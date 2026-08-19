@@ -44,6 +44,39 @@ If it prints `INCOMPLETE: hit the N-page cap`, there is older history it did not
 reach — re-run with a larger `--max-pages`. Do not quote numbers from a
 truncated run as if they were the whole picture.
 
+## Keep attribution alive before there is a host
+
+```bash
+DISCORD_BOT_TOKEN=... DISCORD_GUILD_ID=... node scripts/capture.ts --dry-run
+DISCORD_BOT_TOKEN=... DISCORD_GUILD_ID=... node scripts/capture.ts
+```
+
+Runs once and exits, read-only against Discord. Run it **as often as you can**
+until the service is deployed — every few hours is plenty at TWO's current
+inflow.
+
+The reason it exists: *who* joined and *when* is never lost (Discord stamps
+`joined_at`, and `scripts/backfill.ts` can rebuild that at any point later).
+*Which invite they came through* is lost forever unless somebody read the invite
+counters on both sides of the join. That does not require an always-on bot — it
+requires reading the counters more often than people join.
+
+Each run reads the invite counters, compares them to the previous run's, finds
+the members who joined in between, and records those joins with the code that
+moved. One code moved → that is the code. Several moved → recorded as
+`ambiguous:a+b`, never a guess. None moved → `vanity` or `unknown`.
+
+Two things it cannot do, and no amount of running fixes either:
+
+- somebody who joins **and leaves** inside one window is invisible to this and
+  to the member list. Shorter windows shrink the hole; only a connected bot
+  closes it;
+- `first_message` and `first_voice_session` need the gateway. Not attempted.
+
+Once the service is live this stops being necessary — the bot does the same
+diff per join, at full precision. Leaving it on a cron afterwards is harmless
+(every write is idempotent) but redundant.
+
 ## One-off: moving an existing SQLite database to Postgres
 
 Only needed on a box that ran the old SQLite build. Copies the history across

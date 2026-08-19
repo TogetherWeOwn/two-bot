@@ -8,6 +8,37 @@ export interface InviteState {
 }
 
 /**
+ * How much each invite code was used between two readings of the counters.
+ *
+ * The live bot never needs this - it diffs one join at a time. The host-less
+ * capture path (scripts/capture.ts) does, because a window can contain several
+ * joins and we want to know whether the arithmetic adds up before we attribute
+ * anything.
+ *
+ * Two cases that are easy to get wrong and are the reason this is a named,
+ * tested function rather than three lines inline:
+ *
+ *   * A code absent from `prev` was created inside the window, so ALL of its
+ *     uses are new. Treating it as delta 0 silently loses attribution for the
+ *     newest invite - which is usually the one a growth push is using.
+ *   * A code whose count went DOWN (deleted and recreated, or Discord resetting
+ *     a temporary invite) is not negative growth. Clamp it out; never let it
+ *     cancel a real increase somewhere else.
+ */
+export function inviteGrowth(
+  prev: Map<string, number>,
+  current: readonly InviteState[],
+): Map<string, number> {
+  const growth = new Map<string, number>();
+  for (const inv of current) {
+    const before = prev.get(inv.code);
+    const delta = before === undefined ? inv.uses : inv.uses - before;
+    if (delta > 0) growth.set(inv.code, delta);
+  }
+  return growth;
+}
+
+/**
  * Discord does not tell you which invite a member used. The standard trick is
  * to keep a snapshot of every invite's use count and, on a join, find the code
  * whose count went up. That is what this does.

@@ -1,0 +1,209 @@
+/**
+ * Host-less join capture. Runs, writes, exits - no always-on machine needed.
+ *
+ *   DISCORD_BOT_TOKEN=... DISCORD_GUILD_ID=... node scripts/capture.ts
+ *   node scripts/capture.ts --dry-run     # report, write nothing
+ *
+ * Why this exists
+ * ---------------
+ * We do not have a host yet (TWO-11). The usual story is "every day without
+ * the bot is a day of join data lost forever". That is only half true, and
+ * this script exists to shrink the half that is true.
+ *
+ *   * WHO joined and WHEN is never lost. Discord stamps `joined_at` on every
+ *     current member, so scripts/backfill.ts can rebuild the join curve at any
+ *     point later.
+ *   * WHICH INVITE they came through IS lost, permanently, unless somebody
+ *     was watching. Discord keeps no per-member invite record. All you ever
+ *     get is a per-code cumulative `uses` counter that you have to difference
+ *     yourself.
+ *
+ * So attribution does not actually require an always-on bot. It requires that
+ * *somebody reads the invite counters more often than people join*. At TWO's
+ * current inflow - roughly a join every few days - a capture run every few
+ * hours attributes nearly everything, because in almost every window exactly
+ * one code moves and there is no ambiguity to resolve.
+ *
+ * That is the whole trick. This is the live bot's invite logic, sampled coarse
+ * instead of continuously, and it runs from anywhere with the token.
+ *
+ * What this still cannot see, stated plainly:
+ *   * Somebody who joins AND leaves inside one window is invisible to both
+ *     this and the member list. Shorter windows shrink that hole; nothing
+ *     closes it but a connected bot.
+ *   * If two or more codes move in the same window, we record the join as
+ *     `ambiguous:a+b` rather than guessing. Honest beats tidy.
+ *   * first_message / first_voice still need the gateway. Not attempted here.
+ *
+ * Read-only against Discord: no messages, no roles, nothing posted. Safe to
+ * re-run - every write is idempotent on (member, joined_at), and because that
+ * key does not include the source, the FIRST attribution wins. That is the
+ * behaviour we want: a re-run over an already-recorded window sees counters
+ * that have stopped moving and would otherwise downgrade a good `invite:CODE`
+ * to `unknown`.
+ */
+import { openDb } from '../src/store/db.ts';
+import { EventStore } from '../src/store/eventStore.ts';
+import { InviteTracker, inviteGrowth } from '../src/core/inviteTracker.ts';
+import type { FunnelEvent } from '../src/core/events.ts';
+import { DiscordRest, fetchAllMembers, type RawInvite } from '../src/discord/rest.ts';
+
+const argv = process.argv.slice(2);
+const dryRun = argv.includes('--dry-run');
+const dbPath = process.env.TWO_DB_PATH ?? './data/two.db';
+
+const token = process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN;
+const guildId = process.env.DISCORD_GUILD_ID;
+if (!token || !guildId) {
+  console.error('Missing DISCORD_BOT_TOKEN or DISCORD_GUILD_ID. See docs/SECRETS.md.');
+  process.exit(2);
+}
+
+/**
+ * Stamp the window BEFORE we read anything. A join that lands between this
+ * instant and the fetch below would otherwise fall in the crack between two
+ * windows; this way it simply lands in the next one. Double-counting is not a
+ * risk - member_join is keyed on (guild, member, joined_at).
+ */
+const capturedAt = new Date().toISOString();
+
+const rest = new DiscordRest({ token });
+const db = await openDb(dbPath);
+const store = new EventStore(db);
+const tracker = new InviteTracker(db);
+
+console.log(`\nTWO capture${dryRun ? '  (DRY RUN - nothing will be written)' : ''}`);
+console.log(`  guild ${guildId}   db ${dbPath}\n`);
+
+// --- 1. where does the previous window end? ---------------------------------
+//
+// The invite snapshot's own timestamp IS the last capture. No extra bookkeeping
+// table, and it cannot drift out of step with the counters it describes.
+
+const prevRows = await db
+  .prepare(`SELECT code, uses, updated_at FROM invite_snapshots WHERE guild_id = ?`)
+  .all<{ code: string; uses: number; updated_at: string }>(guildId);
+
+const since = prevRows.reduce<string | null>(
+  (max, r) => (max === null || r.updated_at > max ? r.updated_at : max),
+  null,
+);
+const prevUses = new Map(prevRows.map((r) => [r.code, Number(r.uses)]));
+
+// --- 2. read the invite counters --------------------------------------------
+
+const rawInvites = await rest.get<RawInvite[]>(`/guilds/${guildId}/invites`);
+if (!rawInvites) {
+  console.error(
+    'Could not read the invite list. That is the Manage Server permission -\n' +
+      'without it every join records as `unknown`. Run scripts/preflight.ts.',
+  );
+  process.exit(1);
+}
+
+const current = rawInvites.map((i) => ({
+  code: i.code,
+  uses: Number(i.uses ?? 0),
+  inviterId: i.inviter?.id ?? null,
+  channelId: i.channel?.id ?? null,
+}));
+
+const growth = inviteGrowth(prevUses, current);
+const grew = [...growth.keys()].sort();
+const totalGrowth = [...growth.values()].reduce((a, b) => a + b, 0);
+
+// --- 3. who is new in this window? ------------------------------------------
+
+const members = await fetchAllMembers(rest, guildId);
+if (members.length === 0) {
+  console.error(
+    'Read zero members. That is Server Members Intent being OFF - the REST\n' +
+      'member list needs it too, not just the gateway. Run scripts/preflight.ts.',
+  );
+  process.exit(1);
+}
+
+const guild = await rest.get<{ vanity_url_code?: string | null }>(`/guilds/${guildId}`);
+const hasVanity = !!guild?.vanity_url_code;
+
+const newJoins: { id: string; joinedAt: string }[] = [];
+let bots = 0;
+for (const m of members) {
+  const id = m.user?.id;
+  if (!id || !m.joined_at) continue;
+  if (m.user?.bot) {
+    bots++;
+    if (!dryRun) await store.markBot(guildId, id);
+    continue;
+  }
+  const joinedAt = new Date(m.joined_at).toISOString();
+  // First ever capture has no `since`; the member list is history, not this
+  // window, and backfill.ts owns history. Baseline only, emit nothing.
+  if (since !== null && joinedAt > since) newJoins.push({ id, joinedAt });
+}
+newJoins.sort((a, b) => a.joinedAt.localeCompare(b.joinedAt));
+
+// --- 4. attribute ------------------------------------------------------------
+//
+// One code moved -> that is the code, for everyone in the window. Several
+// moved -> we genuinely cannot say who came through which, so say that.
+// Nothing moved -> vanity URL or Discovery, which leave no counter behind.
+
+const source = tracker.attribute(grew, hasVanity);
+
+const events: FunnelEvent[] = newJoins.map((j) => ({
+  memberId: j.id,
+  guildId,
+  eventType: 'member_join',
+  occurredAt: j.joinedAt,
+  source,
+  metadata: { capture: true, window: { from: since, to: capturedAt } },
+}));
+
+let written = 0;
+if (!dryRun) {
+  for (const e of events) {
+    const res = await store.record(e);
+    if (res.inserted) written++;
+  }
+  // Store the new counters last, so a crash mid-write re-reads the same window
+  // next run instead of losing it.
+  await tracker.diffAndStore(guildId, current);
+  await db
+    .prepare(`UPDATE invite_snapshots SET updated_at = ? WHERE guild_id = ?`)
+    .run(capturedAt, guildId);
+}
+
+// --- 5. report ---------------------------------------------------------------
+
+const label =
+  since === null
+    ? 'first capture - baseline only'
+    : `window ${since} -> ${capturedAt}`;
+
+console.log(`  ${label}`);
+console.log(`  invites              ${current.length} readable, ${grew.length} moved` +
+  (grew.length ? ` (${grew.map((c) => `${c} +${growth.get(c)}`).join(', ')})` : ''));
+console.log(`  members              ${members.length} total (${bots} bots)`);
+console.log(`  new joins in window  ${newJoins.length}`);
+if (newJoins.length) {
+  console.log(`  attributed as        ${source}`);
+  console.log(`  written              ${dryRun ? '0 (dry run)' : written} new events`);
+}
+
+/**
+ * A mismatch between counter growth and new members is not a bug and is worth
+ * printing every time: the usual cause is somebody who joined and left again
+ * inside the window, which is exactly the blind spot this script cannot fix.
+ */
+if (since !== null && totalGrowth !== newJoins.length) {
+  console.log(
+    `\n  note: invite counters moved ${totalGrowth}, member list gained ${newJoins.length}.` +
+      `\n        Likely a join+leave inside the window, or a join through the vanity URL.` +
+      `\n        Neither is recoverable later - shorter windows are the only lever.`,
+  );
+}
+
+console.log(`\n  ${rest.requests} Discord requests. Nothing was posted, no roles changed.\n`);
+
+await db.close();
