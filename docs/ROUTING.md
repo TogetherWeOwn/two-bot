@@ -122,3 +122,38 @@ sufficient before touching the real server.
 `channel_routed` (`EventStore.secondsBetween`). The target from TWO-7 is under
 60 seconds. Watch `degraded` alongside it: a non-zero total means members are
 landing in the hub instead of the room they asked for.
+
+## The ceiling above all of it: the rules gate
+
+Onboarding waits for `pending` to clear before it says anything, so the gate
+sets a hard maximum on every number above. A member who never accepts the rules
+is never welcomed, never picks a game, and never routes — they just sit in the
+member count looking like a member.
+
+```
+node scripts/gate-report.ts     # live, read-only
+```
+
+Read live on 2026-08-19, 84 humans on the roster:
+
+| | |
+| --- | --- |
+| cleared the gate | 53 |
+| stuck at the gate | 31 |
+| joined in the last 90 days | 1 (and they are stuck) |
+| most recent human join | 67 days ago |
+
+The stalling is bursty, not a steady leak. Three cohorts — 2025-07, 2025-09 and
+2025-12 — account for 30 of the 31 stuck members and cleared at 8%, 0% and 6%.
+Every month that arrived as a trickle cleared at 100%. So the gate is not
+uniformly broken; something about how those bursts arrived did not survive it.
+
+Two consequences worth being blunt about:
+
+1. Fixing the dark game categories raises the conversion of members who get
+   through the gate. It does not raise the number who get through it.
+2. With one arrival in 90 days, onboarding quality is not currently the binding
+   constraint on growth — arrivals are. Tracked separately from TWO-7.
+
+The rates are upper bounds: members who hit the gate and left are no longer on
+the roster, so we cannot see them at all.
