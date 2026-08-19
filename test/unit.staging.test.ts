@@ -25,7 +25,13 @@ import {
   resetStagingData,
   seedFixtures,
 } from '../src/staging/fixtures.ts';
-import { LIVE_GUILD_ID } from '../src/staging/spec.ts';
+import {
+  LIVE_BOT_APPLICATION_ID,
+  LIVE_GUILD_ID,
+  STAGING_BOT_APPLICATION_ID,
+  applicationIdFromToken,
+  checkStagingToken,
+} from '../src/staging/spec.ts';
 import type { EventType } from '../src/core/events.ts';
 
 const G = '999000111222333444'; // a stand-in staging guild id
@@ -201,4 +207,43 @@ test('fixtures never carry the live guild id', () => {
   const events = fixtureEvents({ guildId: G, now: TEST_NOW });
   assert.ok(events.length > 0);
   assert.ok(events.every((e) => e.guildId !== LIVE_GUILD_ID));
+});
+
+/*
+ * The wrong-token guard.
+ *
+ * On 2026-08-19 the secrets store had bound this agent the LIVE bot's token
+ * while DISCORD_STAGING_BOT_TOKEN was absent entirely. Nothing ran, because
+ * the variable was missing - but the same mix-up with the variable PRESENT
+ * would have pointed a guild-creating script at the production bot. These
+ * tests are the check that catches that, and they need no token to run: a
+ * synthetic token is just base64(application id) plus two junk segments.
+ */
+const tokenFor = (appId: string) => `${Buffer.from(appId).toString('base64')}.Gxxxxx.yyyyyyyyyy`;
+
+test('an application id can be read back out of a token shape', () => {
+  assert.equal(applicationIdFromToken(tokenFor(STAGING_BOT_APPLICATION_ID)), STAGING_BOT_APPLICATION_ID);
+  assert.equal(applicationIdFromToken(tokenFor(LIVE_BOT_APPLICATION_ID)), LIVE_BOT_APPLICATION_ID);
+  assert.equal(applicationIdFromToken(''), null);
+  assert.equal(applicationIdFromToken('not-a-token'), null);
+});
+
+test('the live bot token is refused, and the message says which bot it is', () => {
+  const r = checkStagingToken(tokenFor(LIVE_BOT_APPLICATION_ID));
+  assert.equal(r.ok, false);
+  assert.match(r.message, /LIVE bot/);
+  assert.match(r.message, new RegExp(LIVE_BOT_APPLICATION_ID));
+});
+
+test('the staging bot token is accepted', () => {
+  const r = checkStagingToken(tokenFor(STAGING_BOT_APPLICATION_ID));
+  assert.equal(r.ok, true);
+});
+
+test('an unrecognised or unparseable token is allowed through to Discord, not hard-failed', () => {
+  // A token reset changes the secret but never the application id, so a reset
+  // staging token still passes above. This covers a THIRD app someone makes
+  // later: we warn, we do not block a setup that may be correct.
+  assert.equal(checkStagingToken(tokenFor('123456789012345678')).ok, true);
+  assert.equal(checkStagingToken('garbage').ok, true);
 });

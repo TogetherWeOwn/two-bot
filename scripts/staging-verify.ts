@@ -30,10 +30,12 @@
  * The token is read from the environment and never printed.
  */
 import {
+  STAGING_BOT_APPLICATION_ID,
   STAGING_PERMISSIONS,
   STAGING_SERVER_NAME,
   STAGING_TEXT_CHANNELS,
   STAGING_VOICE_CHANNELS,
+  checkStagingToken,
   describePermissions,
   stagingGuildId,
 } from '../src/staging/spec.ts';
@@ -45,8 +47,15 @@ const token = process.env.DISCORD_STAGING_BOT_TOKEN;
 if (!token) {
   console.error(
     '\nMissing DISCORD_STAGING_BOT_TOKEN.\n' +
-      '  This is the "Owen Staging" bot token, not the live one. See docs/SECRETS.md.\n',
+      `  This is the "Owen Staging" bot token (application ${STAGING_BOT_APPLICATION_ID}),\n` +
+      '  called `test-two` on the board. Not the live one. See docs/SECRETS.md.\n',
   );
+  process.exit(2);
+}
+
+const tokenCheck = checkStagingToken(token);
+if (!tokenCheck.ok) {
+  console.error(`\n${tokenCheck.message}\n`);
   process.exit(2);
 }
 

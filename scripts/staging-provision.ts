@@ -58,7 +58,12 @@ import {
   type PartialGuild,
   type PartialRole,
 } from '../src/staging/provision.ts';
-import { LIVE_GUILD_ID, STAGING_SERVER_NAME } from '../src/staging/spec.ts';
+import {
+  LIVE_GUILD_ID,
+  STAGING_BOT_APPLICATION_ID,
+  STAGING_SERVER_NAME,
+  checkStagingToken,
+} from '../src/staging/spec.ts';
 
 const API = 'https://discord.com/api/v10';
 
@@ -66,9 +71,16 @@ const token = process.env.DISCORD_STAGING_BOT_TOKEN;
 if (!token) {
   console.error(
     '\nMissing DISCORD_STAGING_BOT_TOKEN.\n' +
-      '  This is the "Owen Staging" bot token, not the live one. See docs/SECRETS.md.\n' +
+      `  This is the "Owen Staging" bot token (application ${STAGING_BOT_APPLICATION_ID}),\n` +
+      '  called `test-two` on the board. Not the live one. See docs/SECRETS.md.\n' +
       '  Refusing to run: there is no safe default for which server to build.\n',
   );
+  process.exit(2);
+}
+
+const tokenCheck = checkStagingToken(token);
+if (!tokenCheck.ok) {
+  console.error(`\n${tokenCheck.message}\n`);
   process.exit(2);
 }
 

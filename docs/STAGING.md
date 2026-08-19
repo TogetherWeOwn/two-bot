@@ -33,6 +33,26 @@ Note what is **not** here: `TWO_DATABASE_URL`, `DISCORD_GUILD_ID` and
 purpose — a staging run must not be one forgotten variable away from writing
 into the real funnel.
 
+### Which bot is which
+
+Two applications, and they are easy to confuse because one of them has two
+names. Application ids are public — they are in every invite URL — so they are
+written down in `src/staging/spec.ts` and checked at startup:
+
+| Application | id | Use |
+|---|---|---|
+| `Owen` | `1539711683898118154` | **live.** Never in a staging variable. |
+| `Owen Staging`, called `test-two` on the board | `1537629682449649724` | staging |
+
+`staging-provision.ts` and `staging-verify.ts` both decode the application id
+out of the token you gave them (it is the first dot-separated segment, base64)
+and **refuse to run if it is the live bot** — before any network call. This is
+not theoretical: on 2026-08-19 the secrets store bound this agent the live
+bot's token while the staging one was absent. If you see that refusal, the
+variable was filled from the wrong application; raise it on TWO-21 rather than
+editing anything locally. A token *reset* is fine and changes nothing here —
+resets change the secret, never the application id.
+
 Never paste a token into an issue, a chat message, or a test file. See
 `docs/SECRETS.md`.
 
@@ -259,9 +279,15 @@ across deliberately, one command, where you can see it.
 One thing from the founder, via TWO-21:
 
 1. `discord_staging_bot_token` — the `Owen Staging` bot token in the secrets
-   store, bound to QA and to me. About five minutes of clicking in the Discord
-   Developer Portal: new application, add bot, **Server Members Intent on**,
-   Public Bot off, copy token.
+   store, bound to QA and to me. The application already exists
+   (`1537629682449649724`); the token needs to reach our environments.
+
+   **Checked 2026-08-19 23:5x: still absent here.** What was present instead
+   was the *live* bot's token under the generic name `DISCORD_BOT_TOKEN` —
+   which is correct for the production bot and useless for staging. "In the
+   store" and "bound to the agent that needs it" are different things, and
+   from outside they look identical. Report absence; do not improvise around
+   it.
 
 That is now the whole dependency. The server no longer needs a human, and
 nobody needs to send us a guild id — `staging-provision.ts` creates the server

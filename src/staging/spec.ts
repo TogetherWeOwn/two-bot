@@ -28,6 +28,72 @@ export const LIVE_GUILD_ID = '326474832151838730';
 export const STAGING_SERVER_NAME = 'TWO Staging';
 export const STAGING_BOT_APPLICATION_NAME = 'Owen Staging';
 
+/**
+ * Discord application ids. These are public identifiers, not secrets - they
+ * appear in every invite URL. They are written down because "which bot is this
+ * token for" is otherwise unanswerable without pasting the token somewhere.
+ *
+ * The staging application is called `Owen Staging` in the developer portal and
+ * `test-two` on the board. Same application, two names, which is exactly why
+ * the id is the thing we check against.
+ */
+export const LIVE_BOT_APPLICATION_ID = '1539711683898118154';
+export const STAGING_BOT_APPLICATION_ID = '1537629682449649724';
+
+/**
+ * A bot token's first dot-separated segment is the base64 of the application
+ * id. Discord documents this; it is not a trick. Returns null for anything
+ * that is not shaped like a bot token, because a caller must be able to tell
+ * "wrong bot" apart from "unparseable".
+ */
+export function applicationIdFromToken(token: string): string | null {
+  const seg = token.trim().split('.')[0];
+  if (!seg) return null;
+  let decoded: string;
+  try {
+    decoded = Buffer.from(seg, 'base64').toString('utf8');
+  } catch {
+    return null;
+  }
+  return /^\d{15,25}$/.test(decoded) ? decoded : null;
+}
+
+/**
+ * Refuse a token that belongs to the LIVE bot.
+ *
+ * This is not hypothetical. On 2026-08-19 the secrets store bound this agent
+ * the live bot's token under a generic name while the staging token was
+ * absent. Had a staging script been handed that value, it would have created a
+ * guild owned by the production bot - and `POST /guilds` is refused once a bot
+ * is in ten, so the live bot's guild slots are not something to spend by
+ * accident.
+ *
+ * Unrecognised ids only warn. A token reset changes the secret but never the
+ * application id, so the ids above stay true across resets; but a third
+ * staging app someone creates later should not hard-fail a correct setup.
+ */
+export function checkStagingToken(token: string): { ok: boolean; message: string } {
+  const appId = applicationIdFromToken(token);
+  if (appId === LIVE_BOT_APPLICATION_ID) {
+    return {
+      ok: false,
+      message:
+        `This token belongs to the LIVE bot (application ${LIVE_BOT_APPLICATION_ID}), not ` +
+        `${STAGING_BOT_APPLICATION_NAME} (${STAGING_BOT_APPLICATION_ID}).\n` +
+        '  Refusing to run. Nothing was contacted.\n' +
+        '  DISCORD_STAGING_BOT_TOKEN has been filled from the wrong application - ' +
+        'raise it on TWO-21 rather than editing it locally.',
+    };
+  }
+  if (appId === STAGING_BOT_APPLICATION_ID) {
+    return { ok: true, message: `token is ${STAGING_BOT_APPLICATION_NAME} (${appId})` };
+  }
+  if (appId === null) {
+    return { ok: true, message: 'token shape not recognised - continuing, Discord will judge it' };
+  }
+  return { ok: true, message: `token is application ${appId}, which is neither the live nor the expected staging bot` };
+}
+
 /** Text channels the fixtures and the integration suite expect to find. */
 export const STAGING_TEXT_CHANNELS = ['welcome', 'general', 'events', 'bot-log'] as const;
 
