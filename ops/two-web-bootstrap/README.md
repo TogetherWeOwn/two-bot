@@ -9,12 +9,20 @@ belong to the bot.
 
 | File | Goes to |
 |---|---|
-| `CODEOWNERS` | `two-web/.github/CODEOWNERS` |
+| `CODEOWNERS` | **superseded — do not copy.** See below. |
 | `CONTRIBUTING.md` | `two-web/CONTRIBUTING.md` |
 | `secret-scan.yml` | `two-web/.github/workflows/secret-scan.yml` |
 | `main-guard.yml` | `two-web/.github/workflows/main-guard.yml` |
 | `githooks/pre-push` | `two-web/.githooks/pre-push` |
 | `githooks/pre-commit` | `two-web/.githooks/pre-commit` |
+
+**`CODEOWNERS` here is superseded.** The Web Lead has committed a fuller one at
+`two-web/.github/CODEOWNERS` (TWO-39) covering paths this copy does not, such as
+`phpunit.dusk.xml`. Copying this file over theirs would lose review routing.
+It is kept only as the record of which four teams the bot side expects —
+`web-lead`, `frontend`, `qa`, `founding-engineer` — and both files agree on
+those. `setup-github.sh --verify` reads whatever is actually committed in the
+repo, so their version is the one that gets checked.
 
 The last three are only load-bearing if the org stays on GitHub Free, where
 GitHub enforces nothing on a private repo's `main`. The hooks refuse a direct

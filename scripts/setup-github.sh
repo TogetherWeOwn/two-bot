@@ -43,6 +43,44 @@ DEFAULT_BRANCH="main"
 BOT_CHECKS=(check gitleaks)
 WEB_CHECKS=(ci tests static dusk budgets gitleaks)
 
+# Teams.
+#
+# CODEOWNERS in both repos addresses `@two-gaming/<slug>`, never an individual,
+# so a review request never dies because one account is asleep. That only works
+# if the team is really there.
+#
+# The failure mode is the quiet one: a CODEOWNERS rule naming a team that does
+# not exist is NOT an error. GitHub drops the rule, the settings page shows
+# nothing wrong, and reviews simply stop being requested while everybody assumes
+# the routing works. Same outcome if the team exists but has no write access to
+# the repo, or has no members. All three are checked in Verify.
+#
+# slug|display name|description
+TEAMS=(
+  "founding-engineer|Founding Engineer|Bot, deploy, secrets and privacy posture"
+  "web-lead|Web Lead|Laravel application: backend, schema, policies, routes"
+  "frontend|Frontend|Blade views, JS, CSS, asset build"
+  "qa|QA|Tests and CI in both repos"
+)
+
+# Which team gets write on which repo. Write is also what makes a team eligible
+# to be a code owner there - a team with read cannot own a path.
+#
+# Derived from the two CODEOWNERS files, not invented here. `frontend` is absent
+# from two-bot's CODEOWNERS, so it gets no access to two-bot. Verify reads the
+# committed files and will fail if this table has drifted from them.
+#
+# slug|repo
+TEAM_REPOS=(
+  "founding-engineer|$BOT_REPO"
+  "qa|$BOT_REPO"
+  "web-lead|$BOT_REPO"
+  "founding-engineer|$WEB_REPO"
+  "web-lead|$WEB_REPO"
+  "frontend|$WEB_REPO"
+  "qa|$WEB_REPO"
+)
+
 # Where each repo's working copy is. Override if yours are elsewhere.
 BOT_PATH="${TWO_BOT_PATH:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 WEB_PATH="${TWO_WEB_PATH:-}"
@@ -116,6 +154,58 @@ case "$PLAN" in
 esac
 
 # ---------------------------------------------------------------------------
+# create_team <slug> <display name> <description>
+create_team() {
+  local slug="$1" tname="$2" tdesc="$3"
+
+  if gh api "orgs/$ORG/teams/$slug" >/dev/null 2>&1; then
+    skip "team @$ORG/$slug already exists"
+    return 0
+  fi
+
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '   \033[90mwould create\033[0m team @%s/%s ("%s")\n' "$ORG" "$slug" "$tname"
+    return 0
+  fi
+
+  local got
+  if ! got="$(gh api --method POST "orgs/$ORG/teams" \
+      -f "name=$tname" -f "description=$tdesc" -f "privacy=closed" \
+      --jq .slug 2>/dev/null)"; then
+    bad "could not create team '$slug' - the token needs admin:org on $ORG"
+    FAILED=1
+    return 0
+  fi
+
+  # GitHub derives the slug from the display name. If it derived something else,
+  # every CODEOWNERS rule pointing at the expected slug is dead on arrival, so
+  # say it now rather than letting reviews quietly stop routing.
+  if [ "$got" != "$slug" ]; then
+    bad "team created as '@$ORG/$got' but CODEOWNERS says '@$ORG/$slug'."
+    bad "  Rename the team so the slug matches, or that rule does nothing."
+    FAILED=1
+    return 0
+  fi
+
+  ok "created team @$ORG/$slug"
+}
+
+# grant_team_repo <slug> <repo> - write access
+grant_team_repo() {
+  local slug="$1" name="$2"
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '   \033[90mwould grant\033[0m @%s/%s write on %s/%s\n' "$ORG" "$slug" "$ORG" "$name"
+    return 0
+  fi
+  if gh api --method PUT "orgs/$ORG/teams/$slug/repos/$ORG/$name" \
+      -f permission=push >/dev/null 2>&1; then
+    ok "@$ORG/$slug: write on $name"
+  else
+    bad "@$ORG/$slug: could not grant write on $name"
+    FAILED=1
+  fi
+}
+
 # repo_exists <name>
 repo_exists() { gh api "repos/$ORG/$1" >/dev/null 2>&1; }
 
@@ -293,9 +383,23 @@ deploy_environment() {
 
 # ---------------------------------------------------------------------------
 if [ "$VERIFY_ONLY" = 0 ]; then
+  say "Teams"
+  for _entry in "${TEAMS[@]}"; do
+    IFS='|' read -r _slug _tname _tdesc <<< "$_entry"
+    create_team "$_slug" "$_tname" "$_tdesc"
+  done
+  warn "Members are added by the org owner in Settings -> Teams. An empty team"
+  warn "routes reviews to nobody, which looks exactly like routing working."
+
   say "Repositories"
   create_repo "$BOT_REPO"
   create_repo "$WEB_REPO"
+
+  say "Repository access"
+  for _entry in "${TEAM_REPOS[@]}"; do
+    IFS='|' read -r _slug _rname <<< "$_entry"
+    grant_team_repo "$_slug" "$_rname"
+  done
 
   say "History"
   push_history "$BOT_PATH" "$BOT_REPO"
@@ -319,6 +423,82 @@ fi
 
 # ---------------------------------------------------------------------------
 say "Verify"
+
+# Teams exist and have somebody in them.
+verify_teams() {
+  local entry slug n
+  for entry in "${TEAMS[@]}"; do
+    slug="${entry%%|*}"
+    if ! gh api "orgs/$ORG/teams/$slug" >/dev/null 2>&1; then
+      bad "team @$ORG/$slug does not exist - every CODEOWNERS rule naming it is silently ignored"
+      FAILED=1
+      continue
+    fi
+    n="$(gh api "orgs/$ORG/teams/$slug/members" --jq 'length' 2>/dev/null || echo 0)"
+    if [ "${n:-0}" -gt 0 ]; then
+      ok "team @$ORG/$slug exists, $n member(s)"
+    else
+      warn "team @$ORG/$slug exists but is EMPTY - a review request to it reaches nobody"
+    fi
+  done
+}
+
+# verify_codeowners <repo>
+#
+# Reads the CODEOWNERS actually committed in the repo - not the table above -
+# and checks every @org/team it names exists and has write there. The file is
+# edited in the repo by whoever owns it, so a new handle can appear at any time
+# and GitHub will never once complain about it being wrong.
+verify_codeowners() {
+  local name="$1" body handles slug perm
+  if ! body="$(gh api "repos/$ORG/$name/contents/.github/CODEOWNERS" \
+        -H 'Accept: application/vnd.github.raw' 2>/dev/null)"; then
+    return 0   # the file being missing is already reported by verify_repo
+  fi
+
+  # The file arrives as argv, not stdin: the heredoc below IS stdin, and piping
+  # the body in as well would silently give python an empty read.
+  handles="$(python3 - "$ORG" "$body" <<'PY'
+import re, sys
+org, text = sys.argv[1].lower(), sys.argv[2]
+seen = []
+for line in text.splitlines():
+    line = line.split('#', 1)[0]
+    for owner, team in re.findall(r'@([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)', line):
+        if owner.lower() == org and team.lower() not in seen:
+            seen.append(team.lower())
+print('\n'.join(seen))
+PY
+)"
+
+  if [ -z "$handles" ]; then
+    warn "$name: CODEOWNERS names no @$ORG/<team> handles at all"
+    return 0
+  fi
+
+  while read -r slug; do
+    [ -n "$slug" ] || continue
+    if ! gh api "orgs/$ORG/teams/$slug" >/dev/null 2>&1; then
+      bad "$name: CODEOWNERS names @$ORG/$slug, which does not exist - that rule is silently ignored"
+      FAILED=1
+      continue
+    fi
+    perm="$(gh api "orgs/$ORG/teams/$slug/repos/$ORG/$name" \
+              -H 'Accept: application/vnd.github.v3.repository+json' \
+              --jq '.permissions | if .admin then "admin" elif .maintain then "maintain" elif .push then "write" else "read" end' \
+              2>/dev/null || echo none)"
+    case "$perm" in
+      write|maintain|admin) ok "$name: code owner @$ORG/$slug has $perm" ;;
+      *) bad "$name: @$ORG/$slug owns paths but has '$perm' on the repo - a team without write cannot be a code owner, so the rule does nothing"
+         FAILED=1 ;;
+    esac
+  done <<< "$handles"
+
+  if [ "$PROTECTION_AVAILABLE" = 0 ]; then
+    warn "$name: on GitHub Free with a private repo, CODEOWNERS does not route"
+    warn "  reviews at all - the file is documentation until the org is on Team."
+  fi
+}
 
 verify_repo() {
   local name="$1"; shift
@@ -396,8 +576,11 @@ verify_repo() {
   fi
 }
 
+verify_teams
 verify_repo "$BOT_REPO" "${BOT_CHECKS[@]}"
+verify_codeowners "$BOT_REPO"
 verify_repo "$WEB_REPO" "${WEB_CHECKS[@]}"
+verify_codeowners "$WEB_REPO"
 
 # The production deploy gate. Warn, do not fail: deploys are TWO-37 and not
 # approved yet, and both deploy jobs skip green while their hook secret is

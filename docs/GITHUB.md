@@ -67,17 +67,38 @@ that happened because nobody made the call.
 ## Teams
 
 `CODEOWNERS` points at teams, not people, so a review request never blocks on
-one account being asleep. Create these once in the org:
+one account being asleep. `setup-github.sh` creates all four and grants their
+repo access; the org owner only has to **add the members**.
 
-| Team | Members | Reviews |
-|---|---|---|
-| `founding-engineer` | Founding Engineer | the bot, deploy, secrets, privacy |
-| `web-lead` | Web Lead | Laravel backend, schema, policies |
-| `frontend` | Frontend Engineer | Blade views, JS, CSS |
-| `qa` | QA Engineer | tests and CI in both repos |
+| Team | Members | Reviews | Write on |
+|---|---|---|---|
+| `founding-engineer` | Founding Engineer | the bot, deploy, secrets, privacy | both repos |
+| `web-lead` | Web Lead | Laravel backend, schema, policies | both repos |
+| `frontend` | Frontend Engineer | Blade views, JS, CSS | `two-web` |
+| `qa` | QA Engineer | tests and CI in both repos | both repos |
 
-Everyone gets **Write**. Nobody needs Admin for day-to-day work; org owner
-stays with the founder.
+`frontend` gets no access to `two-bot` because `two-bot`'s `CODEOWNERS` never
+names it. Everyone else gets **Write**, which is also the minimum that makes a
+team eligible to be a code owner. Nobody needs Admin for day-to-day work; org
+owner stays with the founder.
+
+**Three ways this breaks silently**, all of them checked by `--verify`:
+
+1. **The team does not exist.** A `CODEOWNERS` rule naming a missing team is
+   not an error. GitHub drops the rule, the settings page looks fine, and
+   reviews stop being requested while everyone assumes routing works.
+2. **The team exists but has read, not write.** A team without write cannot own
+   a path. Same silence.
+3. **The team exists but is empty.** The review request is made and reaches
+   nobody. `--verify` warns; only the org owner can fix it.
+
+`--verify` reads the `CODEOWNERS` actually committed in each repo rather than a
+list kept here, so a handle added to the file later is checked too.
+
+One thing no amount of setup fixes: on **GitHub Free with private repos,
+`CODEOWNERS` does not route reviews at all**, and "require review from Code
+Owners" is unavailable. On Free the file is documentation. It becomes a gate on
+GitHub Team — the same plan decision as branch protection, above.
 
 ## What protection is set to
 

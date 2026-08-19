@@ -1,6 +1,9 @@
 # Who gets asked to review what, in two-web.
 #
-# Copy to .github/CODEOWNERS in the two-web repo.
+# SUPERSEDED - DO NOT COPY THIS OVER two-web/.github/CODEOWNERS.
+# The Web Lead committed a fuller version in two-web itself (TWO-39). This copy
+# is kept only as the record of which teams the bot side expects; both files
+# name the same four. See ../README.md.
 #
 # Handles are GitHub teams in the two-gaming org, not individuals, so a review
 # request never dies because one account is asleep.
