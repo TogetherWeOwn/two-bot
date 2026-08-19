@@ -27,52 +27,46 @@ Consumed by the website as `DISCORD_MODERATOR_ROLE_IDS` (TWO-44, for the login
 role mapping in TWO-27). Comma-separated, no spaces:
 
 ```
-508654771276873729,1078757544169848933,1078757266469175386,1078757184021733426,1078756990710452365,1087192823767515219
+508654771276873729
 ```
 
-| Role ID | Name | Discord powers | Holders at snapshot |
+| Role ID | Name | Discord powers | Holders |
 |---|---|---|---|
-| `508654771276873729` | SySOp | Administrator, Manage Guild/Roles/Channels | 1 |
-| `1078757544169848933` | Officer | Ban, Kick, Manage Roles/Channels | 3 |
-| `1078757266469175386` | Game Master | Ban, Kick | 1 |
-| `1078757184021733426` | Captain | Ban, Kick | 0 |
-| `1078756990710452365` | Lieutenant | Ban, Kick | 0 |
-| `1087192823767515219` | Staff | Ban, Kick, Mention Everyone | 6 |
+| `508654771276873729` | SySOp | Administrator, Manage Guild/Roles/Channels | 1 — the server owner |
 
-**The rule:** a role is staff if Discord already trusts it to ban or kick. That
-is a mechanical test — take `audit/summary.json` → `permission_risk`, keep the
-entries carrying Ban or Kick (Administrator counts, it implies both, which is
-how SySOp qualifies), drop any role where `managed` is true so no bot-owned role
-can appear. Mention-Everyone alone is not moderation, which is why `TWO` and
-`Graphic Designer` are in `permission_risk` but not here. Anything looser is a
-decision about community structure, which is not engineering's to make.
+**The rule, as of 2026-08-19T20:43Z: exactly one person, the server owner.** The
+CEO's instruction on TWO-44 was "the only staff member will be the server
+owner," pending a wider restructure. SySOp is the one role that resolves to
+exactly that person and nobody else, so it is the whole list.
 
-Captain and Lieutenant have no holders today and are listed anyway — they are
-live rungs of the ladder, and the reason we key on IDs rather than names is so a
-promotion is not a deploy.
+Why a role ID and not the owner's user ID: the website's permission check is
+role-based and already built, wired, and tested. Pinning to SySOp needs an env
+value and no code. A hard owner-only check would be a code change in the
+website, and it would also mean that handing someone the keys later requires a
+deploy. If a hard pin is ever wanted anyway, the owner's user ID is
+`275483498603741184` (`audit/raw/guild.json` → `owner_id`).
 
-Not staff, and the near misses worth re-reading before anyone adds them:
+The trade to be aware of: this grants the panel to *whoever holds SySOp*, not to
+the owner as a person. Today those are the same — verified, not assumed, on
+2026-08-19T20:47Z by a read-only `GET /guilds/{id}/members/{owner_id}` showing
+the owner holds SySOp, alongside `audit/roles.csv` showing SySOp has exactly one
+holder. Granting SySOp to a second person grants them the website admin panel
+too. That is the intended escape hatch, but it should be a deliberate act.
 
-- `1078757334504976384` **Legate** — managerial rank, but zero moderation
-  permissions and zero holders.
-- `1090651387236450416` **Welcome Team** (13) and `1112759027554844763`
-  **Ticket Manager** (7) — real jobs, no Discord moderation power. Candidates
-  only if a panel turns out to be about events and featured content rather than
-  member moderation. Adding both roughly triples the staff headcount.
-- `448587293154869250` **Founders** (5) — honorary, no permissions.
-- Every bot role with Administrator (MEE6, Statbot, Wick, TWO-BOT, Owen). A
-  `managed` role cannot be held by a person.
-
-**Approved for production.** The CEO sign-off gate on TWO-44 was accepted
-2026-08-19T20:40Z, as recommended and with no amendment — the six roles above are
-the approved staff list for both staging and production. The two alternatives
-offered at the same time (drop the empty Captain/Lieutenant rungs; add Welcome
-Team and Ticket Manager) were **not** taken, so neither is in the list.
+**Superseded.** An earlier six-role list (SySOp, Officer, Game Master, Captain,
+Lieutenant, Staff — roughly 7–8 people, derived mechanically from "Discord
+already trusts this role to ban or kick") was approved at 2026-08-19T20:40Z and
+then narrowed by the CEO three minutes later. It is recorded here only so the
+change is legible: the derivation still lives in `audit/roles.csv` →
+`dangerous_permissions` if the wider list is ever wanted back. Do not ship it
+without a fresh sign-off.
 
 Changing the list later is an env change on the website, not a code change and
 not a redeploy — but it is a change to who can edit the public site, so it goes
 back through the same sign-off. Both env vars fail closed when blank: no guild ID
-means nobody signs in, no role IDs means nobody is a moderator.
+means nobody signs in, no role IDs means nobody is a moderator. Note that blank
+is *not* the right way to express "only the owner" — blank locks the owner out
+too, which is why this is one ID rather than none.
 
 ## Rules for consumers
 
