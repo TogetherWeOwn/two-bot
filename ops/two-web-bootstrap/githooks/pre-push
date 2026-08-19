@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+#
+# Refuse a direct push to main.
+#
+# This is Plan B. If the org is on GitHub Team, the server rejects the push and
+# this hook never gets a say. On GitHub Free with private repos the server does
+# not reject anything, and this hook is the only thing standing between a tired
+# Friday and an unreviewed commit on main.
+#
+# A client-side hook is a courtesy, not a wall - it lives in your clone and
+# --no-verify skips it. That is exactly why main-guard.yml exists too: this
+# stops the accident, that one catches the bypass.
+#
+# Install:  npm run hooks:install    (or: git config core.hooksPath .githooks)
+# Bypass:   TWO_ALLOW_MAIN_PUSH=1 git push origin main
+#
+set -euo pipefail
+
+PROTECTED="main"
+ZERO="0000000000000000000000000000000000000000"
+
+red()  { printf '\033[31m%s\033[0m\n' "$*" >&2; }
+warn() { printf '\033[33m%s\033[0m\n' "$*" >&2; }
+
+blocked=0
+
+# git feeds us one line per ref being pushed:
+#   <local ref> <local sha> <remote ref> <remote sha>
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ "$remote_ref" = "refs/heads/$PROTECTED" ] || continue
+
+  # Deleting main. Never, by any route.
+  if [ "$local_sha" = "$ZERO" ]; then
+    red "REFUSED: this would delete origin/$PROTECTED."
+    blocked=1
+    continue
+  fi
+
+  # Remote has no main yet - this is the initial import. Allowed; it is how
+  # the repo gets its history in the first place.
+  if [ "$remote_sha" = "$ZERO" ]; then
+    warn "note: creating origin/$PROTECTED (initial import) - allowed."
+    continue
+  fi
+
+  # Rewriting history that is already on main.
+  if ! git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+    red "REFUSED: non-fast-forward push to $PROTECTED. This rewrites published history."
+    red "         If you genuinely need this, talk to somebody first."
+    blocked=1
+    continue
+  fi
+
+  # An ordinary direct push. This is the one that happens by accident.
+  if [ "${TWO_ALLOW_MAIN_PUSH:-0}" = "1" ]; then
+    warn "TWO_ALLOW_MAIN_PUSH=1: allowing a direct push to $PROTECTED."
+    warn "main-guard will still flag it on the repo, and that is on purpose."
+    continue
+  fi
+
+  count="$(git rev-list --count "$remote_sha..$local_sha" 2>/dev/null || echo '?')"
+  red ""
+  red "REFUSED: direct push of $count commit(s) to $PROTECTED."
+  red ""
+  red "  Everything reaches main through a pull request, reviewed, with CI green."
+  red ""
+  red "    git switch -c your-branch-name"
+  red "    git push -u origin your-branch-name"
+  red "    gh pr create"
+  red ""
+  red "  Emergency only:  TWO_ALLOW_MAIN_PUSH=1 git push origin $PROTECTED"
+  red ""
+  blocked=1
+done
+
+exit "$blocked"

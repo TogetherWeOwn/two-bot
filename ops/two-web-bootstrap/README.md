@@ -12,6 +12,26 @@ belong to the bot.
 | `CODEOWNERS` | `two-web/.github/CODEOWNERS` |
 | `CONTRIBUTING.md` | `two-web/CONTRIBUTING.md` |
 | `secret-scan.yml` | `two-web/.github/workflows/secret-scan.yml` |
+| `main-guard.yml` | `two-web/.github/workflows/main-guard.yml` |
+| `githooks/pre-push` | `two-web/.githooks/pre-push` |
+| `githooks/pre-commit` | `two-web/.githooks/pre-commit` |
+
+The last three are only load-bearing if the org stays on GitHub Free, where
+GitHub enforces nothing on a private repo's `main`. The hooks refuse a direct
+push locally; `main-guard` makes one that gets through visible within a minute.
+Reasoning and honest limits are in
+[../../docs/GITHUB.md](../../docs/GITHUB.md#plan-b-if-the-answer-is-no).
+
+After copying the hooks in, turn them on and keep them on:
+
+```bash
+chmod +x .githooks/*
+git config core.hooksPath .githooks
+```
+
+Laravel has no `prepare` hook the way the bot's `package.json` does, so add
+that `git config` line to two-web's own CONTRIBUTING setup steps — otherwise
+the files are in the repo and doing nothing.
 
 ## The handoff
 

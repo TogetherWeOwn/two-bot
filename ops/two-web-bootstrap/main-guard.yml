@@ -1,0 +1,65 @@
+name: main-guard
+
+# Did this commit arrive through a pull request?
+#
+# On GitHub Team the server answers that question by rejecting the push, and
+# this workflow never has anything to say. On GitHub Free with a private repo
+# the server does not reject anything, so this is how we find out - loudly,
+# within a minute, on the repo itself rather than in somebody's memory.
+#
+# It cannot prevent the push. It makes the push impossible to miss. Every run
+# that fails here is a real event worth a conversation, not a flaky test.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  arrived-by-pr:
+    runs-on: ubuntu-latest
+    # `created` is true only for the very first push that makes the branch -
+    # the initial history import. Nothing to review against, so skip it.
+    if: github.event.created == false
+    steps:
+      - name: Check the head commit is attached to a merged pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          REPO: ${{ github.repository }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+
+          prs="$(gh api "repos/$REPO/commits/$SHA/pulls" \
+                   --jq '[.[] | select(.merged_at != null) | .number] | join(",")' \
+                 2>/dev/null || echo "")"
+
+          if [ -n "$prs" ]; then
+            echo "ok: $SHA came from merged PR #${prs}"
+            echo "### main-guard: ok" >> "$GITHUB_STEP_SUMMARY"
+            echo "\`$SHA\` arrived through merged PR #${prs}." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          {
+            echo "### main-guard: DIRECT PUSH TO MAIN"
+            echo
+            echo "\`$SHA\` is on \`main\` and is not attached to any merged pull request."
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Pushed by | \`$ACTOR\` |"
+            echo "| Commit | \`$SHA\` |"
+            echo
+            echo "This skipped review and it skipped required checks."
+            echo "If it was an accident, open a PR with the same change so it gets reviewed"
+            echo "after the fact. If it keeps happening, the org needs GitHub Team so the"
+            echo "server refuses the push instead of this job reporting it afterwards."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "::error title=Direct push to main::$SHA was pushed to main by $ACTOR without a pull request"
+          exit 1

@@ -32,6 +32,38 @@ That leaves three options and only one of them is good:
 This is a spend decision, so it is the CEO's, not mine. The setup script
 detects a free plan and warns rather than pretending it worked.
 
+Verified again on 2026-08-19: GitHub's docs still scope both classic protected
+branches and rulesets to "public repositories with GitHub Free… public and
+private repositories with GitHub Pro, Team, and Enterprise Cloud." Push
+rulesets on private repos are Team and up. Nothing has changed in our favour.
+
+## Plan B, if the answer is no
+
+Built and tested, so "no spend" is a survivable answer rather than a quiet one.
+It is two controls: one that stops the accident, one that catches the bypass.
+
+| | |
+|---|---|
+| [`.githooks/pre-push`](../.githooks/pre-push) | Refuses a direct push to `main`, a non-fast-forward push to `main`, and deleting `main`. The initial import is allowed, because that is how history gets in. Escape hatch is `TWO_ALLOW_MAIN_PUSH=1` — deliberate, documented, and it prints a warning. |
+| [`.githooks/pre-commit`](../.githooks/pre-commit) | Refuses `.env`, `.pem`, `.p12`, ssh keys, `.npmrc`, service-account JSON, by filename. Filenames only, so it costs no measurable time and does not get uninstalled out of irritation. |
+| [`main-guard.yml`](../.github/workflows/main-guard.yml) | On every push to `main`, asks GitHub whether that commit is attached to a merged PR. If not, the run fails with the actor's name in it. |
+
+Install is automatic — `npm ci` runs `npm run hooks:install`, which sets
+`core.hooksPath` to the versioned `.githooks/` directory. `setup-github.sh`
+sets it on both working copies too.
+
+**Be honest about what this is.** A client-side hook lives in one clone and
+`--no-verify` walks past it. It stops the tired-Friday accident, which is the
+common case. It does not stop somebody who means it, and it does not stop a web
+UI commit. `main-guard` covers the gap by making any bypass visible within a
+minute — detection, not prevention. GitHub Team is still the answer; this is
+what we have until then.
+
+On a free plan `setup-github.sh --verify` will not report success for an
+unguarded `main` unless you set `TWO_ACCEPT_UNPROTECTED_MAIN=1`. That is on
+purpose: the weaker posture should be something somebody chose, not something
+that happened because nobody made the call.
+
 ## Teams
 
 `CODEOWNERS` points at teams, not people, so a review request never blocks on

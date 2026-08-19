@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+#
+# Stop a file that should never be committed from being committed.
+#
+# Deliberately dumb and deliberately fast - it checks filenames, not contents,
+# so it adds no measurable time to a commit and therefore does not get
+# uninstalled in a hurry. Content scanning is gitleaks' job, in CI, where it
+# has the whole history to look at.
+#
+# Bypass: git commit --no-verify   (and then explain yourself in the PR)
+#
+set -euo pipefail
+
+red() { printf '\033[31m%s\033[0m\n' "$*" >&2; }
+
+# Names that are always a mistake in a commit.
+BAD_PATTERNS='(^|/)\.env$|(^|/)\.env\.(local|production|prod|staging|dev)$|\.pem$|\.p12$|\.pfx$|(^|/)id_rsa$|(^|/)id_ed25519$|(^|/)\.npmrc$|(^|/)service-account.*\.json$'
+
+staged="$(git diff --cached --name-only --diff-filter=ACMR || true)"
+[ -n "$staged" ] || exit 0
+
+offenders="$(printf '%s\n' "$staged" | grep -E "$BAD_PATTERNS" || true)"
+
+if [ -n "$offenders" ]; then
+  red ""
+  red "REFUSED: these files must never be committed:"
+  printf '%s\n' "$offenders" | sed 's/^/    /' >&2
+  red ""
+  red "  Secrets belong in the host env file or GitHub Actions secrets."
+  red "  Names with empty values go in .env.example. See docs/SECRETS.md."
+  red ""
+  red "  If one of these is genuinely safe, add it to .gitignore's exceptions"
+  red "  and say why in the commit message, then: git commit --no-verify"
+  red ""
+  exit 1
+fi
+
+exit 0

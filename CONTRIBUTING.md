@@ -12,6 +12,10 @@ npm ci --include=dev
 npm test
 ```
 
+`npm ci` also installs the repo's git hooks, which refuse a direct push to
+`main` and refuse to commit a `.env` or a private key. If you ever need to
+reinstate them: `npm run hooks:install`.
+
 If `npm test` passes you have a working environment. That is the whole setup —
 it needs no Discord token, because `tools/mock-discord/` stands in for Discord.
 On a clean machine the four commands above take well under a minute.
@@ -38,8 +42,18 @@ environment file.
 
 ## Branches
 
-`main` is protected. You cannot push to it, and neither can I. Everything
-arrives by pull request.
+Nothing lands on `main` except through a pull request. That applies to me too.
+
+How strongly that is enforced depends on the org's GitHub plan, and it is worth
+knowing which one you are working under, because the failure looks different:
+
+| | What stops you |
+|---|---|
+| **GitHub Team** | The server rejects the push. There is no way around it. |
+| **GitHub Free** (private repos) | GitHub enforces nothing. The `pre-push` hook in your clone refuses, and `main-guard` turns any push that gets through into a red X on `main` within a minute. |
+
+On the free plan the rule is real but the wall is not, so treat a `main-guard`
+failure as something to go and talk about, not a flaky job to re-run.
 
 Name branches `type/short-description`:
 
