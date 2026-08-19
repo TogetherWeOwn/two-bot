@@ -31,21 +31,42 @@
  *     issue referenced in scripts/attribution.ts.
  *
  *  2. "active again in the 30 days after joining" needs every activity, and
- *     we store the first of each kind plus a rolling last-seen. So a member
- *     who joined two years ago, activated on day 1 and is still in voice
- *     every week has lastActiveAt far beyond day 30, and a literal reading
- *     would score them as NOT retained - penalising exactly the best-retained
- *     members. So the rule implemented is "still present AND demonstrably
- *     active after the moment they activated", and the roll-up splits it into
- *     `am30ProvenInWindow` (second activity is inside the 30 days, no
- *     inference) and `am30ProvenLater` (second activity is only provable after
- *     day 30). Both numbers are printed. Neither reading is hidden.
+ *     the events table cannot give it: first_message and first_voice_session
+ *     are once-per-member by idempotency key, and member_inactive is emitted
+ *     by a schedule rather than by the member. The repeatable signal is the
+ *     `members.last_active_at` column, which src/core/handlers.ts advances on
+ *     EVERY message and EVERY voice join, not just the first (touchActivity).
+ *     That is what this reads. Decided on TWO-64 against the alternative of a
+ *     new repeatable voice_session event - see the comment on that issue.
+ *
+ *     last_active_at is a LAST value, so the rule has a floor and no ceiling:
+ *
+ *       AM30 = was AM7, left_at IS NULL, and last_active_at is at or after
+ *              day 8 - i.e. they were still turning up after their first week.
+ *
+ *     The floor at day 8 is what stops "joined, did one thing on day 3, gone"
+ *     from reading as retention. There is deliberately NO day-30 ceiling: a
+ *     ceiling would score a member who joined two years ago and was in voice
+ *     yesterday as NOT retained, penalising exactly the best-retained members.
+ *     Being more active cannot make the number worse.
+ *
+ *     The cost of dropping the ceiling is that for a member last seen on day
+ *     400 we cannot prove anything about days 8-30 specifically. So the
+ *     roll-up splits the number: `am30ProvenInWindow` (last seen between day 8
+ *     and day 30 - no inference at all) and `am30ProvenLater` (last seen after
+ *     day 30 - certainly a returning member, but the 8-30 window itself is not
+ *     observable). Both are printed. Neither reading is hidden.
  */
 
 export const AM7_WINDOW_DAYS = 7;
 export const AM30_WINDOW_DAYS = 30;
 /** Messages needed to activate on the text side. Voice needs one session. */
 export const AM7_MESSAGE_THRESHOLD = 3;
+/**
+ * Day at which "active again" starts counting for AM30 - the day after the AM7
+ * window closes. Activity inside the first week is activation, not retention.
+ */
+export const AM30_RETURN_FLOOR_DAYS = AM7_WINDOW_DAYS + 1;
 
 const DAY_MS = 86_400_000;
 
@@ -119,11 +140,11 @@ export function activation(j: JoinRecord): Activation | null {
 }
 
 export type Am30Verdict =
-  /** Still here, and the second activity is inside the 30 days. No inference. */
+  /** Still here, last seen between day 8 and day 30. No inference at all. */
   | 'proven-in-window'
-  /** Still here and demonstrably active again, but only provable after day 30. */
+  /** Still here, last seen after day 30. Returning member; days 8-30 unobservable. */
   | 'proven-later'
-  /** Left, or never did anything after the moment they activated. */
+  /** Left, or never seen again after their first week. */
   | 'no';
 
 /** Was this AM7 member retained? See note 2 in the header for why this is not one boolean. */
@@ -137,6 +158,10 @@ export function am30(j: JoinRecord, act: Activation): Am30Verdict {
   // Strictly after: last-seen equal to the activation moment means the
   // activation IS the only thing they ever did.
   if (last <= actAt) return 'no';
+  // The floor. Last seen on day 3 means they went quiet for the 27 days that
+  // AM30 is actually asking about, so that is not retention.
+  if (last < join + AM30_RETURN_FLOOR_DAYS * DAY_MS) return 'no';
+  // No ceiling - being seen after day 30 is more retention, not less.
   return last <= join + AM30_WINDOW_DAYS * DAY_MS ? 'proven-in-window' : 'proven-later';
 }
 

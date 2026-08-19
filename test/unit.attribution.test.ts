@@ -97,6 +97,28 @@ test('AM30 inside the window is proven, beyond it is proven-later', () => {
   assert.equal(am30(later, activation(later)!), 'proven-later');
 });
 
+test('AM30 does not count someone who went quiet inside their first week', () => {
+  // Joined, came to voice on day 1, came back on day 3, never seen again. They
+  // were absent for the 27 days AM30 is actually asking about.
+  const quiet = member({ firstVoiceAt: at(1), lastActiveAt: at(3) });
+  assert.equal(am30(quiet, activation(quiet)!), 'no');
+});
+
+test('day 8 is exactly where AM30 starts counting', () => {
+  const day7 = member({ firstVoiceAt: at(1), lastActiveAt: at(7) });
+  assert.equal(am30(day7, activation(day7)!), 'no', 'still inside the AM7 window');
+
+  const day8 = member({ firstVoiceAt: at(1), lastActiveAt: at(8) });
+  assert.equal(am30(day8, activation(day8)!), 'proven-in-window');
+});
+
+test('AM30 has no ceiling - a member active today is retained, not lapsed', () => {
+  // The literal "last_active_at between day 8 and day 30" reading scores this
+  // member as a failure. They joined a year ago and were in voice yesterday.
+  const best = member({ firstVoiceAt: at(1), lastActiveAt: at(364) });
+  assert.notEqual(am30(best, activation(best)!), 'no');
+});
+
 test('a code with no joins still gets a row', () => {
   const r = rollUp([], { nowMs: NOW, alwaysShow: ['invite:DEAD', 'invite:ALSODEAD'] });
   assert.deepEqual(

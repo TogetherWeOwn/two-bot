@@ -133,6 +133,39 @@ const codes = await db
   .all<{ code: string; uses: number; channel_id: string | null; updated_at: string }>();
 const alwaysShow = codes.map((c) => `invite:${c.code}`);
 
+// --- is the voice half of AM7 actually being captured right now? -------------
+
+// Voice sessions only reach us through the gateway listener on a running bot;
+// Discord will not serve voice history over REST, so a gap cannot be backfilled
+// later. If the newest voice event is stale, AM7 and AM30 below are floors for
+// anyone who arrived since - and on a voice-first server that is most of AM7.
+// This drives the banner at the top of the report, not a footnote, because a
+// code that delivered people who show up on a Tuesday would otherwise read as a
+// code that delivered nothing.
+// The probe is a CONTRAST, not a single date. Text recency stays current on its
+// own: messages are readable over REST, so `npm run backfill:messages` keeps
+// moving last_active_at forward with no bot running. Voice has no such path. So
+// if the newest voice signal is far behind the newest signal of any kind, the
+// gap is missing voice capture rather than a quiet server. Comparing the two
+// avoids the false alarm from reading voice alone, where a stale date only
+// means "nobody entered voice for the first time lately".
+const VOICE_LAG_DAYS = 30;
+const lastVoiceAt =
+  (
+    await db
+      .prepare(`SELECT MAX(occurred_at) AS t FROM events WHERE event_type='first_voice_session'`)
+      .get<{ t: string | null }>()
+  )?.t ?? null;
+const lastAnyActivityAt =
+  (await db.prepare(`SELECT MAX(last_active_at) AS t FROM members`).get<{ t: string | null }>())
+    ?.t ?? null;
+const daysAgo = (iso: string | null): number | null =>
+  iso ? Math.floor((nowMs - Date.parse(iso)) / 86_400_000) : null;
+const voiceGapDays = daysAgo(lastVoiceAt);
+const activityGapDays = daysAgo(lastAnyActivityAt);
+const voiceIsStale =
+  voiceGapDays === null || voiceGapDays - (activityGapDays ?? 0) >= VOICE_LAG_DAYS;
+
 // --- the community denominator, computed not assumed -------------------------
 
 const memberExcl = excludeClause('member_join', ANOMALIES, 'joined_at');
@@ -188,8 +221,34 @@ const label = allTime ? 'all joins on file' : `joins in the last ${days} days`;
 const w = Math.max(22, ...report.rows.map((r) => r.label.length)) + 2;
 console.log(`\nTWO growth attribution - ${label}`);
 console.log(
-  `since ${allTime ? 'the beginning' : since.slice(0, 10)}, as of ${new Date(nowMs).toISOString().slice(0, 16)}Z\n`,
+  `since ${allTime ? 'the beginning' : since.slice(0, 10)}, as of ${new Date(nowMs).toISOString().slice(0, 16)}Z`,
 );
+
+if (voiceIsStale) {
+  console.log(`
+  ###########################################################################
+  #  THESE ARE FLOORS, NOT COUNTS. VOICE IS NOT BEING RECORDED.             #
+  ###########################################################################
+  ${
+    lastVoiceAt
+      ? `Newest voice session on file: ${lastVoiceAt.slice(0, 10)}, ${voiceGapDays} days ago.\n  Newest activity of any kind: ${(lastAnyActivityAt ?? '-').slice(0, 10)}, ${activityGapDays} days ago.`
+      : `No voice session has ever been recorded.`
+  }
+  Voice needs the gateway listener on a deployed bot (TWO-11, no host yet), and
+  Discord will not serve voice history over REST - so unlike text, this gap can
+  never be backfilled afterwards. TWO is voice-first: 495 voice events against
+  15 text messages in 90 days. Voice is therefore nearly all of AM7.
+
+  What that means for the table below: a member who joined recently, never
+  posted, and is in voice every Tuesday is indistinguishable here from a member
+  who joined and vanished. So every AM7 and AM30 figure is the LOWEST the true
+  number could be. Read a low row as "no evidence", never as "this code failed".
+  Deploying the bot is what turns these floors into counts.
+`);
+} else {
+  console.log('');
+}
+
 console.log(
   `  ${'invite code / source'.padEnd(w)}${'clicks'.padStart(7)}${'joins'.padStart(7)}` +
     `      ${'AM7 / matured'.padEnd(20)}   ${'AM30 / matured AM7'}`,
@@ -217,7 +276,14 @@ console.log(`              column and in neither denominator - that is the "/ ma
 console.log(
   `    AM7       first voice session, or 3+ messages, within 7 days of joining.`,
 );
-console.log(`    AM30      was AM7, still in the server, and active again afterwards.`);
+console.log(`    AM30      was AM7, still in the server, and seen again on day 8 or later.`);
+console.log(
+  `              Day 8 because activity in the first week is activation, not`,
+);
+console.log(
+  `              retention. No upper day: being seen recently is more retention,`,
+);
+console.log(`              not less. Read from members.last_active_at (TWO-64).`);
 
 console.log(`\n  Community size`);
 console.log(
@@ -271,14 +337,15 @@ if (report.usedMessageProxy) {
 }
 if (report.totals.am30 > 0) {
   console.log(
-    `    Of the ${report.totals.am30} AM30 members, ${report.totals.am30ProvenInWindow} are provably active again inside the 30-day`,
+    `    Of the ${report.totals.am30} AM30 members, ${report.totals.am30ProvenInWindow} were last seen between day 8 and day 30 - no`,
   );
   console.log(
-    `      window. The other ${report.totals.am30ProvenLater} are still here and demonstrably active again, but we`,
+    `      inference at all. The other ${report.totals.am30ProvenLater} were last seen after day 30, so they are`,
   );
   console.log(
-    `      store last-seen rather than every session, so we can only prove it later.`,
+    `      certainly returning members, but we store last-seen rather than every`,
   );
+  console.log(`      session, so days 8-30 themselves are not observable for them.`);
 }
 const attributed = report.rows
   .filter((r) => r.source.startsWith('invite:') || r.source === 'vanity')
