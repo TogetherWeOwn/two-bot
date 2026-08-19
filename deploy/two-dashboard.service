@@ -1,0 +1,58 @@
+# The growth dashboard, served as a page instead of a file somebody has to
+# remember to regenerate.
+#
+#   sudo cp deploy/two-dashboard.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now two-dashboard
+#   curl -s localhost:8099 | head       # smoke test on the box
+#
+# It binds to 127.0.0.1 on purpose. To make it reachable, put it behind the
+# host's existing reverse proxy WITH authentication - this page shows member
+# counts and channel names and is not for the public. Do not change the bind
+# address to 0.0.0.0 as a shortcut.
+#
+# Read-only: it opens the bot's database, runs SELECTs, closes. It cannot write.
+
+[Unit]
+Description=TWO growth dashboard
+Documentation=https://github.com/two-gaming/two-bot/blob/main/docs/DASHBOARD.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=twobot
+Group=twobot
+WorkingDirectory=/opt/two-bot
+Environment=PORT=8099
+EnvironmentFile=/etc/two-bot/two-bot.env
+ExecStart=/usr/bin/node scripts/dashboard.ts --serve --host 127.0.0.1
+
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=two-dashboard
+
+# Hardening. It needs the network (to listen) and read access to its own data
+# directory. It never needs to write anything.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

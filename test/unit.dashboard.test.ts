@@ -1,0 +1,301 @@
+/**
+ * The dashboard's arithmetic.
+ *
+ * This is the page the CEO makes decisions from, so the numbers are tested
+ * rather than eyeballed. The failure modes that matter and are covered here:
+ *
+ *   - a cohort that has not aged 30 days reads as 0% instead of "not yet"
+ *   - a raid lands in the retention denominator and makes the community look
+ *     three times worse than it is
+ *   - backfilled joins get counted as a real invite source
+ *   - "active" counts somebody who joined and left without ever speaking
+ *   - week boundaries drift, so a join lands in the wrong week
+ */
+import { test, before, after, beforeEach } from 'node:test';
+import assert from 'node:assert/strict';
+import { openTestDb, type TestDb } from './helpers/testDb.ts';
+import {
+  buildDashboard,
+  channelState,
+  countBySource,
+  labelSource,
+  recentWeeks,
+  retentionAt,
+  weekStart,
+  type MemberRow,
+} from '../src/analytics/dashboard.ts';
+import { renderHtml } from '../src/analytics/render.ts';
+import type { Anomaly } from '../src/analytics/anomalies.ts';
+
+const GUILD = '999';
+const NOW = new Date('2026-03-02T12:00:00.000Z'); // a Monday
+
+// One raid day, so the exclusion path is exercised without depending on the
+// real ANOMALIES list (which will keep growing).
+// The cast is deliberate: anomalies.ts grows fields (`kind` arrived with the
+// raid watcher) and this fixture only cares about the window. Without it every
+// new field breaks a test that has nothing to do with it.
+const TEST_ANOMALIES: Anomaly[] = [
+  {
+    id: 'test-raid',
+    kind: 'raid',
+    start: '2026-02-04',
+    end: '2026-02-04',
+    eventTypes: ['member_join'],
+    status: 'confirmed',
+    label: 'test raid',
+    note: '',
+  } as Anomaly,
+];
+
+let t: TestDb;
+before(async () => {
+  t = await openTestDb(import.meta.filename);
+});
+after(async () => {
+  await t.cleanup();
+});
+beforeEach(async () => {
+  await t.reset();
+});
+
+// ---------------------------------------------------------------------------
+// Pure arithmetic - no database needed
+// ---------------------------------------------------------------------------
+
+test('a week starts on Monday, and the boundary does not drift', () => {
+  assert.equal(weekStart('2026-03-02T00:00:00.000Z'), '2026-03-02'); // Monday
+  assert.equal(weekStart('2026-03-08T23:59:59.999Z'), '2026-03-02'); // Sunday, same week
+  assert.equal(weekStart('2026-03-09T00:00:00.000Z'), '2026-03-09'); // next Monday
+  assert.equal(weekStart('2026-03-01T12:00:00.000Z'), '2026-02-23'); // Sunday, previous week
+});
+
+test('recentWeeks ends with the week we are in and runs backwards', () => {
+  const w = recentWeeks(new Date('2026-03-04T09:00:00.000Z'), 3);
+  assert.deepEqual(w, ['2026-02-16', '2026-02-23', '2026-03-02']);
+});
+
+test('anything the backfill wrote is marked unattributable, not counted as a source', () => {
+  assert.deepEqual(labelSource('backfill:log:member-join'), {
+    label: 'Before tracking (imported history)',
+    unattributed: true,
+  });
+  assert.deepEqual(labelSource(null), { label: 'Unknown', unattributed: true });
+  assert.deepEqual(labelSource('unknown'), { label: 'Unknown', unattributed: true });
+  assert.deepEqual(labelSource('invite:aB3xY9'), { label: 'Invite aB3xY9', unattributed: false });
+  assert.deepEqual(labelSource('vanity'), { label: 'Vanity URL', unattributed: false });
+});
+
+test('sources come back biggest first', () => {
+  const counts = countBySource(['invite:a', 'invite:b', 'invite:a', null, 'invite:a']);
+  assert.deepEqual(
+    counts.map((c) => [c.source, c.joins]),
+    [
+      ['invite:a', 3],
+      ['invite:b', 1],
+      ['unknown', 1],
+    ],
+  );
+  assert.equal(counts[2].unattributed, true);
+});
+
+test('a cohort that has not aged that far is null, not zero', () => {
+  const m: MemberRow[] = [
+    {
+      member_id: '1',
+      joined_at: '2026-03-01T00:00:00.000Z', // 1.5 days before NOW
+      join_source: null,
+      first_message_at: null,
+      first_voice_at: null,
+      last_active_at: null,
+      left_at: null,
+    },
+  ];
+  assert.equal(retentionAt(m, 30, NOW), null, 'D30 cannot be known yet');
+  assert.equal(retentionAt(m, 7, NOW), null, 'D7 cannot be known yet');
+  assert.deepEqual(retentionAt(m, 1, NOW), { eligible: 1, stayed: 1, active: 0 });
+});
+
+test('stayed and active are different numbers, and both are counted honestly', () => {
+  const base = {
+    join_source: null,
+    first_message_at: null,
+    first_voice_at: null,
+  };
+  const members: MemberRow[] = [
+    // joined, still here, spoke well after D7 -> stayed AND active
+    { member_id: 'a', joined_at: '2026-01-01T00:00:00.000Z', last_active_at: '2026-02-01T00:00:00.000Z', left_at: null, ...base },
+    // joined, still here, never spoke -> stayed, not active
+    { member_id: 'b', joined_at: '2026-01-01T00:00:00.000Z', last_active_at: null, left_at: null, ...base },
+    // joined and left on day 3 -> not stayed at D7
+    { member_id: 'c', joined_at: '2026-01-01T00:00:00.000Z', last_active_at: null, left_at: '2026-01-04T00:00:00.000Z', ...base },
+    // spoke on day 2 then left on day 4: active at D1, not at D7
+    { member_id: 'd', joined_at: '2026-01-01T00:00:00.000Z', last_active_at: '2026-01-03T00:00:00.000Z', left_at: '2026-01-05T00:00:00.000Z', ...base },
+  ];
+  assert.deepEqual(retentionAt(members, 1, NOW), { eligible: 4, stayed: 4, active: 2 });
+  assert.deepEqual(retentionAt(members, 7, NOW), { eligible: 4, stayed: 2, active: 1 });
+});
+
+test('channel state needs a human, not just a funnel event', () => {
+  assert.equal(channelState({ humanMsgs30d: 4, humanMsgs90d: 9, events30d: 0 }), 'alive');
+  assert.equal(channelState({ humanMsgs30d: 0, humanMsgs90d: 9, events30d: 0 }), 'quiet');
+  assert.equal(channelState({ humanMsgs30d: 0, humanMsgs90d: 0, events30d: 0 }), 'silent');
+  // the snapshot can be stale; a live event still counts as a sign of life
+  assert.equal(channelState({ humanMsgs30d: 0, humanMsgs90d: 0, events30d: 2 }), 'alive');
+});
+
+// ---------------------------------------------------------------------------
+// End to end against a real database
+// ---------------------------------------------------------------------------
+
+let seq = 0;
+async function join(memberId: string, at: string, source: string) {
+  await t.db
+    .prepare(
+      `INSERT INTO events (event_type, member_id, guild_id, occurred_at, recorded_at, source, idempotency_key)
+       VALUES ('member_join', ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(memberId, GUILD, at, at, source, `k${seq++}`);
+}
+async function member(m: Partial<MemberRow> & { member_id: string }, isBot = 0) {
+  await t.db
+    .prepare(
+      `INSERT INTO members (guild_id, member_id, joined_at, join_source, first_message_at,
+                            first_voice_at, last_active_at, left_at, is_bot)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      GUILD,
+      m.member_id,
+      m.joined_at ?? null,
+      m.join_source ?? null,
+      m.first_message_at ?? null,
+      m.first_voice_at ?? null,
+      m.last_active_at ?? null,
+      m.left_at ?? null,
+      isBot,
+    );
+}
+
+test('a raid never reaches the headline numbers, and is never deleted either', async () => {
+  // 3 real joins in the raid week, plus 50 raid accounts on the raid day.
+  for (let i = 0; i < 3; i++) {
+    const at = `2026-02-05T1${i}:00:00.000Z`;
+    await join(`real${i}`, at, 'invite:good');
+    await member({ member_id: `real${i}`, joined_at: at, last_active_at: '2026-03-01T00:00:00.000Z' });
+  }
+  for (let i = 0; i < 50; i++) {
+    const at = `2026-02-04T20:0${i % 10}:00.000Z`;
+    await join(`raid${i}`, at, 'unknown');
+    await member({ member_id: `raid${i}`, joined_at: at });
+  }
+
+  const d = await buildDashboard(t.db, { now: NOW, weeks: 6, anomalies: TEST_ANOMALIES });
+  const raidWeek = d.weeks.find((w) => w.weekStart === '2026-02-02')!;
+
+  assert.equal(raidWeek.joins, 3, 'only the real joins count');
+  assert.equal(raidWeek.setAside, 50, 'the raid is reported, on its own line');
+  assert.equal(d.raidAccountsStillCounted, 50, 'and named in the member total');
+  assert.equal(d.realHumans, 3);
+  assert.equal(d.humansInServer, 53, 'because Discord still shows all 53');
+
+  // The retention denominator is the thing a raid quietly destroys.
+  assert.equal(d.retentionOverall.d7!.eligible, 3);
+  assert.equal(d.retentionOverall.d7!.active, 3);
+
+  // Nothing was deleted.
+  const total = await t.db.prepare(`SELECT COUNT(*) AS n FROM events`).get<{ n: number }>();
+  assert.equal(Number(total!.n), 53);
+});
+
+test('bots are not members, and never land in a cohort', async () => {
+  await join('human', '2026-02-24T10:00:00.000Z', 'invite:good');
+  await member({ member_id: 'human', joined_at: '2026-02-24T10:00:00.000Z' });
+  await join('botty', '2026-02-24T11:00:00.000Z', 'invite:good');
+  await member({ member_id: 'botty', joined_at: '2026-02-24T11:00:00.000Z' }, 1);
+
+  const d = await buildDashboard(t.db, { now: NOW, weeks: 4, anomalies: TEST_ANOMALIES });
+  assert.equal(d.weeks.find((w) => w.weekStart === '2026-02-23')!.joins, 1);
+  assert.equal(d.humansInServer, 1);
+  assert.equal(d.cohorts.find((c) => c.weekStart === '2026-02-23')!.size, 1);
+});
+
+test('active means the last 7 days, and leavers do not count as active', async () => {
+  await member({
+    member_id: 'here',
+    joined_at: '2026-01-01T00:00:00.000Z',
+    first_message_at: '2026-01-02T00:00:00.000Z',
+    last_active_at: '2026-03-01T00:00:00.000Z',
+  });
+  // active recently, but we never caught a first message or voice session for
+  // them - the backfill gap. They still count as never-spoke until we do.
+  await member({ member_id: 'stale', joined_at: '2026-01-01T00:00:00.000Z', last_active_at: '2026-02-01T00:00:00.000Z' });
+  await member({
+    member_id: 'gone',
+    joined_at: '2026-01-01T00:00:00.000Z',
+    last_active_at: '2026-03-01T00:00:00.000Z',
+    left_at: '2026-03-01T06:00:00.000Z',
+  });
+  await member({ member_id: 'lurker', joined_at: '2026-01-01T00:00:00.000Z' });
+
+  const d = await buildDashboard(t.db, { now: NOW, weeks: 4, anomalies: TEST_ANOMALIES });
+  assert.equal(d.active7d, 1, 'only "here"');
+  assert.equal(d.active30d, 2, '"here" and "stale"');
+  assert.equal(d.joinedNeverSpoke, 2, '"stale" has no first message/voice recorded, and "lurker"');
+});
+
+test('with no joins at all the page still renders, and says nothing rather than zero', async () => {
+  const d = await buildDashboard(t.db, { now: NOW, weeks: 4, anomalies: TEST_ANOMALIES });
+  assert.equal(d.thisWeek.joins, 0);
+  assert.equal(d.retentionOverall.d7, null, 'no cohort at all is not 0% retention');
+  assert.ok(d.caveats.some((c) => c.includes('No join has an invite source yet')));
+
+  const html = renderHtml(d);
+  assert.ok(html.startsWith('<!doctype html>'));
+  assert.ok(html.includes('TWO growth dashboard'));
+  // no external requests - the whole point of a self-contained file
+  assert.equal(/<(script|link|img|iframe)\b/i.test(html), false);
+  assert.equal(/https?:\/\//.test(html.replace(/xmlns="[^"]*"/g, '')), false);
+});
+
+test('the rendered page carries the real numbers, not just a template', async () => {
+  await join('a', '2026-02-24T10:00:00.000Z', 'invite:promoAAA');
+  await member({ member_id: 'a', joined_at: '2026-02-24T10:00:00.000Z', last_active_at: '2026-03-01T00:00:00.000Z' });
+
+  const d = await buildDashboard(t.db, {
+    now: NOW,
+    weeks: 4,
+    anomalies: TEST_ANOMALIES,
+    channelSnapshot: {
+      collected_at: '2026-03-01T00:00:00.000Z',
+      channels: [
+        { id: '5', name: 'general', parent_name: 'TWO', human_msgs_30d: 12, human_msgs_90d: 40, unique_humans_30d: 4, days_silent: 0 },
+        { id: '6', name: 'ghost-town', parent_name: 'TWO', human_msgs_30d: 0, human_msgs_90d: 0, unique_humans_30d: 0, days_silent: 400 },
+      ],
+    },
+  });
+
+  assert.equal(d.channels[0].name, 'general');
+  assert.equal(d.channels[0].state, 'alive');
+  assert.equal(d.channels[1].state, 'silent');
+  assert.equal(d.channelSnapshotAt, '2026-03-01T00:00:00.000Z');
+
+  const html = renderHtml(d);
+  assert.ok(html.includes('Invite promoAAA'), 'the invite source is on the page');
+  assert.ok(html.includes('general'));
+});
+
+test('html escaping: a channel name cannot inject markup', async () => {
+  const d = await buildDashboard(t.db, {
+    now: NOW,
+    weeks: 2,
+    anomalies: TEST_ANOMALIES,
+    channelSnapshot: {
+      collected_at: NOW.toISOString(),
+      channels: [{ id: '7', name: '<script>alert(1)</script>', human_msgs_30d: 1, human_msgs_90d: 1 }],
+    },
+  });
+  const html = renderHtml(d);
+  assert.equal(html.includes('<script>'), false);
+  assert.ok(html.includes('&lt;script&gt;'));
+});
