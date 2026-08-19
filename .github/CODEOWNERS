@@ -1,0 +1,28 @@
+# Who gets asked to review what.
+#
+# GitHub requires review from a code owner before a PR can merge (branch
+# protection enforces it). The point is not ceremony: it is that the person
+# who knows a file is the person who sees the change to it.
+#
+# Handles are GitHub *teams* in the two-gaming org, not individuals, so a
+# review request never dies because one account is asleep. Teams are created
+# once by the org owner; see docs/GITHUB.md for the list and who is in each.
+
+# Default: everything in this repo belongs to the bot owner.
+*                           @two-gaming/founding-engineer
+
+# Tests and CI are QA's call as well as the bot owner's. Both must approve,
+# because "make CI green" is the single easiest thing to get wrong on purpose.
+/test/                      @two-gaming/founding-engineer @two-gaming/qa
+/.github/workflows/         @two-gaming/founding-engineer @two-gaming/qa
+
+# The contract the website reads. A change here can break two-web silently,
+# so the Web Lead sees it before it lands.
+/docs/EVENTS.md             @two-gaming/founding-engineer @two-gaming/web-lead
+
+# Secrets, privacy and deploy posture. Changes here are reviewed, always.
+/docs/SECRETS.md            @two-gaming/founding-engineer
+/docs/PRIVACY.md            @two-gaming/founding-engineer
+/deploy/                    @two-gaming/founding-engineer
+/.gitignore                 @two-gaming/founding-engineer
+/.env.example               @two-gaming/founding-engineer

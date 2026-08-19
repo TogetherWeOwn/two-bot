@@ -82,6 +82,8 @@ are tested without a network, a token, or a server.
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | Deploy, health checks, restore, common problems |
 | [docs/SECRETS.md](docs/SECRETS.md) | Token handling and the exact bot permissions needed |
 | [docs/PRIVACY.md](docs/PRIVACY.md) | What member data we store, and what we refuse to |
+| [docs/GITHUB.md](docs/GITHUB.md) | The org, branch protection, and how a repo gets moved in |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Local setup, branch naming, commits, how a PR gets merged |
 
 ## Open items needing a decision
 

@@ -1,0 +1,94 @@
+# Contributing to two-bot
+
+## Local setup, start to finish
+
+Requires **Node 24 or newer** and nothing else. No database server, no Docker,
+no build step.
+
+```bash
+git clone git@github.com:two-gaming/two-bot.git
+cd two-bot
+npm install
+npm test
+```
+
+If `npm test` passes you have a working environment. That is the whole setup —
+it needs no Discord token, because `tools/mock-discord/` stands in for Discord.
+
+To run the bot for real, copy `.env.example` to `.env`, put a token in it, and
+`npm run dev`. See [docs/SECRETS.md](docs/SECRETS.md) for where tokens come
+from. **Never** put a real token anywhere but `.env` or the production
+environment file.
+
+## The commands
+
+| Command | What it does |
+|---|---|
+| `npm test` | Unit + end-to-end. Must pass before you open a PR. |
+| `npm run typecheck` | Node strips types, it does not check them. CI runs this; run it too. |
+| `npm run dev` | Runs against real Discord using `.env`. |
+| `npm run funnel` | Prints the current funnel numbers. |
+| `npm run preflight` | Checks credentials and bot permissions before a deploy. |
+
+## Branches
+
+`main` is protected. You cannot push to it, and neither can I. Everything
+arrives by pull request.
+
+Name branches `type/short-description`:
+
+```
+feat/invite-click-tracking
+fix/duplicate-join-events
+docs/runbook-restore-steps
+chore/bump-discord-js
+```
+
+Types: `feat`, `fix`, `docs`, `test`, `chore`, `refactor`.
+
+## Commits
+
+Subject line in the imperative, under 72 characters, no trailing period:
+
+```
+Add invite click redirect and attribution
+Fix double-counting when a member rejoins
+```
+
+Prefix with the type when it helps (`fix: ...`); it is not enforced. What is
+enforced: the subject says what changed, not what file you touched. If you
+cannot describe a commit in one line, it is probably two commits.
+
+Reference the issue in the body when there is one (`TWO-9`).
+
+## Pull requests
+
+1. Branch off `main`.
+2. Open the PR. CI runs `npm ci`, `npm run typecheck`, `npm test`, and a secret
+   scan. All four must be green.
+3. A code owner reviews it — see [.github/CODEOWNERS](.github/CODEOWNERS).
+   You cannot approve your own PR. That is deliberate and it applies to
+   everyone.
+4. Squash or merge commit, your choice. Keep the history readable.
+
+A red PR does not merge. If CI is wrong, fix CI in its own PR rather than
+routing around it.
+
+## Things that will get a PR sent back
+
+- A secret in the diff. Rotate it, do not just delete the line — it is in the
+  history the moment you push.
+- Member personal data stored where the feature does not need it. Read
+  [docs/PRIVACY.md](docs/PRIVACY.md) before adding a column.
+- Anything that DMs or mass-messages members. That needs sign-off from the CEO
+  before it is written, not after.
+- A new runtime dependency without a sentence in the PR saying why the standard
+  library will not do.
+
+## Where things live
+
+`src/core/` has no Discord dependency and is where the funnel rules are. If you
+can put logic there instead of in `src/discord/`, do — it is the part that can
+be tested without a network.
+
+Full layout is in the [README](README.md).

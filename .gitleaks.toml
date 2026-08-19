@@ -1,0 +1,42 @@
+# Secret scanning config. Extends the default gitleaks ruleset rather than
+# replacing it, so we keep every provider pattern they maintain and only add
+# what is specific to us.
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "discord-bot-token"
+description = "Discord bot token"
+# Discord tokens are three base64url segments: snowflake.timestamp.hmac.
+regex = '''(?i)\b[MNO][A-Za-z0-9_-]{22,26}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,38}\b'''
+keywords = ["discord"]
+
+[[rules]]
+id = "discord-mfa-token"
+description = "Discord user (MFA) token"
+regex = '''\bmfa\.[A-Za-z0-9_-]{80,100}\b'''
+keywords = ["mfa."]
+
+[[rules]]
+id = "discord-webhook"
+description = "Discord webhook URL"
+regex = '''https://(?:canary\.|ptb\.)?discord(?:app)?\.com/api/webhooks/[0-9]{17,20}/[A-Za-z0-9_-]{60,}'''
+keywords = ["discord.com/api/webhooks"]
+
+[allowlist]
+description = "Fixtures and documented placeholders, not live credentials"
+paths = [
+  # Read-only snapshots of public server metadata. No credentials, checked by
+  # hand before they were committed. Invite *codes* look high-entropy but are
+  # public by definition - they are what we hand to new members.
+  '''^audit/raw/.*\.json$''',
+  '''^audit/invites\.csv$''',
+  # The local Discord stand-in. Its tokens are literally the string "mock".
+  '''^tools/mock-discord/''',
+]
+regexes = [
+  # .env.example ships names with empty values, on purpose.
+  '''DISCORD_TOKEN=$''',
+  '''DISCORD_TOKEN=mock''',
+]

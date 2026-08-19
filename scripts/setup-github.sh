@@ -1,0 +1,309 @@
+#!/usr/bin/env bash
+#
+# One-shot setup for the two-gaming GitHub org: repos, history, branch
+# protection, secret scanning.
+#
+# Safe to re-run. Every step checks the current state first and skips or
+# updates rather than failing, so if it stops half way you fix the cause and
+# run it again.
+#
+#   ./scripts/setup-github.sh                 # do it
+#   ./scripts/setup-github.sh --dry-run       # print what it would do
+#   ./scripts/setup-github.sh --verify        # only check the end state
+#
+# Needs: gh CLI, authenticated as a user with `admin:org` and `repo` on the
+# two-gaming org. See docs/GITHUB.md.
+
+set -euo pipefail
+
+ORG="${TWO_GITHUB_ORG:-two-gaming}"
+BOT_REPO="two-bot"
+WEB_REPO="two-web"
+DEFAULT_BRANCH="main"
+
+# Where each repo's working copy is. Override if yours are elsewhere.
+BOT_PATH="${TWO_BOT_PATH:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+WEB_PATH="${TWO_WEB_PATH:-}"
+
+DRY_RUN=0
+VERIFY_ONLY=0
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=1 ;;
+    --verify)  VERIFY_ONLY=1 ;;
+    -h|--help) sed -n '2,20p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    *) echo "unknown argument: $arg" >&2; exit 2 ;;
+  esac
+done
+
+say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
+ok()   { printf '   \033[32mok\033[0m    %s\n' "$*"; }
+skip() { printf '   \033[90mskip\033[0m  %s\n' "$*"; }
+warn() { printf '   \033[33mwarn\033[0m  %s\n' "$*"; }
+bad()  { printf '   \033[31mFAIL\033[0m  %s\n' "$*"; }
+
+run() {
+  if [ "$DRY_RUN" = 1 ]; then printf '   \033[90mwould run:\033[0m %s\n' "$*"; return 0; fi
+  "$@"
+}
+
+FAILED=0
+
+# ---------------------------------------------------------------------------
+say "Preflight"
+
+command -v gh >/dev/null || { bad "gh CLI not installed"; exit 1; }
+gh auth status >/dev/null 2>&1 || {
+  bad "gh is not authenticated. Run: gh auth login --scopes 'repo,admin:org,workflow'"
+  exit 1
+}
+ok "gh authenticated as $(gh api user --jq .login)"
+
+gh api "orgs/$ORG" >/dev/null 2>&1 || {
+  bad "org '$ORG' not reachable. Either it does not exist yet, or this account is not a member."
+  bad "This is the TWO-21 blocker. Stop here."
+  exit 1
+}
+ok "org '$ORG' reachable"
+
+# Plan matters: on GitHub Free, branch protection and rulesets are enforced on
+# PUBLIC repos only. Our repos must stay private until the launch hardening
+# pass, so a free org cannot give us a main that actually rejects a push.
+PLAN="$(gh api "orgs/$ORG" --jq '.plan.name // "unknown"' 2>/dev/null || echo unknown)"
+ok "org plan: $PLAN"
+PROTECTION_AVAILABLE=1
+case "$PLAN" in
+  free)
+    PROTECTION_AVAILABLE=0
+    warn "GitHub Free: branch protection on PRIVATE repos is not enforced."
+    warn "Protection will be written but GitHub will ignore it until the org is"
+    warn "on Team (\$4/user/month) or the repos go public. See docs/GITHUB.md."
+    ;;
+  *) ok "plan supports branch protection on private repos" ;;
+esac
+
+# ---------------------------------------------------------------------------
+# repo_exists <name>
+repo_exists() { gh api "repos/$ORG/$1" >/dev/null 2>&1; }
+
+# create_repo <name> - private, no auto-init (we push real history into it)
+create_repo() {
+  local name="$1"
+  if repo_exists "$name"; then
+    skip "$ORG/$name already exists"
+  else
+    run gh api --method POST "orgs/$ORG/repos" \
+      -f "name=$name" \
+      -F "private=true" \
+      -F "has_issues=false" \
+      -F "has_wiki=false" \
+      -F "has_projects=false" \
+      -F "auto_init=false" \
+      -F "allow_squash_merge=true" \
+      -F "allow_merge_commit=true" \
+      -F "allow_rebase_merge=false" \
+      -F "delete_branch_on_merge=true" >/dev/null
+    ok "created $ORG/$name (private)"
+  fi
+
+  # Private, always. Never flip this until TWO-35 has cleared history.
+  local vis
+  vis="$(gh api "repos/$ORG/$name" --jq .private 2>/dev/null || echo true)"
+  if [ "$vis" != "true" ]; then
+    bad "$ORG/$name is PUBLIC. It must be private until TWO-35 clears secrets and history."
+    FAILED=1
+  fi
+}
+
+# push_history <local-path> <repo-name>
+# Pushes the full history. Never force, never squash - if the remote already
+# has commits we do not own, this stops rather than overwriting them.
+push_history() {
+  local path="$1" name="$2"
+  if [ -z "$path" ] || [ ! -d "$path/.git" ]; then
+    warn "no git repo at '${path:-<unset>}' - skipping push for $name"
+    return 0
+  fi
+
+  local url="git@github.com:$ORG/$name.git"
+  local current
+  current="$(git -C "$path" remote get-url origin 2>/dev/null || true)"
+  if [ -z "$current" ]; then
+    run git -C "$path" remote add origin "$url"
+    ok "$name: added origin -> $url"
+  elif [ "$current" != "$url" ]; then
+    run git -C "$path" remote set-url origin "$url"
+    ok "$name: origin re-pointed $current -> $url"
+  else
+    skip "$name: origin already $url"
+  fi
+
+  # Default branch must be `main`. CI triggers on `main`; a repo left on
+  # `master` silently runs no push-CI at all.
+  local branch
+  branch="$(git -C "$path" symbolic-ref --short HEAD)"
+  if [ "$branch" != "$DEFAULT_BRANCH" ]; then
+    run git -C "$path" branch -m "$branch" "$DEFAULT_BRANCH"
+    ok "$name: renamed $branch -> $DEFAULT_BRANCH"
+  fi
+
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '   \033[90mwould run:\033[0m git -C %s push -u origin %s (full history, %s commits)\n' \
+      "$path" "$DEFAULT_BRANCH" "$(git -C "$path" rev-list --count HEAD)"
+  else
+    # --force is deliberately absent.
+    git -C "$path" push -u origin "$DEFAULT_BRANCH"
+    ok "$name: pushed $(git -C "$path" rev-list --count HEAD) commits with full history"
+  fi
+}
+
+# protect <repo-name> <required-check...>
+# Classic branch protection: it is the API that reports its own effect
+# honestly, which matters because on a free org the call succeeds and the
+# rule does nothing.
+protect() {
+  local name="$1"; shift
+  local checks=("$@")
+
+  local contexts_json
+  contexts_json="$(printf '%s\n' "${checks[@]}" | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')"
+
+  local payload
+  payload="$(python3 - "$contexts_json" <<'PY'
+import json, sys
+contexts = json.loads(sys.argv[1])
+print(json.dumps({
+    "required_status_checks": {"strict": True, "contexts": contexts},
+    # No admin bypass. If it does not apply to me it is not a rule.
+    "enforce_admins": True,
+    "required_pull_request_reviews": {
+        "required_approving_review_count": 1,
+        # The whole point: you cannot approve your own work.
+        "require_last_push_approval": True,
+        "dismiss_stale_reviews": True,
+        "require_code_owner_reviews": True,
+    },
+    "restrictions": None,
+    "allow_force_pushes": False,
+    "allow_deletions": False,
+    "required_linear_history": False,
+    "required_conversation_resolution": True,
+}))
+PY
+)"
+
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '   \033[90mwould protect\033[0m %s/%s:%s with checks %s\n' "$ORG" "$name" "$DEFAULT_BRANCH" "${checks[*]}"
+    return 0
+  fi
+
+  if printf '%s' "$payload" | gh api --method PUT \
+      "repos/$ORG/$name/branches/$DEFAULT_BRANCH/protection" --input - >/dev/null 2>&1; then
+    ok "$name: protection written on $DEFAULT_BRANCH (PR required, CI ${checks[*]}, no self-approval, no force-push)"
+  else
+    bad "$name: could not write branch protection"
+    [ "$PROTECTION_AVAILABLE" = 0 ] && bad "  most likely cause: private repo on a Free org"
+    FAILED=1
+  fi
+}
+
+# secret_protection <repo-name>
+secret_protection() {
+  local name="$1"
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '   \033[90mwould enable\033[0m secret scanning + push protection on %s\n' "$name"
+    return 0
+  fi
+  if gh api --method PATCH "repos/$ORG/$name" \
+      -F 'security_and_analysis[secret_scanning][status]=enabled' \
+      -F 'security_and_analysis[secret_scanning_push_protection][status]=enabled' \
+      >/dev/null 2>&1; then
+    ok "$name: GitHub secret scanning + push protection enabled"
+  else
+    warn "$name: GitHub-native secret scanning unavailable (paid add-on on private repos)."
+    warn "  The gitleaks job in .github/workflows/secret-scan.yml covers this for free."
+  fi
+}
+
+# ---------------------------------------------------------------------------
+if [ "$VERIFY_ONLY" = 0 ]; then
+  say "Repositories"
+  create_repo "$BOT_REPO"
+  create_repo "$WEB_REPO"
+
+  say "History"
+  push_history "$BOT_PATH" "$BOT_REPO"
+  if [ -n "$WEB_PATH" ]; then
+    push_history "$WEB_PATH" "$WEB_REPO"
+  else
+    warn "TWO_WEB_PATH unset - the Web Lead pushes two-web themselves. See docs/GITHUB.md."
+  fi
+
+  say "Branch protection on $DEFAULT_BRANCH"
+  # Check names must match the job names CI actually reports, or the rule
+  # waits forever on a check that never arrives.
+  protect "$BOT_REPO" "check" "gitleaks"
+  protect "$WEB_REPO" "tests" "gitleaks"
+
+  say "Secret scanning"
+  secret_protection "$BOT_REPO"
+  secret_protection "$WEB_REPO"
+fi
+
+# ---------------------------------------------------------------------------
+say "Verify"
+
+verify_repo() {
+  local name="$1"
+  if ! repo_exists "$name"; then bad "$name: does not exist"; FAILED=1; return; fi
+
+  local priv; priv="$(gh api "repos/$ORG/$name" --jq .private)"
+  [ "$priv" = "true" ] && ok "$name: private" || { bad "$name: PUBLIC - must be private until TWO-35"; FAILED=1; }
+
+  local db; db="$(gh api "repos/$ORG/$name" --jq .default_branch)"
+  [ "$db" = "$DEFAULT_BRANCH" ] && ok "$name: default branch is $db" || { bad "$name: default branch is '$db', expected $DEFAULT_BRANCH"; FAILED=1; }
+
+  local p
+  if p="$(gh api "repos/$ORG/$name/branches/$DEFAULT_BRANCH/protection" 2>/dev/null)"; then
+    local pr checks admins selfapp
+    pr="$(printf '%s' "$p"      | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("required_pull_request_reviews",{}).get("required_approving_review_count",0))')"
+    selfapp="$(printf '%s' "$p" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("required_pull_request_reviews",{}).get("require_last_push_approval",False))')"
+    checks="$(printf '%s' "$p"  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(",".join(d.get("required_status_checks",{}).get("contexts",[])) or "NONE")')"
+    admins="$(printf '%s' "$p"  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("enforce_admins",{}).get("enabled",False))')"
+
+    [ "$pr" -ge 1 ]           && ok "$name: PR review required ($pr approval)"        || { bad "$name: no review required"; FAILED=1; }
+    [ "$selfapp" = "True" ]   && ok "$name: self-approval blocked"                    || { bad "$name: self-approval NOT blocked"; FAILED=1; }
+    [ "$checks" != "NONE" ]   && ok "$name: CI required ($checks)"                    || { bad "$name: no required status checks - a red PR can merge"; FAILED=1; }
+    [ "$admins" = "True" ]    && ok "$name: admins included, no bypass"               || { bad "$name: admins can bypass"; FAILED=1; }
+  else
+    bad "$name: NO branch protection on $DEFAULT_BRANCH - direct pushes are allowed"
+    FAILED=1
+  fi
+
+  for f in .github/CODEOWNERS CONTRIBUTING.md README.md .env.example .gitignore; do
+    if gh api "repos/$ORG/$name/contents/$f" >/dev/null 2>&1; then ok "$name: $f present"
+    else bad "$name: $f MISSING"; FAILED=1; fi
+  done
+
+  # A committed .env is the one thing that must never be true.
+  if gh api "repos/$ORG/$name/contents/.env" >/dev/null 2>&1; then
+    bad "$name: .env IS COMMITTED. Rotate every value in it, then remove it from history."
+    FAILED=1
+  else
+    ok "$name: no .env committed"
+  fi
+}
+
+verify_repo "$BOT_REPO"
+verify_repo "$WEB_REPO"
+
+echo
+if [ "$FAILED" = 0 ]; then
+  say "All checks passed"
+  echo "   Last step is manual and cannot be skipped - prove it actually blocks:"
+  echo "     git -C $BOT_PATH push origin $DEFAULT_BRANCH   # must be REJECTED"
+  exit 0
+else
+  say "Some checks FAILED (see above)"
+  exit 1
+fi
