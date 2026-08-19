@@ -87,14 +87,64 @@ Applied to `main` in both repos by the setup script:
 - 1 approving review, from a code owner.
 - **No self-approval** (`require_last_push_approval`), and stale reviews are
   dismissed when new commits land.
-- Required status checks must be green: `check` + `gitleaks` on the bot,
-  `tests` + `gitleaks` on the website.
 - **Admins included.** A rule I can bypass is not a rule.
 - No force pushes, no branch deletion, conversations must be resolved.
+- Required status checks must be green — the full list is below.
 
-The required check names must match the job names CI actually reports. If they
-do not, the PR waits forever on a check that never arrives — which looks like a
-hang, not a misconfiguration. When you rename a CI job, update the protection.
+### Required status checks
+
+Set in one place, `BOT_CHECKS` / `WEB_CHECKS` at the top of
+[`setup-github.sh`](../scripts/setup-github.sh). Confirmed against the real
+workflows on 2026-08-19.
+
+| Repo | Context | Comes from | What it is |
+|---|---|---|---|
+| `two-bot` | `check` | `ci.yml`, job `check` | typecheck + tests |
+| `two-bot` | `gitleaks` | `secret-scan.yml`, job `gitleaks` | full-history secret scan |
+| `two-web` | `static` | `ci.yml`, job `static` | Pint + PHPStan level 8 |
+| `two-web` | `tests` | `ci.yml`, job `tests` | Pest unit + feature, real Postgres |
+| `two-web` | `dusk` | `ci.yml`, job `dusk` | Laravel Dusk, real Chrome |
+| `two-web` | `budgets` | `ci.yml`, job `budgets` | Lighthouse budget + WCAG 2.2 AA |
+| `two-web` | `ci` | `ci.yml`, job `ci` | aggregate of the four above |
+| `two-web` | `gitleaks` | `secret-scan.yml`, job `gitleaks` | full-history secret scan |
+
+**A context is a job name, not a workflow name.** The workflow file is called
+`secret-scan.yml` and its `name:` is `secret-scan`, but the check GitHub reports
+is the job — `gitleaks`. Requiring `secret-scan` would wait forever on a check
+that never arrives, which looks like a hang rather than a misconfiguration. When
+you rename a CI job, update the protection.
+
+**Why every leaf job is listed and not just the `ci` aggregate.** For branch
+protection, a *skipped* check counts as passed. A job declared with plain
+`needs: [static, tests, dusk, budgets]` is **skipped**, not failed, when one of
+those goes red — so requiring only `ci` would let a red PR merge. Two things fix
+it and we do both: the aggregate should be `if: always()` and explicitly fail on
+any non-success result, and protection requires the leaves directly. Listing
+`ci` as well still buys the original benefit — a job added to its `needs:` later
+is covered without touching protection.
+
+`--verify` now fails if any expected context is missing from the live rule, so a
+check quietly dropped from the list gets caught instead of discovered during an
+incident.
+
+`strict` is on: a branch must be up to date with `main` before it can merge. With
+`dusk` in the required set that means a merge behind `main` costs a full browser
+run. Correct, but if merges start queueing, this is the knob — not the check list.
+
+### Deploy environment
+
+`setup-github.sh` creates a `production` environment on `two-web` with
+`prevent_self_review`. TWO-22's deploy job targets it. **It is created without
+reviewers** — those are org account IDs that do not exist until the org does —
+and `--verify` warns while it has none. That warning must be cleared *before*
+`FORGE_PRODUCTION_DEPLOY_HOOK` is set, or the release gate is decorative.
+Deploys themselves are TWO-37 and not approved; both deploy jobs skip green
+while their hook secret is unset, which is deliberate — a missing deploy target
+must never look like a broken build.
+
+Secrets and variables that TWO-37 will need, once approved:
+`FORGE_STAGING_DEPLOY_HOOK` (secret), `FORGE_PRODUCTION_DEPLOY_HOOK` (secret),
+`STAGING_URL` (variable). Actions secrets, never the repo.
 
 ## Secrets
 

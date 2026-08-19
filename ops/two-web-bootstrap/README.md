@@ -33,6 +33,23 @@ Laravel has no `prepare` hook the way the bot's `package.json` does, so add
 that `git config` line to two-web's own CONTRIBUTING setup steps — otherwise
 the files are in the repo and doing nothing.
 
+`ci.yml` is **not** here — that is QA's, from TWO-22, and the Web Lead is
+applying it into two-web directly. `secret-scan.yml` is the only workflow of
+the two that is mine, and it is not duplicated in QA's patch.
+
+## Required check names
+
+Protection on two-web's `main` requires these contexts. They are **job** names,
+not workflow names — `secret-scan.yml` reports its check as `gitleaks`.
+
+`ci` · `tests` · `static` · `dusk` · `budgets` (QA's `ci.yml`) and `gitleaks`
+(`secret-scan.yml`).
+
+The list lives in `WEB_CHECKS` at the top of `scripts/setup-github.sh`. If a job
+gets renamed, change it there — nowhere else. Full reasoning, including why the
+`ci` aggregate alone is not sufficient, is in
+[../../docs/GITHUB.md](../../docs/GITHUB.md#required-status-checks).
+
 ## The handoff
 
 The Web Lead pushes two-web, not me. Their working copy has the real local

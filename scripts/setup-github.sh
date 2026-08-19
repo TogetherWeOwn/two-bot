@@ -21,6 +21,28 @@ BOT_REPO="two-bot"
 WEB_REPO="two-web"
 DEFAULT_BRANCH="main"
 
+# Required status check contexts, per repo.
+#
+# These are GitHub JOB names - the `jobs.<id>` key in a workflow file, or that
+# job's `name:` if it sets one. They are NOT workflow names. A context that
+# matches nothing leaves the PR waiting forever on a check that never arrives,
+# which reads as a hang rather than a misconfiguration.
+#
+#   two-bot   ci.yml          -> job `check`
+#             secret-scan.yml -> job `gitleaks`   (workflow is named secret-scan,
+#                                                  the job is not)
+#   two-web   ci.yml          -> jobs `static` `tests` `dusk` `budgets` `ci`
+#             secret-scan.yml -> job `gitleaks`
+#
+# Every leaf job is listed, not just the `ci` aggregate. A job that is *skipped*
+# counts as PASSED for branch protection, and an aggregate declared with plain
+# `needs:` is skipped - not failed - when something it needs goes red. Requiring
+# only the aggregate would therefore let a red PR merge. Requiring the leaves
+# closes that hole; requiring the aggregate as well means a future job added to
+# its `needs:` list is covered without touching protection.
+BOT_CHECKS=(check gitleaks)
+WEB_CHECKS=(ci tests static dusk budgets gitleaks)
+
 # Where each repo's working copy is. Override if yours are elsewhere.
 BOT_PATH="${TWO_BOT_PATH:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 WEB_PATH="${TWO_WEB_PATH:-}"
@@ -244,6 +266,31 @@ secret_protection() {
   fi
 }
 
+# deploy_environment <repo-name>
+# A GitHub `production` environment with a human reviewer gate. TWO-22's deploy
+# job targets it; the job stays inert until TWO-37 is approved and the Forge
+# hook secrets exist, so creating the environment early costs nothing and means
+# the gate is already there the day deploys turn on.
+#
+# Reviewers cannot be set here: they are org account/team IDs I do not have
+# until the org exists. The environment is created WITHOUT them and --verify
+# says so loudly, because an environment with no reviewers is a gate that looks
+# shut and is not.
+deploy_environment() {
+  local name="$1"
+  if [ "$DRY_RUN" = 1 ]; then
+    printf '   \033[90mwould create\033[0m `production` environment on %s (prevent_self_review)\n' "$name"
+    return 0
+  fi
+  if gh api --method PUT "repos/$ORG/$name/environments/production" \
+      -F 'prevent_self_review=true' -F 'wait_timer=0' >/dev/null 2>&1; then
+    ok "$name: \`production\` environment exists, self-review prevented"
+  else
+    warn "$name: could not create the \`production\` environment"
+    warn "  Environments on private repos need GitHub Team or above - same plan question as protection."
+  fi
+}
+
 # ---------------------------------------------------------------------------
 if [ "$VERIFY_ONLY" = 0 ]; then
   say "Repositories"
@@ -259,21 +306,23 @@ if [ "$VERIFY_ONLY" = 0 ]; then
   fi
 
   say "Branch protection on $DEFAULT_BRANCH"
-  # Check names must match the job names CI actually reports, or the rule
-  # waits forever on a check that never arrives.
-  protect "$BOT_REPO" "check" "gitleaks"
-  protect "$WEB_REPO" "tests" "gitleaks"
+  protect "$BOT_REPO" "${BOT_CHECKS[@]}"
+  protect "$WEB_REPO" "${WEB_CHECKS[@]}"
 
   say "Secret scanning"
   secret_protection "$BOT_REPO"
   secret_protection "$WEB_REPO"
+
+  say "Deploy environment"
+  deploy_environment "$WEB_REPO"
 fi
 
 # ---------------------------------------------------------------------------
 say "Verify"
 
 verify_repo() {
-  local name="$1"
+  local name="$1"; shift
+  local expected=("$@")
   if ! repo_exists "$name"; then bad "$name: does not exist"; FAILED=1; return; fi
 
   local priv; priv="$(gh api "repos/$ORG/$name" --jq .private)"
@@ -290,10 +339,25 @@ verify_repo() {
     checks="$(printf '%s' "$p"  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(",".join(d.get("required_status_checks",{}).get("contexts",[])) or "NONE")')"
     admins="$(printf '%s' "$p"  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("enforce_admins",{}).get("enabled",False))')"
 
+    local stale
+    stale="$(printf '%s' "$p"   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("required_pull_request_reviews",{}).get("dismiss_stale_reviews",False))')"
+
     [ "$pr" -ge 1 ]           && ok "$name: PR review required ($pr approval)"        || { bad "$name: no review required"; FAILED=1; }
     [ "$selfapp" = "True" ]   && ok "$name: self-approval blocked"                    || { bad "$name: self-approval NOT blocked"; FAILED=1; }
+    [ "$stale" = "True" ]     && ok "$name: stale approvals dismissed on new commits" || { bad "$name: stale approvals survive a force-push"; FAILED=1; }
     [ "$checks" != "NONE" ]   && ok "$name: CI required ($checks)"                    || { bad "$name: no required status checks - a red PR can merge"; FAILED=1; }
     [ "$admins" = "True" ]    && ok "$name: admins included, no bypass"               || { bad "$name: admins can bypass"; FAILED=1; }
+
+    # Every expected context must actually be required. A check silently
+    # dropped from the list is the failure mode nobody notices: CI still runs
+    # and still goes red, and the PR merges anyway.
+    local want
+    for want in "${expected[@]}"; do
+      case ",$checks," in
+        *",$want,"*) : ;;
+        *) bad "$name: required check '$want' is NOT in the protection rule"; FAILED=1 ;;
+      esac
+    done
   elif [ "$PROTECTION_AVAILABLE" = 0 ]; then
     # Expected on a free org with a private repo. Report it as what it is, and
     # then check that Plan B is actually in place rather than assumed.
@@ -332,8 +396,25 @@ verify_repo() {
   fi
 }
 
-verify_repo "$BOT_REPO"
-verify_repo "$WEB_REPO"
+verify_repo "$BOT_REPO" "${BOT_CHECKS[@]}"
+verify_repo "$WEB_REPO" "${WEB_CHECKS[@]}"
+
+# The production deploy gate. Warn, do not fail: deploys are TWO-37 and not
+# approved yet, and both deploy jobs skip green while their hook secret is
+# unset, so there is nothing to gate today.
+if env_json="$(gh api "repos/$ORG/$WEB_REPO/environments/production" 2>/dev/null)"; then
+  reviewers="$(printf '%s' "$env_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(sum(len(r.get("reviewers",[])) for r in d.get("protection_rules",[]) if r.get("type")=="required_reviewers"))' 2>/dev/null || echo 0)"
+  if [ "${reviewers:-0}" -gt 0 ]; then
+    ok "$WEB_REPO: production environment has $reviewers required reviewer(s)"
+  else
+    warn "$WEB_REPO: production environment has NO required reviewers."
+    warn "  Harmless while FORGE_PRODUCTION_DEPLOY_HOOK is unset (the deploy job skips green)."
+    warn "  Add reviewers in Settings -> Environments -> production BEFORE that secret exists,"
+    warn "  or the release sign-off gate is decorative."
+  fi
+else
+  skip "$WEB_REPO: no production environment yet (created on the next non-verify run)"
+fi
 
 echo
 if [ "$FAILED" = 0 ] && [ "$ADVISORY_MAIN" = 1 ]; then
