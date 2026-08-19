@@ -63,9 +63,16 @@ Not staff, and the near misses worth re-reading before anyone adds them:
 - Every bot role with Administrator (MEE6, Statbot, Wick, TWO-BOT, Owen). A
   `managed` role cannot be held by a person.
 
-Production use of this list is gated on CEO sign-off (confirmation on TWO-44).
-Staging is not gated. Both env vars fail closed when blank: no guild ID means
-nobody signs in, no role IDs means nobody is a moderator.
+**Approved for production.** The CEO sign-off gate on TWO-44 was accepted
+2026-08-19T20:40Z, as recommended and with no amendment — the six roles above are
+the approved staff list for both staging and production. The two alternatives
+offered at the same time (drop the empty Captain/Lieutenant rungs; add Welcome
+Team and Ticket Manager) were **not** taken, so neither is in the list.
+
+Changing the list later is an env change on the website, not a code change and
+not a redeploy — but it is a change to who can edit the public site, so it goes
+back through the same sign-off. Both env vars fail closed when blank: no guild ID
+means nobody signs in, no role IDs means nobody is a moderator.
 
 ## Rules for consumers
 
