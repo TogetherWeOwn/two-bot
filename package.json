@@ -15,6 +15,7 @@
     "test:e2e": "node --test test/e2e.funnel.test.ts test/e2e.onboarding.test.ts",
     "typecheck": "tsc --noEmit",
     "funnel": "node scripts/funnel.ts",
+    "attribution": "node scripts/attribution.ts",
     "dashboard": "node scripts/dashboard.ts",
     "audit:collect": "node scripts/audit-collect.ts",
     "reengage": "node scripts/reengagement.ts",

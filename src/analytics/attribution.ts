@@ -1,0 +1,298 @@
+/**
+ * Growth attribution: click -> join -> AM7 -> AM30, per invite code.
+ *
+ * This is the arithmetic half of scripts/attribution.ts. It is pure on purpose
+ * - the script reads rows, this decides what they mean, and the test needs no
+ * database. Same split as anomalies.ts / funnel.ts.
+ *
+ * The two definitions were agreed on TWO-62 (document `roadmap-30d`) and are
+ * implemented here verbatim, with every place the data forces an
+ * interpretation called out in a comment and surfaced in the printed report.
+ *
+ *   AM7  (activation) - within 7 days of joining, had a first voice session
+ *                       OR posted 3 or more messages. Voice alone qualifies;
+ *                       one message does not. TWO is voice-first (495 voice
+ *                       events against 15 text messages in 90 days), so this
+ *                       asymmetry is deliberate, not sloppiness.
+ *
+ *   AM30 (retention)  - was AM7, is still in the server, and was active again
+ *                       in the 30 days after joining. The only number that
+ *                       counts as growth.
+ *
+ * WHAT THE DATA CANNOT YET DO, STATED ONCE HERE
+ *
+ *  1. "3 or more messages" needs a per-member message count and we do not
+ *     store one. `members` holds first_message_at and nothing else. So a
+ *     record whose `thirdMessageAt` is null falls back to first_message_at,
+ *     which admits people who posted exactly once or twice. That makes AM7 an
+ *     UPPER BOUND. Every roll-up carries `am7MessageProxy` so the report can
+ *     say how much of the number rests on it, and `am7Voice` is the exact
+ *     lower bound. Closing this is a separate, small change - see the child
+ *     issue referenced in scripts/attribution.ts.
+ *
+ *  2. "active again in the 30 days after joining" needs every activity, and
+ *     we store the first of each kind plus a rolling last-seen. So a member
+ *     who joined two years ago, activated on day 1 and is still in voice
+ *     every week has lastActiveAt far beyond day 30, and a literal reading
+ *     would score them as NOT retained - penalising exactly the best-retained
+ *     members. So the rule implemented is "still present AND demonstrably
+ *     active after the moment they activated", and the roll-up splits it into
+ *     `am30ProvenInWindow` (second activity is inside the 30 days, no
+ *     inference) and `am30ProvenLater` (second activity is only provable after
+ *     day 30). Both numbers are printed. Neither reading is hidden.
+ */
+
+export const AM7_WINDOW_DAYS = 7;
+export const AM30_WINDOW_DAYS = 30;
+/** Messages needed to activate on the text side. Voice needs one session. */
+export const AM7_MESSAGE_THRESHOLD = 3;
+
+const DAY_MS = 86_400_000;
+
+/** One join, plus everything known about that member's activity afterwards. */
+export interface JoinRecord {
+  memberId: string;
+  /** The join being credited. ISO-8601 UTC. */
+  joinedAt: string;
+  /** Raw `source` off the member_join event: `invite:CODE` / `vanity` / ... */
+  source: string;
+  firstVoiceAt: string | null;
+  firstMessageAt: string | null;
+  /**
+   * When this member's third message landed, or null if we do not record
+   * message counts yet. Null triggers the first_message proxy - see the header.
+   */
+  thirdMessageAt: string | null;
+  /** Rolling last-seen. Moved forward by every voice session, not just the first. */
+  lastActiveAt: string | null;
+  /** Non-null once they have left. */
+  leftAt: string | null;
+}
+
+/** How a member cleared the AM7 bar. */
+export type ActivationBasis = 'voice' | 'messages' | 'message-proxy';
+
+export interface Activation {
+  basis: ActivationBasis;
+  /** When they cleared it. */
+  at: string;
+}
+
+/**
+ * Did this member activate inside the 7-day window, and how?
+ *
+ * Earliest qualifying signal wins, so `at` is the true activation moment and
+ * the AM30 "active again" test has something real to compare against.
+ */
+export function activation(j: JoinRecord): Activation | null {
+  const join = Date.parse(j.joinedAt);
+  if (Number.isNaN(join)) return null;
+  const deadline = join + AM7_WINDOW_DAYS * DAY_MS;
+
+  const inWindow = (ts: string | null): number | null => {
+    if (!ts) return null;
+    const t = Date.parse(ts);
+    // `>= join` guards against activity stamped before the join we are
+    // crediting, which happens on a rejoin: the member's first-ever message
+    // can predate their second arrival by years.
+    return !Number.isNaN(t) && t >= join && t <= deadline ? t : null;
+  };
+
+  const candidates: { basis: ActivationBasis; t: number }[] = [];
+  const voice = inWindow(j.firstVoiceAt);
+  if (voice !== null) candidates.push({ basis: 'voice', t: voice });
+
+  if (j.thirdMessageAt !== null) {
+    const third = inWindow(j.thirdMessageAt);
+    if (third !== null) candidates.push({ basis: 'messages', t: third });
+  } else {
+    // No message counts on file. Fall back to "posted at all", which is a
+    // looser bar than the agreed 3+, and label it so the report can say so.
+    const first = inWindow(j.firstMessageAt);
+    if (first !== null) candidates.push({ basis: 'message-proxy', t: first });
+  }
+
+  if (candidates.length === 0) return null;
+  candidates.sort((a, b) => a.t - b.t);
+  const best = candidates[0];
+  return { basis: best.basis, at: new Date(best.t).toISOString() };
+}
+
+export type Am30Verdict =
+  /** Still here, and the second activity is inside the 30 days. No inference. */
+  | 'proven-in-window'
+  /** Still here and demonstrably active again, but only provable after day 30. */
+  | 'proven-later'
+  /** Left, or never did anything after the moment they activated. */
+  | 'no';
+
+/** Was this AM7 member retained? See note 2 in the header for why this is not one boolean. */
+export function am30(j: JoinRecord, act: Activation): Am30Verdict {
+  if (j.leftAt) return 'no';
+  if (!j.lastActiveAt) return 'no';
+  const last = Date.parse(j.lastActiveAt);
+  const actAt = Date.parse(act.at);
+  const join = Date.parse(j.joinedAt);
+  if (Number.isNaN(last) || Number.isNaN(actAt) || Number.isNaN(join)) return 'no';
+  // Strictly after: last-seen equal to the activation moment means the
+  // activation IS the only thing they ever did.
+  if (last <= actAt) return 'no';
+  return last <= join + AM30_WINDOW_DAYS * DAY_MS ? 'proven-in-window' : 'proven-later';
+}
+
+/**
+ * One printed line. `joins` is people, not events - the caller collapses the
+ * duplicate-logger copies before this ever sees them.
+ */
+export interface AttributionRow {
+  /** `invite:CODE`, `vanity`, `unknown`, or a backfill source. */
+  source: string;
+  /** Human label: the bare code for invites, the source string otherwise. */
+  label: string;
+  clicks: number;
+  joins: number;
+
+  /** Joins old enough to have had their 7 days. The AM7 denominator. */
+  am7Eligible: number;
+  am7: number;
+  /** Of `am7`, how many cleared the bar on voice alone. The exact lower bound. */
+  am7Voice: number;
+  /** Of `am7`, how many were admitted by the first_message proxy. See header note 1. */
+  am7MessageProxy: number;
+
+  /** AM7 members old enough to have had their 30 days. The AM30 denominator. */
+  am30Eligible: number;
+  am30: number;
+  am30ProvenInWindow: number;
+  am30ProvenLater: number;
+}
+
+function emptyRow(source: string): AttributionRow {
+  return {
+    source,
+    label: source.startsWith('invite:') ? source.slice('invite:'.length) : source,
+    clicks: 0,
+    joins: 0,
+    am7Eligible: 0,
+    am7: 0,
+    am7Voice: 0,
+    am7MessageProxy: 0,
+    am30Eligible: 0,
+    am30: 0,
+    am30ProvenInWindow: 0,
+    am30ProvenLater: 0,
+  };
+}
+
+export interface RollUpOptions {
+  /** Now, in ms. Injected so the test is not a function of the wall clock. */
+  nowMs: number;
+  /** Clicks per source. Empty until a tracked redirect link exists. */
+  clicksBySource?: Map<string, number>;
+  /**
+   * Sources that must appear even with nothing behind them - every live invite
+   * code. A channel producing zero joins is the finding, not a missing row.
+   */
+  alwaysShow?: string[];
+}
+
+export interface AttributionTotals extends AttributionRow {
+  /** Members counted once each, however many codes they arrived through. */
+  distinctJoiners: number;
+}
+
+export interface RollUp {
+  rows: AttributionRow[];
+  totals: AttributionTotals;
+  /** True if any row leaned on the first_message proxy. Drives the caveat line. */
+  usedMessageProxy: boolean;
+}
+
+/**
+ * Aggregate joins into one row per source.
+ *
+ * Maturity is tracked per column, not per row, because at ~15 joins a month a
+ * cohort that has not had its 30 days yet is most of the table. Folding
+ * immature members into the denominator would print a retention collapse that
+ * is really just the calendar.
+ */
+export function rollUp(joins: JoinRecord[], opts: RollUpOptions): RollUp {
+  const { nowMs, clicksBySource = new Map(), alwaysShow = [] } = opts;
+  const rows = new Map<string, AttributionRow>();
+  const row = (source: string): AttributionRow => {
+    let r = rows.get(source);
+    if (!r) rows.set(source, (r = emptyRow(source)));
+    return r;
+  };
+
+  for (const s of alwaysShow) row(s);
+  for (const [s, n] of clicksBySource) row(s).clicks += n;
+
+  const totals = { ...emptyRow('TOTAL'), distinctJoiners: 0 } as AttributionTotals;
+  const seen = new Set<string>();
+  let usedMessageProxy = false;
+
+  for (const j of joins) {
+    const r = row(j.source);
+    r.joins++;
+    totals.joins++;
+    if (!seen.has(j.memberId)) {
+      seen.add(j.memberId);
+      totals.distinctJoiners++;
+    }
+
+    const join = Date.parse(j.joinedAt);
+    const am7Mature = !Number.isNaN(join) && nowMs >= join + AM7_WINDOW_DAYS * DAY_MS;
+    if (!am7Mature) continue;
+    r.am7Eligible++;
+    totals.am7Eligible++;
+
+    const act = activation(j);
+    if (!act) continue;
+    r.am7++;
+    totals.am7++;
+    if (act.basis === 'voice') {
+      r.am7Voice++;
+      totals.am7Voice++;
+    } else if (act.basis === 'message-proxy') {
+      r.am7MessageProxy++;
+      totals.am7MessageProxy++;
+      usedMessageProxy = true;
+    }
+
+    if (nowMs < join + AM30_WINDOW_DAYS * DAY_MS) continue;
+    r.am30Eligible++;
+    totals.am30Eligible++;
+    const verdict = am30(j, act);
+    if (verdict === 'no') continue;
+    r.am30++;
+    totals.am30++;
+    if (verdict === 'proven-in-window') {
+      r.am30ProvenInWindow++;
+      totals.am30ProvenInWindow++;
+    } else {
+      r.am30ProvenLater++;
+      totals.am30ProvenLater++;
+    }
+  }
+
+  for (const [, r] of rows) totals.clicks += r.clicks;
+
+  const sorted = [...rows.values()].sort(
+    (a, b) =>
+      b.am30 - a.am30 || b.am7 - a.am7 || b.joins - a.joins || a.label.localeCompare(b.label),
+  );
+  return { rows: sorted, totals, usedMessageProxy };
+}
+
+/**
+ * `n / d (p%)`, never a bare percentage.
+ *
+ * At ~15 joins a month "33%" is one person out of three and reads like a
+ * trend. The denominator is not decoration, so it is not optional and the
+ * formatter has no mode that drops it.
+ */
+export function rate(n: number, d: number): string {
+  const frac = `${String(n).padStart(3)} /${String(d).padStart(4)}`;
+  return d === 0 ? `${frac}   ( n/a)` : `${frac}   (${String(Math.round((n / d) * 100)).padStart(3)}%)`;
+}
