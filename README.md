@@ -30,9 +30,12 @@ Requires **Node 24 or newer** (it runs TypeScript directly and uses the
 built-in SQLite).
 
 ```bash
-npm install
+npm ci --include=dev
 npm test            # unit + full end-to-end, no Discord token needed
 ```
+
+(`--include=dev` matters: if `NODE_ENV=production` is set, npm quietly skips
+devDependencies and `npm run typecheck` then fails with `tsc: not found`.)
 
 To run it against a real server, put a bot token in `.env`
 (copy `.env.example`) and:

@@ -8,12 +8,18 @@ no build step.
 ```bash
 git clone git@github.com:two-gaming/two-bot.git
 cd two-bot
-npm install
+npm ci --include=dev
 npm test
 ```
 
 If `npm test` passes you have a working environment. That is the whole setup —
 it needs no Discord token, because `tools/mock-discord/` stands in for Discord.
+On a clean machine the four commands above take well under a minute.
+
+`--include=dev` is not optional padding. Some environments set
+`NODE_ENV=production`, and npm then skips devDependencies without saying so.
+The symptom is `npm run typecheck` failing with `tsc: not found`, which looks
+like a broken machine rather than a missing flag.
 
 To run the bot for real, copy `.env.example` to `.env`, put a token in it, and
 `npm run dev`. See [docs/SECRETS.md](docs/SECRETS.md) for where tokens come
