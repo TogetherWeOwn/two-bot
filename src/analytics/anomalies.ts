@@ -16,8 +16,16 @@
 
 export type AnomalyStatus = 'confirmed' | 'unconfirmed';
 
+/**
+ * What kind of not-community-behaviour this was. Only `raid` windows contain
+ * accounts that are candidates for removal, so scripts/raid-list.ts keys off
+ * this rather than off the wording of a label.
+ */
+export type AnomalyKind = 'raid' | 'cleanup' | 'prune';
+
 export interface Anomaly {
   id: string;
+  kind: AnomalyKind;
   /** First affected UTC day, inclusive. `YYYY-MM-DD`. */
   start: string;
   /** Last affected UTC day, inclusive. `YYYY-MM-DD`. */
@@ -33,6 +41,7 @@ export interface Anomaly {
 export const ANOMALIES: Anomaly[] = [
   {
     id: '2025-07-06-raid',
+    kind: 'raid',
     start: '2025-07-06',
     end: '2025-07-06',
     eventTypes: ['member_join'],
@@ -47,6 +56,7 @@ export const ANOMALIES: Anomaly[] = [
   },
   {
     id: '2025-08-raid-cleanup',
+    kind: 'cleanup',
     start: '2025-08-05',
     end: '2025-08-06',
     eventTypes: ['member_leave'],
@@ -60,6 +70,7 @@ export const ANOMALIES: Anomaly[] = [
   },
   {
     id: '2025-12-15-raid',
+    kind: 'raid',
     start: '2025-12-15',
     end: '2025-12-15',
     eventTypes: ['member_join'],
@@ -77,6 +88,7 @@ export const ANOMALIES: Anomaly[] = [
   },
   {
     id: '2025-09-12-raid',
+    kind: 'raid',
     start: '2025-09-12',
     end: '2025-09-12',
     eventTypes: ['member_join'],
@@ -89,6 +101,7 @@ export const ANOMALIES: Anomaly[] = [
   },
   {
     id: '2024-06-03-prune',
+    kind: 'prune',
     start: '2024-06-03',
     end: '2024-06-03',
     eventTypes: ['member_leave'],
@@ -101,6 +114,7 @@ export const ANOMALIES: Anomaly[] = [
   },
   {
     id: '2023-05-23-prune',
+    kind: 'prune',
     start: '2023-05-23',
     end: '2023-05-23',
     eventTypes: ['member_leave'],

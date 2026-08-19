@@ -19,6 +19,7 @@ import {
 
 const AUG: Anomaly = {
   id: 'test',
+  kind: 'cleanup',
   start: '2025-08-05',
   end: '2025-08-06',
   eventTypes: ['member_leave'],

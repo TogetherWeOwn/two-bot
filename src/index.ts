@@ -6,6 +6,8 @@ import { InviteTracker } from './core/inviteTracker.ts';
 import { FunnelHandlers } from './core/handlers.ts';
 import { createClient, registerHandlers } from './discord/client.ts';
 import { registerOnboarding } from './discord/onboarding.ts';
+import { RaidWatch } from './analytics/raidWatch.ts';
+import { makeRaidAnnouncer } from './discord/raidAlert.ts';
 import { OnboardingRecorder } from './onboarding/flow.ts';
 import { flagInactive } from './jobs/inactivity.ts';
 
@@ -31,7 +33,24 @@ if (cfg.apiBase) {
   log.info('api_base_override', { apiBase: cfg.apiBase });
 }
 
-registerHandlers(client, { handlers, invites });
+// Join-burst detection (TWO-56). Always on - three raids reached this server
+// unnoticed. Where the alert goes is configurable; whether we watch is not.
+const raid = {
+  watch: new RaidWatch({
+    threshold: cfg.raidJoinThreshold,
+    windowSeconds: cfg.raidWindowSeconds,
+  }),
+  announce: makeRaidAnnouncer(client, { channelId: cfg.staffAlertChannelId }),
+};
+log.info('raid_watch_enabled', {
+  threshold: cfg.raidJoinThreshold,
+  windowSeconds: cfg.raidWindowSeconds,
+  // No staff channel means the alert exists only in this log. Said out loud at
+  // boot so it is a known state rather than a surprise during a raid.
+  alertTarget: cfg.staffAlertChannelId ?? 'log only (DISCORD_STAFF_ALERT_CHANNEL_ID unset)',
+});
+
+registerHandlers(client, { handlers, invites, raid });
 
 // Onboarding (TWO-7). Skipped entirely if no landing channel is configured -
 // better to run the funnel with onboarding off than to post into a guessed

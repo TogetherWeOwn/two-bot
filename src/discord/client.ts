@@ -1,6 +1,8 @@
 import { Client, GatewayIntentBits, Events, type Guild } from 'discord.js';
 import type { FunnelHandlers } from '../core/handlers.ts';
 import type { InviteTracker, InviteState } from '../core/inviteTracker.ts';
+import type { RaidWatch } from '../analytics/raidWatch.ts';
+import type { RaidAnnouncer } from './raidAlert.ts';
 import { log } from '../core/log.ts';
 
 /**
@@ -27,6 +29,11 @@ export const INTENTS = [
 export interface BotDeps {
   handlers: FunnelHandlers;
   invites: InviteTracker;
+  /**
+   * Join-burst detection (TWO-56). Optional: leave it out and joins are
+   * recorded exactly as before, which is what every existing test does.
+   */
+  raid?: { watch: RaidWatch; announce: RaidAnnouncer };
 }
 
 export function createClient(): Client {
@@ -58,7 +65,7 @@ async function snapshotInvites(guild: Guild, invites: InviteTracker): Promise<st
 
 /** Wire gateway events to the framework-free handlers. */
 export function registerHandlers(client: Client, deps: BotDeps): void {
-  const { handlers, invites } = deps;
+  const { handlers, invites, raid } = deps;
 
   client.once(Events.ClientReady, async (c) => {
     log.info('ready', { user: c.user.tag, guilds: c.guilds.cache.size });
@@ -79,6 +86,21 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
       inviterId,
       occurredAt: member.joinedAt?.toISOString(),
     });
+
+    // Burst check last, and never at the expense of the join record: an alert
+    // that throws must not lose the event it was alerting about.
+    if (raid && !member.user?.bot) {
+      try {
+        const alert = raid.watch.observe(
+          member.guild.id,
+          member.id,
+          member.joinedAt?.getTime() ?? Date.now(),
+        );
+        if (alert) await raid.announce(alert);
+      } catch (err) {
+        log.error('raid_watch_failed', { guildId: member.guild.id, err: String(err) });
+      }
+    }
   });
 
   client.on(Events.GuildMemberRemove, async (member) => {

@@ -27,6 +27,14 @@ export interface Config {
   landingChannelIds: string[];
   /** Onboarding observes and logs but changes nothing. */
   onboardingDryRun: boolean;
+  /**
+   * Staff channel for join-burst alerts (TWO-56). Null = alerts go to the log
+   * only. Never a member-facing channel: this posts member IDs.
+   */
+  staffAlertChannelId: string | null;
+  /** Joins inside `raidWindowSeconds` that raise an alert. */
+  raidJoinThreshold: number;
+  raidWindowSeconds: number;
 }
 
 /**
@@ -69,6 +77,9 @@ export function loadConfig(): Config {
       .map((s) => s.trim())
       .filter(Boolean),
     onboardingDryRun: process.env.TWO_ONBOARDING_DRY_RUN === '1',
+    staffAlertChannelId: process.env.DISCORD_STAFF_ALERT_CHANNEL_ID || null,
+    raidJoinThreshold: Number(process.env.TWO_RAID_JOIN_THRESHOLD ?? 5),
+    raidWindowSeconds: Number(process.env.TWO_RAID_WINDOW_SECONDS ?? 60),
     dbPath: resolveDbSpec(),
     dbPoolMax: Number(process.env.TWO_DB_POOL_MAX ?? 5),
     inactivityDays: Number(process.env.TWO_INACTIVITY_DAYS ?? 14),
