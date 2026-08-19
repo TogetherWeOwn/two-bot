@@ -37,6 +37,7 @@ import {
   type RawChannel,
   type RawInvite,
 } from '../src/discord/rest.ts';
+import { collapseCrossSourceDuplicates } from '../src/backfill/dedupe.ts';
 import {
   memberLogKindForChannel,
   parseMemberLogMessage,
@@ -237,10 +238,21 @@ console.log(
     `(${skipped} held no join/leave/voice entries)\n`,
 );
 
-// --- 3. reconcile the two sources -------------------------------------------
+// --- 3. reconcile the sources ------------------------------------------------
 
 /**
- * The member list and the join log both know about current members, and their
+ * First, the log channels against each other. TWO ran several logging bots at
+ * once, each with its own channel, so one join is written twice seconds apart.
+ * See src/backfill/dedupe.ts - unhandled this overstated joins by 42%.
+ */
+const joinDedupe = collapseCrossSourceDuplicates(logJoins);
+const leaveDedupe = collapseCrossSourceDuplicates(logLeaves);
+const dedupedJoins = joinDedupe.kept;
+const dedupedLeaves = leaveDedupe.kept;
+
+/**
+ * Then the member list against the logs. The member list and the join log both
+ * know about current members, and their
  * timestamps differ by seconds (Discord's stamp vs when the logger bot posted).
  * Left unhandled that is one join counted twice. The event store's idempotency
  * key includes the timestamp - deliberately, because rejoins are real - so it
@@ -251,7 +263,7 @@ console.log(
  */
 const TOLERANCE_MS = 5 * 60 * 1000;
 const logJoinsByMember = new Map<string, number[]>();
-for (const e of logJoins) {
+for (const e of dedupedJoins) {
   const arr = logJoinsByMember.get(e.memberId!) ?? [];
   arr.push(Date.parse(e.occurredAt));
   logJoinsByMember.set(e.memberId!, arr);
@@ -273,7 +285,7 @@ const keptMemberListJoins = memberListJoins.filter((e) => {
  * looking present, or vice versa. Sorting ascending makes the projection land
  * on the same state it would have reached live.
  */
-const all = [...logJoins, ...logLeaves, ...keptMemberListJoins, ...voiceEvents].sort((a, b) =>
+const all = [...dedupedJoins, ...dedupedLeaves, ...keptMemberListJoins, ...voiceEvents].sort((a, b) =>
   a.occurredAt < b.occurredAt ? -1 : a.occurredAt > b.occurredAt ? 1 : 0,
 );
 
@@ -349,9 +361,12 @@ const span = (() => {
 })();
 
 console.log(`  recovered events     ${String(all.length).padStart(5)}   spanning ${span}`);
-console.log(`    joins              ${String(logJoins.length + keptMemberListJoins.length).padStart(5)}   ` +
-  `(${logJoins.length} from logs, ${keptMemberListJoins.length} from the member list, ${supersededByLog} de-duplicated)`);
-console.log(`    leaves             ${String(logLeaves.length).padStart(5)}`);
+console.log(`    joins              ${String(dedupedJoins.length + keptMemberListJoins.length).padStart(5)}   ` +
+  `(${dedupedJoins.length} from logs, ${keptMemberListJoins.length} from the member list)`);
+console.log(`    leaves             ${String(dedupedLeaves.length).padStart(5)}`);
+console.log(`    de-duplicated      ${String(joinDedupe.collapsed + leaveDedupe.collapsed + supersededByLog).padStart(5)}   ` +
+  `(${joinDedupe.collapsed} joins and ${leaveDedupe.collapsed} leaves logged twice by different bots, ` +
+  `${supersededByLog} member-list joins already in a log)`);
 console.log(`    voice sessions     ${String(voiceEvents.length).padStart(5)}`);
 if (!dryRun) {
   console.log(
