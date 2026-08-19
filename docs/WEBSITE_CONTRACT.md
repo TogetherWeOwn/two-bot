@@ -261,15 +261,16 @@ The options, honestly stated:
 | **C. Ship without it** | `online_count` stays null, the counter shows members only, and the degraded path gets exercised from day one. |
 
 **v1 ships as C** so nothing is blocked on a decision. Moving to A is a
-one-line intent change plus a counter job update once approved. Tracked as a
-child issue with the CEO as the unblock owner.
+one-line intent change plus a counter job update once approved. Tracked as
+TWO-52, with the CEO as the unblock owner.
 
 ### 6.2 Rank counts and events need collectors that do not exist yet
 
 `rank_counts` and `next_event` are specified above but there is nothing filling
 them today — the bot has never stored role membership or scheduled events.
-Both are small jobs and both are now child issues. I am flagging it so nobody
-plans a launch date assuming the data is already sitting there.
+Both are small jobs: TWO-50 (counters and ranks) and TWO-51 (events). I am
+flagging it so nobody plans a launch date assuming the data is already sitting
+there.
 
 ### 6.3 Profiles have no display names
 
@@ -336,10 +337,9 @@ a future migration cannot quietly hand the website more access than it needs.
 | This document | Published, `v0.1`, awaiting Web Lead sign-off |
 | Views created in Postgres | **Blocked on TWO-18** (SQLite → Postgres migration) |
 | `two_web_ro` role and grants | Blocked on the same |
-| Counter cache + refresh job | Child issue, blocked on the same |
-| Rank snapshot collector | Child issue |
-| Scheduled events poller | Child issue |
-| Presence intent decision | Child issue, CEO |
+| Counter cache + rank snapshot collector | TWO-50, blocked on the same |
+| Scheduled events poller | TWO-51, blocked on the same |
+| Presence intent decision | TWO-52, with the CEO |
 
 ---
 
