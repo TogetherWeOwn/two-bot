@@ -1,0 +1,19 @@
+# Nightly backup, paired with two-bot-backup.timer.
+#
+#   sudo cp deploy/two-bot-backup.{service,timer} /etc/systemd/system/
+#   sudo systemctl enable --now two-bot-backup.timer
+#   systemctl list-timers two-bot-backup
+
+[Unit]
+Description=Back up the TWO bot database
+After=two-bot.service
+
+[Service]
+Type=oneshot
+User=twobot
+Group=twobot
+WorkingDirectory=/opt/two-bot
+Environment=TWO_DB_PATH=/opt/two-bot/data/two.db
+Environment=TWO_BACKUP_DIR=/var/backups/two-bot
+ExecStart=/usr/bin/bash /opt/two-bot/scripts/backup.sh
+ReadWritePaths=/opt/two-bot/data /var/backups/two-bot

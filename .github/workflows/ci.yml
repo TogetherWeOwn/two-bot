@@ -1,0 +1,26 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      # --include=dev matters: some environments set NODE_ENV=production,
+      # which makes npm silently skip devDependencies and typecheck disappears.
+      - run: npm ci --include=dev
+
+      # Node strips types, it does not check them. Without this step type
+      # errors reach production perfectly happily.
+      - run: npm run typecheck
+
+      - run: npm test

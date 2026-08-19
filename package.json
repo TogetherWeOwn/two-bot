@@ -1,0 +1,29 @@
+{
+  "name": "two-bot",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "TWO gaming community Discord bot and funnel instrumentation",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/index.ts",
+    "dev": "node --env-file=.env src/index.ts",
+    "test": "node --test test/unit.store.test.ts test/e2e.funnel.test.ts",
+    "test:unit": "node --test test/unit.store.test.ts",
+    "test:e2e": "node --test test/e2e.funnel.test.ts",
+    "typecheck": "tsc --noEmit",
+    "funnel": "node scripts/funnel.ts",
+    "backup": "bash scripts/backup.sh"
+  },
+  "dependencies": {
+    "discord.js": "^14.27.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.5.0",
+    "typescript": "^5.9.3",
+    "ws": "^8.21.0"
+  }
+}

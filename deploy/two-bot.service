@@ -1,0 +1,57 @@
+# systemd unit for the TWO bot.
+#
+#   sudo cp deploy/two-bot.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now two-bot
+#   journalctl -u two-bot -f          # live logs
+#
+# Restart-on-failure is the whole point of this file: if the bot crashes or the
+# box reboots, it comes back without anyone noticing.
+
+[Unit]
+Description=TWO community Discord bot
+Documentation=https://github.com/two-gaming/two-bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=twobot
+Group=twobot
+WorkingDirectory=/opt/two-bot
+ExecStart=/usr/bin/node src/index.ts
+
+# Secrets live here, root-owned, chmod 600. Never in the repo, never in this file.
+EnvironmentFile=/etc/two-bot/two-bot.env
+
+# Restart always, with backoff, but give up if it is crash-looping so we get
+# paged instead of silently burning the Discord identify budget.
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+# Stop cleanly: index.ts handles SIGTERM and closes the database.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=two-bot
+
+# Hardening. The bot needs the network and its own data directory. Nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/two-bot/data /var/backups/two-bot
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target
