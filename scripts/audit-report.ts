@@ -524,7 +524,21 @@ const obviousHangout = rows.some(
   (r) => r.type === 'voice' && r.visible_to_everyone && /lobby|lounge|hang|general|chat|hub/i.test(r.name),
 );
 
-/** Onboarding's own rule: >= 7 defaults, >= 5 of them view AND send for @everyone. */
+/**
+ * Onboarding's own rule: >= 7 defaults, >= 5 of them view AND send for @everyone.
+ *
+ * Verified 2026-08-19 against the live docs, Modify Guild Onboarding:
+ * "Onboarding enforces constraints when enabled. These constraints are that there
+ *  must be at least 7 Default Channels and at least 5 of them must allow sending
+ *  messages to the @everyone role. The `mode` field modifies what is considered
+ *  when enforcing these constraints."
+ * https://discord.com/developers/docs/resources/guild#modify-guild-onboarding
+ *
+ * mode 0 (ONBOARDING_DEFAULT) counts only default channels; mode 1
+ * (ONBOARDING_ADVANCED) counts default channels and questions. The guild is on
+ * mode 0 today. Note that mode 1 only ever helps the >= 7 half of the rule --
+ * the >= 5 send-capable half is unaffected by questions.
+ */
 const qualifyingDefaults = (onboarding?.default_channel_ids ?? []).filter((id: string) => {
   const r = rows.find((x) => x.channel_id === id);
   return r?.everyone_can_send === true;
