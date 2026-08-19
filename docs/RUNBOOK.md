@@ -2,6 +2,20 @@
 
 Written for whoever is on the box, not necessarily an engineer.
 
+## Before you deploy
+
+Check the credential and the server permissions first. This takes seconds and
+catches the failures that otherwise show up as a permanent hole in the numbers:
+
+```bash
+DISCORD_TOKEN=... DISCORD_GUILD_ID=... node scripts/preflight.ts
+```
+
+`Ready to deploy.` means the funnel will collect. Anything marked `FAIL` means
+it will not, or will record every join as `unknown` — fix that in the Discord
+developer portal before starting the service, because missed joins cannot be
+backfilled later.
+
 ## Deploy
 
 ```bash

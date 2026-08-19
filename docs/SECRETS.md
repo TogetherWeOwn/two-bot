@@ -52,8 +52,37 @@ Ban Members, Manage Roles, Manage Channels, or Send Messages. It is a
 read-and-record service. When onboarding automation lands it will need
 `Send Messages` in specific channels only, and that is a separate conversation.
 
+## Checking it is right
+
+`scripts/preflight.ts` verifies all of the above against the live Discord API
+without connecting to the gateway or touching the database:
+
+```bash
+DISCORD_TOKEN=... DISCORD_GUILD_ID=... node scripts/preflight.ts
+```
+
+It exits non-zero only on things that break the funnel (dead token, Server
+Members Intent off, no Manage Server, invite list unreadable) and warns on
+access we hold but did not ask for. Run it before a deploy and any time joins
+start recording as `unknown`. It never prints the token.
+
 ## Current state
 
-The live TWO bot token has not been issued to engineering yet. Everything in
-this repository was built and verified against a local mock Discord (see
-`tools/mock-discord/`), so no credential was needed and none is stored anywhere.
+The live token was issued on 2026-08-19 and verified against the real
+**TogetherWeOwn** server (`326474832151838730`) as bot `Owen`. It is held as the
+Paperclip secret `discord_bot_token` and injected as an environment variable;
+it is not written to any file in this repository.
+
+Preflight against the live server currently passes with two warnings, neither
+of which blocks data collection:
+
+- **Message Content Intent is ON.** It should be off. We never request the
+  intent in code, so no content can reach the database, but the application is
+  configured to be capable of reading it and that contradicts `docs/PRIVACY.md`.
+- **The bot was granted Administrator.** It needs `View Channels` and
+  `Manage Server` only. Administrator implies every permission we explicitly
+  said this bot must not have — kick, ban, manage roles, send messages.
+
+Both are Discord-portal changes owned by whoever administers the server, and
+both are tracked on TWO-11. Everything before the token arrived was built and
+verified against a local mock Discord (see `tools/mock-discord/`).
