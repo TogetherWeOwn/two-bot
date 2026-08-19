@@ -9,9 +9,9 @@ import { log } from '../core/log.ts';
  * This only writes an event and returns a list. It does NOT message anybody -
  * any outbound DM or ping needs CEO sign-off first (see docs/PRIVACY.md).
  */
-export function flagInactive(db: Db, store: EventStore, days: number): string[] {
+export async function flagInactive(db: Db, store: EventStore, days: number): Promise<string[]> {
   const cutoff = new Date(Date.now() - days * 86_400_000).toISOString();
-  const rows = db
+  const rows = await db
     .prepare(
       `SELECT guild_id, member_id FROM members
         WHERE left_at IS NULL
@@ -19,11 +19,11 @@ export function flagInactive(db: Db, store: EventStore, days: number): string[] 
           AND COALESCE(last_active_at, joined_at) < ?
           AND (inactive_flagged_at IS NULL OR inactive_flagged_at < ?)`,
     )
-    .all(cutoff, cutoff) as { guild_id: string; member_id: string }[];
+    .all<{ guild_id: string; member_id: string }>(cutoff, cutoff);
 
   const at = nowIso();
   for (const r of rows) {
-    store.record({
+    await store.record({
       guildId: r.guild_id,
       memberId: r.member_id,
       eventType: 'member_inactive',
@@ -37,9 +37,9 @@ export function flagInactive(db: Db, store: EventStore, days: number): string[] 
 }
 
 /** Members who joined and never said a word. The highest-leverage list we have. */
-export function joinedNeverPosted(db: Db, guildId: string): string[] {
+export async function joinedNeverPosted(db: Db, guildId: string): Promise<string[]> {
   return (
-    db
+    await db
       .prepare(
         `SELECT member_id FROM members
           WHERE guild_id = ? AND joined_at IS NOT NULL
@@ -47,6 +47,6 @@ export function joinedNeverPosted(db: Db, guildId: string): string[] {
             AND left_at IS NULL AND is_bot = 0
           ORDER BY joined_at DESC`,
       )
-      .all(guildId) as { member_id: string }[]
+      .all<{ member_id: string }>(guildId)
   ).map((r) => r.member_id);
 }

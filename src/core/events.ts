@@ -8,6 +8,16 @@
 export const EVENT_TYPES = [
   'invite_click',
   'member_join',
+  // --- onboarding (TWO-7) -------------------------------------------------
+  // These three sit between member_join and first_message. They exist so we
+  // can answer "of the people who joined, how many actually got routed
+  // somewhere, and how long did it take?" - which is the whole point of the
+  // onboarding work. Without them a stalled funnel looks identical to a slow
+  // one.
+  'onboarding_prompted', // the welcome + game picker was posted for them
+  'game_roles_selected', // they picked at least one game and we granted it
+  'channel_routed', // we handed them links to channels they can now see
+  // ------------------------------------------------------------------------
   'first_message',
   'first_voice_session',
   'member_inactive',
@@ -46,7 +56,19 @@ export interface FunnelEvent {
 export function idempotencyKey(e: FunnelEvent): string {
   // One member can only cross each funnel stage once, except for events that
   // legitimately repeat (invite_click, member_join for rejoins, member_inactive).
-  const repeatable: EventType[] = ['invite_click', 'member_join', 'member_inactive', 'member_leave'];
+  //
+  // game_roles_selected / channel_routed repeat by design: a member can come
+  // back to the picker and change what they play. Counting reach still works -
+  // use COUNT(DISTINCT member_id). onboarding_prompted stays once-per-member so
+  // a re-post can never inflate the top of the onboarding funnel.
+  const repeatable: EventType[] = [
+    'invite_click',
+    'member_join',
+    'member_inactive',
+    'member_leave',
+    'game_roles_selected',
+    'channel_routed',
+  ];
   if (repeatable.includes(e.eventType)) {
     return `${e.guildId}:${e.memberId ?? 'anon'}:${e.eventType}:${e.occurredAt}`;
   }

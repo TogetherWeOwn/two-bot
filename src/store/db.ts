@@ -1,23 +1,53 @@
-import { DatabaseSync } from 'node:sqlite';
-import { readFileSync, mkdirSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const here = dirname(fileURLToPath(import.meta.url));
-
-export type Db = DatabaseSync;
-
 /**
- * Open (and if needed create) the datastore. Safe to call repeatedly.
- * `path` of ':memory:' gives an ephemeral db, used by the tests.
+ * Open the datastore.
+ *
+ * One entry point, two drivers. Which one you get is decided by the spec
+ * string, so nothing above this line has to know:
+ *
+ *   'postgres://...' / 'postgresql://'  -> Postgres (migrations run on open)
+ *   ':memory:'                          -> ephemeral SQLite
+ *   any other string                    -> SQLite file at that path
+ *
+ * The SQLite branch is scheduled for deletion (TWO-18) once Postgres has held
+ * up in staging. Do not build anything new on it.
  */
-export function openDb(path: string): Db {
-  if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
-  const db = new DatabaseSync(path);
-  const sql = readFileSync(join(here, 'schema.sql'), 'utf8');
-  db.exec(sql);
-  db.prepare(
-    `INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?, ?)`,
-  ).run('0001_initial', new Date().toISOString());
+import type { Db } from './driver.ts';
+import { openSqlite } from './sqliteDriver.ts';
+import { openPostgres } from './postgresDriver.ts';
+import { migrate } from './migrate.ts';
+
+export type { Db, Statement, RunResult } from './driver.ts';
+
+export function isPostgresSpec(spec: string): boolean {
+  return spec.startsWith('postgres://') || spec.startsWith('postgresql://');
+}
+
+export interface OpenOptions {
+  /** Skip migrations. Only the migration runner's own tests want this. */
+  skipMigrations?: boolean;
+  poolMax?: number;
+  /** Postgres schema to use instead of `public`. Tests only - see postgresDriver.ts. */
+  schema?: string;
+  applicationName?: string;
+}
+
+/** Safe to call repeatedly. Creates the schema if it is not there yet. */
+export async function openDb(spec: string, opts: OpenOptions = {}): Promise<Db> {
+  if (!isPostgresSpec(spec)) return openSqlite(spec);
+
+  const db = await openPostgres({
+    connectionString: spec,
+    max: opts.poolMax,
+    schema: opts.schema,
+    applicationName: opts.applicationName,
+  });
+  if (!opts.skipMigrations) {
+    try {
+      await migrate(db);
+    } catch (err) {
+      await db.close();
+      throw err;
+    }
+  }
   return db;
 }

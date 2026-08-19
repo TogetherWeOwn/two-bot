@@ -43,7 +43,7 @@ export class FunnelHandlers {
     this.store = store;
   }
 
-  onJoin(i: JoinInput): FunnelEvent | null {
+  async onJoin(i: JoinInput): Promise<FunnelEvent | null> {
     if (i.isBot) return null;
     const e: FunnelEvent = {
       guildId: i.guildId,
@@ -53,17 +53,17 @@ export class FunnelHandlers {
       source: i.source,
       metadata: i.inviterId ? { inviterId: i.inviterId } : undefined,
     };
-    const r = this.store.record(e);
+    const r = await this.store.record(e);
     log.info('member_join', { memberId: i.memberId, source: i.source, inserted: r.inserted });
     return e;
   }
 
-  onMessage(i: MessageInput): FunnelEvent | null {
+  async onMessage(i: MessageInput): Promise<FunnelEvent | null> {
     if (i.isBot) return null;
     const at = i.occurredAt ?? nowIso();
     // Every message updates recency; only the first one is a funnel milestone.
-    this.store.touchActivity(i.guildId, i.memberId, at);
-    if (this.store.hasEvent(i.guildId, i.memberId, 'first_message')) return null;
+    await this.store.touchActivity(i.guildId, i.memberId, at);
+    if (await this.store.hasEvent(i.guildId, i.memberId, 'first_message')) return null;
 
     const e: FunnelEvent = {
       guildId: i.guildId,
@@ -72,16 +72,16 @@ export class FunnelHandlers {
       occurredAt: at,
       source: `channel:${i.channelId}`,
     };
-    this.store.record(e);
+    await this.store.record(e);
     log.info('first_message', { memberId: i.memberId, channelId: i.channelId });
     return e;
   }
 
-  onVoiceJoin(i: VoiceInput): FunnelEvent | null {
+  async onVoiceJoin(i: VoiceInput): Promise<FunnelEvent | null> {
     if (i.isBot) return null;
     const at = i.occurredAt ?? nowIso();
-    this.store.touchActivity(i.guildId, i.memberId, at);
-    if (this.store.hasEvent(i.guildId, i.memberId, 'first_voice_session')) return null;
+    await this.store.touchActivity(i.guildId, i.memberId, at);
+    if (await this.store.hasEvent(i.guildId, i.memberId, 'first_voice_session')) return null;
 
     const e: FunnelEvent = {
       guildId: i.guildId,
@@ -90,12 +90,12 @@ export class FunnelHandlers {
       occurredAt: at,
       source: `channel:${i.channelId}`,
     };
-    this.store.record(e);
+    await this.store.record(e);
     log.info('first_voice_session', { memberId: i.memberId, channelId: i.channelId });
     return e;
   }
 
-  onLeave(guildId: string, memberId: string, occurredAt?: string): FunnelEvent {
+  async onLeave(guildId: string, memberId: string, occurredAt?: string): Promise<FunnelEvent> {
     const e: FunnelEvent = {
       guildId,
       memberId,
@@ -103,7 +103,7 @@ export class FunnelHandlers {
       occurredAt: occurredAt ?? nowIso(),
       source: 'gateway',
     };
-    this.store.record(e);
+    await this.store.record(e);
     return e;
   }
 
@@ -113,7 +113,7 @@ export class FunnelHandlers {
    * a tracking redirect (a short link we control) can post clicks in, which is
    * the only honest way to measure the top of the funnel.
    */
-  onInviteClick(guildId: string, code: string, occurredAt?: string): FunnelEvent {
+  async onInviteClick(guildId: string, code: string, occurredAt?: string): Promise<FunnelEvent> {
     const e: FunnelEvent = {
       guildId,
       memberId: null,
@@ -121,7 +121,7 @@ export class FunnelHandlers {
       occurredAt: occurredAt ?? nowIso(),
       source: `invite:${code}`,
     };
-    this.store.record(e);
+    await this.store.record(e);
     return e;
   }
 }

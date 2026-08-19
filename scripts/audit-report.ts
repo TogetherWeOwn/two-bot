@@ -27,6 +27,7 @@ const KICK_MEMBERS = 1n << 1n;
 const MANAGE_ROLES = 1n << 28n;
 const MANAGE_CHANNELS = 1n << 4n;
 const MENTION_EVERYONE = 1n << 17n;
+const SEND_MESSAGES = 1n << 11n;
 
 type Overwrite = { id: string; type: number; allow: string; deny: string };
 type Channel = {
@@ -39,6 +40,7 @@ type Channel = {
   nsfw?: boolean;
   rate_limit_per_user?: number;
   last_message_id?: string | null;
+  user_limit?: number;
   permission_overwrites?: Overwrite[];
 };
 type Role = {
@@ -62,6 +64,7 @@ type Activity = {
   human_messages_90d: number;
   bot_messages_90d: number;
   unique_authors_90d: number;
+  unique_human_authors_30d: number;
   unique_human_authors_90d: number;
   last_message_at: string | null;
   days_since_last_message: number | null;
@@ -121,6 +124,19 @@ function everyoneCanView(ch: Channel): boolean {
   return view;
 }
 
+/** Can @everyone post here, after overwrites? Onboarding's own rule needs this. */
+function everyoneCanSend(ch: Channel): boolean {
+  const base = BigInt(everyoneRole.permissions);
+  if (base & ADMINISTRATOR) return true;
+  let send = (base & SEND_MESSAGES) !== 0n;
+  const ow = (ch.permission_overwrites ?? []).find((o) => o.id === guild.id && o.type === 0);
+  if (ow) {
+    if (BigInt(ow.deny) & SEND_MESSAGES) send = false;
+    if (BigInt(ow.allow) & SEND_MESSAGES) send = true;
+  }
+  return send && everyoneCanView(ch);
+}
+
 /** Roles other than @everyone that are explicitly granted view on this channel. */
 function grantedRoles(ch: Channel): string[] {
   return (ch.permission_overwrites ?? [])
@@ -139,7 +155,10 @@ type ForumStats = {
   human30: number;
   bot90: number;
   humans90: number;
+  humans30: number;
   threads90: number;
+  posts: number;
+  postsWithReply: number;
   lastMs: number | null;
 };
 function forumStats(id: string): ForumStats {
@@ -150,13 +169,21 @@ function forumStats(id: string): ForumStats {
     human30: 0,
     bot90: 0,
     humans90: 0,
+    humans30: 0,
     threads90: 0,
+    posts: 0,
+    postsWithReply: 0,
     lastMs: null,
   };
   const bucket = forumThreads[id];
   for (const t of [...(bucket?.active ?? []), ...(bucket?.archived ?? [])]) {
     const ms = snowflakeMs(t.last_message_id ?? t.id);
     if (s.lastMs === null || ms > s.lastMs) s.lastMs = ms;
+    // A forum post with no reply is the clearest "nobody is home" signal there
+    // is. total_message_sent counts the opening post, so >1 means someone
+    // answered.
+    s.posts++;
+    if ((t.total_message_sent ?? 0) > 1) s.postsWithReply++;
   }
   for (const t of threadActivity.filter((x) => x.parent_id === id)) {
     if (t.messages_90d === 0) continue;
@@ -169,37 +196,47 @@ function forumStats(id: string): ForumStats {
     // Upper bound: the same person posting in two threads counts twice. Good
     // enough to separate "one person talking" from "a room full of people".
     s.humans90 += t.unique_human_authors_90d;
+    s.humans30 += t.unique_human_authors_30d ?? 0;
   }
   return s;
 }
 
 // --- rubric ------------------------------------------------------------------
 //
-// One verdict per channel, first matching rule wins. The justifying number is
-// recorded next to it so nobody has to take the verdict on faith.
+// Straight out of the `audit-spec` document on TWO-13, section 3. Verdicts are
+// driven by UNIQUE HUMAN AUTHORS, not message counts - "400 messages from 2
+// people is not a channel, it is a DM with an audience".
 //
-//   gate-behind-role  visible to @everyone, but zero human traffic and it is a
-//                     bot log / staff / ops room. It is sidebar noise for a new
-//                     member and should sit behind a role.
-//   archive           nothing at all in 90 days.
-//   merge             1-9 human messages in 90 days. Real but too thin to hold
-//                     its own room; fold into a sibling.
-//   rewrite-topic     healthy traffic, visible to everyone, but no topic set -
-//                     a newcomer cannot tell what it is for.
-//   keep              everything else.
+//   keep              >= 3 unique human authors in the last 30 days
+//   merge             1-2 unique human authors in 30d, but real activity in 90d
+//   archive           zero human messages in 90 days (hide, never delete)
+//   rewrite-topic     alive, but the topic is empty
+//   gate-behind-role  a per-game or niche channel visible to everyone at join
 //
-// PROTECTED never gets archived regardless of traffic: Discord itself points
-// new members at these, so deleting them breaks the server's own config.
-const PROTECTED = new Set<string>(
-  [
-    guild.rules_channel_id,
-    guild.public_updates_channel_id,
-    guild.safety_alerts_channel_id,
-    guild.afk_channel_id,
-    ...(welcome?.welcome_channels ?? []).map((w: any) => w.channel_id),
-    ...(onboarding?.default_channel_ids ?? []),
-  ].filter(Boolean) as string[],
-);
+// First matching rule wins. `create` is a redesign decision, not an audit one,
+// so it is out of scope here (spec section 4: no recommendations beyond the
+// per-channel verdicts).
+//
+// PROTECTED does not change a verdict - the spec does not exempt anything. It
+// is carried as its own column so the migration knows which archives require
+// repointing a guild setting first.
+const PROTECTED_BY = new Map<string, string>();
+const markProtected = (id: unknown, why: string) => {
+  if (typeof id === 'string' && id && !PROTECTED_BY.has(id)) PROTECTED_BY.set(id, why);
+};
+markProtected(guild.rules_channel_id, 'rules channel');
+markProtected(guild.public_updates_channel_id, 'public updates channel');
+markProtected(guild.safety_alerts_channel_id, 'safety alerts channel');
+markProtected(guild.afk_channel_id, 'AFK channel');
+markProtected(guild.system_channel_id, 'system channel');
+for (const w of welcome?.welcome_channels ?? []) markProtected(w.channel_id, 'welcome screen card');
+for (const id of onboarding?.default_channel_ids ?? []) markProtected(id, 'Server Guide default channel');
+
+/** Names that look like a specific game or platform rather than a general room. */
+// Word-boundaried on purpose: an unanchored /ark/ matches "Dark red" and an
+// unanchored /cod/ matches "Coding".
+const GAME_CHANNEL =
+  /\b(shooters?|survival|horror|minecraft|valorant|fortnite|apex|cod|warzone|rust|dayz|ark|gta|league|dota|overwatch|siege|tarkov|palworld|helldivers|destiny|halo|battlefield|rocketleague)\b/i;
 
 const OPS_PATTERN =
   /log|audit|mod-|modmail|moderator|admin|staff|wick|ticket|verify|network-status|lfc_role_proof|stream_program|pisnrzrs|microuxys|toxxicpeaches|ghostlyog|segunpeace|bawrzy|monkers/i;
@@ -211,19 +248,29 @@ type Row = {
   category: string;
   position: number;
   visible_to_everyone: boolean;
+  everyone_can_send: boolean;
   gated_roles: number;
+  topic: string;
   has_topic: boolean;
   slowmode_s: number;
   nsfw: boolean;
+  voice_user_limit: string;
   msgs_90d: number;
   msgs_30d: number;
   human_msgs_90d: number;
   human_msgs_30d: number;
   bot_msgs_90d: number;
+  unique_humans_30d: number;
   unique_humans_90d: number;
+  forum_posts: string;
+  forum_posts_with_reply: string;
+  threads_active: number;
+  truncated: boolean;
   last_message_at: string;
   days_silent: string;
   verdict: string;
+  merge_into: string;
+  protected_by: string;
   justification: string;
 };
 
@@ -233,6 +280,13 @@ const onboardingRoleIds = new Set<string>(
     (p.options ?? []).flatMap((o: any) => (o.role_ids ?? []) as string[]),
   ),
 );
+
+/** Do a role name and a channel name refer to the same game? */
+function namesOverlap(a: string, b: string): boolean {
+  const words = (v: string) => v.toLowerCase().match(/[a-z]{4,}/g) ?? [];
+  const wb = new Set(words(b));
+  return words(a).some((w) => wb.has(w) || wb.has(w.replace(/s$/, '')) || wb.has(w + 's'));
+}
 
 const rows: Row[] = [];
 for (const ch of channels) {
@@ -257,39 +311,57 @@ for (const ch of channels) {
   const silent = lastMs === null ? null : Math.floor((now - lastMs) / DAY);
 
   const visible = everyoneCanView(ch);
-  const ops = OPS_PATTERN.test(ch.name);
   const topic = (ch.topic ?? '').trim().length > 0;
-  const protectedCh = PROTECTED.has(ch.id);
+
+  const authors30 = f ? f.humans30 : (a?.unique_human_authors_30d ?? 0);
+  const protectedBy = PROTECTED_BY.get(ch.id) ?? '';
+  const perGame = GAME_CHANNEL.test(ch.name);
 
   let verdict: string;
   let why: string;
-  const readable = ch.type === 0 || ch.type === 5 || ch.type === 15 || ch.type === 16;
-  if (visible && human90 === 0 && (ops || bot90 > 0) && !protectedCh) {
-    verdict = 'gate-behind-role';
-    why = `in @everyone's sidebar but 0 human messages/90d (${bot90} bot messages) - noise for a newcomer`;
-  } else if (msgs90 === 0 && !protectedCh) {
+  let mergeInto = '';
+
+  if (human90 === 0) {
     verdict = 'archive';
-    why = silent === null ? 'never had a message' : `0 messages/90d, silent ${silent}d`;
-  } else if (visible && readable && !topic && (protectedCh || human90 >= 10)) {
-    verdict = 'rewrite-topic';
     why =
-      `kept and in the newcomer's sidebar, but no channel topic is set` +
-      ` (${human90} human messages/90d) - nothing tells a newcomer what it is for`;
-  } else if (msgs90 === 0 && protectedCh) {
-    verdict = 'keep';
-    why = `0 messages/90d, but Discord's own config points new members here`;
-  } else if (human90 === 0 && bot90 > 0) {
-    verdict = 'keep';
-    why = `bot-only feed: ${bot90} bot messages/90d, already hidden from @everyone`;
-  } else if (human90 >= 1 && human90 <= 9) {
+      `0 human messages in 90 days` +
+      (bot90 > 0 ? ` (${bot90} bot messages)` : '') +
+      (silent === null ? ', never used' : `, last message ${silent}d ago`) +
+      (visible ? '' : ' - already hidden from @everyone, so this is bookkeeping, not a member-facing change');
+  } else if (authors30 >= 3) {
+    if (visible && !topic) {
+      verdict = 'rewrite-topic';
+      why = `${authors30} unique human authors in 30d, but no topic is set`;
+    } else {
+      verdict = 'keep';
+      why = `${authors30} unique human authors in 30d (${human30} messages)`;
+    }
+  } else if (authors30 >= 1) {
     verdict = 'merge';
-    why = `only ${human90} human messages/90d from ${humans} people`;
+    why = `only ${authors30} unique human author${authors30 === 1 ? '' : 's'} in 30d (${humans} in 90d, ${human90} messages)`;
+  } else if (visible && perGame) {
+    verdict = 'gate-behind-role';
+    why = `per-game channel visible at join, ${human90} human messages/90d from ${humans} people but nobody in 30d`;
   } else if (visible && !topic) {
     verdict = 'rewrite-topic';
-    why = `${human90} human messages/90d but no channel topic - a newcomer cannot tell what it is for`;
+    why = `${human90} human messages/90d but 0 authors in 30d and no topic set`;
   } else {
-    verdict = 'keep';
-    why = `${human90} human messages/90d (${human30} in 30d) from ${humans} people`;
+    verdict = 'merge';
+    why = `${human90} human messages/90d from ${humans} people, none in the last 30 days`;
+  }
+
+  if (verdict === 'merge') {
+    // Name the destination: the liveliest sibling in the same category.
+    const siblings = channels.filter(
+      (c) => c.parent_id === ch.parent_id && c.id !== ch.id && (c.type === ch.type || (c.type === 0 && ch.type === 0)),
+    );
+    let best: { name: string; n: number } | null = null;
+    for (const sib of siblings) {
+      const sa = act.get(sib.id);
+      const n = sa?.human_messages_90d ?? 0;
+      if (n > 0 && (best === null || n > best.n)) best = { name: sib.name, n };
+    }
+    mergeInto = best?.name ?? '';
   }
 
   rows.push({
@@ -299,19 +371,29 @@ for (const ch of channels) {
     category: ch.parent_id ? (byId.get(ch.parent_id)?.name ?? '') : '(no category)',
     position: ch.position ?? 0,
     visible_to_everyone: visible,
+    everyone_can_send: everyoneCanSend(ch),
     gated_roles: grantedRoles(ch).length,
+    topic: (ch.topic ?? '').replace(/\s+/g, ' ').trim(),
     has_topic: topic,
     slowmode_s: ch.rate_limit_per_user ?? 0,
     nsfw: ch.nsfw === true,
+    voice_user_limit: ch.type === 2 ? String(ch.user_limit ?? 0) : '',
     msgs_90d: msgs90,
     msgs_30d: msgs30,
     human_msgs_90d: human90,
     human_msgs_30d: human30,
     bot_msgs_90d: bot90,
+    unique_humans_30d: authors30,
     unique_humans_90d: humans,
+    forum_posts: f ? String(f.posts) : '',
+    forum_posts_with_reply: f ? String(f.postsWithReply) : '',
+    threads_active: threadActivity.filter((t) => t.parent_id === ch.id).length,
+    truncated: a?.hit_page_cap === true,
     last_message_at: lastMs ? new Date(lastMs).toISOString().slice(0, 10) : '',
     days_silent: silent === null ? '' : String(silent),
     verdict,
+    merge_into: mergeInto,
+    protected_by: protectedBy,
     justification: why,
   });
 }
@@ -373,6 +455,22 @@ const roleRows = roles
       managed_by_integration: r.managed,
       colored: r.color !== 0,
       permission_class: priv,
+      // spec 3.8 - the risk list. Named permissions, not a bitfield, so a
+      // non-engineer can read the row.
+      dangerous_permissions: (
+        [
+          [ADMINISTRATOR, 'Administrator'],
+          [MANAGE_GUILD, 'Manage Guild'],
+          [MANAGE_ROLES, 'Manage Roles'],
+          [MANAGE_CHANNELS, 'Manage Channels'],
+          [BAN_MEMBERS, 'Ban Members'],
+          [KICK_MEMBERS, 'Kick Members'],
+          [MENTION_EVERYONE, 'Mention Everyone'],
+        ] as [bigint, string][]
+      )
+        .filter(([bit]) => (p & bit) !== 0n)
+        .map(([, label]) => label)
+        .join(' / '),
       permissions: r.permissions,
       granted_by_onboarding: onboardingRoleIds.has(r.id),
       // Roles padded with invisible characters (braille blank, hangul
@@ -401,9 +499,64 @@ const inviteRows = invites
   }));
 writeFileSync(`${OUT}/invites.csv`, csv(inviteRows));
 
-// --- summary -----------------------------------------------------------------
+// --- server-level checks (spec section 3) ------------------------------------
 const count = (v: string) => rows.filter((r) => r.verdict === v).length;
 const visibleRows = rows.filter((r) => r.visible_to_everyone);
+const serverTotals = read<{ unique_human_authors_30d: number; unique_human_authors_90d: number }>('server_totals');
+
+/** Every action between clicking the invite and being able to say hello. */
+const gateSteps: string[] = [];
+if ((guild.features ?? []).includes('MEMBER_VERIFICATION_GATE_ENABLED'))
+  gateSteps.push('accept the rules screening box');
+if (guild.verification_level >= 3) gateSteps.push(`verification level ${guild.verification_level}`);
+if (onboarding?.enabled === true) {
+  const required = (onboarding.prompts ?? []).filter((p: any) => p.required && p.in_onboarding).length;
+  if (required > 0) gateSteps.push(`${required} required Server Guide questions`);
+}
+// A channel a newcomer can read but not post in is a gate too, if it is the only
+// one they can see.
+if (visibleRows.filter((r) => r.everyone_can_send && (r.type === 'text' || r.type === 'voice')).length === 0)
+  gateSteps.push('no visible channel @everyone can post in');
+
+const deadAir = visibleRows.filter((r) => r.human_msgs_30d === 0).length;
+
+const obviousHangout = rows.some(
+  (r) => r.type === 'voice' && r.visible_to_everyone && /lobby|lounge|hang|general|chat|hub/i.test(r.name),
+);
+
+/** Onboarding's own rule: >= 7 defaults, >= 5 of them view AND send for @everyone. */
+const qualifyingDefaults = (onboarding?.default_channel_ids ?? []).filter((id: string) => {
+  const r = rows.find((x) => x.channel_id === id);
+  return r?.everyone_can_send === true;
+}).length;
+
+/** Game roles vs per-game channels. Both directions are bugs (spec 3.5). */
+const gameRoleNames = roles.filter((r) => GAME_CHANNEL.test(r.name) || /games?$/i.test(r.name));
+const gameCoverage = {
+  roles_with_no_channel: gameRoleNames
+    .filter((r) => !rows.some((c) => GAME_CHANNEL.test(c.name) && namesOverlap(r.name, c.name)))
+    .map((r) => ({ role: r.name, holders: members.role_headcount[r.id] ?? 0 })),
+  channels_with_no_role: rows
+    .filter((c) => GAME_CHANNEL.test(c.name) && !gameRoleNames.some((r) => namesOverlap(r.name, c.name)))
+    .map((c) => c.name),
+  roles_wired_to_their_channel: gameRoleNames
+    .map((r) => {
+      const chans = rows.filter((c) => GAME_CHANNEL.test(c.name) && namesOverlap(r.name, c.name));
+      const granted = chans.filter((c) => {
+        const raw = byId.get(c.channel_id);
+        return (raw?.permission_overwrites ?? []).some(
+          (o) => o.id === r.id && BigInt(o.allow) & VIEW_CHANNEL,
+        );
+      });
+      return {
+        role: r.name,
+        holders: members.role_headcount[r.id] ?? 0,
+        channels: chans.map((c) => c.name),
+        channels_the_role_can_actually_see: granted.map((c) => c.name),
+      };
+    })
+    .filter((x) => x.channels.length > 0),
+};
 const summary = {
   collected_at: meta.collected_at,
   guild: {
@@ -458,6 +611,51 @@ const summary = {
     total_human_messages_30d: rows.reduce((n, r) => n + r.human_msgs_30d, 0),
     total_bot_messages_90d: rows.reduce((n, r) => n + r.bot_msgs_90d, 0),
   },
+  // spec section 3, "server-level checks". These are the baselines TWO-14
+  // re-reads at T+30 to decide whether the redesign worked.
+  server_level: {
+    // 3.1 - target is <= 7
+    visible_channels_at_join: visibleRows.length,
+    visible_channels_target: 7,
+    // 3.2 - gate cost. Anything over two steps needs a reason.
+    gate_steps: gateSteps.length,
+    gate_step_detail: gateSteps,
+    // 3.3 - dead air: visible channels with 0 human messages in 30d / visible channels
+    dead_air_ratio: Number((deadAir / Math.max(1, visibleRows.length)).toFixed(3)),
+    dead_air_numerator: deadAir,
+    dead_air_denominator: visibleRows.length,
+    // 3.4 - voice readiness
+    voice_channels_total: rows.filter((r) => r.type === 'voice').length,
+    voice_visible_at_join: rows.filter((r) => r.type === 'voice' && r.visible_to_everyone).length,
+    voice_obvious_hangout: obviousHangout,
+    voice_history_readable_over_rest: false,
+    // 3.6 - default notifications. 0 = ALL_MESSAGES (a problem), 1 = ONLY_MENTIONS (fine)
+    default_message_notifications: guild.default_message_notifications,
+    default_notifications_flag:
+      guild.default_message_notifications === 0
+        ? 'ALL MESSAGES - one click to fix, common cause of week-one muting'
+        : 'only mentions - fine, no action needed',
+    // 3.7 - ownership. Discord stores no such field; this needs a human answer.
+    channel_ownership_recorded: false,
+    // The rule for turning native Onboarding on at all.
+    onboarding_requirement: 'at least 7 default channels, at least 5 allowing @everyone to view AND send',
+    onboarding_default_channels_configured: (onboarding?.default_channel_ids ?? []).length,
+    onboarding_qualifying_channels_today: qualifyingDefaults,
+    onboarding_requirement_met_today: (onboarding?.default_channel_ids ?? []).length >= 7 && qualifyingDefaults >= 5,
+  },
+  // 3.8 - permission risk. Reported per role with headcounts, never as a list of
+  // named members: spec 2.6 says do not enumerate members.
+  permission_risk: roleRows
+    .filter((r) => !r.managed_by_integration && r.dangerous_permissions)
+    .map((r) => ({
+      role: r.name,
+      holders: r.members_holding,
+      permissions: r.dangerous_permissions,
+    })),
+  // 3.5 - game coverage: roles with no channel, channels with no role.
+  game_coverage: gameCoverage,
+  A_unique_human_authors_30d: serverTotals.unique_human_authors_30d,
+  A_unique_human_authors_90d: serverTotals.unique_human_authors_90d,
   verdicts: {
     keep: count('keep'),
     merge: count('merge'),
@@ -515,5 +713,54 @@ for (const cat of cats) {
   }
 }
 writeFileSync(`${OUT}/new-member-walkthrough.txt`, walk);
+
+// --- the two files TWO-14 builds from ----------------------------------------
+// Contract paths from the audit-spec, section 4. The JSON is the rollback
+// source for the migration, so it carries every channel's topic, position,
+// parent and permission overwrites exactly as they are today.
+const STAMP = new Date(now).toISOString().slice(0, 10);
+mkdirSync('data', { recursive: true });
+
+writeFileSync(`data/server-audit-${STAMP}.csv`, csv(rows as unknown as Record<string, unknown>[]));
+
+writeFileSync(
+  `data/server-audit-${STAMP}.json`,
+  JSON.stringify(
+    {
+      collected_at: meta.collected_at,
+      note:
+        'Rollback source for the TWO-14 migration. Every channel below is recorded with the' +
+        ' topic, position, parent and permission overwrites it had at collection time.' +
+        ' No message content and no member identities are in this file.',
+      summary,
+      guild,
+      welcome_screen: welcome,
+      onboarding,
+      categories: channels.filter((c) => c.type === 4),
+      channels: channels
+        .filter((c) => c.type !== 4)
+        .map((c) => ({
+          id: c.id,
+          name: c.name,
+          type: c.type,
+          type_name: TYPE_NAME[c.type] ?? String(c.type),
+          parent_id: c.parent_id ?? null,
+          parent_name: c.parent_id ? (byId.get(c.parent_id)?.name ?? null) : null,
+          position: c.position ?? 0,
+          topic: c.topic ?? null,
+          nsfw: c.nsfw === true,
+          rate_limit_per_user: c.rate_limit_per_user ?? 0,
+          user_limit: c.user_limit ?? null,
+          permission_overwrites: c.permission_overwrites ?? [],
+          audit: rows.find((r) => r.channel_id === c.id) ?? null,
+        })),
+      roles: roleRows,
+      invites: inviteRows,
+    },
+    null,
+    2,
+  ) + '\n',
+);
+
 process.stdout.write(walk);
 process.stdout.write('\n' + JSON.stringify(summary, null, 2) + '\n');

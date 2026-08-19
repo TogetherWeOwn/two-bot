@@ -24,12 +24,12 @@ export class InviteTracker {
   }
 
   /** Replace the stored snapshot for a guild and return the codes that grew. */
-  diffAndStore(guildId: string, current: InviteState[]): string[] {
+  async diffAndStore(guildId: string, current: InviteState[]): Promise<string[]> {
     const prev = new Map<string, number>();
-    for (const row of this.db
+    for (const row of await this.db
       .prepare(`SELECT code, uses FROM invite_snapshots WHERE guild_id = ?`)
-      .all(guildId) as { code: string; uses: number }[]) {
-      prev.set(row.code, row.uses);
+      .all<{ code: string; uses: number }>(guildId)) {
+      prev.set(row.code, Number(row.uses));
     }
 
     const grew: string[] = [];
@@ -40,7 +40,7 @@ export class InviteTracker {
       seen.add(inv.code);
       const before = prev.get(inv.code);
       if (before !== undefined && inv.uses > before) grew.push(inv.code);
-      this.db
+      await this.db
         .prepare(
           `INSERT INTO invite_snapshots (guild_id, code, uses, inviter_id, channel_id, updated_at)
            VALUES (?, ?, ?, ?, ?, ?)
@@ -54,7 +54,7 @@ export class InviteTracker {
     // Drop invites that no longer exist so a recreated code does not look like a jump.
     for (const code of prev.keys()) {
       if (!seen.has(code)) {
-        this.db
+        await this.db
           .prepare(`DELETE FROM invite_snapshots WHERE guild_id = ? AND code = ?`)
           .run(guildId, code);
       }
@@ -70,10 +70,10 @@ export class InviteTracker {
     return guildHasVanity ? 'vanity' : 'unknown';
   }
 
-  inviterFor(guildId: string, code: string): string | null {
-    const row = this.db
+  async inviterFor(guildId: string, code: string): Promise<string | null> {
+    const row = await this.db
       .prepare(`SELECT inviter_id FROM invite_snapshots WHERE guild_id = ? AND code = ?`)
-      .get(guildId, code) as { inviter_id: string | null } | undefined;
+      .get<{ inviter_id: string | null }>(guildId, code);
     return row?.inviter_id ?? null;
   }
 }

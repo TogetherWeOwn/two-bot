@@ -1,9 +1,9 @@
 {
-  "collected_at": "2026-08-19T20:07:58.001Z",
-  "finished_at": "2026-08-19T20:09:02.396Z",
+  "collected_at": "2026-08-19T20:19:24.719Z",
+  "finished_at": "2026-08-19T20:20:21.770Z",
   "guild_id": "326474832151838730",
-  "window_30d_start": "2026-07-20T20:07:58.001Z",
-  "window_90d_start": "2026-05-21T20:07:58.001Z",
+  "window_30d_start": "2026-07-20T20:19:24.719Z",
+  "window_90d_start": "2026-05-21T20:19:24.719Z",
   "discord_requests": 118,
   "channels_seen": 130,
   "collector": "scripts/audit-collect.ts",

@@ -13,8 +13,36 @@ DISCORD_TOKEN=... DISCORD_GUILD_ID=... node scripts/preflight.ts
 
 `Ready to deploy.` means the funnel will collect. Anything marked `FAIL` means
 it will not, or will record every join as `unknown` — fix that in the Discord
-developer portal before starting the service, because missed joins cannot be
-backfilled later.
+developer portal before starting the service.
+
+What a gap in coverage actually costs, precisely: **invite attribution and
+first-message timing are lost for good**, because Discord keeps no per-member
+record of either. **Join dates are not lost** — see the next section.
+
+## Recover the history (one-off, no host needed)
+
+```bash
+DISCORD_TOKEN=... DISCORD_GUILD_ID=... node scripts/backfill.ts --dry-run
+DISCORD_TOKEN=... DISCORD_GUILD_ID=... node scripts/backfill.ts
+```
+
+Runs once and exits — this does **not** need the service installed, and it is
+read-only against Discord. It recovers:
+
+- every current member's real join date, from Discord's own `joined_at`;
+- joins, leaves and voice sessions from the log channels TWO's older logging
+  bots have been writing for years — including members who have since **left**,
+  who are invisible in the member list and whose absence would otherwise
+  flatter every retention number we print;
+- the current invite use counts, stored as the attribution baseline so the
+  *first* live join after deploy is attributable instead of `unknown`.
+
+Always read the `--dry-run` output first. Re-running is safe: every write is
+idempotent, so a second run reports `already on file` and changes nothing.
+
+If it prints `INCOMPLETE: hit the N-page cap`, there is older history it did not
+reach — re-run with a larger `--max-pages`. Do not quote numbers from a
+truncated run as if they were the whole picture.
 
 ## Deploy
 

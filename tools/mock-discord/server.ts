@@ -14,12 +14,28 @@
 import { createServer, type Server } from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { AddressInfo } from 'node:net';
+import { GAME_PICKS, GAME_HUB_CHANNEL_ID, GATED_CATEGORIES, GUILD_ID as TWO_GUILD_ID } from '../../src/onboarding/catalog.ts';
 
-const GUILD_ID = '900000000000000001';
+/**
+ * The mock guild uses TWO's real ids. Not cosmetic: the onboarding catalog is
+ * a table of real role and channel ids, so a mock with invented ids would test
+ * a flow that cannot exist. Nothing here talks to discord.com - the bot under
+ * test is pointed at this process via DISCORD_API_BASE.
+ */
+const GUILD_ID = TWO_GUILD_ID;
 const BOT_ID = '900000000000000002';
 const EVERYONE_ROLE = GUILD_ID; // @everyone role id == guild id, as on real Discord
-const TEXT_CHANNEL = '900000000000000010';
+const TEXT_CHANNEL = '1045943373007171674'; // 💬〢general - the real landing channel
 const VOICE_CHANNEL = '900000000000000011';
+const MEMBER_ROLE = '1078755185423286372'; // the real "Member" role
+/** Position the bot's role where it really sits: above the game roles. */
+const BOT_ROLE = '900000000000000003';
+
+export interface CapturedRequest {
+  method: string;
+  url: string;
+  body: unknown;
+}
 
 export interface MockInvite {
   code: string;
@@ -42,9 +58,133 @@ export interface MockDiscord {
   message(memberId: string, channelId?: string): void;
   voiceJoin(memberId: string, channelId?: string): void;
   close(): Promise<void>;
+
+  // --- onboarding (TWO-7) ---------------------------------------------------
+  /** Every non-GET the bot made. Assert on what it actually sent. */
+  captured: CapturedRequest[];
+  /** Join behind the rules gate: present in the guild, unable to interact. */
+  memberJoinPending(memberId: string, username: string): void;
+  /** Rules accepted - pending flips false. This is the real onboarding trigger. */
+  memberAcceptRules(memberId: string, username: string): void;
+  /** Simulate the member choosing games in the picker. */
+  selectGames(memberId: string, username: string, keys: string[], heldRoleIds?: string[]): void;
 }
 
-function guildPayload() {
+const VIEW_CHANNEL = 1n << 10n;
+
+function rolePayload(id: string, name: string, position: number, permissions = '0') {
+  return {
+    id,
+    name,
+    color: 0,
+    hoist: false,
+    position,
+    permissions,
+    managed: false,
+    mentionable: false,
+    flags: 0,
+  };
+}
+
+/**
+ * The roles onboarding touches, at their real relative positions: every game
+ * role below the bot's role, so role-hierarchy failures show up here rather
+ * than in production.
+ */
+function rolesPayload() {
+  return [
+    // @everyone with VIEW_CHANNEL and SEND_MESSAGES, as on the real server.
+    rolePayload(EVERYONE_ROLE, '@everyone', 0, String(VIEW_CHANNEL | (1n << 11n))),
+    rolePayload(BOT_ROLE, 'Owen', 105, String(1n << 28n)), // MANAGE_ROLES
+    rolePayload(MEMBER_ROLE, 'Member', 106),
+    ...GAME_PICKS.map((p, i) => rolePayload(p.roleId, p.roleName, 10 + i)),
+  ];
+}
+
+/**
+ * Channels, reproducing production's defect on purpose: the three game
+ * categories deny view to @everyone and grant it back to nobody, so a member
+ * holding "Shooter Games" still cannot see #shooters-general.
+ *
+ * Three configurations, because the difference between the last two is a bug
+ * that nearly shipped:
+ *
+ *   'dark'            - production today. Nobody can see the game rooms.
+ *   'categories-only' - the grant added to the categories and nothing else.
+ *                       Looks correct in the Discord UI. Changes nothing for
+ *                       members, because Discord resolves permissions from a
+ *                       channel's OWN overwrites - a category is a template you
+ *                       sync down, it grants nothing at runtime.
+ *   'lit'             - the grant on the categories AND the channels inside
+ *                       them. This is what apply-game-channel-access.ts does.
+ */
+export type Lighting = 'dark' | 'categories-only' | 'lit';
+
+function channelsPayload(lighting: Lighting) {
+  const deny = [{ id: EVERYONE_ROLE, type: 0, allow: '0', deny: String(VIEW_CHANNEL) }];
+  const granted = (roleId: string) => [
+    ...deny,
+    { id: roleId, type: 0, allow: String(VIEW_CHANNEL), deny: '0' },
+  ];
+
+  const categories = GATED_CATEGORIES.map((cat) => ({
+    id: cat.categoryId,
+    type: 4,
+    guild_id: GUILD_ID,
+    name: cat.categoryName,
+    position: 5,
+    permission_overwrites: lighting === 'dark' ? deny : granted(cat.roleId),
+  }));
+
+  const gameChannels = GAME_PICKS.filter((p) => p.primaryChannelId).map((p) => {
+    const cat = GATED_CATEGORIES.find((c) => c.roleId === p.roleId)!;
+    return {
+      id: p.primaryChannelId!,
+      type: 0,
+      guild_id: GUILD_ID,
+      name: p.label.toLowerCase() + '-general',
+      position: 0,
+      parent_id: cat.categoryId,
+      permission_overwrites: lighting === 'lit' ? granted(cat.roleId) : deny,
+      nsfw: false,
+    };
+  });
+
+  return [
+    {
+      id: TEXT_CHANNEL,
+      type: 0,
+      guild_id: GUILD_ID,
+      name: 'general',
+      position: 0,
+      permission_overwrites: [],
+      nsfw: false,
+    },
+    {
+      id: GAME_HUB_CHANNEL_ID,
+      type: 0, // a text channel here; the real one is a forum, but routing only links it
+      guild_id: GUILD_ID,
+      name: 'game-hub',
+      position: 2,
+      permission_overwrites: [],
+      nsfw: false,
+    },
+    {
+      id: VOICE_CHANNEL,
+      type: 2,
+      guild_id: GUILD_ID,
+      name: 'Lobby',
+      position: 1,
+      permission_overwrites: [],
+      bitrate: 64000,
+      user_limit: 0,
+    },
+    ...categories,
+    ...gameChannels,
+  ];
+}
+
+function guildPayload(lighting: Lighting = 'dark') {
   return {
     id: GUILD_ID,
     name: 'TWO Dev',
@@ -78,42 +218,22 @@ function guildPayload() {
     features: [],
     emojis: [],
     stickers: [],
-    roles: [
-      {
-        id: EVERYONE_ROLE,
-        name: '@everyone',
-        color: 0,
-        hoist: false,
-        position: 0,
-        permissions: '104324673',
-        managed: false,
-        mentionable: false,
-        flags: 0,
-      },
-    ],
-    channels: [
-      {
-        id: TEXT_CHANNEL,
-        type: 0,
-        guild_id: GUILD_ID,
-        name: 'general',
-        position: 0,
-        permission_overwrites: [],
-        nsfw: false,
-      },
-      {
-        id: VOICE_CHANNEL,
-        type: 2,
-        guild_id: GUILD_ID,
-        name: 'Lobby',
-        position: 1,
-        permission_overwrites: [],
-        bitrate: 64000,
-        user_limit: 0,
-      },
-    ],
+    roles: rolesPayload(),
+    channels: channelsPayload(lighting),
     threads: [],
-    members: [],
+    // The bot itself has to be in the member list, otherwise guild.members.me
+    // is null and every permission check the bot makes returns nothing.
+    members: [
+      {
+        user: userPayload(BOT_ID, 'two-dev-bot', true),
+        roles: [BOT_ROLE],
+        joined_at: new Date(0).toISOString(),
+        deaf: false,
+        mute: false,
+        flags: 0,
+        pending: false,
+      },
+    ],
     presences: [],
     voice_states: [],
     stage_instances: [],
@@ -146,8 +266,105 @@ function userPayload(id: string, username: string, bot = false) {
   };
 }
 
-export async function startMockDiscord(): Promise<MockDiscord> {
+export async function startMockDiscord(
+  opts: { lighting?: Lighting } = {},
+): Promise<MockDiscord> {
   const invites: MockInvite[] = [{ code: 'twodev01', uses: 5, inviterId: '900000000000000099' }];
+  const captured: CapturedRequest[] = [];
+  const lighting: Lighting = opts.lighting ?? 'dark';
+  /** Roles the bot has granted per member, so PATCH member can echo them back. */
+  const memberRoles = new Map<string, string[]>();
+
+  /**
+   * Non-GET routes the onboarding flow touches. Everything returns a
+   * plausible payload, because discord.js parses these responses.
+   */
+  function handleWrite(
+    method: string,
+    url: string,
+    body: unknown,
+    json: (b: unknown, status?: number) => void,
+    noContent: () => void,
+  ) {
+    // Posting the welcome message.
+    let m = /\/api\/v10\/channels\/(\d+)\/messages$/.exec(url);
+    if (m && method === 'POST') {
+      const b = body as { content?: string };
+      return json({
+        id: snowflake(),
+        type: 0,
+        channel_id: m[1],
+        guild_id: GUILD_ID,
+        author: userPayload(BOT_ID, 'two-dev-bot', true),
+        content: b?.content ?? '',
+        timestamp: new Date().toISOString(),
+        edited_timestamp: null,
+        tts: false,
+        mention_everyone: false,
+        mentions: [],
+        mention_roles: [],
+        attachments: [],
+        embeds: [],
+        pinned: false,
+        components: [],
+      });
+    }
+
+    // Interaction ack (deferReply) and the follow-up edit.
+    if (/\/api\/v10\/interactions\/\d+\/[^/]+\/callback/.test(url) && method === 'POST') {
+      return noContent();
+    }
+    if (/\/api\/v10\/webhooks\/\d+\/[^/]+\/messages\/@original/.test(url)) {
+      const b = body as { content?: string };
+      return json({
+        id: snowflake(),
+        type: 0,
+        channel_id: TEXT_CHANNEL,
+        guild_id: GUILD_ID,
+        author: userPayload(BOT_ID, 'two-dev-bot', true),
+        content: b?.content ?? '',
+        timestamp: new Date().toISOString(),
+        edited_timestamp: null,
+        tts: false,
+        mention_everyone: false,
+        mentions: [],
+        mention_roles: [],
+        attachments: [],
+        embeds: [],
+        pinned: false,
+        components: [],
+        flags: 64,
+      });
+    }
+
+    // Bulk role change - what discord.js uses for roles.add(array).
+    m = /\/api\/v10\/guilds\/\d+\/members\/(\d+)$/.exec(url);
+    if (m && method === 'PATCH') {
+      const b = body as { roles?: string[] };
+      if (b?.roles) memberRoles.set(m[1], b.roles);
+      return json({
+        user: userPayload(m[1], 'newbie'),
+        roles: b?.roles ?? [],
+        joined_at: new Date().toISOString(),
+        deaf: false,
+        mute: false,
+        flags: 0,
+        pending: false,
+      });
+    }
+
+    // Single role add/remove.
+    m = /\/api\/v10\/guilds\/\d+\/members\/(\d+)\/roles\/(\d+)$/.exec(url);
+    if (m) {
+      const cur = new Set(memberRoles.get(m[1]) ?? [MEMBER_ROLE]);
+      if (method === 'PUT') cur.add(m[2]);
+      if (method === 'DELETE') cur.delete(m[2]);
+      memberRoles.set(m[1], [...cur]);
+      return noContent();
+    }
+
+    return json({});
+  }
 
   let seq = 0;
   let socket: WebSocket | null = null;
@@ -158,11 +375,35 @@ export async function startMockDiscord(): Promise<MockDiscord> {
 
   const http: Server = createServer((req, res) => {
     const url = req.url ?? '';
+    const method = req.method ?? 'GET';
     const json = (body: unknown, status = 200) => {
       const s = JSON.stringify(body);
       res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(s) });
       res.end(s);
     };
+    const noContent = () => {
+      res.writeHead(204);
+      res.end();
+    };
+
+    // Record every write so tests can assert on what the bot actually sent -
+    // including asserting that it never sent a DM.
+    if (method !== 'GET') {
+      const chunks: Buffer[] = [];
+      req.on('data', (c) => chunks.push(c as Buffer));
+      req.on('end', () => {
+        const raw = Buffer.concat(chunks).toString() || 'null';
+        let body: unknown = null;
+        try {
+          body = JSON.parse(raw);
+        } catch {
+          body = raw;
+        }
+        captured.push({ method, url, body });
+        handleWrite(method, url, body, json, noContent);
+      });
+      return;
+    }
 
     if (url.startsWith('/api/v10/gateway/bot')) {
       const port = (http.address() as AddressInfo).port;
@@ -238,7 +479,7 @@ export async function startMockDiscord(): Promise<MockDiscord> {
           },
         });
         setTimeout(() => {
-          send(ws, { op: 0, s: ++seq, t: 'GUILD_CREATE', d: guildPayload() });
+          send(ws, { op: 0, s: ++seq, t: 'GUILD_CREATE', d: guildPayload(lighting) });
           readyResolve?.();
         }, 30);
       }
@@ -323,6 +564,89 @@ export async function startMockDiscord(): Promise<MockDiscord> {
         request_to_speak_timestamp: null,
       });
     },
+    captured,
+
+    memberJoinPending(memberId, username) {
+      dispatch('GUILD_MEMBER_ADD', {
+        guild_id: GUILD_ID,
+        user: userPayload(memberId, username),
+        roles: [],
+        joined_at: new Date().toISOString(),
+        premium_since: null,
+        deaf: false,
+        mute: false,
+        pending: true, // behind the rules gate
+        flags: 0,
+      });
+    },
+
+    memberAcceptRules(memberId, username) {
+      // discord.js compares against its cached copy, so the "before" state has
+      // to have been dispatched first via memberJoinPending.
+      dispatch('GUILD_MEMBER_UPDATE', {
+        guild_id: GUILD_ID,
+        user: userPayload(memberId, username),
+        roles: [MEMBER_ROLE],
+        joined_at: new Date().toISOString(),
+        premium_since: null,
+        deaf: false,
+        mute: false,
+        pending: false,
+        flags: 0,
+      });
+    },
+
+    selectGames(memberId, username, keys, heldRoleIds = [MEMBER_ROLE]) {
+      dispatch('INTERACTION_CREATE', {
+        id: snowflake(),
+        application_id: BOT_ID,
+        type: 3, // MESSAGE_COMPONENT
+        token: 'mock-interaction-token',
+        version: 1,
+        guild_id: GUILD_ID,
+        channel_id: TEXT_CHANNEL,
+        channel: { id: TEXT_CHANNEL, type: 0 },
+        data: {
+          custom_id: 'two:onboarding:games',
+          component_type: 3, // string select
+          values: keys,
+        },
+        member: {
+          user: userPayload(memberId, username),
+          roles: heldRoleIds,
+          joined_at: new Date().toISOString(),
+          deaf: false,
+          mute: false,
+          pending: false,
+          flags: 0,
+          permissions: '0',
+        },
+        message: {
+          id: snowflake(),
+          type: 0,
+          channel_id: TEXT_CHANNEL,
+          author: userPayload(BOT_ID, 'two-dev-bot', true),
+          content: 'welcome',
+          timestamp: new Date().toISOString(),
+          edited_timestamp: null,
+          tts: false,
+          mention_everyone: false,
+          mentions: [],
+          mention_roles: [],
+          attachments: [],
+          embeds: [],
+          pinned: false,
+          components: [],
+        },
+        app_permissions: '0',
+        locale: 'en-US',
+        // discord.js reads these unconditionally - a real INTERACTION_CREATE
+        // always carries them, and BaseInteraction throws without them.
+        entitlements: [],
+        authorizing_integration_owners: {},
+      });
+    },
+
     async close() {
       for (const c of wss.clients) c.terminate();
       await new Promise<void>((res) => wss.close(() => res()));

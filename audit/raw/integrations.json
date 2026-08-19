@@ -40,8 +40,8 @@
       }
     },
     "scopes": [
-      "bot",
-      "applications.commands"
+      "applications.commands",
+      "bot"
     ],
     "user": {
       "id": "275483498603741184"
@@ -87,8 +87,8 @@
       }
     },
     "scopes": [
-      "bot",
-      "applications.commands"
+      "applications.commands",
+      "bot"
     ],
     "user": {
       "id": "275483498603741184"
@@ -133,8 +133,8 @@
       }
     },
     "scopes": [
-      "bot",
-      "applications.commands"
+      "applications.commands",
+      "bot"
     ],
     "user": {
       "id": "275483498603741184"
@@ -203,8 +203,8 @@
       }
     },
     "scopes": [
-      "bot",
       "applications.commands",
+      "bot",
       "webhook.incoming"
     ],
     "user": {
@@ -250,8 +250,8 @@
       }
     },
     "scopes": [
-      "bot",
-      "applications.commands"
+      "applications.commands",
+      "bot"
     ],
     "user": {
       "id": "275483498603741184"
@@ -296,8 +296,8 @@
       }
     },
     "scopes": [
-      "bot",
-      "applications.commands"
+      "applications.commands",
+      "bot"
     ],
     "user": {
       "id": "275483498603741184"
@@ -343,8 +343,8 @@
       }
     },
     "scopes": [
-      "bot",
-      "applications.commands"
+      "applications.commands",
+      "bot"
     ],
     "user": {
       "id": "275483498603741184"
@@ -389,8 +389,8 @@
       }
     },
     "scopes": [
-      "bot",
       "applications.commands",
+      "bot",
       "webhook.incoming"
     ],
     "user": {
@@ -436,8 +436,8 @@
       }
     },
     "scopes": [
-      "bot",
-      "applications.commands"
+      "applications.commands",
+      "bot"
     ],
     "user": {
       "id": "275483498603741184"
@@ -482,8 +482,8 @@
       }
     },
     "scopes": [
-      "bot",
       "applications.commands",
+      "bot",
       "webhook.incoming"
     ],
     "user": {
@@ -529,8 +529,8 @@
       }
     },
     "scopes": [
-      "bot",
-      "applications.commands"
+      "applications.commands",
+      "bot"
     ],
     "user": {
       "id": "275483498603741184"
@@ -575,8 +575,8 @@
       }
     },
     "scopes": [
-      "bot",
-      "applications.commands"
+      "applications.commands",
+      "bot"
     ],
     "user": {
       "id": "275483498603741184"
@@ -622,8 +622,8 @@
       }
     },
     "scopes": [
-      "bot",
       "applications.commands",
+      "bot",
       "webhook.incoming"
     ],
     "user": {
@@ -669,8 +669,8 @@
       }
     },
     "scopes": [
-      "bot",
-      "applications.commands"
+      "applications.commands",
+      "bot"
     ],
     "user": {
       "id": "275483498603741184"
@@ -715,8 +715,8 @@
       }
     },
     "scopes": [
-      "bot",
-      "applications.commands"
+      "applications.commands",
+      "bot"
     ],
     "user": {
       "id": "275483498603741184"
@@ -762,8 +762,8 @@
       }
     },
     "scopes": [
-      "bot",
-      "applications.commands"
+      "applications.commands",
+      "bot"
     ],
     "user": {
       "id": "275483498603741184"
@@ -809,8 +809,8 @@
       }
     },
     "scopes": [
-      "bot",
-      "applications.commands"
+      "applications.commands",
+      "bot"
     ],
     "user": {
       "id": "275483498603741184"
@@ -855,8 +855,8 @@
       }
     },
     "scopes": [
-      "bot",
-      "applications.commands"
+      "applications.commands",
+      "bot"
     ],
     "user": {
       "id": "275483498603741184"
@@ -901,8 +901,8 @@
       }
     },
     "scopes": [
-      "bot",
-      "applications.commands"
+      "applications.commands",
+      "bot"
     ],
     "user": {
       "id": "275483498603741184"
@@ -947,8 +947,8 @@
       }
     },
     "scopes": [
-      "bot",
-      "applications.commands"
+      "applications.commands",
+      "bot"
     ],
     "user": {
       "id": "275483498603741184"
@@ -993,8 +993,8 @@
       }
     },
     "scopes": [
-      "bot",
-      "applications.commands"
+      "applications.commands",
+      "bot"
     ],
     "user": {
       "id": "275483498603741184"
@@ -1040,8 +1040,8 @@
       }
     },
     "scopes": [
-      "bot",
-      "applications.commands"
+      "applications.commands",
+      "bot"
     ],
     "user": {
       "id": "275483498603741184"
@@ -1087,8 +1087,8 @@
       }
     },
     "scopes": [
-      "bot",
-      "applications.commands"
+      "applications.commands",
+      "bot"
     ],
     "user": {
       "id": "275483498603741184"

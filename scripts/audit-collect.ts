@@ -131,6 +131,7 @@ type Activity = {
   bot_messages_90d: number;
   unique_authors_30d: number;
   unique_authors_90d: number;
+  unique_human_authors_30d: number;
   unique_human_authors_90d: number;
   last_message_at: string | null;
   days_since_last_message: number | null;
@@ -142,6 +143,15 @@ const now = Date.now();
 const DAY = 86_400_000;
 const cut30 = now - 30 * DAY;
 const cut90 = now - 90 * DAY;
+/**
+ * Server-wide de-duplicated human author ids. Held in memory only, for the
+ * length of one run, and reduced to two integers before anything is written.
+ * This is the "A" number the reconfiguration proposal is sized from: how many
+ * distinct people said anything at all, anywhere, in the window.
+ */
+const SERVER_HUMANS_30 = new Set<string>();
+const SERVER_HUMANS_90 = new Set<string>();
+
 const PAGE_CAP = 40; // 4000 messages in 90d is plenty to call a channel "busy"
 
 /**
@@ -160,6 +170,7 @@ async function scanChannel(ch: Channel): Promise<Activity> {
     bot_messages_90d: 0,
     unique_authors_30d: 0,
     unique_authors_90d: 0,
+    unique_human_authors_30d: 0,
     unique_human_authors_90d: 0,
     last_message_at: null,
     days_since_last_message: null,
@@ -184,6 +195,7 @@ async function scanChannel(ch: Channel): Promise<Activity> {
 
   const authors30 = new Set<string>();
   const authors90 = new Set<string>();
+  const humans30 = new Set<string>();
   const humans90 = new Set<string>();
   let before: string | null = null;
   let done = false;
@@ -208,11 +220,18 @@ async function scanChannel(ch: Channel): Promise<Activity> {
       if (bot) base.bot_messages_90d++;
       else base.human_messages_90d++;
       authors90.add(m.author.id);
-      if (!bot) humans90.add(m.author.id);
+      if (!bot) {
+        humans90.add(m.author.id);
+        SERVER_HUMANS_90.add(m.author.id);
+      }
       if (ts >= cut30) {
         base.messages_30d++;
         if (!bot) base.human_messages_30d++;
         authors30.add(m.author.id);
+        if (!bot) {
+          humans30.add(m.author.id);
+          SERVER_HUMANS_30.add(m.author.id);
+        }
       }
     }
     if (page.length < 100) break;
@@ -225,6 +244,7 @@ async function scanChannel(ch: Channel): Promise<Activity> {
   base.hit_page_cap = base.pages_fetched >= PAGE_CAP && !done;
   base.unique_authors_30d = authors30.size;
   base.unique_authors_90d = authors90.size;
+  base.unique_human_authors_30d = humans30.size;
   base.unique_human_authors_90d = humans90.size;
   base.scanned = true;
   return base;
@@ -365,6 +385,15 @@ for (const ch of channels) {
   );
 }
 save('activity', activity);
+
+// The de-duplicated headline: how many distinct humans said anything at all,
+// anywhere in the guild, in each window. Counts only - the id sets never leave
+// memory. Threads are scanned separately above and feed the same sets.
+save('server_totals', {
+  unique_human_authors_30d: SERVER_HUMANS_30.size,
+  unique_human_authors_90d: SERVER_HUMANS_90.size,
+  note: 'de-duplicated across every channel and thread scanned in this run',
+});
 
 save('meta', {
   collected_at: startedAt,

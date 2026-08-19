@@ -1,10 +1,10 @@
 {
-  "collected_at": "2026-08-19T20:07:58.001Z",
+  "collected_at": "2026-08-19T20:19:24.719Z",
   "guild": {
     "id": "326474832151838730",
     "name": "TogetherWeOwn",
     "members": 107,
-    "online": 26,
+    "online": 27,
     "verification_level": 2,
     "boost_tier": 1,
     "boosts": 5,
@@ -56,11 +56,148 @@
     "total_human_messages_30d": 1,
     "total_bot_messages_90d": 5019
   },
+  "server_level": {
+    "visible_channels_at_join": 27,
+    "visible_channels_target": 7,
+    "gate_steps": 1,
+    "gate_step_detail": [
+      "accept the rules screening box"
+    ],
+    "dead_air_ratio": 0.963,
+    "dead_air_numerator": 26,
+    "dead_air_denominator": 27,
+    "voice_channels_total": 12,
+    "voice_visible_at_join": 12,
+    "voice_obvious_hangout": true,
+    "voice_history_readable_over_rest": false,
+    "default_message_notifications": 1,
+    "default_notifications_flag": "only mentions - fine, no action needed",
+    "channel_ownership_recorded": false,
+    "onboarding_requirement": "at least 7 default channels, at least 5 allowing @everyone to view AND send",
+    "onboarding_default_channels_configured": 26,
+    "onboarding_qualifying_channels_today": 9,
+    "onboarding_requirement_met_today": true
+  },
+  "permission_risk": [
+    {
+      "role": "SySOp",
+      "holders": 1,
+      "permissions": "Administrator / Manage Guild / Manage Roles / Manage Channels / Mention Everyone"
+    },
+    {
+      "role": "Officer",
+      "holders": 3,
+      "permissions": "Manage Roles / Manage Channels / Ban Members / Kick Members / Mention Everyone"
+    },
+    {
+      "role": "Game Master",
+      "holders": 1,
+      "permissions": "Ban Members / Kick Members"
+    },
+    {
+      "role": "Captain",
+      "holders": 0,
+      "permissions": "Ban Members / Kick Members"
+    },
+    {
+      "role": "Lieutenant",
+      "holders": 0,
+      "permissions": "Ban Members / Kick Members"
+    },
+    {
+      "role": "TWO",
+      "holders": 0,
+      "permissions": "Mention Everyone"
+    },
+    {
+      "role": "Graphic Designer",
+      "holders": 0,
+      "permissions": "Mention Everyone"
+    },
+    {
+      "role": "Staff",
+      "holders": 6,
+      "permissions": "Ban Members / Kick Members / Mention Everyone"
+    }
+  ],
+  "game_coverage": {
+    "roles_with_no_channel": [
+      {
+        "role": "Retro Games",
+        "holders": 0
+      },
+      {
+        "role": "Tabletop Games",
+        "holders": 0
+      },
+      {
+        "role": "rocketleague",
+        "holders": 0
+      },
+      {
+        "role": "League of Legends",
+        "holders": 0
+      },
+      {
+        "role": "Epic Games",
+        "holders": 0
+      },
+      {
+        "role": "Riot Games",
+        "holders": 0
+      }
+    ],
+    "channels_with_no_role": [],
+    "roles_wired_to_their_channel": [
+      {
+        "role": "Shooter Games",
+        "holders": 27,
+        "channels": [
+          "💬〢shooters-general"
+        ],
+        "channels_the_role_can_actually_see": []
+      },
+      {
+        "role": "Horror Games",
+        "holders": 6,
+        "channels": [
+          "💬〢horror-general"
+        ],
+        "channels_the_role_can_actually_see": []
+      },
+      {
+        "role": "Survival Games",
+        "holders": 11,
+        "channels": [
+          "💬〢survival-general"
+        ],
+        "channels_the_role_can_actually_see": []
+      },
+      {
+        "role": "Game Staff: Shooter",
+        "holders": 1,
+        "channels": [
+          "💬〢shooters-general"
+        ],
+        "channels_the_role_can_actually_see": []
+      },
+      {
+        "role": "Game Staff: Survival",
+        "holders": 0,
+        "channels": [
+          "💬〢survival-general"
+        ],
+        "channels_the_role_can_actually_see": []
+      }
+    ]
+  },
+  "A_unique_human_authors_30d": 1,
+  "A_unique_human_authors_90d": 3,
   "verdicts": {
-    "keep": 22,
-    "merge": 2,
-    "archive": 84,
-    "rewrite-topic": 4,
+    "keep": 0,
+    "merge": 1,
+    "archive": 109,
+    "rewrite-topic": 2,
     "gate-behind-role": 0
   }
 }

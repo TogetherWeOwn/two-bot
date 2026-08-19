@@ -10,15 +10,20 @@
   "scripts": {
     "start": "node src/index.ts",
     "dev": "node --env-file=.env src/index.ts",
-    "test": "node --test test/unit.store.test.ts test/e2e.funnel.test.ts",
-    "test:unit": "node --test test/unit.store.test.ts",
-    "test:e2e": "node --test test/e2e.funnel.test.ts",
+    "test": "node --test test/unit.store.test.ts test/unit.backfill.test.ts test/unit.onboarding.test.ts test/unit.staging.test.ts test/e2e.funnel.test.ts test/e2e.onboarding.test.ts",
+    "test:unit": "node --test test/unit.store.test.ts test/unit.backfill.test.ts test/unit.onboarding.test.ts test/unit.staging.test.ts",
+    "test:e2e": "node --test test/e2e.funnel.test.ts test/e2e.onboarding.test.ts",
     "typecheck": "tsc --noEmit",
     "funnel": "node scripts/funnel.ts",
-    "backup": "bash scripts/backup.sh"
+    "backfill": "node scripts/backfill.ts",
+    "preflight": "node scripts/preflight.ts",
+    "backup": "bash scripts/backup.sh",
+    "verify:catalog": "node scripts/verify-catalog.ts"
   },
   "dependencies": {
-    "discord.js": "^14.27.0"
+    "@types/pg": "^8.23.1",
+    "discord.js": "^14.27.0",
+    "pg": "^8.23.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
