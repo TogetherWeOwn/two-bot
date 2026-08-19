@@ -19,6 +19,7 @@ set -euo pipefail
 ORG="${TWO_GITHUB_ORG:-two-gaming}"
 BOT_REPO="two-bot"
 WEB_REPO="two-web"
+DESIGN_REPO="two-design"
 DEFAULT_BRANCH="main"
 
 # Required status check contexts, per repo.
@@ -28,20 +29,43 @@ DEFAULT_BRANCH="main"
 # matches nothing leaves the PR waiting forever on a check that never arrives,
 # which reads as a hang rather than a misconfiguration.
 #
-#   two-bot   ci.yml          -> job `check`
-#             secret-scan.yml -> job `gitleaks`   (workflow is named secret-scan,
+#   two-bot    ci.yml          -> job `check`
+#              secret-scan.yml -> job `gitleaks`  (workflow is named secret-scan,
 #                                                  the job is not)
-#   two-web   ci.yml          -> jobs `static` `tests` `dusk` `budgets` `ci`
-#             secret-scan.yml -> job `gitleaks`
+#   two-web    ci.yml          -> jobs `static` `pest` `dusk` `budgets`, and the
+#                                aggregate `tests` that needs the other four
+#              secret-scan.yml -> job `gitleaks`
+#   two-design ci.yml          -> job `tests`     (QA, TWO-22)
+#              secret-scan.yml -> job `gitleaks`
 #
-# Every leaf job is listed, not just the `ci` aggregate. A job that is *skipped*
-# counts as PASSED for branch protection, and an aggregate declared with plain
-# `needs:` is skipped - not failed - when something it needs goes red. Requiring
-# only the aggregate would therefore let a red PR merge. Requiring the leaves
-# closes that hole; requiring the aggregate as well means a future job added to
-# its `needs:` list is covered without touching protection.
+# `ci` is the WORKFLOW name in two-web, not a job. It is deliberately absent
+# here. GitHub is asymmetric in both directions and only one of the two is
+# obvious:
+#   - a *skipped* required check counts as PASSED, so a naively-declared
+#     aggregate lets a red PR merge;
+#   - an *absent* required check blocks the PR forever with no error anywhere.
+# Requiring `ci` would have made two-web's main unmergeable from the moment
+# protection went on, presenting as slow CI rather than as a broken rule.
+# (QA, TWO-36 / TWO-22.)
+#
+# Every leaf job is listed as well as the aggregate. two-web's `tests` does
+# carry `if: always()` with a guard covering failure, cancelled AND skipped, so
+# the aggregate alone would be sound - but naming the leaves means protection
+# does not depend on that guard staying correct. The cost is that this list has
+# to be updated when a job is added or renamed; verify_check_jobs below fails
+# on a required check that matches no job, and warns on a job that reports but
+# is not required, so the drift is caught rather than discovered.
 BOT_CHECKS=(check gitleaks)
-WEB_CHECKS=(ci tests static dusk budgets gitleaks)
+WEB_CHECKS=(tests static pest dusk budgets gitleaks)
+DESIGN_CHECKS=(tests gitleaks)
+
+# Files every repo must have on the default branch before we call it set up.
+# Per repo, because they genuinely differ: two-design has no runtime and no
+# configuration, so demanding a .env.example there would be asking for an empty
+# file whose only purpose is to satisfy this list.
+BOT_FILES=(.github/CODEOWNERS CONTRIBUTING.md README.md .env.example .gitignore)
+WEB_FILES=(.github/CODEOWNERS CONTRIBUTING.md README.md .env.example .gitignore)
+DESIGN_FILES=(.github/CODEOWNERS CONTRIBUTING.md README.md .gitignore)
 
 # Teams.
 #
@@ -60,15 +84,16 @@ TEAMS=(
   "founding-engineer|Founding Engineer|Bot, deploy, secrets and privacy posture"
   "web-lead|Web Lead|Laravel application: backend, schema, policies, routes"
   "frontend|Frontend|Blade views, JS, CSS, asset build"
-  "qa|QA|Tests and CI in both repos"
+  "qa|QA|Tests and CI across all three repos"
+  "design|Design|Design tokens, brand assets, accessibility"
 )
 
 # Which team gets write on which repo. Write is also what makes a team eligible
 # to be a code owner there - a team with read cannot own a path.
 #
-# Derived from the two CODEOWNERS files, not invented here. `frontend` is absent
-# from two-bot's CODEOWNERS, so it gets no access to two-bot. Verify reads the
-# committed files and will fail if this table has drifted from them.
+# Derived from the three CODEOWNERS files, not invented here. `frontend` is
+# absent from two-bot's CODEOWNERS, so it gets no access to two-bot. Verify
+# reads the committed files and will fail if this table has drifted from them.
 #
 # slug|repo
 TEAM_REPOS=(
@@ -79,11 +104,21 @@ TEAM_REPOS=(
   "web-lead|$WEB_REPO"
   "frontend|$WEB_REPO"
   "qa|$WEB_REPO"
+  "design|$DESIGN_REPO"
+  "frontend|$DESIGN_REPO"
+  "qa|$DESIGN_REPO"
+  "founding-engineer|$DESIGN_REPO"
 )
 
 # Where each repo's working copy is. Override if yours are elsewhere.
 BOT_PATH="${TWO_BOT_PATH:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 WEB_PATH="${TWO_WEB_PATH:-}"
+# two-design sits next to two-bot in the shared workspace. Guess that, so the
+# common case needs no environment variable; an explicit TWO_DESIGN_PATH wins.
+DESIGN_PATH="${TWO_DESIGN_PATH:-}"
+if [ -z "$DESIGN_PATH" ] && [ -d "$(dirname "$BOT_PATH")/$DESIGN_REPO/.git" ]; then
+  DESIGN_PATH="$(dirname "$BOT_PATH")/$DESIGN_REPO"
+fi
 
 DRY_RUN=0
 VERIFY_ONLY=0
@@ -288,6 +323,42 @@ push_history() {
   fi
 }
 
+# push_extra_branches <local-path> <repo-name>
+#
+# Any local branch that is not `main`. Unmerged work that only exists in one
+# working copy is one lost directory away from gone, and the whole reason for
+# this issue is that we have work sitting in exactly that state - two-design's
+# CI gates live on `ci/design-gates` and nowhere else.
+#
+# Pushing them is also how the first pull request happens: the branch is up,
+# protection is on, somebody opens a PR, and the rule gets proved by a real
+# merge rather than by reading a settings page.
+push_extra_branches() {
+  local path="$1" name="$2" b
+  [ -n "$path" ] && [ -d "$path/.git" ] || return 0
+
+  local branches
+  branches="$(git -C "$path" for-each-ref --format='%(refname:short)' refs/heads/ \
+              | grep -vx "$DEFAULT_BRANCH" || true)"
+  [ -n "$branches" ] || { skip "$name: no branches other than $DEFAULT_BRANCH"; return 0; }
+
+  while read -r b; do
+    [ -n "$b" ] || continue
+    # Already merged into main - the ref is history, not work. Pushing it would
+    # put a dead branch in the repo on day one.
+    if git -C "$path" merge-base --is-ancestor "$b" "$DEFAULT_BRANCH" 2>/dev/null; then
+      skip "$name: branch $b is already in $DEFAULT_BRANCH"
+      continue
+    fi
+    if [ "$DRY_RUN" = 1 ]; then
+      printf '   \033[90mwould run:\033[0m git -C %s push -u origin %s\n' "$path" "$b"
+    else
+      git -C "$path" push -u origin "$b"
+      ok "$name: pushed branch $b"
+    fi
+  done <<< "$branches"
+}
+
 # protect <repo-name> <required-check...>
 # Classic branch protection: it is the API that reports its own effect
 # honestly, which matters because on a free org the call succeeds and the
@@ -394,6 +465,7 @@ if [ "$VERIFY_ONLY" = 0 ]; then
   say "Repositories"
   create_repo "$BOT_REPO"
   create_repo "$WEB_REPO"
+  create_repo "$DESIGN_REPO"
 
   say "Repository access"
   for _entry in "${TEAM_REPOS[@]}"; do
@@ -403,19 +475,29 @@ if [ "$VERIFY_ONLY" = 0 ]; then
 
   say "History"
   push_history "$BOT_PATH" "$BOT_REPO"
+  push_extra_branches "$BOT_PATH" "$BOT_REPO"
   if [ -n "$WEB_PATH" ]; then
     push_history "$WEB_PATH" "$WEB_REPO"
+    push_extra_branches "$WEB_PATH" "$WEB_REPO"
   else
     warn "TWO_WEB_PATH unset - the Web Lead pushes two-web themselves. See docs/GITHUB.md."
+  fi
+  if [ -n "$DESIGN_PATH" ]; then
+    push_history "$DESIGN_PATH" "$DESIGN_REPO"
+    push_extra_branches "$DESIGN_PATH" "$DESIGN_REPO"
+  else
+    warn "TWO_DESIGN_PATH unset and no two-design next to two-bot - skipping its history."
   fi
 
   say "Branch protection on $DEFAULT_BRANCH"
   protect "$BOT_REPO" "${BOT_CHECKS[@]}"
   protect "$WEB_REPO" "${WEB_CHECKS[@]}"
+  protect "$DESIGN_REPO" "${DESIGN_CHECKS[@]}"
 
   say "Secret scanning"
   secret_protection "$BOT_REPO"
   secret_protection "$WEB_REPO"
+  secret_protection "$DESIGN_REPO"
 
   say "Deploy environment"
   deploy_environment "$WEB_REPO"
@@ -500,9 +582,16 @@ PY
   fi
 }
 
+# verify_repo <name> "<required check...>" "<required file...>"
+#
+# Both lists arrive as space-separated strings rather than as arrays, because
+# the required files differ per repo and bash cannot pass two arrays.
 verify_repo() {
-  local name="$1"; shift
-  local expected=("$@")
+  local name="$1"
+  # shellcheck disable=SC2206
+  local expected=($2)
+  # shellcheck disable=SC2206
+  local files=($3)
   if ! repo_exists "$name"; then bad "$name: does not exist"; FAILED=1; return; fi
 
   local priv; priv="$(gh api "repos/$ORG/$name" --jq .private)"
@@ -562,7 +651,7 @@ verify_repo() {
     FAILED=1
   fi
 
-  for f in .github/CODEOWNERS CONTRIBUTING.md README.md .env.example .gitignore; do
+  for f in "${files[@]}"; do
     if gh api "repos/$ORG/$name/contents/$f" >/dev/null 2>&1; then ok "$name: $f present"
     else bad "$name: $f MISSING"; FAILED=1; fi
   done
@@ -576,11 +665,125 @@ verify_repo() {
   fi
 }
 
+# verify_check_jobs <repo> <required-check...>
+#
+# A required status check is matched by name against a check that actually
+# reports. If nothing ever reports that name, the PR does not fail - it sits
+# there forever saying "Expected", which reads as a slow CI rather than as a
+# rule pointing at nothing. Nobody debugs it for the first hour.
+#
+# So: read the workflow files on the default branch and work out what each job
+# will actually report as - its `name:` if it sets one, otherwise its job id -
+# and require every protected context to be one of those. This is a hard
+# failure when the workflows parsed, because the alternative is a repo whose
+# main branch cannot be merged into and no error message anywhere saying so.
+#
+# It stays a warning in the two cases where a miss is not evidence of a bug:
+# the repo has no workflows on the default branch at all (the workflow is still
+# on a branch waiting for review - two-design is in exactly that state until
+# QA's `ci/design-gates` merges), or the heuristic below parsed nothing, since
+# it is not a YAML engine and should not fail a setup on its own blind spot.
+verify_check_jobs() {
+  local name="$1"; shift
+  local expected=("$@") listing found="" f body want
+
+  listing="$(gh api "repos/$ORG/$name/contents/.github/workflows" \
+               --jq '.[].path' 2>/dev/null || true)"
+  if [ -z "$listing" ]; then
+    warn "$name: no .github/workflows on $DEFAULT_BRANCH - every required check would hang as 'Expected'"
+    return 0
+  fi
+
+  while read -r f; do
+    [ -n "$f" ] || continue
+    body="$(gh api "repos/$ORG/$name/contents/$f" -H 'Accept: application/vnd.github.raw' 2>/dev/null || true)"
+    [ -n "$body" ] || continue
+    found+="$(python3 - "$body" <<'PY'
+import re, sys
+# Heuristic, not a YAML parser: the job ids of a workflow are the keys nested
+# one level under a top-level `jobs:`. A job reports under its `name:` if it
+# sets one and under its id otherwise, so emit `id|reported-name` and let the
+# caller tell a real match from a near miss.
+#
+# Only workflows that trigger on `pull_request` count. A push-only workflow
+# never reports on a PR, so requiring one of its jobs would hang the PR, and
+# listing its jobs as "reports but not required" would be noise - two-bot's
+# main-guard is push-only on purpose.
+text, out, in_jobs, job = sys.argv[1], [], False, None
+head = text.split('\njobs:', 1)[0]
+if 'pull_request' not in head:
+    print('')
+    raise SystemExit(0)
+def flush():
+    if job:
+        out.append('%s|%s' % (job[0], job[1] or job[0]))
+for line in text.splitlines():
+    if re.match(r'^jobs:\s*$', line):
+        in_jobs = True
+        continue
+    if in_jobs and re.match(r'^\S', line):
+        flush(); job = None
+        in_jobs = False
+    if not in_jobs:
+        continue
+    m = re.match(r'^  ([A-Za-z0-9_.-]+):\s*$', line)
+    if m:
+        flush()
+        job = [m.group(1), None]
+        continue
+    m = re.match(r'^    name:\s*["\']?([^"\'#]+?)["\']?\s*$', line)
+    if m and job:
+        job[1] = m.group(1).strip()
+flush()
+print('\n'.join(out))
+PY
+)"$'\n'
+  done <<< "$listing"
+
+  local reported ids
+  reported="$(printf '%s' "$found" | awk -F'|' 'NF==2 {print $2}')"
+  ids="$(printf '%s' "$found" | awk -F'|' 'NF==2 {print $1}')"
+
+  if [ -z "$reported" ]; then
+    warn "$name: could not read any job names out of .github/workflows - skipping the check-name audit"
+    return 0
+  fi
+
+  for want in "${expected[@]}"; do
+    if printf '%s\n' "$reported" | grep -qxF "$want"; then
+      ok "$name: required check '$want' is defined by a workflow on $DEFAULT_BRANCH"
+    elif printf '%s\n' "$ids" | grep -qxF "$want"; then
+      bad "$name: required check '$want' is a job id, but that job sets its own 'name:' and reports under that instead."
+      bad "  Branch protection matches the reported name. Every PR would wait on '$want' forever."
+      FAILED=1
+    else
+      bad "$name: required check '$want' matches no job on $DEFAULT_BRANCH - every PR would wait on it forever."
+      bad "  Reported names on this branch: $(printf '%s\n' "$reported" | paste -sd' ' -)"
+      FAILED=1
+    fi
+  done
+
+  # The other half of the drift: a job that runs on every PR but is not in the
+  # required list. It goes red and the PR still merges. Not fatal - a job can be
+  # advisory on purpose - but it should never be a surprise.
+  local have
+  while read -r have; do
+    [ -n "$have" ] || continue
+    printf '%s\n' "${expected[@]}" | grep -qxF "$have" && continue
+    warn "$name: job '$have' reports on PRs but is not required - it can go red and the PR still merges"
+  done <<< "$reported"
+}
+
 verify_teams
-verify_repo "$BOT_REPO" "${BOT_CHECKS[@]}"
+verify_repo "$BOT_REPO" "${BOT_CHECKS[*]}" "${BOT_FILES[*]}"
 verify_codeowners "$BOT_REPO"
-verify_repo "$WEB_REPO" "${WEB_CHECKS[@]}"
+verify_check_jobs "$BOT_REPO" "${BOT_CHECKS[@]}"
+verify_repo "$WEB_REPO" "${WEB_CHECKS[*]}" "${WEB_FILES[*]}"
 verify_codeowners "$WEB_REPO"
+verify_check_jobs "$WEB_REPO" "${WEB_CHECKS[@]}"
+verify_repo "$DESIGN_REPO" "${DESIGN_CHECKS[*]}" "${DESIGN_FILES[*]}"
+verify_codeowners "$DESIGN_REPO"
+verify_check_jobs "$DESIGN_REPO" "${DESIGN_CHECKS[@]}"
 
 # The production deploy gate. Warn, do not fail: deploys are TWO-37 and not
 # approved yet, and both deploy jobs skip green while their hook secret is

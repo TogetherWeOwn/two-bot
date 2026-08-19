@@ -6,8 +6,8 @@ decided once rather than per repo.
 | | |
 |---|---|
 | Org | `two-gaming` |
-| Repos | `two-bot` (this one), `two-web` (the Laravel site) |
-| Visibility | **Private**, both, until the launch hardening pass has cleared secrets and history |
+| Repos | `two-bot` (this one), `two-web` (the Laravel site), `two-design` (tokens and brand) |
+| Visibility | **Private**, all three, until the launch hardening pass has cleared secrets and history |
 | Default branch | `main` |
 | Setup | [`scripts/setup-github.sh`](../scripts/setup-github.sh) — idempotent, re-runnable, `--dry-run` and `--verify` supported |
 
@@ -25,7 +25,7 @@ That leaves three options and only one of them is good:
 
 | Option | Cost | Verdict |
 |---|---|---|
-| **GitHub Team** | $4 / committer / month (~$16–20/mo for this team) | **Recommended.** Private repos and enforced protection, which is what TWO-22's pipeline depends on. |
+| **GitHub Team** | $4 / committer / month (~$20–24/mo for this team) | **Recommended.** Private repos and enforced protection, which is what TWO-22's pipeline depends on. |
 | Make repos public now | free | **No.** History and secrets have not been cleared yet. Private → public is easy; the reverse is not. |
 | Stay free + private, protection advisory only | free | Works right up until the day somebody is in a hurry. This is the situation the issue was written to prevent. |
 
@@ -67,20 +67,31 @@ that happened because nobody made the call.
 ## Teams
 
 `CODEOWNERS` points at teams, not people, so a review request never blocks on
-one account being asleep. `setup-github.sh` creates all four and grants their
+one account being asleep. `setup-github.sh` creates all five and grants their
 repo access; the org owner only has to **add the members**.
 
 | Team | Members | Reviews | Write on |
 |---|---|---|---|
-| `founding-engineer` | Founding Engineer | the bot, deploy, secrets, privacy | both repos |
-| `web-lead` | Web Lead | Laravel backend, schema, policies | both repos |
-| `frontend` | Frontend Engineer | Blade views, JS, CSS | `two-web` |
-| `qa` | QA Engineer | tests and CI in both repos | both repos |
+| `founding-engineer` | Founding Engineer | the bot, deploy, secrets, privacy | all three |
+| `web-lead` | Web Lead | Laravel backend, schema, policies | `two-bot`, `two-web` |
+| `frontend` | Frontend Engineer | Blade views, JS, CSS, design tokens | `two-web`, `two-design` |
+| `qa` | QA Engineer | tests and CI everywhere | all three |
+| `design` | Product Designer | tokens, brand assets, accessibility | `two-design` |
 
-`frontend` gets no access to `two-bot` because `two-bot`'s `CODEOWNERS` never
-names it. Everyone else gets **Write**, which is also the minimum that makes a
-team eligible to be a code owner. Nobody needs Admin for day-to-day work; org
-owner stays with the founder.
+Access follows the `CODEOWNERS` files, not preference. `frontend` gets no access
+to `two-bot` because `two-bot`'s `CODEOWNERS` never names it; it does get
+`two-design`, because `resources/css/two.css` in `two-web` is a copy of
+`two-design/tokens/two.css` and Frontend is who has to carry a token change
+across. Everyone gets **Write**, which is also the minimum that makes a team
+eligible to be a code owner. Nobody needs Admin for day-to-day work; org owner
+stays with the founder.
+
+`design` is a fifth committer and therefore about **$4/month more** on GitHub
+Team than the four-agent estimate in TWO-40. If the founder would rather not add
+a fifth seat, the fallback is to drop the `design` team and let
+`@two-gaming/frontend` own `two-design` — worse, because the person who wrote
+the tokens then cannot be required to review a change to them, but it is not
+broken. That is a spend call, not mine.
 
 **Three ways this breaks silently**, all of them checked by `--verify`:
 
@@ -102,7 +113,7 @@ GitHub Team — the same plan decision as branch protection, above.
 
 ## What protection is set to
 
-Applied to `main` in both repos by the setup script:
+Applied to `main` in all three repos by the setup script:
 
 - No direct pushes — everything arrives by pull request.
 - 1 approving review, from a code owner.
@@ -114,7 +125,7 @@ Applied to `main` in both repos by the setup script:
 
 ### Required status checks
 
-Set in one place, `BOT_CHECKS` / `WEB_CHECKS` at the top of
+Set in one place, `BOT_CHECKS` / `WEB_CHECKS` / `DESIGN_CHECKS` at the top of
 [`setup-github.sh`](../scripts/setup-github.sh). Confirmed against the real
 workflows on 2026-08-19.
 
@@ -128,12 +139,20 @@ workflows on 2026-08-19.
 | `two-web` | `budgets` | `ci.yml`, job `budgets` | Lighthouse budget + WCAG 2.2 AA |
 | `two-web` | `ci` | `ci.yml`, job `ci` | aggregate of the four above |
 | `two-web` | `gitleaks` | `secret-scan.yml`, job `gitleaks` | full-history secret scan |
+| `two-design` | `tests` | `ci.yml`, job `tests` | WCAG 2.2 AA contrast over 43 pairings, plus a floor on how many are asserted |
+| `two-design` | `gitleaks` | `secret-scan.yml`, job `gitleaks` | full-history secret scan |
 
 **A context is a job name, not a workflow name.** The workflow file is called
 `secret-scan.yml` and its `name:` is `secret-scan`, but the check GitHub reports
 is the job — `gitleaks`. Requiring `secret-scan` would wait forever on a check
 that never arrives, which looks like a hang rather than a misconfiguration. When
 you rename a CI job, update the protection.
+
+`--verify` now reads the workflow files on `main` and warns when a required
+context matches no job in any of them, which is the only cheap way to catch that
+mistake before a PR sits there saying "Expected" for an hour. It warns rather
+than fails: a workflow can legitimately still be on a branch awaiting its first
+review.
 
 **Why every leaf job is listed and not just the `ci` aggregate.** For branch
 protection, a *skipped* check counts as passed. A job declared with plain
@@ -221,6 +240,22 @@ Before that first commit, check `git status` for `.env`, `/vendor`, and
 `/node_modules`. Laravel's stock `.gitignore` covers all three; confirm it is
 present rather than assuming.
 
+### two-design specifically
+
+Nothing to do — the script finds it next to `two-bot` in the shared workspace
+and pushes it with the rest. `TWO_DESIGN_PATH=/path/to/two-design` if yours is
+somewhere else.
+
+It is a real repo, not decoration: `resources/css/two.css` in `two-web` is a
+byte-identical copy of `two-design/tokens/two.css`, and the site's WCAG 2.2 AA
+contrast guarantee is asserted by `two-design/tools/check-contrast.mjs` against
+those tokens. With no repo, that check has nowhere to run and the accessibility
+claim on the launch checklist has nothing behind it.
+
+Any local branch that is **not** already merged into `main` goes up too. Work
+that exists in one working copy and nowhere else is one lost directory from
+gone, and this repo is the reason that rule exists.
+
 ## Verifying it actually works
 
 ```bash
@@ -228,8 +263,9 @@ present rather than assuming.
 ```
 
 That checks visibility, default branch, protection, required checks,
-self-approval, and that `README`, `CONTRIBUTING`, `CODEOWNERS`, `.env.example`
-and `.gitignore` exist and `.env` does not.
+self-approval, and that each repo's required files exist and `.env` does not.
+The file list is per repo: `two-design` has no runtime and no configuration, so
+it is not asked for a `.env.example` that would only exist to satisfy a check.
 
 It cannot check the one that matters most. Do this by hand, once, per repo:
 
