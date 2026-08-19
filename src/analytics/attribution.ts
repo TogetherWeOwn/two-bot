@@ -56,6 +56,12 @@
  *     and day 30 - no inference at all) and `am30ProvenLater` (last seen after
  *     day 30 - certainly a returning member, but the 8-30 window itself is not
  *     observable). Both are printed. Neither reading is hidden.
+ *
+ *  3. A capture window in which several invite codes moved yields exact per-code
+ *     JOIN COUNTS but no member<->code pairing (TWO-73). Those joins arrive here
+ *     with `attributionExact: false` and are counted into `joinsInexact`, so a
+ *     row can say "these 3 joins are real, the AM7 beside them is a set of 3
+ *     people who may not all be mine". The joins column is never affected.
  */
 
 export const AM7_WINDOW_DAYS = 7;
@@ -88,6 +94,21 @@ export interface JoinRecord {
   lastActiveAt: string | null;
   /** Non-null once they have left. */
   leftAt: string | null;
+  /**
+   * Did we OBSERVE this member arriving through `source`, or only place them
+   * there? (TWO-73, `metadata.attribution_exact` on the capture event.)
+   *
+   * False in a window where several codes moved: code A gained 2 uses and code
+   * B gained 1, so A produced 2 joins and B produced 1 - the per-code join
+   * COUNT is exact - but which of the three members was B's is not observable.
+   *
+   * That distinction only bites below the joins column. Counting joins per code
+   * is unaffected; AM7 and AM30 are per-MEMBER rates, so on a row built from
+   * placements they describe a set of people who may not be that code's. Null
+   * means the event predates the flag - the old capture path only ever wrote an
+   * `invite:CODE` when exactly one code moved, so those are observations.
+   */
+  attributionExact?: boolean | null;
 }
 
 /** How a member cleared the AM7 bar. */
@@ -176,6 +197,13 @@ export interface AttributionRow {
   label: string;
   clicks: number;
   joins: number;
+  /**
+   * Of `joins`, how many were placed on this code by the multi-code split
+   * rather than observed. `joins` itself stays exact either way; anything to
+   * the RIGHT of it on this row is soft when this is non-zero. See
+   * JoinRecord.attributionExact.
+   */
+  joinsInexact: number;
 
   /** Joins old enough to have had their 7 days. The AM7 denominator. */
   am7Eligible: number;
@@ -198,6 +226,7 @@ function emptyRow(source: string): AttributionRow {
     label: source.startsWith('invite:') ? source.slice('invite:'.length) : source,
     clicks: 0,
     joins: 0,
+    joinsInexact: 0,
     am7Eligible: 0,
     am7: 0,
     am7Voice: 0,
@@ -261,6 +290,10 @@ export function rollUp(joins: JoinRecord[], opts: RollUpOptions): RollUp {
     const r = row(j.source);
     r.joins++;
     totals.joins++;
+    if (j.attributionExact === false) {
+      r.joinsInexact++;
+      totals.joinsInexact++;
+    }
     if (!seen.has(j.memberId)) {
       seen.add(j.memberId);
       totals.distinctJoiners++;

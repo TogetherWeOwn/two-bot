@@ -31,8 +31,15 @@
  *   * Somebody who joins AND leaves inside one window is invisible to both
  *     this and the member list. Shorter windows shrink that hole; nothing
  *     closes it but a connected bot.
- *   * If two or more codes move in the same window, we record the join as
- *     `ambiguous:a+b` rather than guessing. Honest beats tidy.
+ *   * If two or more codes move in the same window we do NOT lose the window.
+ *     When the counters and the member list agree on how many people arrived,
+ *     the split is fully determined in aggregate - code A gained 2, code B
+ *     gained 1, so A produced 2 joins and B produced 1 - and that is what gets
+ *     recorded. Which member came through which is not observable, so those
+ *     events carry `attribution_exact: false`: quote the per-code join counts,
+ *     never a per-member rate off them. Only when the arithmetic does NOT close
+ *     (a join+leave inside the window, or a vanity join) do we fall back to
+ *     `ambiguous:a+b`. Honest beats tidy, but exact beats both.
  *   * first_message / first_voice still need the gateway. Not attempted here.
  *
  * Read-only against Discord: no messages, no roles, nothing posted. Safe to
@@ -44,7 +51,7 @@
  */
 import { openDb } from '../src/store/db.ts';
 import { EventStore } from '../src/store/eventStore.ts';
-import { InviteTracker, inviteGrowth } from '../src/core/inviteTracker.ts';
+import { InviteTracker, inviteGrowth, attributeJoins } from '../src/core/inviteTracker.ts';
 import type { FunnelEvent } from '../src/core/events.ts';
 import { DiscordRest, fetchAllMembers, type RawInvite } from '../src/discord/rest.ts';
 
@@ -145,19 +152,33 @@ newJoins.sort((a, b) => a.joinedAt.localeCompare(b.joinedAt));
 
 // --- 4. attribute ------------------------------------------------------------
 //
-// One code moved -> that is the code, for everyone in the window. Several
-// moved -> we genuinely cannot say who came through which, so say that.
+// One code moved -> that is the code, for everyone in the window.
+// Several moved and the counters agree with the member list -> hand each code
+//   as many joins as it gained. Per-code counts are exact; who got which is
+//   not, and every such event carries attribution_exact: false to say so.
+// Several moved and they DISAGREE -> `ambiguous:a+b`. Honest beats tidy.
 // Nothing moved -> vanity URL or Discovery, which leave no counter behind.
+//
+// The per-join decision lives in attributeJoins() (src/core/inviteTracker.ts)
+// so it can be unit tested against inviteGrowth() output with no Discord and
+// no database.
 
-const source = tracker.attribute(grew, hasVanity);
+const attributions = attributeJoins(growth, newJoins.length, hasVanity);
 
-const events: FunnelEvent[] = newJoins.map((j) => ({
+const events: FunnelEvent[] = newJoins.map((j, i) => ({
   memberId: j.id,
   guildId,
   eventType: 'member_join',
   occurredAt: j.joinedAt,
-  source,
-  metadata: { capture: true, window: { from: since, to: capturedAt } },
+  source: attributions[i].source,
+  metadata: {
+    capture: true,
+    // Read by scripts/attribution.ts. False means the per-code JOIN COUNT is
+    // still right but this member's own code is a placement, not an
+    // observation - so per-member rates on that row are soft.
+    attribution_exact: attributions[i].exact,
+    window: { from: since, to: capturedAt },
+  },
 }));
 
 let written = 0;
@@ -187,7 +208,19 @@ console.log(`  invites              ${current.length} readable, ${grew.length} m
 console.log(`  members              ${members.length} total (${bots} bots)`);
 console.log(`  new joins in window  ${newJoins.length}`);
 if (newJoins.length) {
-  console.log(`  attributed as        ${source}`);
+  // One line per source, not one line per join: the operator wants to see the
+  // split the campaign will be read off.
+  const bySource = new Map<string, { n: number; exact: number }>();
+  for (const a of attributions) {
+    const e = bySource.get(a.source) ?? { n: 0, exact: 0 };
+    e.n++;
+    if (a.exact) e.exact++;
+    bySource.set(a.source, e);
+  }
+  const split = [...bySource.entries()]
+    .sort((a, b) => b[1].n - a[1].n || a[0].localeCompare(b[0]))
+    .map(([s, e]) => `${s} x${e.n}${e.exact === e.n ? '' : ' (~ who-got-which not observed)'}`);
+  console.log(`  attributed as        ${split.join('\n                       ')}`);
   console.log(`  written              ${dryRun ? '0 (dry run)' : written} new events`);
 }
 

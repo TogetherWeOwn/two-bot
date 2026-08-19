@@ -55,11 +55,30 @@ const db = await openDb(dbSpec);
 const joinExcl = excludeClause('member_join');
 const joinEvents = await db
   .prepare(
-    `SELECT member_id, occurred_at, source FROM events
+    `SELECT member_id, occurred_at, source, metadata FROM events
       WHERE event_type='member_join' AND member_id IS NOT NULL AND occurred_at >= ?${joinExcl.sql}
       ORDER BY occurred_at`,
   )
-  .all<{ member_id: string; occurred_at: string; source: string }>(since, ...joinExcl.params);
+  .all<{ member_id: string; occurred_at: string; source: string; metadata: string | null }>(
+    since,
+    ...joinExcl.params,
+  );
+
+/**
+ * `metadata.attribution_exact` (TWO-73). Absent on every event written before
+ * that change and on every event from the live bot, both of which only ever
+ * name a code when exactly one moved - so absent means observed, not unknown.
+ * Only an explicit `false` marks a placement.
+ */
+const attributionExact = (raw: string | null): boolean | null => {
+  if (!raw) return null;
+  try {
+    const v = (JSON.parse(raw) as { attribution_exact?: unknown }).attribution_exact;
+    return typeof v === 'boolean' ? v : null;
+  } catch {
+    return null; // A metadata blob we cannot read is not evidence of anything.
+  }
+};
 
 const { kept, collapsed } = collapseCrossSourceDuplicates(
   joinEvents.map((e) => ({
@@ -67,6 +86,7 @@ const { kept, collapsed } = collapseCrossSourceDuplicates(
     memberId: e.member_id,
     occurredAt: e.occurred_at,
     source: e.source,
+    attributionExact: attributionExact(e.metadata),
   })),
 );
 
@@ -110,6 +130,7 @@ for (const e of kept) {
     thirdMessageAt: null,
     lastActiveAt: m?.last_active_at ?? null,
     leftAt: m?.left_at ?? null,
+    attributionExact: e.attributionExact,
   });
 }
 
@@ -194,13 +215,14 @@ await db.close();
 
 if (csv) {
   console.log(
-    'source,clicks,joins,am7,am7_eligible,am7_voice,am7_message_proxy,am30,am30_eligible,am30_proven_in_window,am30_proven_later',
+    'source,clicks,joins,joins_inexact,am7,am7_eligible,am7_voice,am7_message_proxy,am30,am30_eligible,am30_proven_in_window,am30_proven_later',
   );
   const line = (r: AttributionRow) =>
     [
       r.source,
       r.clicks,
       r.joins,
+      r.joinsInexact,
       r.am7,
       r.am7Eligible,
       r.am7Voice,
@@ -216,9 +238,16 @@ if (csv) {
 }
 
 const label = allTime ? 'all joins on file' : `joins in the last ${days} days`;
+// A row whose joins were placed by the multi-code split rather than observed
+// (TWO-73). The joins count is still exact; the AM7/AM30 beside it describes a
+// set of people who may not all be this code's. Marked in the label so it
+// travels with the number when somebody copies one line into a chat.
+const soft = (r: AttributionRow) => r.joinsInexact > 0;
+const nameOf = (r: AttributionRow) => (soft(r) ? `${r.label} ~` : r.label);
+
 // Wide enough for the longest backfill source string, so no row shifts out of
 // its column. A misaligned table is a table people misread.
-const w = Math.max(22, ...report.rows.map((r) => r.label.length)) + 2;
+const w = Math.max(22, ...report.rows.map((r) => nameOf(r).length)) + 2;
 console.log(`\nTWO growth attribution - ${label}`);
 console.log(
   `since ${allTime ? 'the beginning' : since.slice(0, 10)}, as of ${new Date(nowMs).toISOString().slice(0, 16)}Z`,
@@ -259,7 +288,7 @@ const line = (r: AttributionRow, name: string) =>
   `  ${name.padEnd(w)}${String(r.clicks).padStart(7)}${String(r.joins).padStart(7)}` +
   `      ${rate(r.am7, r.am7Eligible)}   ${rate(r.am30, r.am30Eligible)}`;
 
-for (const r of report.rows) console.log(line(r, r.label));
+for (const r of report.rows) console.log(line(r, nameOf(r)));
 console.log(`  ${'-'.repeat(w + 14 + 46)}`);
 console.log(line(report.totals, 'TOTAL'));
 
@@ -284,6 +313,11 @@ console.log(
   `              retention. No upper day: being seen recently is more retention,`,
 );
 console.log(`              not less. Read from members.last_active_at (TWO-64).`);
+if (report.totals.joinsInexact > 0) {
+  console.log(
+    `    ~         this code's JOINS COUNT IS EXACT; its AM7/AM30 is not. See below.`,
+  );
+}
 
 console.log(`\n  Community size`);
 console.log(
@@ -320,6 +354,38 @@ if (report.totals.clicks === 0) {
     `      live bot only (TWO-11, no host yet), and a raw discord.gg link is clicked`,
   );
   console.log(`      off-platform where we cannot see it. It needs a redirect we control.`);
+}
+if (report.totals.joinsInexact > 0) {
+  const marked = report.rows.filter(soft);
+  console.log(
+    `    ${report.totals.joinsInexact} of ${report.totals.joins} joins were placed on a code, not observed on it (marked ~).`,
+  );
+  console.log(
+    `      They landed in a capture window where several codes moved at once. The`,
+  );
+  console.log(
+    `      counters said exactly how many joins each code produced and the member`,
+  );
+  console.log(
+    `      list agreed on the total, so the JOINS COLUMN IS EXACT for those codes -`,
+  );
+  console.log(
+    `      that is the number the campaign is asking for, and it can be quoted.`,
+  );
+  console.log(
+    `      What Discord does not record is WHICH member used which code, so on a`,
+  );
+  console.log(
+    `      marked row the AM7 and AM30 cells describe a set of people who may not`,
+  );
+  console.log(`      all be that code's. Do not quote those as hard.`);
+  console.log(
+    `      Marked: ${marked.map((r) => `${r.label} (${r.joinsInexact}/${r.joins})`).join(', ')}.`,
+  );
+  console.log(
+    `      Shorter capture windows shrink this: one code moving per window is exact`,
+  );
+  console.log(`      end to end. Running capture more often is the only lever (TWO-11).`);
 }
 if (report.usedMessageProxy) {
   console.log(

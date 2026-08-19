@@ -176,3 +176,50 @@ test('every rate carries its denominator, and zero never reads as a percentage',
   assert.match(rate(0, 0), /n\/a/);
   assert.doesNotMatch(rate(0, 0), /0%/);
 });
+
+/**
+ * Placed-vs-observed attribution (TWO-73). The multi-code capture split gives
+ * exact per-code join COUNTS with no member<->code pairing, and the report has
+ * to carry that distinction or somebody quotes a soft AM7 as hard.
+ */
+
+test('joins placed by the multi-code split are counted, and counted as placements', () => {
+  const rows = [
+    member({ memberId: 'a', source: 'invite:A', attributionExact: false, firstVoiceAt: at(1), lastActiveAt: at(20) }),
+    member({ memberId: 'b', source: 'invite:A', attributionExact: false }),
+    member({ memberId: 'c', source: 'invite:B', attributionExact: false }),
+  ];
+  const r = rollUp(rows, { nowMs: NOW });
+  const a = r.rows.find((x) => x.source === 'invite:A')!;
+  // The count is the deliverable and it is exact.
+  assert.equal(a.joins, 2);
+  // ...but every one of them is a placement, so the AM7 beside it is soft.
+  assert.equal(a.joinsInexact, 2);
+  assert.equal(r.totals.joins, 3);
+  assert.equal(r.totals.joinsInexact, 3);
+});
+
+test('an observed join is not marked, and neither is one from before the flag existed', () => {
+  const rows = [
+    member({ memberId: 'a', source: 'invite:A', attributionExact: true }),
+    // Pre-TWO-73 events carry no flag. The old capture path only ever named a
+    // code when exactly one moved, so absent means observed, not unknown.
+    member({ memberId: 'b', source: 'invite:A' }),
+    member({ memberId: 'c', source: 'invite:A', attributionExact: null }),
+  ];
+  const r = rollUp(rows, { nowMs: NOW });
+  const a = r.rows.find((x) => x.source === 'invite:A')!;
+  assert.equal(a.joins, 3);
+  assert.equal(a.joinsInexact, 0);
+  assert.equal(r.totals.joinsInexact, 0);
+});
+
+test('a code can be part observed and part placed, and the row says how much', () => {
+  const rows = [
+    member({ memberId: 'a', source: 'invite:A', attributionExact: true }),
+    member({ memberId: 'b', source: 'invite:A', attributionExact: false }),
+  ];
+  const a = rollUp(rows, { nowMs: NOW }).rows.find((x) => x.source === 'invite:A')!;
+  assert.equal(a.joins, 2);
+  assert.equal(a.joinsInexact, 1);
+});

@@ -38,6 +38,77 @@ export function inviteGrowth(
   return growth;
 }
 
+/** One join's attribution, as decided for a whole capture window. */
+export interface JoinAttribution {
+  /** `invite:CODE` / `ambiguous:a+b` / `vanity` / `unknown`. */
+  source: string;
+  /**
+   * True only when THIS member provably came through THIS code. False means
+   * the source is right in aggregate but the member<->code pairing is not
+   * observable, so per-code join COUNTS may be quoted and per-member rates
+   * (AM7/AM30) may not.
+   */
+  exact: boolean;
+}
+
+/**
+ * Decide a source for every join in one capture window.
+ *
+ * The thing this exists to fix: `attribute()` below collapses the window to a
+ * single string, so a window where code A gained 2 and code B gained 1 with 3
+ * new members recorded three joins of `ambiguous:A+B`. But that window is
+ * fully determined in aggregate - A produced 2 joins, B produced 1 - and "which
+ * listing site produces joins" is exactly a per-code count. Throwing it away
+ * forced the campaign to stagger launches two codes at a time; it does not any
+ * more.
+ *
+ * The rules, in the order they are tried:
+ *
+ *   * Nothing moved -> vanity or unknown, as before. Nobody's source is proven.
+ *   * The counters and the member list AGREE on how many people arrived -> hand
+ *     each code as many joins as it gained. Exact per-code counts.
+ *   * They DISAGREE -> somebody joined and left inside the window, or came via
+ *     the vanity URL, so the arithmetic does not close and any split would be a
+ *     guess dressed as a number. Fall back to the honest `ambiguous:a+b`.
+ *
+ * WHERE `exact` IS TRUE, AND WHY IT IS NARROWER THAN "ONE CODE MOVED"
+ *
+ * Only when one code moved AND the arithmetic closes. One code gaining 1 use
+ * while two members appear means one of those two did NOT come through it - we
+ * still stamp the code on both (unchanged behaviour, it is the best guess
+ * available and the run prints the mismatch), but it is not proof, so it is not
+ * flagged as proof.
+ *
+ * Order within a distribution is arbitrary by construction: joins are handed
+ * out in sorted code order against joins in arrival order, and no claim is made
+ * that member #1 is A's. That is precisely what `exact: false` records.
+ */
+export function attributeJoins(
+  growth: ReadonlyMap<string, number>,
+  joinCount: number,
+  guildHasVanity: boolean,
+): JoinAttribution[] {
+  if (joinCount <= 0) return [];
+  const fill = (source: string, exact: boolean): JoinAttribution[] =>
+    Array.from({ length: joinCount }, () => ({ source, exact }));
+
+  const codes = [...growth.keys()].sort();
+  const total = [...growth.values()].reduce((a, b) => a + b, 0);
+  const closes = total === joinCount;
+
+  if (codes.length === 0) return fill(guildHasVanity ? 'vanity' : 'unknown', false);
+  if (codes.length === 1) return fill(`invite:${codes[0]}`, closes);
+  if (!closes) return fill(`ambiguous:${codes.join('+')}`, false);
+
+  const out: JoinAttribution[] = [];
+  for (const code of codes) {
+    for (let i = 0; i < (growth.get(code) ?? 0); i++) {
+      out.push({ source: `invite:${code}`, exact: false });
+    }
+  }
+  return out;
+}
+
 /**
  * Discord does not tell you which invite a member used. The standard trick is
  * to keep a snapshot of every invite's use count and, on a join, find the code
