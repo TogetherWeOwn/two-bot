@@ -133,11 +133,11 @@ workflows on 2026-08-19.
 |---|---|---|---|
 | `two-bot` | `check` | `ci.yml`, job `check` | typecheck + tests |
 | `two-bot` | `gitleaks` | `secret-scan.yml`, job `gitleaks` | full-history secret scan |
-| `two-web` | `static` | `ci.yml`, job `static` | Pint + PHPStan level 8 |
-| `two-web` | `tests` | `ci.yml`, job `tests` | Pest unit + feature, real Postgres |
+| `two-web` | `static` | `ci.yml`, job `static` | Pint + PHPStan level 8, and `verify-pipeline.sh --lint` |
+| `two-web` | `pest` | `ci.yml`, job `pest` | Pest unit + feature, real Postgres |
 | `two-web` | `dusk` | `ci.yml`, job `dusk` | Laravel Dusk, real Chrome |
 | `two-web` | `budgets` | `ci.yml`, job `budgets` | Lighthouse budget + WCAG 2.2 AA |
-| `two-web` | `ci` | `ci.yml`, job `ci` | aggregate of the four above |
+| `two-web` | `tests` | `ci.yml`, job `tests` | aggregate of the four above |
 | `two-web` | `gitleaks` | `secret-scan.yml`, job `gitleaks` | full-history secret scan |
 | `two-design` | `tests` | `ci.yml`, job `tests` | WCAG 2.2 AA contrast over 43 pairings, plus a floor on how many are asserted |
 | `two-design` | `gitleaks` | `secret-scan.yml`, job `gitleaks` | full-history secret scan |
@@ -148,20 +148,36 @@ is the job — `gitleaks`. Requiring `secret-scan` would wait forever on a check
 that never arrives, which looks like a hang rather than a misconfiguration. When
 you rename a CI job, update the protection.
 
-`--verify` now reads the workflow files on `main` and warns when a required
-context matches no job in any of them, which is the only cheap way to catch that
-mistake before a PR sits there saying "Expected" for an hour. It warns rather
-than fails: a workflow can legitimately still be on a branch awaiting its first
-review.
+**`ci` is not in the list, and must never be.** `CI` is the *workflow* name in
+`two-web`; no job is called that. GitHub's two failure modes here are asymmetric
+and only one of them is loud:
 
-**Why every leaf job is listed and not just the `ci` aggregate.** For branch
-protection, a *skipped* check counts as passed. A job declared with plain
-`needs: [static, tests, dusk, budgets]` is **skipped**, not failed, when one of
-those goes red — so requiring only `ci` would let a red PR merge. Two things fix
-it and we do both: the aggregate should be `if: always()` and explicitly fail on
-any non-success result, and protection requires the leaves directly. Listing
-`ci` as well still buys the original benefit — a job added to its `needs:` later
-is covered without touching protection.
+- a **skipped** required check counts as **passed** — a badly declared aggregate
+  lets a red PR merge;
+- an **absent** required check **blocks the pull request forever** — `main`
+  becomes unmergeable the moment protection is applied, and it presents as slow
+  CI, not as a broken rule.
+
+`--verify` reads the workflow files on `main`, works out what each job will
+actually report as (its `name:` if it sets one, its id otherwise), and **fails**
+when a required context matches none of them. It considers only workflows that
+trigger on `pull_request`, since a push-only workflow like `main-guard` never
+reports on a PR. It stays a warning in the two cases where a miss is not
+evidence of a bug: the repo has no workflows on `main` yet (still on a branch
+awaiting review), or the parser read nothing at all.
+
+It also warns the other way — a job that reports on PRs but is not required can
+go red while the PR merges. Advisory jobs are legitimate; surprises are not.
+
+**Why every leaf job is listed and not just the aggregate.** For branch
+protection, a *skipped* check counts as passed. An aggregate declared with plain
+`needs:` is **skipped**, not failed, when one of those goes red — so requiring
+only the aggregate would let a red PR merge. `two-web`'s `tests` does carry
+`if: always()` with a guard covering `failure`, `cancelled` **and** `skipped`
+(QA, TWO-22), so the aggregate alone would in fact be sound. Naming the leaves
+as well means protection does not depend on that guard staying correct. The cost
+is that the list has to be updated when a job is added or renamed — which is
+what the two `--verify` checks above are for.
 
 `--verify` now fails if any expected context is missing from the live rule, so a
 check quietly dropped from the list gets caught instead of discovered during an
