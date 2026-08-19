@@ -68,6 +68,14 @@ export interface MockDiscord {
   memberAcceptRules(memberId: string, username: string): void;
   /** Simulate the member choosing games in the picker. */
   selectGames(memberId: string, username: string, keys: string[], heldRoleIds?: string[]): void;
+
+  // --- internal actions endpoint (TWO-59) -----------------------------------
+  /** Seed the roles GET /guilds/x/members/y reports, so already_held is reachable. */
+  setMemberRoles(memberId: string, roleIds: string[]): void;
+  /** Seed an existing member, so PUT /guilds/x/members/y answers 204 not 201. */
+  addExistingMember(memberId: string): void;
+  /** True once the bot has added this member through the one-click join path. */
+  hasMember(memberId: string): boolean;
 }
 
 const VIEW_CHANNEL = 1n << 10n;
@@ -274,6 +282,8 @@ export async function startMockDiscord(
   const lighting: Lighting = opts.lighting ?? 'dark';
   /** Roles the bot has granted per member, so PATCH member can echo them back. */
   const memberRoles = new Map<string, string[]>();
+  /** Who is in the guild, for the one-click join path (TWO-59). */
+  const existingMembers = new Set<string>();
 
   /**
    * Non-GET routes the onboarding flow touches. Everything returns a
@@ -353,6 +363,27 @@ export async function startMockDiscord(
       });
     }
 
+    // One-click join, PUT /guilds/{guild}/members/{user} (TWO-59). Discord
+    // answers 201 when it added them and 204 when they were already in, and
+    // the endpoint reports those as two different outcomes.
+    if (m && method === 'PUT') {
+      const id = m[1];
+      if (existingMembers.has(id)) return noContent();
+      existingMembers.add(id);
+      return json(
+        {
+          user: userPayload(id, 'oneclick'),
+          roles: memberRoles.get(id) ?? [],
+          joined_at: new Date().toISOString(),
+          deaf: false,
+          mute: false,
+          flags: 0,
+          pending: false,
+        },
+        201,
+      );
+    }
+
     // Single role add/remove.
     m = /\/api\/v10\/guilds\/\d+\/members\/(\d+)\/roles\/(\d+)$/.exec(url);
     if (m) {
@@ -411,6 +442,21 @@ export async function startMockDiscord(
         url: `ws://127.0.0.1:${port}/gw`,
         shards: 1,
         session_start_limit: { total: 1000, remaining: 999, reset_after: 60_000, max_concurrency: 1 },
+      });
+    }
+
+    // Read one member. role.assign uses this to tell "role added" from "you
+    // already had it", so the roles it reports have to be the seeded ones.
+    const member = /\/api\/v10\/guilds\/\d+\/members\/(\d+)$/.exec(url);
+    if (member) {
+      return json({
+        user: userPayload(member[1], 'member'),
+        roles: memberRoles.get(member[1]) ?? [],
+        joined_at: new Date().toISOString(),
+        deaf: false,
+        mute: false,
+        flags: 0,
+        pending: false,
       });
     }
 
@@ -645,6 +691,18 @@ export async function startMockDiscord(
         entitlements: [],
         authorizing_integration_owners: {},
       });
+    },
+
+    setMemberRoles(memberId: string, roleIds: string[]) {
+      memberRoles.set(memberId, roleIds);
+    },
+
+    addExistingMember(memberId: string) {
+      existingMembers.add(memberId);
+    },
+
+    hasMember(memberId: string) {
+      return existingMembers.has(memberId);
     },
 
     async close() {

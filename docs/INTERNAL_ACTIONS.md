@@ -1,9 +1,21 @@
 # The internal actions endpoint
 
-**Status: `v0.1` — specification, not yet implemented. TWO-24.**
-Published now so the website can be built against it. The wire format below is
-what I will implement; if something here is wrong for the caller, say so on
-TWO-24 before it is code rather than after.
+**Status: `v0.2` — the pre-Postgres slice is built and tested (TWO-59). The
+rest is still specification (TWO-24).**
+
+What exists today, in `src/internal/`: the listener with its private-interface
+guard, HMAC verification, the skew and replay checks, per-key rate limiting,
+the full typed error envelope, structured per-request logging, and the two
+naturally-idempotent actions — `role.assign` (live) and `guild.add_member`
+(built, and switched off until the CEO signs off; see §3).
+
+Still specification: `announcement.post` and `event.upsert`, the durable
+`idempotency_key → result` store, and the durable audit trail. Those need
+Postgres, so they wait on TWO-18. Calling one of them today returns a typed
+`action_not_allowed`, not a 500.
+
+The wire format below is what is implemented. If something here is wrong for
+the caller, say so on TWO-24.
 
 The website never holds the Discord bot token. When it needs something to
 happen in the TWO server, it calls **one** endpoint on the bot, over the
@@ -135,10 +147,22 @@ point of the table: the site degrades gracefully, it does not white-screen.
 
 | Action | Status | Idempotency | Discord permission needed |
 |---|---|---|---|
-| `role.assign` | **approved** (TWO-24) | natural — assigning a held role is a no-op | Manage Roles |
-| `announcement.post` | **approved** (TWO-24) | **needs key** | View Channel + Send Messages in the target channel |
-| `event.upsert` | **approved** (TWO-24) | **needs key** on create; update is natural | Manage Events |
-| `guild.add_member` | **proposed — awaiting CEO sign-off** (TWO-57) | natural — Discord returns 204 if already a member | Create Instant Invite |
+| `role.assign` | **approved and live** (TWO-24) | natural — assigning a held role is a no-op | Manage Roles |
+| `announcement.post` | approved, not built — needs the durable store | **needs key** | View Channel + Send Messages in the target channel |
+| `event.upsert` | approved, not built — needs the durable store | **needs key** on create; update is natural | Manage Events |
+| `guild.add_member` | **built and tested, switched off — awaiting CEO sign-off** (TWO-57) | natural — Discord returns 204 if already a member | Create Instant Invite |
+
+`guild.add_member` only answers when `TWO_INTERNAL_ALLOW_ADD_MEMBER=1`, and
+that flag is the record of the CEO's decision rather than a convenience. With
+it unset the endpoint returns `action_not_allowed` and makes no Discord call —
+the same answer it gives for an action that does not exist. Nothing about the
+member-recruiting path is waiting on engineering; it is waiting on approval.
+
+There is a second allowlist inside `role.assign`: the `role_key` map. It starts
+from the roles a member can already self-assign in the onboarding menu
+(`src/onboarding/catalog.ts`), so handing it to the website grants no privilege
+a member does not already have by clicking. `TWO_INTERNAL_ROLE_KEYS` adds
+named exceptions to that, one snowflake at a time.
 
 **Natural** means Discord itself makes the repeat harmless, so the bot needs no
 stored state to be safe. **Needs key** means a repeat would produce a second
@@ -379,6 +403,8 @@ else, and it rotates independently of the bot token.
 ## 10. Tests, before the code
 
 Named here so the list is agreed before there is anything to argue about.
+Everything below is green as of TWO-59 except the one marked *deferred*, which
+needs the durable store.
 
 - Valid request for each allowlisted action → the expected Discord call.
 - Tampered body, valid signature → `unauthorized`.
@@ -387,6 +413,7 @@ Named here so the list is agreed before there is anything to argue about.
 - Timestamp 121s old, and 121s in the future → `stale_request`.
 - Replayed nonce inside the window → `replayed`, **and no Discord call made**.
 - Same idempotency key, fresh nonce → the stored result, **and no second post**.
+  *(deferred — needs the durable store, TWO-18.)*
 - Action not on the allowlist → `action_not_allowed`.
 - Malformed JSON, missing field, wrong type → `malformed`.
 - Over the rate limit → `429` with `Retry-After`.
@@ -397,8 +424,34 @@ Named here so the list is agreed before there is anything to argue about.
 
 ---
 
+---
+
+## 11. Running it
+
+Off by default. A bot with none of these set behaves exactly as it did before
+and opens no port.
+
+| Variable | Meaning |
+|---|---|
+| `TWO_INTERNAL_ACTIONS` | `1` to run the listener at all. |
+| `TWO_INTERNAL_BIND_HOST` | Private address to bind. Default `127.0.0.1`. A public or wildcard address refuses to start. |
+| `TWO_INTERNAL_PORT` | Default `8787`. |
+| `TWO_INTERNAL_KEYS` | `key-id:secret,key-id:secret`. Minimum 32 characters each. A real secret — see `docs/SECRETS.md`. |
+| `TWO_INTERNAL_ROLE_KEYS` | Extra `role-key:<snowflake>` pairs beyond the self-assignable set. |
+| `TWO_INTERNAL_ALLOW_ADD_MEMBER` | `1` to enable `guild.add_member`. **Requires the CEO's sign-off.** |
+
+`DISCORD_GUILD_ID` is required when the endpoint is on — the actions act on one
+guild, and guessing which is not a thing this should do.
+
+Tests: `test/unit.internalauth.test.ts` (signature, skew, replay, buckets, bind
+guard, error table) and `test/e2e.internalactions.test.ts` (the §10 list over
+real HTTP, against `tools/mock-discord`).
+
+---
+
 ## Changelog
 
 | Version | Date | Change |
 |---|---|---|
 | `v0.1` | 2026-08-19 | First specification. Three approved actions from TWO-24, plus `guild.add_member` proposed on TWO-57 and awaiting CEO sign-off. |
+| `v0.2` | 2026-08-19 | TWO-59: the pre-Postgres slice implemented — listener, HMAC, skew, replay, rate limits, error envelope, request logging, `role.assign` live and `guild.add_member` built but switched off. No wire-format change. |

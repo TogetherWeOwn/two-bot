@@ -10,6 +10,10 @@ import { RaidWatch } from './analytics/raidWatch.ts';
 import { makeRaidAnnouncer } from './discord/raidAlert.ts';
 import { OnboardingRecorder } from './onboarding/flow.ts';
 import { flagInactive } from './jobs/inactivity.ts';
+import { loadInternalActionsConfig } from './internal/config.ts';
+import { startInternalActions, type InternalServer } from './internal/server.ts';
+import { KeyRing } from './internal/signing.ts';
+import { DiscordActions } from './internal/discordActions.ts';
 
 const cfg = loadConfig();
 setLogLevel(cfg.logLevel);
@@ -69,6 +73,30 @@ if (cfg.landingChannelIds.length === 0) {
   });
 }
 
+// The internal actions endpoint (TWO-24 / TWO-59). Off unless
+// TWO_INTERNAL_ACTIONS=1 - a bot without it runs exactly as before and opens
+// no port. When it is on, a bad bind address or a missing key is a startup
+// crash rather than a quietly-exposed remote control for the server.
+const internalCfg = loadInternalActionsConfig();
+let internal: InternalServer | null = null;
+if (internalCfg) {
+  if (!cfg.guildId) {
+    throw new Error('TWO_INTERNAL_ACTIONS=1 requires DISCORD_GUILD_ID - the actions act on one guild.');
+  }
+  internal = await startInternalActions({
+    host: internalCfg.host,
+    port: internalCfg.port,
+    keys: new KeyRing(internalCfg.keys),
+    guildId: cfg.guildId,
+    discord: new DiscordActions({
+      token: cfg.discordToken,
+      base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+    }),
+    roleKeys: internalCfg.roleKeys,
+    enabled: internalCfg.enabled,
+  });
+}
+
 // Inactivity sweep once an hour. Cheap query; no outbound messages.
 const sweep = setInterval(
   () => {
@@ -83,6 +111,7 @@ sweep.unref();
 async function shutdown(signal: string) {
   log.info('shutdown', { signal });
   clearInterval(sweep);
+  if (internal) await internal.close();
   try {
     await client.destroy();
   } catch {
