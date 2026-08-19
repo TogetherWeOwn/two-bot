@@ -48,6 +48,7 @@ run() {
 }
 
 FAILED=0
+ADVISORY_MAIN=0
 
 # ---------------------------------------------------------------------------
 say "Preflight"
@@ -78,6 +79,16 @@ case "$PLAN" in
     warn "GitHub Free: branch protection on PRIVATE repos is not enforced."
     warn "Protection will be written but GitHub will ignore it until the org is"
     warn "on Team (\$4/user/month) or the repos go public. See docs/GITHUB.md."
+    warn ""
+    warn "Plan B applies instead: the .githooks/pre-push hook refuses a direct"
+    warn "push locally, and .github/workflows/main-guard.yml reports one loudly"
+    warn "after the fact. Together that is a speed bump and an alarm, not a lock."
+    if [ "${TWO_ACCEPT_UNPROTECTED_MAIN:-0}" != "1" ]; then
+      warn ""
+      warn "Set TWO_ACCEPT_UNPROTECTED_MAIN=1 to say out loud that this is the"
+      warn "accepted posture. Without it --verify will fail, on purpose: an"
+      warn "unguarded main should never become true by default."
+    fi
     ;;
   *) ok "plan supports branch protection on private repos" ;;
 esac
@@ -145,6 +156,14 @@ push_history() {
   if [ "$branch" != "$DEFAULT_BRANCH" ]; then
     run git -C "$path" branch -m "$branch" "$DEFAULT_BRANCH"
     ok "$name: renamed $branch -> $DEFAULT_BRANCH"
+  fi
+
+  # Hooks live in .githooks/ so they are versioned; git only looks there if
+  # told to. Do it here so the first clone of each repo is already guarded.
+  if [ -d "$path/.githooks" ]; then
+    run git -C "$path" config core.hooksPath .githooks
+    run chmod +x "$path/.githooks/pre-push" "$path/.githooks/pre-commit"
+    ok "$name: local hooks active (core.hooksPath=.githooks)"
   fi
 
   if [ "$DRY_RUN" = 1 ]; then
@@ -275,6 +294,25 @@ verify_repo() {
     [ "$selfapp" = "True" ]   && ok "$name: self-approval blocked"                    || { bad "$name: self-approval NOT blocked"; FAILED=1; }
     [ "$checks" != "NONE" ]   && ok "$name: CI required ($checks)"                    || { bad "$name: no required status checks - a red PR can merge"; FAILED=1; }
     [ "$admins" = "True" ]    && ok "$name: admins included, no bypass"               || { bad "$name: admins can bypass"; FAILED=1; }
+  elif [ "$PROTECTION_AVAILABLE" = 0 ]; then
+    # Expected on a free org with a private repo. Report it as what it is, and
+    # then check that Plan B is actually in place rather than assumed.
+    warn "$name: main is NOT enforced by GitHub (free plan, private repo)"
+    ADVISORY_MAIN=1
+
+    if gh api "repos/$ORG/$name/contents/.github/workflows/main-guard.yml" >/dev/null 2>&1; then
+      ok "$name: main-guard workflow present - a direct push gets reported"
+    else
+      bad "$name: main-guard.yml MISSING. Nothing would notice a direct push at all."
+      FAILED=1
+    fi
+
+    if [ "${TWO_ACCEPT_UNPROTECTED_MAIN:-0}" != "1" ]; then
+      bad "$name: unguarded main is not an accepted state."
+      bad "  Either put the org on GitHub Team, or re-run with"
+      bad "  TWO_ACCEPT_UNPROTECTED_MAIN=1 to record that this is a deliberate choice."
+      FAILED=1
+    fi
   else
     bad "$name: NO branch protection on $DEFAULT_BRANCH - direct pushes are allowed"
     FAILED=1
@@ -298,7 +336,21 @@ verify_repo "$BOT_REPO"
 verify_repo "$WEB_REPO"
 
 echo
-if [ "$FAILED" = 0 ]; then
+if [ "$FAILED" = 0 ] && [ "$ADVISORY_MAIN" = 1 ]; then
+  say "Passed, with main guarded by convention only"
+  echo "   The org is on GitHub Free and the repos are private, so GitHub enforces"
+  echo "   nothing on $DEFAULT_BRANCH. What is actually protecting it:"
+  echo "     - .githooks/pre-push refuses a direct push, in each clone that installed it"
+  echo "     - main-guard.yml turns a direct push into a red X within a minute"
+  echo "     - CI and gitleaks still run on every PR and on $DEFAULT_BRANCH"
+  echo
+  echo "   Prove the hook works, once, per clone:"
+  echo "     git -C $BOT_PATH commit --allow-empty -m 'hook check'"
+  echo "     git -C $BOT_PATH push origin $DEFAULT_BRANCH   # must be REFUSED locally"
+  echo
+  echo "   This becomes real protection the day the org moves to GitHub Team."
+  exit 0
+elif [ "$FAILED" = 0 ]; then
   say "All checks passed"
   echo "   Last step is manual and cannot be skipped - prove it actually blocks:"
   echo "     git -C $BOT_PATH push origin $DEFAULT_BRANCH   # must be REJECTED"
