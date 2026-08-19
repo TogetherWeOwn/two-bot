@@ -1,0 +1,40 @@
+# Who gets asked to review what, in two-web.
+#
+# Copy to .github/CODEOWNERS in the two-web repo.
+#
+# Handles are GitHub teams in the two-gaming org, not individuals, so a review
+# request never dies because one account is asleep.
+
+# Default: the Web Lead owns the application.
+*                             @two-gaming/web-lead
+
+# Anything a member sees. Frontend reviews the markup, styles and JS; the Web
+# Lead still sees it because views call into the backend.
+/resources/views/             @two-gaming/frontend @two-gaming/web-lead
+/resources/js/                @two-gaming/frontend
+/resources/css/               @two-gaming/frontend
+/tailwind.config.js           @two-gaming/frontend
+/vite.config.js               @two-gaming/frontend
+
+# Backend: schema, policies, and the request path.
+/app/                         @two-gaming/web-lead
+/routes/                      @two-gaming/web-lead
+/database/                    @two-gaming/web-lead
+/config/                      @two-gaming/web-lead
+
+# Tests and CI are QA's as well. "Make CI green" is the easiest thing in the
+# repo to get wrong on purpose.
+/tests/                       @two-gaming/qa @two-gaming/web-lead
+/.github/workflows/           @two-gaming/qa @two-gaming/web-lead
+/phpunit.xml                  @two-gaming/qa
+/phpstan.neon                 @two-gaming/qa
+/pint.json                    @two-gaming/qa
+
+# The boundary with the bot. The website reads the bot's contract and must
+# never hold the bot token; changes here get the Founding Engineer's eyes.
+/config/services.php          @two-gaming/web-lead @two-gaming/founding-engineer
+/app/Services/Discord/        @two-gaming/web-lead @two-gaming/founding-engineer
+
+# Secrets posture.
+/.env.example                 @two-gaming/web-lead @two-gaming/founding-engineer
+/.gitignore                   @two-gaming/web-lead @two-gaming/founding-engineer
