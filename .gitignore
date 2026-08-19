@@ -1,5 +1,9 @@
 node_modules/
-data/
+data/*
+# the audit snapshots are the whole point of the audit - they are the rollback
+# source for the server migration and the diff base for the next audit
+!data/server-audit-*.json
+!data/server-audit-*.csv
 backups/
 *.db
 *.db-wal
