@@ -145,10 +145,15 @@ export function isExcluded(
  * A SQL fragment that drops the listed windows, plus its parameters. Appended
  * to an existing WHERE, so it always starts with AND. Empty when the event type
  * has no windows, which keeps the caller free of special cases.
+ *
+ * `column` is for querying the `members` projection instead of the event log:
+ * the raid windows are defined by when people joined, and in `members` that
+ * instant is called `joined_at`.
  */
 export function excludeClause(
   eventType: string,
   anomalies: Anomaly[] = ANOMALIES,
+  column = 'occurred_at',
 ): { sql: string; params: string[] } {
   const hits = anomalies.filter((a) => a.eventTypes.includes(eventType));
   if (hits.length === 0) return { sql: '', params: [] };
@@ -156,7 +161,7 @@ export function excludeClause(
   const terms = hits.map((a) => {
     const { from, to } = windowBounds(a);
     params.push(from, to);
-    return '(occurred_at >= ? AND occurred_at < ?)';
+    return `(${column} >= ? AND ${column} < ?)`;
   });
   return { sql: ` AND NOT (${terms.join(' OR ')})`, params };
 }
