@@ -1,0 +1,191 @@
+role_id,name,position,hoisted,mentionable,managed_by_integration,colored,permission_class,permissions,granted_by_onboarding,separator_header,members_holding
+508654771276873729,SySOp,200,false,true,false,false,administrator,28587300746233,false,false,1
+1078868065275609171,TWO-BOT,198,false,false,true,false,administrator,805362699,false,false,0
+1060912046012633148,NPC,197,false,false,false,false,basic,1071697478209,false,false,0
+1092632907190894593,Black,196,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632909468405831,Grey,195,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632911754309702,White,194,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632914040197140,Dark red,193,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632916242219059,Rose,192,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632918406471690,Mona,191,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632920348438550,Red,190,false,false,false,true,cosmetic (no permissions),0,false,false,1
+1092632923087323166,Vermilion,189,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632925276753952,Tangerine,188,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632927944318976,Orange,187,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632930741923921,Mango Tango,186,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632933052993646,Koromiko,185,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632935183679619,Yellow,184,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632937368928358,Lemon Yellow,183,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632939776442400,Pale Canary,182,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632942129459230,Lime,181,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632944260157541,Green Yellow,180,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632946474745896,Reef,179,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632949192675342,Green,178,false,false,false,true,cosmetic (no permissions),0,false,false,1
+1092632951977672724,Screamin' Green,177,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632954381013042,Mint Green,176,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632956813709422,Spring Green,175,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632959204470884,Aquamarine,174,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632961347768350,Aero,173,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632963583332452,Bright Turquoise,172,false,false,false,true,cosmetic (no permissions),0,false,false,1
+1092632965990842419,Aqua,171,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632968268361799,Fresh Air,170,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632970470379520,Cyan,169,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632972626243604,Malibu,168,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632974773719110,Clear water,167,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632977311285319,Azure Radiance,166,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632979639111850,Blueberry,165,false,false,false,true,cosmetic (no permissions),0,false,false,1
+1092632981803372624,Anakiwa,164,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632983934095360,Blue Ribbon,163,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632986291273758,Indigo,162,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632988736573521,Melrose,161,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632990808559626,Blue,160,false,false,false,true,cosmetic (no permissions),0,false,false,1
+1092632993052495923,Royal Blue,159,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632995195785287,Ship Cove,158,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092632997561380955,Electric Violet,157,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092633000421904544,Heliotrope,156,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092633003492126780,Mauve,155,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092633005752864859,Violet,154,false,false,false,true,cosmetic (no permissions),0,false,false,1
+1092633008277827647,Amethyst,153,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092633011016699995,East Side,152,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092633013369712660,Magenta,151,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092633015466860564,Pink Flamingo,150,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092633018222514236,Lavender Rose,149,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092633020722331738,Hollywood Cerise,148,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092633022953705502,Hot Pink,147,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1092633025411563571,Cotton Candy,146,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1140377116370804756,Member of the Month,145,true,false,false,true,cosmetic (no permissions),0,false,false,0
+1105879962499690549,Wick,144,false,false,true,false,administrator,8,false,false,0
+1101315895390900295,⠀⠀⠀⠀⠀⠀⠀MANAGERIAL RANKS⠀⠀⠀⠀⠀⠀⠀⠀⠀,143,false,false,false,false,cosmetic (no permissions),0,false,true,7
+1078757544169848933,Officer,142,true,true,false,false,moderation,10986526343127,false,false,3
+1078757334504976384,Legate,141,true,true,false,false,basic,1071697478209,false,false,0
+1078757266469175386,Game Master,140,true,true,false,false,moderation,10967466764103,false,false,1
+1078757184021733426,Captain,139,true,true,false,false,moderation,10967466764103,false,false,0
+1078756990710452365,Lieutenant,138,true,true,false,false,moderation,10967466766151,false,false,0
+1101312355608035398,⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀SUPPORTERS⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀,137,false,false,false,false,cosmetic (no permissions),0,true,true,46
+1112811366944874536,Titanium Titan,136,true,false,false,true,basic,71199856074305,false,false,0
+1112811276771528855,Diamond Defender,135,true,false,false,true,basic,71199856074305,false,false,0
+1112810451785498654,Ruby Royalty,134,true,false,false,true,basic,71199856074305,false,false,0
+1112809780222906509,Emerald Elite,133,true,false,false,true,basic,71199856074305,false,false,0
+1112809656885202974,Platinum Player,132,true,false,false,true,basic,71199856074305,false,false,0
+1112809538396098720,Gold Gamer,131,true,false,false,true,basic,71199856074305,false,false,0
+1112809426349457459,Silver Sentinel,130,true,false,false,true,basic,71199856074305,false,false,0
+1112809331398815824,Iron Insider,129,true,false,false,true,basic,71199856074305,false,false,0
+1112809226427957379,Bronze Battler,128,true,false,false,true,basic,71199856074305,false,false,0
+1112801161163055255,Copper Club,127,true,false,false,true,basic,71199856074305,false,false,0
+1051260096333750322,Benefactors,125,true,false,false,false,basic,1071630373440,false,false,0
+1051260362873385000,Backers,123,true,false,false,false,basic,1071630373440,false,false,0
+1051260579022643281,Subscribers,121,true,false,false,false,basic,1071630373440,false,false,0
+1051260775995551784,Supporters,119,true,false,false,false,basic,1071630373440,false,false,0
+1009516637600370719,Server Booster,118,true,false,true,true,mention-everyone,1071630504512,false,false,2
+1092823497924956300,LFC Upvoter,117,false,false,false,false,basic,39582418599936,false,false,6
+1078863839199772702,Live,116,true,true,false,true,cosmetic (no permissions),0,false,false,0
+1101315995764805712,⠀⠀⠀⠀⠀⠀⠀RECREATIONAL RANKS⠀⠀⠀⠀⠀⠀⠀⠀,115,false,false,false,false,cosmetic (no permissions),0,true,true,46
+448587293154869250,Founders,114,true,false,false,false,cosmetic (no permissions),0,false,false,5
+1104855809323696208,Unverified,113,false,false,false,false,cosmetic (no permissions),0,false,false,4
+1078756016071659605,Legend,112,true,false,false,false,basic,1071697478209,false,false,6
+1078755949814231160,Veteran,111,true,false,false,false,basic,1071697478209,false,false,7
+1078755880343965777,Soldier,110,true,false,false,false,basic,1071697478209,false,false,17
+1078755666191188029,Luminary,109,true,false,false,false,basic,1071697478209,false,false,1
+1078755594950955189,Maven,108,true,false,false,false,basic,1071697478209,false,false,3
+1052647673724944484,Initiate,107,true,false,false,false,basic,968552204865,false,false,1
+1078755185423286372,Member,106,true,false,false,false,basic,968552205889,false,false,41
+1144789677057003636,Prospect,105,true,false,false,false,cosmetic (no permissions),0,true,false,51
+448584234907729940,TWO.gg Member,104,false,false,false,false,basic,968552205889,false,false,2
+1101314731089862778,⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀STATUS⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀,103,false,false,false,false,cosmetic (no permissions),0,true,true,47
+1080508643558047754,Participant,102,false,false,false,false,cosmetic (no permissions),0,false,false,5
+1101170473108242452,⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀PLATFORMS⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀,101,false,false,false,false,cosmetic (no permissions),0,true,true,47
+1092247753574330458,PC,100,false,false,false,false,cosmetic (no permissions),0,true,false,27
+1087930995875008522,Xbox,99,false,false,false,false,cosmetic (no permissions),0,true,false,14
+1087931108945039470,Playstation,98,false,false,false,false,cosmetic (no permissions),0,true,false,6
+1092248449786855595,Switch,97,false,false,false,false,cosmetic (no permissions),0,true,false,10
+1092250849717264475,Mobile,96,false,false,false,false,cosmetic (no permissions),0,true,false,8
+1092570654349475863,Color-Chan,94,false,false,true,false,moderation,292326337616,false,false,0
+1051273169782181923,carl-bot,93,false,false,true,false,moderation,870576177,false,false,0
+1078424166212055174,Statbot,92,false,false,true,false,administrator,275146457112,false,false,0
+1063280360676409405,Streamer,89,false,false,false,false,cosmetic (no permissions),0,false,false,2
+448890318989819904,TWO,88,false,true,false,true,mention-everyone,6478615104,false,false,0
+465229022130077697,Graphic Designer,87,true,true,false,false,mention-everyone,6478615104,false,false,0
+1063245872328081439,Pokemon,86,false,false,false,false,cosmetic (no permissions),0,false,false,0
+1101297337919340585,⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀GAMES⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀,85,false,false,false,false,cosmetic (no permissions),0,false,true,24
+1051272877871222915,Shooter Games,84,false,true,false,false,cosmetic (no permissions),0,true,false,27
+1055496084434206852,Automobiles,83,false,false,false,false,basic,1071630373440,false,false,0
+1055499052801855528,Music,82,false,false,false,false,cosmetic (no permissions),0,false,false,1
+1055499317361782864,Movies & TV,81,false,false,false,false,cosmetic (no permissions),0,true,false,0
+1055499328195666022,Sports,80,false,false,false,false,cosmetic (no permissions),0,false,false,0
+1056439099701076008,guns,79,false,false,false,false,basic,1071630373440,false,false,1
+1063252694543913020,Books,78,false,false,false,false,cosmetic (no permissions),0,false,false,0
+1063252753255776256,Coding,77,false,false,false,false,cosmetic (no permissions),0,false,false,0
+1063252816967249940,GFX,76,false,false,false,false,cosmetic (no permissions),0,false,false,0
+1063255307410739241,Retro Games,75,false,false,false,false,cosmetic (no permissions),0,false,false,0
+1063255343884406864,Tabletop Games,74,false,false,false,false,cosmetic (no permissions),0,false,false,0
+1063330746242191372,PatchBot,73,false,false,true,false,basic,120795963392,false,false,0
+1065438198316138507,warthunder,72,false,false,false,false,cosmetic (no permissions),0,false,false,0
+1065438396069191700,fallguys,71,false,false,false,false,cosmetic (no permissions),0,false,false,0
+1065438504521322526,rocketleague,70,false,false,false,false,cosmetic (no permissions),0,false,false,0
+1065438630253953044,new role,69,false,false,false,false,cosmetic (no permissions),0,false,false,0
+1078084405026889750,Referral Contest Winner,68,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1084500694423318558,new role,66,false,false,false,false,cosmetic (no permissions),0,false,false,0
+1087192823767515219,Staff,65,false,false,false,false,moderation,32957699452871,false,false,6
+1101306065246752768,⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀LOCATION⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀,64,false,false,false,false,cosmetic (no permissions),0,true,true,42
+1087897546741006456,North America,63,false,false,false,false,cosmetic (no permissions),0,true,false,28
+1087897623538704475,Europe,62,false,false,false,false,cosmetic (no permissions),0,true,false,1
+1087897738265509938,South America,61,false,false,false,false,cosmetic (no permissions),0,true,false,1
+1087897790681731122,Asia,60,false,false,false,false,cosmetic (no permissions),0,true,false,3
+1087897935045476402,Africa,59,false,false,false,false,cosmetic (no permissions),0,true,false,0
+1087898062669750353,Oceania,58,false,false,false,false,cosmetic (no permissions),0,true,false,1
+1087930764974358568,Twitch,57,false,false,false,false,cosmetic (no permissions),0,false,false,0
+1087930859346206740,TikTok,56,false,false,true,false,cosmetic (no permissions),0,false,false,0
+1087930904866979931,Steam,55,false,false,false,false,cosmetic (no permissions),0,false,false,0
+1087931620964708392,League of Legends,54,false,false,true,false,cosmetic (no permissions),0,false,false,0
+1087931680985194496,Battle.net,53,false,false,true,false,cosmetic (no permissions),0,false,false,0
+1087931739126628353,Epic Games,52,false,false,false,false,cosmetic (no permissions),0,false,false,0
+1087931795347099748,Riot Games,51,false,false,false,false,cosmetic (no permissions),0,false,false,0
+1087931842432356373,Reddit,50,false,false,false,false,cosmetic (no permissions),0,false,false,0
+1087931915933323329,Instagram,49,false,false,false,false,cosmetic (no permissions),0,false,false,0
+1087931959864471612,Twitter,48,false,false,true,false,cosmetic (no permissions),0,false,false,0
+1087932006278647908,Facebook,47,false,false,true,false,cosmetic (no permissions),0,false,false,0
+1087932058388664350,Youtube,46,false,false,true,false,cosmetic (no permissions),0,false,false,0
+1087932662519443546,Spotify,45,false,false,true,false,cosmetic (no permissions),0,false,false,1
+1088287410632261642,DiscordServers.com,44,false,false,true,false,basic,1,false,false,0
+1101297505179816017,⠀⠀⠀⠀⠀⠀⠀⠀⠀NOTIFICATIONS⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀,43,false,false,false,false,cosmetic (no permissions),0,true,true,46
+1088981961789415546,LFG,42,false,false,false,false,cosmetic (no permissions),0,false,false,6
+1088982029523226728,News,41,false,false,false,false,cosmetic (no permissions),0,true,false,24
+1088982099375181864,Events & Giveaways,40,false,false,false,false,cosmetic (no permissions),0,true,false,18
+1088982263292756059,DM's Open,39,false,false,false,false,cosmetic (no permissions),0,true,false,17
+1088982372122374185,DM's Closed,38,false,false,false,false,cosmetic (no permissions),0,true,false,10
+1090627565934366863,Gold Role,37,false,false,false,true,cosmetic (no permissions),0,false,false,0
+1090651387236450416,Welcome Team,36,false,false,false,false,cosmetic (no permissions),0,true,false,13
+1101297643503767582,⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀CHAT RANK⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀,35,false,false,false,false,cosmetic (no permissions),0,true,true,24
+1094046641008418816,NSFW,34,false,false,false,false,cosmetic (no permissions),0,true,false,10
+1103318655728627827,StickyBot,33,false,false,true,false,mention-everyone,140123794496,false,false,0
+1112759027554844763,Ticket Manager,31,false,false,false,false,cosmetic (no permissions),0,false,false,7
+1113180728381931630,Spectator,30,false,false,false,false,cosmetic (no permissions),0,false,false,32
+1115004404949590116,Suggestions Bot,29,false,false,true,false,basic,309238033408,false,false,0
+1132805194707644529,⁣     ▲⁣            Member Roles⁣            ▲⁣,28,false,false,false,false,cosmetic (no permissions),0,false,false,1
+1132805520953184297,⁣     ▲⁣       Streamer Roles⁣      ▲,27,false,false,false,false,cosmetic (no permissions),0,false,false,0
+1119666971584237679,Horror Games,26,false,false,false,false,cosmetic (no permissions),0,true,false,6
+1132805628172173322,⁣     ▲⁣        Game Roles⁣        ▲,25,false,false,false,false,cosmetic (no permissions),0,false,false,0
+1135005206841663490,ChronicleBot,24,false,false,true,false,mention-everyone,17620103785536,false,false,0
+1138920512601464915,Raid Organizer,23,false,false,true,false,moderation,17995913193552,false,false,0
+1146631068787671110,TWO Battlepass Lvl 1-10,22,false,false,false,false,cosmetic (no permissions),0,false,false,5
+1146631222395670538,TWO Battlepass Lvl 11-30,21,false,false,false,false,cosmetic (no permissions),0,false,false,7
+1146631481461055558,TWO Battlepass Lvl 31-50,20,false,false,false,false,cosmetic (no permissions),0,false,false,3
+1147419475042377751,Restream Bot,19,false,false,true,false,basic,84032,false,false,0
+1149888357439127573,Active Member Giveaway,18,false,false,false,false,cosmetic (no permissions),0,false,false,10
+1179233034713702511,Survival Games,16,false,false,false,false,cosmetic (no permissions),0,true,false,11
+1179233301295284385,CounterStrike,15,false,false,false,false,cosmetic (no permissions),0,false,false,0
+1179233886178394142,Game Staff: Shooter,14,false,false,false,false,cosmetic (no permissions),0,false,false,1
+1179233934303825920,Game Staff: Survival,13,false,false,false,false,cosmetic (no permissions),0,false,false,0
+1211391129031811204,MEE6,12,false,false,true,false,administrator,364870364415,false,false,0
+1233902645408825437,GameServerApp.com,11,false,false,true,false,moderation,268454912,false,false,0
+1244337842466066497,Medal,10,false,false,true,false,moderation,301296759,false,false,0
+1254778753876496485,TWO Battlepass Lvl 51+,8,false,false,false,false,cosmetic (no permissions),0,false,false,0
+1391522751050809484,឵឵B឵឵ot,7,false,false,true,false,basic,1,false,false,0
+1391524788513673236,Phantom,6,false,false,false,false,cosmetic (no permissions),0,false,false,30
+1399098352314093631,Discord Me,5,false,false,true,false,basic,66561,false,false,0
+1399099000132473077,DISBOARD.org,4,false,false,true,false,moderation,19473,false,false,0
+1399100066287058966,Apollo,3,false,false,true,false,moderation,36776045648,false,false,0
+1399100719012778006,LFG Tool,2,false,false,true,false,moderation,285240336,false,false,0
+1469138374152687751,Autoexec,1,false,false,true,false,cosmetic (no permissions),0,false,false,0
+1539718644953514087,Owen,1,false,false,true,false,administrator,8866461766385663,false,false,0
+326474832151838730,@everyone,0,false,false,false,false,basic,2111339353935424,false,false,0

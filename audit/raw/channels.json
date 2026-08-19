@@ -1,0 +1,4349 @@
+[
+  {
+    "id": "327082608611557377",
+    "type": 5,
+    "last_message_id": "1162905003099435058",
+    "flags": 0,
+    "last_pin_timestamp": "2023-03-22T01:14:21+00:00",
+    "guild_id": "326474832151838730",
+    "name": "📢〢announcements",
+    "parent_id": "1087198131512430642",
+    "rate_limit_per_user": 0,
+    "topic": "📢 Welcome to #news! Stay up to date with the latest announcements, updates, and important information about our server. This channel is dedicated to sharing news about server events, rule changes, feature updates, and any other relevant server-related announcements. Make sure to keep an eye on this channel to stay informed and actively participate in the server community. Let's stay connected and make the most of our server experience! :newspaper::sparkles:",
+    "default_thread_rate_limit_per_user": 0,
+    "position": 3,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "551940064833",
+        "deny": "128089644792080"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "📣"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1045892418362417192",
+    "type": 0,
+    "last_message_id": "1063872867818807296",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "about_us",
+    "parent_id": "1063309416365039649",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "default_thread_rate_limit_per_user": 0,
+    "position": 64,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "ℹ️"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1045943373007171674",
+    "type": 0,
+    "last_message_id": "1537477595300364340",
+    "flags": 0,
+    "last_pin_timestamp": "2023-08-09T21:50:29+00:00",
+    "guild_id": "326474832151838730",
+    "name": "💬〢general",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 0,
+    "topic": "💬 Welcome to #general-chat! This is the go-to channel for casual conversations and friendly banter. Feel free to chat about anything and everything here, from hobbies and interests to current events and daily life. Get to know your fellow community members, share stories, ask questions, and engage in lighthearted discussions. Remember, in this channel, we foster a welcoming and inclusive atmosphere where everyone's voice is respected. Let's build connections and enjoy some great conversations! :star2:",
+    "default_auto_archive_duration": 10080,
+    "position": 24,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "0"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🌐"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1045946491463807066",
+    "type": 4,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "TWO | GAMES",
+    "parent_id": null,
+    "position": 7,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ]
+  },
+  {
+    "id": "1045950023663370260",
+    "type": 2,
+    "last_message_id": "1084326227239772160",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "💤 AFK",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 0,
+    "bitrate": 128000,
+    "user_limit": 0,
+    "rtc_region": null,
+    "position": 10,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "0"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🛌"
+    },
+    "theme_color": null,
+    "voice_background_display": null,
+    "voice_hangout": null
+  },
+  {
+    "id": "1047562772407398500",
+    "type": 0,
+    "last_message_id": "1193290105138458684",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🎶〢music",
+    "parent_id": "1432057164242878637",
+    "rate_limit_per_user": 0,
+    "topic": "🎵 Welcome to #music! Your stage to discuss genres, artists, albums, and everything that makes your heart beat to a rhythm. Share your favorite tracks, explore new tunes, debate over classic vs. contemporary, or ask for instrument tips. Let's respect all tastes and remember – in this channel, we're all ears! :headphones:",
+    "position": 23,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "377958173696"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🎵"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1055494206556225719",
+    "type": 4,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "TWO | SOCIAL",
+    "parent_id": null,
+    "position": 1,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1048576"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "240518479872",
+        "deny": "0"
+      }
+    ]
+  },
+  {
+    "id": "1055494371019071570",
+    "type": 0,
+    "last_message_id": "1193290509725212762",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🚗〢automobiles",
+    "parent_id": "1055494206556225719",
+    "rate_limit_per_user": 0,
+    "topic": "🚗 Welcome to #automobiles! A space for gearheads, enthusiasts, and novices to discuss everything on wheels. Share your favorite models, ask for advice on repairs and maintenance, or chat about the latest trends in the auto world. Remember to respect everyone's opinions and keep conversations relevant and clean. Drive on! 🏁",
+    "position": 17,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1048576"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "240518479872",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false
+  },
+  {
+    "id": "1055500237831151716",
+    "type": 0,
+    "last_message_id": "1193290023915769876",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "⚽〢sports",
+    "parent_id": "1055494206556225719",
+    "rate_limit_per_user": 0,
+    "topic": "🏀 Welcome to #sports! Your digital arena to discuss all things sports, from football to figure skating. Share your match predictions, favorite players, memorable games, or even your own athletic achievements. Whether you're a casual fan or a sports encyclopedia, all are welcome here. Remember to respect all teams and opinions. Let's play ball! ⚽️",
+    "position": 16,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1048576"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "240518479872",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "⚽"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1056439011088007261",
+    "type": 0,
+    "last_message_id": "1193290366980456478",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🔫〢guns",
+    "parent_id": "1055494206556225719",
+    "rate_limit_per_user": 0,
+    "topic": "🔫 Welcome to #guns! This is a forum for responsible gun owners, enthusiasts, and those interested in firearm history and technology. Discuss various models, share safe handling tips, and engage in informed debates about gun laws. Always prioritize safety and respect everyone's viewpoint. Remember, this is a platform for educational conversation, not for sales or illegal activities. Lock and load responsibly! :scales:",
+    "position": 18,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "377958173696"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ],
+    "nsfw": true,
+    "icon_emoji": {
+      "id": null,
+      "name": "🔫"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1056447465286541333",
+    "type": 0,
+    "last_message_id": "1228304110378549359",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🚽〢spam",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 26,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🚽"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1057456170320801802",
+    "type": 0,
+    "last_message_id": "1205625928420560906",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "💸・gamedeals",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 32,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "💸"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1058572808826933319",
+    "type": 0,
+    "last_message_id": "1283451884765581364",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "wick-logs",
+    "parent_id": "1078761198708858891",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 55,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "262144",
+        "deny": "1024"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🕯️"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1058572809607073832",
+    "type": 0,
+    "last_message_id": "1350903067406766163",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "📜〢mod-logs",
+    "parent_id": "1078761198708858891",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 51,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "262144",
+        "deny": "1024"
+      },
+      {
+        "id": "1087192823767515219",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "1078757544169848933",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "📜"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1059534713695502337",
+    "type": 0,
+    "last_message_id": "1350882904896442480",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "📈〢network-status",
+    "parent_id": "1078761198708858891",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 54,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ],
+    "nsfw": false
+  },
+  {
+    "id": "1063256513172484149",
+    "type": 0,
+    "last_message_id": "1193289919309828197",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "💻〢tech",
+    "parent_id": "1432057164242878637",
+    "rate_limit_per_user": 0,
+    "topic": "💻 Welcome to #coding! A space for code enthusiasts, professional developers, and programming beginners. Share your projects, ask for help, discuss different languages and frameworks, or simply chat about the latest tech trends. Whether you've just printed your first \"Hello, World!\" or you're a seasoned developer, there's always something to learn here. Remember, in this channel, we debug in respect and patience. Happy coding! :rocket:",
+    "position": 20,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "377958173696"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "💻"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1063269593914818600",
+    "type": 0,
+    "last_message_id": "1065398469331783780",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "stream_program",
+    "parent_id": "1063309416365039649",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 66,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "📺"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1063303397639454781",
+    "type": 0,
+    "last_message_id": "1063305554941968404",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "lfc_role_proof",
+    "parent_id": "1063309416365039649",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 65,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🔒"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1063309416365039649",
+    "type": 4,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "IMPORTANT INFORMATION",
+    "parent_id": null,
+    "position": 13,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ]
+  },
+  {
+    "id": "1078083546054397982",
+    "type": 0,
+    "last_message_id": "1112440351794409523",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🎉〢giveaways",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 31,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "549792514624",
+        "deny": "57565476031744"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🎁"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1078104807132373032",
+    "type": 0,
+    "last_message_id": "1135223418506203186",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "✅・verify",
+    "parent_id": "1087198131512430642",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 6,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "64",
+        "deny": "274878041088"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "✅"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1078761198708858891",
+    "type": 4,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "TWO | LEADERSHIP",
+    "parent_id": null,
+    "position": 8,
+    "permission_overwrites": [
+      {
+        "id": "1078757184021733426",
+        "type": 0,
+        "allow": "1049600",
+        "deny": "0"
+      },
+      {
+        "id": "1078757544169848933",
+        "type": 0,
+        "allow": "1049600",
+        "deny": "0"
+      },
+      {
+        "id": "1078757334504976384",
+        "type": 0,
+        "allow": "1049600",
+        "deny": "0"
+      },
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      },
+      {
+        "id": "1078757266469175386",
+        "type": 0,
+        "allow": "1049600",
+        "deny": "0"
+      },
+      {
+        "id": "1078756990710452365",
+        "type": 0,
+        "allow": "1049600",
+        "deny": "0"
+      }
+    ]
+  },
+  {
+    "id": "1078864674046627960",
+    "type": 0,
+    "last_message_id": "1087528678348562532",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "stream-announcements",
+    "parent_id": "1063309416365039649",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 67,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "📢"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1079390933159788714",
+    "type": 0,
+    "last_message_id": "1139762592521408532",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "staff-applications",
+    "parent_id": "1078761198708858891",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 53,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      },
+      {
+        "id": "1078757334504976384",
+        "type": 0,
+        "allow": "1049600",
+        "deny": "0"
+      },
+      {
+        "id": "1078757184021733426",
+        "type": 0,
+        "allow": "1049600",
+        "deny": "0"
+      },
+      {
+        "id": "1078757544169848933",
+        "type": 0,
+        "allow": "1049600",
+        "deny": "0"
+      },
+      {
+        "id": "1078757266469175386",
+        "type": 0,
+        "allow": "1049600",
+        "deny": "0"
+      },
+      {
+        "id": "1078756990710452365",
+        "type": 0,
+        "allow": "1049600",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "👮"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1080624480382107728",
+    "type": 0,
+    "last_message_id": "1533662014369697792",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "invites",
+    "parent_id": "1063309416365039649",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 68,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "📨"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1086368551729905694",
+    "type": 2,
+    "last_message_id": null,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "➕〢Create a VC",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 0,
+    "bitrate": 128000,
+    "user_limit": 0,
+    "rtc_region": null,
+    "position": 0,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "0"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "➕"
+    },
+    "theme_color": null,
+    "voice_background_display": null,
+    "voice_hangout": null
+  },
+  {
+    "id": "1087198131512430642",
+    "type": 4,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "TWO | INFO",
+    "parent_id": null,
+    "position": 0,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "0"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "128641584856913"
+      }
+    ]
+  },
+  {
+    "id": "1087198966346690570",
+    "type": 15,
+    "last_message_id": "1474234561289388105",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "📰〢introduce-yourself",
+    "parent_id": "1087198131512430642",
+    "rate_limit_per_user": 0,
+    "topic": "This forum serves as a welcoming area where new members can share a bit about themselves, their interests, and their reasons for joining the community.",
+    "position": 1,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "0"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "available_tags": [],
+    "default_reaction_emoji": null,
+    "default_sort_order": 0,
+    "default_forum_layout": 1,
+    "default_tag_setting": "match_some",
+    "icon_emoji": {
+      "id": null,
+      "name": "📰"
+    },
+    "theme_color": null,
+    "template": ""
+  },
+  {
+    "id": "1087199234706640940",
+    "type": 4,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "TWO | LOBBY",
+    "parent_id": null,
+    "position": 3,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "0"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ]
+  },
+  {
+    "id": "1087199559719067748",
+    "type": 0,
+    "last_message_id": "1193301938813538436",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🌎〢away-from-keyboard",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 0,
+    "topic": "Your one-stop destination for all things non-gaming. Got something to share that doesn't involve the comforting glow of a 144Hz screen? This is the place. This is where you take a break from owning noobs and talk about owning life. Chat about your latest achievements, or share how you managed to put a dent in your infinity pile of laundry. Keep it respectful, and keep it real. Let's make this chat more lit than your RGB setup!",
+    "position": 28,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "377957125120"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🌌"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1087199619546632232",
+    "type": 0,
+    "last_message_id": "1437238990125269143",
+    "flags": 0,
+    "last_pin_timestamp": "2023-04-08T23:15:26+00:00",
+    "guild_id": "326474832151838730",
+    "name": "📺〢clips-and-highlights",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 0,
+    "topic": "🎮 Welcome to #game-clips! This channel is dedicated to sharing and showcasing your most epic and hilarious gaming moments. Share your game clips, highlight reels, and memorable gameplay footage from various titles. Whether it's a perfectly executed headshot, a game-winning play, or a funny glitch, this is the place to share and relive those gaming highlights. Remember, in this channel, we appreciate and support each other's gaming achievements while fostering a positive and inclusive gaming community. Capture, share, and let the games begin! :movie_camera::video_game:",
+    "position": 25,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "0"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🎥"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1087199767718809650",
+    "type": 0,
+    "last_message_id": "1283102628506767490",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🔞〢nsfw",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 29,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "826817972801",
+        "deny": "127814766884112"
+      },
+      {
+        "id": "1094046641008418816",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": true,
+    "icon_emoji": {
+      "id": null,
+      "name": "🔞"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1087199860802986095",
+    "type": 0,
+    "last_message_id": "1125866875247677540",
+    "flags": 0,
+    "last_pin_timestamp": "2023-06-04T22:40:55+00:00",
+    "guild_id": "326474832151838730",
+    "name": "📝〢suggestions",
+    "parent_id": "1087198131512430642",
+    "rate_limit_per_user": 0,
+    "topic": "Channel Rules: https://discord.com/channels/326474832151838730/1087199860802986095/1115047528258347018",
+    "position": 5,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "274877906944",
+        "deny": "103079218176"
+      },
+      {
+        "id": "474051954998509571",
+        "type": 1,
+        "allow": "377957124096",
+        "deny": "0"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "📝"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1087199956600897557",
+    "type": 0,
+    "last_message_id": "1529230887563038771",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "📺〢streaming",
+    "parent_id": "1045946491463807066",
+    "rate_limit_per_user": 0,
+    "topic": "Members can post their live streams or social media links here.",
+    "position": 42,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "274878958592"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "274877908992",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🎥"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1087200082505510972",
+    "type": 0,
+    "last_message_id": "1259590149038276781",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🤝・partners",
+    "parent_id": "1087198131512430642",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 10,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🤝"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1087200619418357810",
+    "type": 0,
+    "last_message_id": "1113261727707045950",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🌈〢color-change",
+    "parent_id": "1087198131512430642",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 8,
+    "permission_overwrites": [
+      {
+        "id": "1092823497924956300",
+        "type": 0,
+        "allow": "1024",
+        "deny": "377957124096"
+      },
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "377957125120"
+      },
+      {
+        "id": "1060912046012633148",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🌈"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1087201563405193247",
+    "type": 4,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🎫【 SUPPORT TICKETS 】🎫",
+    "parent_id": null,
+    "position": 10,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1048576"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ]
+  },
+  {
+    "id": "1087201627980714044",
+    "type": 0,
+    "last_message_id": "1112824626708484146",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🎫・ticket",
+    "parent_id": "1087201563405193247",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 59,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "377958172672"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078868065275609171",
+        "type": 0,
+        "allow": "377957124096",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🎟️"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1087910390802960414",
+    "type": 15,
+    "last_message_id": "1289428709077680129",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "📰〢patches",
+    "parent_id": "1045946491463807066",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 43,
+    "permission_overwrites": [
+      {
+        "id": "1063330746242191372",
+        "type": 0,
+        "allow": "274877908992",
+        "deny": "0"
+      },
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "551940063809",
+        "deny": "128089644793104"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "available_tags": [],
+    "default_reaction_emoji": null,
+    "default_sort_order": null,
+    "default_forum_layout": 0,
+    "default_tag_setting": "match_some",
+    "icon_emoji": {
+      "id": null,
+      "name": "📝"
+    },
+    "theme_color": null,
+    "template": ""
+  },
+  {
+    "id": "1090639835896746027",
+    "type": 4,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "Logs",
+    "parent_id": null,
+    "position": 14,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ]
+  },
+  {
+    "id": "1090639980705099776",
+    "type": 0,
+    "last_message_id": "1381773525173665812",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "message-delete",
+    "parent_id": "1090639835896746027",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 69,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🗑️"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1090640059524468797",
+    "type": 0,
+    "last_message_id": "1403020310248423484",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "message-edit",
+    "parent_id": "1090639835896746027",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 70,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ],
+    "nsfw": false
+  },
+  {
+    "id": "1090640094194565180",
+    "type": 0,
+    "last_message_id": "1276724474561167433",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "image-delete",
+    "parent_id": "1090639835896746027",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 71,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🖼️"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1090640131200913589",
+    "type": 0,
+    "last_message_id": "1396224224971980920",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "bulk-message-delete",
+    "parent_id": "1090639835896746027",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 72,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🗑️"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1090640168412786688",
+    "type": 0,
+    "last_message_id": null,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "log-invitesinvite-info",
+    "parent_id": "1090639835896746027",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 73,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "📜"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1090640199475802202",
+    "type": 0,
+    "last_message_id": null,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "moderator-commands",
+    "parent_id": "1090639835896746027",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 74,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🛠️"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1090640261375340554",
+    "type": 0,
+    "last_message_id": "1416116922881413240",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "member-join",
+    "parent_id": "1090639835896746027",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 75,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "👥"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1090640290882261092",
+    "type": 0,
+    "last_message_id": "1408483869883105324",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "member-leave",
+    "parent_id": "1090639835896746027",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 76,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🚪"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1090640324600266902",
+    "type": 0,
+    "last_message_id": "1416645361665052722",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "member-role-add",
+    "parent_id": "1090639835896746027",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 77,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "📥"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1090640356627976263",
+    "type": 0,
+    "last_message_id": "1416647901777629315",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "member-role-remove",
+    "parent_id": "1090639835896746027",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 78,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "📤"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1090640385027616861",
+    "type": 0,
+    "last_message_id": "1415155749276876811",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "nickname-change",
+    "parent_id": "1090639835896746027",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 79,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🔀"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1090640414568091700",
+    "type": 0,
+    "last_message_id": "1283451804285145098",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "member-ban",
+    "parent_id": "1090639835896746027",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 80,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🚫"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1090640441948512326",
+    "type": 0,
+    "last_message_id": null,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "member-unban",
+    "parent_id": "1090639835896746027",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 81,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🔓"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1090640472449486908",
+    "type": 0,
+    "last_message_id": "1399100729746133104",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "role-create",
+    "parent_id": "1090639835896746027",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 82,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "📝"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1090640510227582986",
+    "type": 0,
+    "last_message_id": "1391556098594574417",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "role-delete",
+    "parent_id": "1090639835896746027",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 83,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🚫"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1090642310846480445",
+    "type": 0,
+    "last_message_id": "1141886879843745842",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "role-update",
+    "parent_id": "1090639835896746027",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 84,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "📥"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1090642341041291364",
+    "type": 0,
+    "last_message_id": "1414358209346535515",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "channel-create",
+    "parent_id": "1090639835896746027",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 85,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🆕"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1090642374226612404",
+    "type": 0,
+    "last_message_id": "1414358536028164157",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "channel-delete",
+    "parent_id": "1090639835896746027",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 86,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🗑️"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1090642415339192351",
+    "type": 0,
+    "last_message_id": "1416943092472221817",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "voice-channel-join",
+    "parent_id": "1090639835896746027",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 87,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🔊"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1090642448579043388",
+    "type": 0,
+    "last_message_id": "1416955814354358365",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "voice-channel-leave",
+    "parent_id": "1090639835896746027",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 88,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🔇"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1090642477624590376",
+    "type": 0,
+    "last_message_id": "1416945178182418564",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "voice-channel-move",
+    "parent_id": "1090639835896746027",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 89,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🎙️"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1092312335529541632",
+    "type": 15,
+    "last_message_id": "1429207072284741693",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🎮〢game-hub",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 0,
+    "topic": "**Post Guidelines:**\nWelcome to the **Game Hub**! To ensure a positive and organized experience for all members, please follow these guidelines when posting threads:\n\n**1. Thread Titles:**\n   - Use clear and descriptive titles for your threads. Include the game name and the purpose of your post (e.g., `[Apex Legends] Looking for Squad` or `[Overwatch] Strategy Discussion`).\n\n**2. Content:**\n   - Clearly state the purpose of your post in the first few sentences.\n   - Provide relevant details such as game mode, preferred playtimes, and any specific requirements or expectations.\n\n**3. Tagging:**\n   - Use appropriate tags to categorize your thread. \n\n**4. Featured Image:**\n   - Enhance your thread with a featured image showcasing the game. This makes your post more visually appealing and helps other members quickly identify the game.\n\n**How to Source a Featured Image:**\n\n**Steam:**\n1. Visit the Steam store page for the game.\n2. Right-click on the desired image (e.g., game cover, in-game screenshot) and select \"Copy Image Address\" or \"Save Image As.\"\n3. Use the copied image address or upload the saved image when creating your thread.\n\n**IGDB (Internet Game Database):**\n1. Go to [IGDB](https://www.igdb.com/).\n2. Search for the game.\n3. Browse the available images and right-click on the preferred one to copy the image address or save the image.\n\n**AlphaRatio:**\n1. Visit [AlphaRatio](https://alpharatio.cc/) .\n2. Search for the game and find a suitable image.\n3. Right-click on the image to copy the image address or save the image to your device.\n\n**Google Image Search:**\n1. Go to [Google Images](https://images.google.com/).\n2. Type in the game's name and press Enter.\n3. Browse the results and right-click on the image you want to use. Select \"Copy Image Address\" or \"Save Image As.\"\n\n**Additional Tips:**\n- Make sure the images you choose are of high quality and appropriately represent the game.\n- If you're unsure about the image source or usage rights, it's best to use images from official game websites or authorized databases like Steam and IGDB.\n\nBy following these guidelines, you'll help keep our community organized and enjoyable for everyone. Thank you for contributing to the **Game Hub**!",
+    "position": 27,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "0"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "available_tags": [
+      {
+        "id": "1092538484037787788",
+        "name": "PC",
+        "moderated": false,
+        "emoji_id": "1092247524074586213",
+        "emoji_name": null
+      },
+      {
+        "id": "1092538517458006117",
+        "name": "Xbox",
+        "moderated": false,
+        "emoji_id": "1092245371595538572",
+        "emoji_name": null
+      },
+      {
+        "id": "1092538587339300925",
+        "name": "Playstation",
+        "moderated": false,
+        "emoji_id": "1092245368198144103",
+        "emoji_name": null
+      },
+      {
+        "id": "1092538701764104285",
+        "name": "Switch",
+        "moderated": false,
+        "emoji_id": "1092245369120895026",
+        "emoji_name": null
+      },
+      {
+        "id": "1092538784408678480",
+        "name": "Mobile",
+        "moderated": false,
+        "emoji_id": null,
+        "emoji_name": "📱"
+      }
+    ],
+    "default_reaction_emoji": null,
+    "default_sort_order": null,
+    "default_forum_layout": 2,
+    "default_tag_setting": "match_some",
+    "icon_emoji": {
+      "id": null,
+      "name": "🎮"
+    },
+    "theme_color": null,
+    "template": ""
+  },
+  {
+    "id": "1092823790695751810",
+    "type": 0,
+    "last_message_id": "1116868598724562965",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "👍・lfc-upvote",
+    "parent_id": "1087198131512430642",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 9,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "128641584856913"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "👍"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1092929576491036672",
+    "type": 0,
+    "last_message_id": "1498110382613729364",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "👑〢battlepass",
+    "parent_id": "1087198131512430642",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 11,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "377957125120"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "👑"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1104836077761593354",
+    "type": 0,
+    "last_message_id": "1539718979843661907",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "❗〢audit-log",
+    "parent_id": "1078761198708858891",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 50,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "📜"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1105881919062806588",
+    "type": 0,
+    "last_message_id": "1539718650225889292",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "wicklogs",
+    "parent_id": "1090639835896746027",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 90,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "262144",
+        "deny": "1049600"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🕯️"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1112742773829926983",
+    "type": 4,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "ModMail",
+    "parent_id": null,
+    "position": 15,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ]
+  },
+  {
+    "id": "1112742775578964099",
+    "type": 0,
+    "last_message_id": "1112743066793676900",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "modmail-log",
+    "parent_id": "1112742773829926983",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 91,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "📬"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1112743065665413120",
+    "type": 0,
+    "last_message_id": "1112743542712967218",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "pisnrzrs-0001",
+    "parent_id": "1112742773829926983",
+    "rate_limit_per_user": 0,
+    "topic": "ModMail Channel 275483498603741184 1112742047854628934 (Please do not change this)",
+    "position": 92,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🔒"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1112762115992854600",
+    "type": 4,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🎫【 CLAIMED TICKETS 】🎫",
+    "parent_id": null,
+    "position": 11,
+    "permission_overwrites": [
+      {
+        "id": "1112759027554844763",
+        "type": 0,
+        "allow": "68608",
+        "deny": "0"
+      },
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "68608"
+      }
+    ]
+  },
+  {
+    "id": "1112762118266159154",
+    "type": 4,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🎫【 CLOSED TICKETS 】🎫",
+    "parent_id": null,
+    "position": 12,
+    "permission_overwrites": [
+      {
+        "id": "1112759027554844763",
+        "type": 0,
+        "allow": "68608",
+        "deny": "0"
+      },
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "68608"
+      }
+    ]
+  },
+  {
+    "id": "1112873080293970002",
+    "type": 0,
+    "last_message_id": "1228304146176671744",
+    "flags": 128,
+    "guild_id": "326474832151838730",
+    "name": "💎〢support-us",
+    "parent_id": "1087198131512430642",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 7,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "0"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "128641584856913"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "💎"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1113455405343977472",
+    "type": 4,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🧠│AI FUN",
+    "parent_id": null,
+    "position": 9,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ]
+  },
+  {
+    "id": "1113457081329139763",
+    "type": 0,
+    "last_message_id": "1166763366509981716",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "📃・text-generation",
+    "parent_id": "1113455405343977472",
+    "rate_limit_per_user": 0,
+    "topic": "📝 Welcome to #text-generation! Unleash the power of AI with the /write bot command. This channel is dedicated to generating captivating AI-generated texts and exploring the possibilities of creative algorithms. Share your generated texts, discuss different prompts and techniques, and experiment with the /write command's various options. Whether you're an avid writer or simply curious about AI-generated content, this channel is your literary haven. Remember, in this channel, we appreciate and explore the AI's linguistic abilities while encouraging responsible and ethical use. Let the AI's words weave tales of imagination! :sparkles::pen_fountain:",
+    "position": 56,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "📃"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1113457217706922035",
+    "type": 0,
+    "last_message_id": "1195778777490399312",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🌄・image-generation",
+    "parent_id": "1113455405343977472",
+    "rate_limit_per_user": 0,
+    "topic": "🖼️ Welcome to #image-generation! Harness the power of artificial intelligence with the /imagine bot command. Use this channel to generate fascinating AI-generated images and explore the possibilities of creative algorithms. Share your generated images, discuss different prompts and techniques, and experiment with the /imagine command's various options. Whether you're a seasoned AI artist or just diving into the world of image generation, this channel is your digital studio. Remember, in this channel, we appreciate and admire the AI's creative output while encouraging ethical and responsible use. Let the AI brush strokes create magic! :art::sparkles:",
+    "position": 57,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🖼️"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1113979181391429672",
+    "type": 0,
+    "last_message_id": "1537477611641638997",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🆓・freebies",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 33,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🎁"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1114833990315159622",
+    "type": 0,
+    "last_message_id": "1114927519821471815",
+    "flags": 0,
+    "last_pin_timestamp": "2023-06-04T08:32:16+00:00",
+    "guild_id": "326474832151838730",
+    "name": "5-microuxys4545",
+    "parent_id": "1112762118266159154",
+    "rate_limit_per_user": 0,
+    "topic": "Ticket #5 - Type: 📩 **Open ticket** - Closed by: <@1104830164023660627> - Created by: <@1104830164023660627>",
+    "position": 61,
+    "permission_overwrites": [
+      {
+        "id": "1112759027554844763",
+        "type": 0,
+        "allow": "68608",
+        "deny": "0"
+      },
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "68608"
+      },
+      {
+        "id": "456483983870394368",
+        "type": 1,
+        "allow": "68608",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false
+  },
+  {
+    "id": "1117480270044594186",
+    "type": 15,
+    "last_message_id": "1120006740986056714",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🛠・diy-projects",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 34,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "available_tags": [],
+    "default_reaction_emoji": null,
+    "default_sort_order": null,
+    "default_forum_layout": 0,
+    "default_tag_setting": "match_some",
+    "icon_emoji": {
+      "id": null,
+      "name": "🔨"
+    },
+    "theme_color": null,
+    "template": ""
+  },
+  {
+    "id": "1118994447036850369",
+    "type": 0,
+    "last_message_id": "1538808467819733044",
+    "flags": 0,
+    "last_pin_timestamp": "2024-03-26T14:54:00+00:00",
+    "guild_id": "326474832151838730",
+    "name": "💬〢horror-general",
+    "parent_id": "1178933610586308739",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 39,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "👻"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1118994739799281664",
+    "type": 0,
+    "last_message_id": "1266878000427962438",
+    "flags": 0,
+    "last_pin_timestamp": "2023-06-15T22:30:34+00:00",
+    "guild_id": "326474832151838730",
+    "name": "📅〢events",
+    "parent_id": "1087198131512430642",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "default_auto_archive_duration": 10080,
+    "position": 4,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "0"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "128641584856913"
+      }
+    ],
+    "nsfw": false
+  },
+  {
+    "id": "1119073453291610123",
+    "type": 0,
+    "last_message_id": "1119091919310561350",
+    "flags": 0,
+    "last_pin_timestamp": "2023-06-16T01:18:23+00:00",
+    "guild_id": "326474832151838730",
+    "name": "6-pisnrzrs-segunpeace9185",
+    "parent_id": "1112762118266159154",
+    "rate_limit_per_user": 0,
+    "topic": "Ticket #6 - Type: 📩 **Open ticket** - Closed by: <@441034097813356545> - Claimed by: <@275483498603741184> - Created by: <@1073182848661606430>",
+    "position": 60,
+    "permission_overwrites": [
+      {
+        "id": "1112759027554844763",
+        "type": 0,
+        "allow": "68608",
+        "deny": "0"
+      },
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "68608"
+      },
+      {
+        "id": "456483983870394368",
+        "type": 1,
+        "allow": "68608",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🔒"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1119296196373139587",
+    "type": 0,
+    "last_message_id": "1193290444273098802",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🎨〢creative",
+    "parent_id": "1432057164242878637",
+    "rate_limit_per_user": 0,
+    "topic": "🎨 Creative Channel: Unleash your imagination here! Share your artwork, game designs, fan-fictions, music, 3D models, cosplay, and any form of creativity related to our beloved gaming world or beyond. Seek feedback, collaborate on projects, or simply appreciate the vast talents of our community. Remember: Constructive criticism is key, respect every creator's effort, and always give credit when due. Let's inspire and be inspired, turning pixels and passion into masterpieces! :paintbrush: :notes: :camera_flash:",
+    "position": 21,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "377958173696"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🖌️"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1127785339486994473",
+    "type": 0,
+    "last_message_id": "1128216713180221460",
+    "flags": 0,
+    "last_pin_timestamp": "2023-07-10T02:16:18+00:00",
+    "guild_id": "326474832151838730",
+    "name": "9-pisnrzrs-bawrzy",
+    "parent_id": "1112762118266159154",
+    "rate_limit_per_user": 0,
+    "topic": "Ticket #9 - Type: 📩 **Open ticket** - Closed by: <@441034097813356545> - Claimed by: <@275483498603741184> - Created by: <@721091792711450665>",
+    "position": 62,
+    "permission_overwrites": [
+      {
+        "id": "1112759027554844763",
+        "type": 0,
+        "allow": "68608",
+        "deny": "0"
+      },
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "68608"
+      },
+      {
+        "id": "456483983870394368",
+        "type": 1,
+        "allow": "68608",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🔢"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1128819815298125854",
+    "type": 0,
+    "last_message_id": "1149030288438075532",
+    "flags": 0,
+    "last_pin_timestamp": "2023-07-12T23:05:19+00:00",
+    "guild_id": "326474832151838730",
+    "name": "ticket-faq",
+    "parent_id": "1087201563405193247",
+    "rate_limit_per_user": 0,
+    "topic": "Centralized support for recurring questions and consistent ticket responses. Find pre-prepared scripts for common inquiries to maintain efficient and streamlined ticket handling.\n\nObjective: Enhance support efficiency by providing standardized responses and a repository of frequently asked questions (FAQs). Find copy-paste solutions to ensure consistent customer interactions.\n\nGuidelines:\n\nSearch first: Check existing messages and pinned posts for previous answers.\nUse tags: Categorize content with #Billing, #Technical, #General, or create new tags.\nCollaborate: Contribute FAQs and scripts to build a comprehensive knowledge base.\nStay professional: Maintain a respectful tone while offering assistance.\nNote: Unique cases may require personalized responses. Adapt scripts as needed and consult with team members for complex issues.\n\nTemplate:\n[Category: #Tag]\nQuestion/Issue: [Description]\nAnswer/Script: [Provide pre-prepared response or script]",
+    "position": 58,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1112759027554844763",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "❓"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1132448261253369939",
+    "type": 0,
+    "last_message_id": "1175877693334634547",
+    "flags": 128,
+    "guild_id": "326474832151838730",
+    "name": "🚩〢guidelines",
+    "parent_id": "1087198131512430642",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 2,
+    "permission_overwrites": [
+      {
+        "id": "508654771276873729",
+        "type": 0,
+        "allow": "377957173248",
+        "deny": "0"
+      },
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "377957124096"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🚩"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1132475979282006137",
+    "type": 0,
+    "last_message_id": "1342761772125257748",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🚀〢quick-start-guide",
+    "parent_id": "1087198131512430642",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 12,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "377957125120"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🚀"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1134893653832245428",
+    "type": 15,
+    "last_message_id": "1135218857167044739",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🌐〢divisions",
+    "parent_id": "1045946491463807066",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 41,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "274878958592"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ],
+    "nsfw": false,
+    "available_tags": [],
+    "default_reaction_emoji": null,
+    "default_sort_order": null,
+    "default_forum_layout": 2,
+    "default_tag_setting": "match_some",
+    "icon_emoji": {
+      "id": null,
+      "name": "🌐"
+    },
+    "theme_color": null,
+    "template": ""
+  },
+  {
+    "id": "1138590687311446049",
+    "type": 0,
+    "last_message_id": "1138596944470622269",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "📌〢staff-announcements",
+    "parent_id": "1078761198708858891",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 44,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1087192823767515219",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "📌"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1138590808715571300",
+    "type": 0,
+    "last_message_id": "1450236036339863753",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🔧〢updates-and-changes",
+    "parent_id": "1078761198708858891",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 45,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1087192823767515219",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false
+  },
+  {
+    "id": "1138591034163593336",
+    "type": 0,
+    "last_message_id": "1342267809106759703",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "📝〢staff-chat",
+    "parent_id": "1078761198708858891",
+    "rate_limit_per_user": 0,
+    "topic": "🔧📋 | General discussion on server management, staff updates, and coordination. Respect confidentiality.",
+    "position": 46,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1087192823767515219",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "👮"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1138591122927648908",
+    "type": 0,
+    "last_message_id": "1228367510685093908",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🌀〢moderator-chat",
+    "parent_id": "1078761198708858891",
+    "rate_limit_per_user": 0,
+    "topic": "🛡️🔍 | Dedicated space for moderators. Discuss user issues, rule enforcement, and moderation strategies.",
+    "position": 48,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1087192823767515219",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🛡️"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1138593758443737140",
+    "type": 0,
+    "last_message_id": "1267641410837024841",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🔺〢admin-chat",
+    "parent_id": "1078761198708858891",
+    "rate_limit_per_user": 0,
+    "topic": "👑🔧 | Admins only. Discuss server infrastructure, critical decisions, and high-level server tasks. Make informed choices.",
+    "position": 49,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078757544169848933",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🔒"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1139710398585651220",
+    "type": 0,
+    "last_message_id": "1391555780272193747",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🤖〢bot-commands",
+    "parent_id": "1078761198708858891",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 52,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      },
+      {
+        "id": "1078757544169848933",
+        "type": 0,
+        "allow": "1049600",
+        "deny": "0"
+      },
+      {
+        "id": "1078757334504976384",
+        "type": 0,
+        "allow": "1049600",
+        "deny": "0"
+      },
+      {
+        "id": "1078757184021733426",
+        "type": 0,
+        "allow": "1049600",
+        "deny": "0"
+      },
+      {
+        "id": "1078757266469175386",
+        "type": 0,
+        "allow": "1049600",
+        "deny": "0"
+      },
+      {
+        "id": "1078756990710452365",
+        "type": 0,
+        "allow": "1049600",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false
+  },
+  {
+    "id": "1139711707443368079",
+    "type": 4,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "logs",
+    "parent_id": null,
+    "position": 16,
+    "permission_overwrites": [
+      {
+        "id": "275483498603741184",
+        "type": 1,
+        "allow": "27664",
+        "deny": "0"
+      },
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "235148962103951360",
+        "type": 1,
+        "allow": "27648",
+        "deny": "0"
+      }
+    ]
+  },
+  {
+    "id": "1139711709980925962",
+    "type": 0,
+    "last_message_id": "1539714233347080223",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "voice-log",
+    "parent_id": "1139711707443368079",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 93,
+    "permission_overwrites": [
+      {
+        "id": "275483498603741184",
+        "type": 1,
+        "allow": "27664",
+        "deny": "0"
+      },
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "235148962103951360",
+        "type": 1,
+        "allow": "27648",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🎙️"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1139711711851593848",
+    "type": 0,
+    "last_message_id": "1511930399423594567",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "message-log",
+    "parent_id": "1139711707443368079",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 94,
+    "permission_overwrites": [
+      {
+        "id": "275483498603741184",
+        "type": 1,
+        "allow": "27664",
+        "deny": "0"
+      },
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "235148962103951360",
+        "type": 1,
+        "allow": "27648",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "📝"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1139711713525108896",
+    "type": 0,
+    "last_message_id": "1539718662636834970",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "join-leave-log",
+    "parent_id": "1139711707443368079",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 95,
+    "permission_overwrites": [
+      {
+        "id": "275483498603741184",
+        "type": 1,
+        "allow": "27664",
+        "deny": "0"
+      },
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "235148962103951360",
+        "type": 1,
+        "allow": "27648",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "📥"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1139711716129783950",
+    "type": 0,
+    "last_message_id": "1539718662020399126",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "member-log",
+    "parent_id": "1139711707443368079",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 96,
+    "permission_overwrites": [
+      {
+        "id": "275483498603741184",
+        "type": 1,
+        "allow": "27664",
+        "deny": "0"
+      },
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "235148962103951360",
+        "type": 1,
+        "allow": "27648",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "📝"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1139711719065784414",
+    "type": 0,
+    "last_message_id": "1539718662204686337",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "server-log",
+    "parent_id": "1139711707443368079",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 97,
+    "permission_overwrites": [
+      {
+        "id": "275483498603741184",
+        "type": 1,
+        "allow": "27664",
+        "deny": "0"
+      },
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "235148962103951360",
+        "type": 1,
+        "allow": "27648",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "📜"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1140914034686836766",
+    "type": 4,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "Logger",
+    "parent_id": null,
+    "position": 17,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ]
+  },
+  {
+    "id": "1140914163934302289",
+    "type": 0,
+    "last_message_id": "1343091014398640158",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "logger",
+    "parent_id": "1140914034686836766",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 98,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "📝"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1146611215511081012",
+    "type": 0,
+    "last_message_id": "1539718653778329680",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "👋〢welcome",
+    "parent_id": "1087198131512430642",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "default_auto_archive_duration": 10080,
+    "position": 0,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "128641584856913"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "👋"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1154904611799437404",
+    "type": 0,
+    "last_message_id": "1165439537502228510",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🎉〢subscriber-rewards",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 30,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      },
+      {
+        "id": "1112809331398815824",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "1112811366944874536",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "1112809538396098720",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "1112809656885202974",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "1112810451785498654",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "1112809780222906509",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "1112811276771528855",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "1112809226427957379",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "1112801161163055255",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "1112809426349457459",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🎁"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1175127344072118405",
+    "type": 2,
+    "last_message_id": "1528587407111225474",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🏠〢Lobby",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 0,
+    "bitrate": 128000,
+    "user_limit": 0,
+    "rtc_region": null,
+    "position": 3,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "0"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🏠"
+    },
+    "theme_color": null,
+    "voice_background_display": null,
+    "voice_hangout": null
+  },
+  {
+    "id": "1175150257278025771",
+    "type": 0,
+    "last_message_id": "1193448359969706004",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "😂〢memes",
+    "parent_id": "1432057164242878637",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 22,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "377958173696"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "😂"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1175150463298060370",
+    "type": 0,
+    "last_message_id": "1193448634323320912",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🐠〢pets",
+    "parent_id": "1055494206556225719",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 19,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "377958173696"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🐾"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1175151272438026280",
+    "type": 15,
+    "last_message_id": null,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "💬〢clubs",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 35,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "1024"
+      }
+    ],
+    "nsfw": false,
+    "available_tags": [],
+    "default_reaction_emoji": null,
+    "default_sort_order": null,
+    "default_forum_layout": 0,
+    "default_tag_setting": "match_some",
+    "icon_emoji": {
+      "id": null,
+      "name": "🎉"
+    },
+    "theme_color": null,
+    "template": ""
+  },
+  {
+    "id": "1176294550294233169",
+    "type": 15,
+    "last_message_id": "1226551248854057043",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🙂〢interests",
+    "parent_id": "1055494206556225719",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 13,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1048576"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "240518479872",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "available_tags": [],
+    "default_reaction_emoji": {
+      "emoji_id": null,
+      "emoji_name": "👍"
+    },
+    "default_sort_order": null,
+    "default_forum_layout": 1,
+    "default_tag_setting": "match_some",
+    "icon_emoji": {
+      "id": null,
+      "name": "👥"
+    },
+    "theme_color": null,
+    "template": ""
+  },
+  {
+    "id": "1176386295384260648",
+    "type": 0,
+    "last_message_id": null,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "self-promotion",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 21600,
+    "topic": null,
+    "default_auto_archive_duration": 10080,
+    "position": 36,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "📢"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1178791853861113887",
+    "type": 0,
+    "last_message_id": "1178846564060516382",
+    "flags": 0,
+    "last_pin_timestamp": "2023-11-27T20:17:59+00:00",
+    "guild_id": "326474832151838730",
+    "name": "11-ghostlyog-monkers",
+    "parent_id": "1112762118266159154",
+    "rate_limit_per_user": 0,
+    "topic": "Ticket #11 - Type: 📩 **Open ticket** - Closed by: <@83104159292723200> - Claimed by: <@83104159292723200> - Created by: <@176159471540633610>",
+    "position": 63,
+    "permission_overwrites": [
+      {
+        "id": "1112759027554844763",
+        "type": 0,
+        "allow": "68608",
+        "deny": "0"
+      },
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "68608"
+      },
+      {
+        "id": "456483983870394368",
+        "type": 1,
+        "allow": "68608",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "♾️"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1178933610586308739",
+    "type": 4,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "👻【 Horror 】👻",
+    "parent_id": null,
+    "position": 5,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ]
+  },
+  {
+    "id": "1178936839151816715",
+    "type": 4,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🎮【 Survival 】🎮",
+    "parent_id": null,
+    "position": 4,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ]
+  },
+  {
+    "id": "1178937094035492884",
+    "type": 0,
+    "last_message_id": "1228304200216346644",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "💬〢survival-general",
+    "parent_id": "1178936839151816715",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 38,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🌐"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1179216170591715348",
+    "type": 4,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🎯【 Shooters 】🎯",
+    "parent_id": null,
+    "position": 6,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ]
+  },
+  {
+    "id": "1179217198930202735",
+    "type": 0,
+    "last_message_id": "1289428163470037073",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "💬〢shooters-general",
+    "parent_id": "1179216170591715348",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 40,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      }
+    ],
+    "nsfw": false,
+    "icon_emoji": {
+      "id": null,
+      "name": "🌐"
+    },
+    "theme_color": null
+  },
+  {
+    "id": "1225192754020225176",
+    "type": 0,
+    "last_message_id": "1283102309387210833",
+    "flags": 0,
+    "last_pin_timestamp": "2024-04-03T21:43:35+00:00",
+    "guild_id": "326474832151838730",
+    "name": "📝〢staff-away",
+    "parent_id": "1078761198708858891",
+    "rate_limit_per_user": 0,
+    "topic": "**Staff Availability Channel**: Post your current availability status here - :green_circle: `Available`, :yellow_circle: `Limited Availability`, or :red_circle: `Away`. Please **edit your original post** to update your status. Check this channel regularly to see who's available for work and collaboration.",
+    "position": 47,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1087192823767515219",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false
+  },
+  {
+    "id": "1266840224835833920",
+    "type": 2,
+    "last_message_id": "1460886423463919699",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "☕〢The Lounge",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 0,
+    "bitrate": 128000,
+    "user_limit": 0,
+    "rtc_region": null,
+    "position": 1,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "0"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false
+  },
+  {
+    "id": "1266840693637255363",
+    "type": 2,
+    "last_message_id": "1522036735033479218",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🔞〢The Bar",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 0,
+    "bitrate": 128000,
+    "user_limit": 0,
+    "rtc_region": null,
+    "position": 2,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "0"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false
+  },
+  {
+    "id": "1269750661722148954",
+    "type": 2,
+    "last_message_id": null,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🎉〢Events",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 0,
+    "bitrate": 128000,
+    "user_limit": 0,
+    "rtc_region": null,
+    "position": 4,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "0"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false
+  },
+  {
+    "id": "1269753028404056076",
+    "type": 2,
+    "last_message_id": null,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "💭〢Hub",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 0,
+    "bitrate": 128000,
+    "user_limit": 0,
+    "rtc_region": null,
+    "position": 5,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "0"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false
+  },
+  {
+    "id": "1269753534346432644",
+    "type": 2,
+    "last_message_id": null,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🎧〢Duos",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 0,
+    "bitrate": 128000,
+    "user_limit": 2,
+    "rtc_region": null,
+    "position": 6,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "0"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false
+  },
+  {
+    "id": "1269753860193521816",
+    "type": 2,
+    "last_message_id": null,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🎧〢Trios",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 0,
+    "bitrate": 128000,
+    "user_limit": 3,
+    "rtc_region": null,
+    "position": 7,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "0"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false
+  },
+  {
+    "id": "1269754268265480242",
+    "type": 2,
+    "last_message_id": null,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🎧〢Quads",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 0,
+    "bitrate": 128000,
+    "user_limit": 4,
+    "rtc_region": null,
+    "position": 8,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "0"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false
+  },
+  {
+    "id": "1269754877303721985",
+    "type": 2,
+    "last_message_id": null,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🎧〢Squads",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 0,
+    "bitrate": 128000,
+    "user_limit": 6,
+    "rtc_region": null,
+    "position": 9,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "0"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false
+  },
+  {
+    "id": "1276964524150358138",
+    "type": 15,
+    "last_message_id": "1276990296034377758",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "💎〢supporters",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 37,
+    "permission_overwrites": [
+      {
+        "id": "1051260579022643281",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "1112809226427957379",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "1112809780222906509",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "1051260096333750322",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "1140377116370804756",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "1009516637600370719",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "1112809426349457459",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1051260362873385000",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "1051260775995551784",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "1112809331398815824",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "1112811276771528855",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "1112809538396098720",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "1112809656885202974",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "1112810451785498654",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "1112811366944874536",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      },
+      {
+        "id": "1112801161163055255",
+        "type": 0,
+        "allow": "1024",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "available_tags": [],
+    "default_reaction_emoji": null,
+    "default_sort_order": null,
+    "default_forum_layout": 0,
+    "default_tag_setting": "match_some",
+    "icon_emoji": null,
+    "theme_color": null,
+    "template": ""
+  },
+  {
+    "id": "1431742191620853791",
+    "type": 15,
+    "last_message_id": "1431746768453767339",
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "📺〢tv-shows",
+    "parent_id": "1055494206556225719",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 15,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1048576"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "240518479872",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "available_tags": [],
+    "default_reaction_emoji": null,
+    "default_sort_order": 0,
+    "default_forum_layout": 0,
+    "default_tag_setting": "match_some",
+    "icon_emoji": null,
+    "theme_color": null,
+    "template": ""
+  },
+  {
+    "id": "1431746979540631622",
+    "type": 15,
+    "last_message_id": null,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🎞️〢movies",
+    "parent_id": "1055494206556225719",
+    "rate_limit_per_user": 0,
+    "topic": null,
+    "position": 14,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1048576"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "240518479872",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false,
+    "available_tags": [],
+    "default_reaction_emoji": null,
+    "default_sort_order": 0,
+    "default_forum_layout": 0,
+    "default_tag_setting": "match_some",
+    "icon_emoji": null,
+    "theme_color": null,
+    "template": ""
+  },
+  {
+    "id": "1432057164242878637",
+    "type": 4,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "Archive",
+    "parent_id": null,
+    "position": 2,
+    "permission_overwrites": [
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "1049600"
+      }
+    ]
+  },
+  {
+    "id": "1465060666972049439",
+    "type": 2,
+    "last_message_id": null,
+    "flags": 0,
+    "guild_id": "326474832151838730",
+    "name": "🎧〢Quads [1]",
+    "parent_id": "1087199234706640940",
+    "rate_limit_per_user": 0,
+    "bitrate": 96000,
+    "user_limit": 5,
+    "rtc_region": null,
+    "position": 11,
+    "permission_overwrites": [
+      {
+        "id": "83104159292723200",
+        "type": 1,
+        "allow": "286262544",
+        "deny": "0"
+      },
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "0"
+      },
+      {
+        "id": "1078757266469175386",
+        "type": 0,
+        "allow": "1048576",
+        "deny": "0"
+      },
+      {
+        "id": "1078755185423286372",
+        "type": 0,
+        "allow": "137439264768",
+        "deny": "0"
+      },
+      {
+        "id": "1078757184021733426",
+        "type": 0,
+        "allow": "1048576",
+        "deny": "0"
+      },
+      {
+        "id": "1078757544169848933",
+        "type": 0,
+        "allow": "1048576",
+        "deny": "0"
+      },
+      {
+        "id": "1078757334504976384",
+        "type": 0,
+        "allow": "1048576",
+        "deny": "0"
+      },
+      {
+        "id": "1104855809323696208",
+        "type": 0,
+        "allow": "0",
+        "deny": "1024"
+      },
+      {
+        "id": "456483983870394368",
+        "type": 1,
+        "allow": "17826832",
+        "deny": "0"
+      },
+      {
+        "id": "1078756990710452365",
+        "type": 0,
+        "allow": "1048576",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false
+  },
+  {
+    "id": "1499430425045766326",
+    "type": 0,
+    "last_message_id": "1499483141507649729",
+    "flags": 0,
+    "last_pin_timestamp": "2026-04-30T15:21:12.256000+00:00",
+    "guild_id": "326474832151838730",
+    "name": "12-toxxicpeaches",
+    "parent_id": "1112762118266159154",
+    "rate_limit_per_user": 0,
+    "topic": "Ticket #12 - Type: 📩 **Open ticket** - Closed by: <@275483498603741184> - Created by: <@1419134514134782012>",
+    "position": 99,
+    "permission_overwrites": [
+      {
+        "id": "1112759027554844763",
+        "type": 0,
+        "allow": "68608",
+        "deny": "0"
+      },
+      {
+        "id": "326474832151838730",
+        "type": 0,
+        "allow": "0",
+        "deny": "68608"
+      },
+      {
+        "id": "456483983870394368",
+        "type": 1,
+        "allow": "68608",
+        "deny": "0"
+      }
+    ],
+    "nsfw": false
+  }
+]

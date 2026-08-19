@@ -1,0 +1,38 @@
+# What a brand-new member sees, in order
+
+1. Invite link -> membership screening (verification level 2, rules screening ON). Until they tick the box they can read but not post. 31 of 84 members are still stuck here.
+2. Server Guide / onboarding: **DISABLED** (6 prompts configured, 29 roles it would hand out).
+3. Welcome screen lands them in: #💬〢general
+4. Sidebar they can actually read (27 of 112 channels):
+
+TWO | INFO
+   #📰〢introduce-yourself  [0 human msgs/90d]
+   #🚩〢guidelines  [0 human msgs/90d, no topic]
+   #📢〢announcements  [0 human msgs/90d]
+   #📅〢events  [0 human msgs/90d, no topic]
+   #💎〢support-us  [0 human msgs/90d, no topic]
+   #🤝・partners  [0 human msgs/90d, no topic]
+TWO | SOCIAL
+   #🙂〢interests  [0 human msgs/90d, no topic]
+   #🎞️〢movies  [0 human msgs/90d, no topic]
+   #📺〢tv-shows  [0 human msgs/90d, no topic]
+   #⚽〢sports  [0 human msgs/90d]
+   #🚗〢automobiles  [0 human msgs/90d]
+TWO | LOBBY
+   #💬〢general  [10 human msgs/90d]
+   #📺〢clips-and-highlights  [0 human msgs/90d]
+   #🎮〢game-hub  [0 human msgs/90d]
+   🔊➕〢Create a VC  [0 human msgs/90d, no topic]
+   🔊☕〢The Lounge  [0 human msgs/90d, no topic]
+   🔊🔞〢The Bar  [1 human msgs/90d, no topic]
+   🔊🏠〢Lobby  [4 human msgs/90d, no topic]
+   🔊🎉〢Events  [0 human msgs/90d, no topic]
+   🔊💭〢Hub  [0 human msgs/90d, no topic]
+   🔊🎧〢Duos  [0 human msgs/90d, no topic]
+   🔊🎧〢Trios  [0 human msgs/90d, no topic]
+   🔊🎧〢Quads  [0 human msgs/90d, no topic]
+   🔊🎧〢Squads  [0 human msgs/90d, no topic]
+   🔊💤 AFK  [0 human msgs/90d, no topic]
+   🔊🎧〢Quads [1]  [0 human msgs/90d, no topic]
+🎫【 SUPPORT TICKETS 】🎫
+   #🎫・ticket  [0 human msgs/90d, no topic]

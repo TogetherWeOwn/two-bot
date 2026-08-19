@@ -1,0 +1,66 @@
+{
+  "collected_at": "2026-08-19T20:07:58.001Z",
+  "guild": {
+    "id": "326474832151838730",
+    "name": "TogetherWeOwn",
+    "members": 107,
+    "online": 26,
+    "verification_level": 2,
+    "boost_tier": 1,
+    "boosts": 5,
+    "vanity_url": null,
+    "rules_channel": "🚩〢guidelines",
+    "system_channel": null,
+    "onboarding_enabled": false,
+    "onboarding_prompts": 6,
+    "welcome_screen_channels": 1
+  },
+  "counts": {
+    "categories": 18,
+    "channels_total": 112,
+    "channels_visible_to_everyone": 27,
+    "roles_total": 190,
+    "roles_cosmetic": 132,
+    "roles_separator_header": 9,
+    "roles_nobody_holds": 96,
+    "roles_managed_by_bots": 30,
+    "invites_total": 16,
+    "invites_never_used": 12,
+    "bot_integrations": 24
+  },
+  "members": {
+    "human_members": 84,
+    "bot_members": 23,
+    "stuck_at_rules_screening": 31,
+    "joined_last_30d": 0,
+    "joined_last_90d": 1,
+    "joins_by_month_last_12": {
+      "2025-09": 4,
+      "2025-10": 2,
+      "2025-11": 1,
+      "2025-12": 16,
+      "2026-01": 0,
+      "2026-02": 0,
+      "2026-03": 0,
+      "2026-04": 0,
+      "2026-05": 0,
+      "2026-06": 1,
+      "2026-07": 0,
+      "2026-08": 0
+    }
+  },
+  "activity": {
+    "channels_with_any_human_message_90d": 3,
+    "channels_with_any_human_message_30d": 1,
+    "total_human_messages_90d": 15,
+    "total_human_messages_30d": 1,
+    "total_bot_messages_90d": 5019
+  },
+  "verdicts": {
+    "keep": 22,
+    "merge": 2,
+    "archive": 84,
+    "rewrite-topic": 4,
+    "gate-behind-role": 0
+  }
+}
