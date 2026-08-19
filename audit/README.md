@@ -31,6 +31,7 @@ re-run for free.
 | `channels.csv` | One row per channel: visibility, topic, 30/90-day traffic, verdict, and the number behind the verdict. |
 | `categories.csv` | One row per category with its channels rolled up. |
 | `roles.csv` | All 190 roles with a permission class, named dangerous permissions, and how many members hold each. |
+| `role-consolidation.csv` | The per-role keep/merge/delete plan behind the `role-consolidation` document on TWO-55, plus the migration wave and whether a holder export is required. Rebuild with `node scripts/role-consolidation.ts` — no network, reads `raw/` only, so the rubric can be argued with and re-run for free. |
 | `invites.csv` | Every active invite, uses, landing channel, inviter id. |
 | `summary.json` | Headline counts plus the spec's server-level checks. |
 | `new-member-walkthrough.txt` | The sidebar a brand-new member actually sees, in order. |
