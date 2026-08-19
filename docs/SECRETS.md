@@ -52,6 +52,14 @@ Ban Members, Manage Roles, Manage Channels, or Send Messages. It is a
 read-and-record service. When onboarding automation lands it will need
 `Send Messages` in specific channels only, and that is a separate conversation.
 
+> **This list goes out of date the moment TWO-24 ships.** The website's action
+> endpoint needs `Manage Roles`, `Manage Events`, `Send Messages` in one
+> channel, and `Create Instant Invite` — four bits that are explicitly refused
+> above, and none of which `Manage Server` implies. The full breakdown is in
+> `docs/INTERNAL_ACTIONS.md` §8. **TWO-42 must not narrow the live grant until
+> that reconciliation is agreed**, or one-click join (TWO-57) dies silently on
+> the day the permissions are tightened.
+
 ## Checking it is right
 
 `scripts/preflight.ts` verifies all of the above against the live Discord API
