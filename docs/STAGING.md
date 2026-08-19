@@ -3,10 +3,10 @@
 This is written for QA. You should never need to ask an engineer to reset
 staging, and you should never point a test at the live TWO server.
 
-**Status: the code is ready, the server is not.** The staging Discord server
-and the `Owen Staging` bot application are being created by the founder under
-TWO-21. Everything below works today except the two steps that need those
-credentials, which are marked. See "What is still missing" at the bottom.
+**Status: the code is ready, the server is not.** The only thing outstanding
+is the `Owen Staging` bot token (TWO-21). The server itself no longer needs a
+human — the bot creates it, see "Building the staging server" below.
+Everything else works today; the steps that need the token are marked.
 
 ---
 
@@ -25,7 +25,7 @@ credentials, which are marked. See "What is still missing" at the bottom.
 | Variable | What it is | Where it comes from |
 |---|---|---|
 | `TWO_STAGING_DATABASE_URL` | Postgres URL for the staging database | your secrets store |
-| `DISCORD_STAGING_GUILD_ID` | id of the `TWO Staging` server | posted in the TWO-21 thread — not secret |
+| `DISCORD_STAGING_GUILD_ID` | id of the `TWO Staging` server | printed by `staging-provision.ts` and posted on TWO-25 — not secret |
 | `DISCORD_STAGING_BOT_TOKEN` | the `Owen Staging` bot token | secrets store, bound to you and to me |
 
 Note what is **not** here: `TWO_DATABASE_URL`, `DISCORD_GUILD_ID` and
@@ -134,6 +134,65 @@ asserts the two agree, so a half-update fails loudly instead of drifting.
 
 ---
 
+## Building the staging server
+
+**Needs `DISCORD_STAGING_BOT_TOKEN`. Run once, by an engineer.**
+
+```bash
+node scripts/staging-provision.ts            # prints the plan, changes nothing
+node scripts/staging-provision.ts --apply    # creates it
+```
+
+Discord lets a bot create a server (`POST /guilds`) as long as it is in fewer
+than ten, and a fresh staging bot is in zero. So the bot makes its own server,
+becomes its owner, and fills in the four text channels, `Voice 1` and the three
+roles from `src/staging/spec.ts`. No invite link, no permission integer, no
+authorize step.
+
+**It prints the guild id.** Nobody has that id until this runs. Put it in
+`DISCORD_STAGING_GUILD_ID` and post it on TWO-25.
+
+Things worth knowing before you run it:
+
+- **Dry run is the default.** A guild the bot created cannot have its ownership
+  transferred to a person, so a mistake can only be deleted, never handed over.
+- **It never creates a second `TWO Staging`.** If one exists it reconciles it.
+  If it somehow finds two, it stops and makes you pick. This matters more than
+  it sounds: a bot can only create guilds while in fewer than ten, so a loop
+  that made ten of them would permanently lose the ability to make another. The
+  script refuses to create past eight.
+- **If the founder made the server by hand**, invite the bot to it, set
+  `DISCORD_STAGING_GUILD_ID`, and run the same script — it then only fills in
+  what is missing and never creates anything.
+- **It never deletes or renames anything.** Channels outside the spec are
+  reported and left alone.
+- **A bot-created server has no humans in it.** Not even the founder.
+
+```bash
+node scripts/staging-provision.ts --apply --invite                 # 7-day, 5-use link
+node scripts/staging-provision.ts --apply --grant-admin <user-id>  # after they join
+```
+
+Share the invite link directly, not in a public channel.
+
+### One consequence of the bot owning the server
+
+Discord skips permission and hierarchy checks entirely for a guild owner. Two
+things follow:
+
+1. The role-position failure described below **cannot happen** on a bot-owned
+   staging server. `staging-verify.ts` knows this and does not report it.
+2. The scoped permission set `268520512` therefore cannot be proved on staging
+   any more — an owner holds everything by definition. That proof moves to the
+   live invite. `staging-verify.ts` says so rather than passing quietly, so
+   nobody later mistakes a green staging run for evidence the live bot needs
+   nothing more.
+
+If the founder created the server by hand and invited the bot normally, both
+checks apply as they always did.
+
+---
+
 ## Checking the staging server itself
 
 **Needs `DISCORD_STAGING_BOT_TOKEN` — not runnable until the founder creates
@@ -162,16 +221,19 @@ not a crash, which is why it can survive for days. The fix is one drag in
 
 | | |
 |---|---|
-| Server | `TWO Staging` — private, founder and bot only |
+| Server | `TWO Staging` — private, created and owned by the staging bot |
 | Text channels | `#welcome` `#general` `#events` `#bot-log` |
 | Voice | `Voice 1` — a real one, because `first_voice_session` cannot be asserted without it |
 | Roles | `Moderator` `Member` `Game: Test` |
 | Bot application | `Owen Staging` — Public Bot **off**, Server Members Intent **on**, Presence **off**, Message Content **off** |
-| Permissions | `268520512` — scoped, **not** Administrator |
+| Permissions | owner — implicit. `268520512` remains the scoped set the **live** bot is invited with |
 
 The permission integer decodes to: Add Reactions, View Channels, Send
-Messages, Embed Links, Read Message History, Manage Roles. Staging is where we
-prove the live bot needs nothing more than this.
+Messages, Embed Links, Read Message History, Manage Roles. We used to say
+staging is where we prove the live bot needs nothing more than that. Since the
+bot now owns the staging guild, it holds everything there regardless, so that
+proof has to happen against the live invite instead. Do not read a green
+staging run as evidence about live permissions.
 
 ---
 
@@ -194,18 +256,23 @@ across deliberately, one command, where you can see it.
 
 ## What is still missing
 
-Two things, both owned by the founder via TWO-21:
+One thing from the founder, via TWO-21:
 
-1. The `TWO Staging` Discord server, built to the spec above, with the
-   `Owen Staging` bot invited using permission integer `268520512` and its role
-   dragged above the three test roles.
-2. `discord_staging_bot_token` in the secrets store, bound to QA and to me, and
-   the staging guild id posted in the TWO-21 thread.
+1. `discord_staging_bot_token` — the `Owen Staging` bot token in the secrets
+   store, bound to QA and to me. About five minutes of clicking in the Discord
+   Developer Portal: new application, add bot, **Server Members Intent on**,
+   Public Bot off, copy token.
+
+That is now the whole dependency. The server no longer needs a human, and
+nobody needs to send us a guild id — `staging-provision.ts` creates the server
+and prints the id itself, the first time it runs.
 
 A staging Postgres database is also needed. It can be a second database on the
 same server the bot's Postgres migration (TWO-18) lands on — no extra spend.
 
-Until then: the fixtures, the reset script and the verifier all exist and are
-tested. `staging-reset.ts` has been run end to end against a real Postgres
-database and is green. What cannot be exercised yet is anything that talks to
-Discord.
+Until then: the fixtures, the reset script, the verifier and the provisioning
+script all exist. `staging-reset.ts` has been run end to end against a real
+Postgres database and is green, and every provisioning *decision* — create vs
+adopt, the ten-guild guard, role hierarchy under both ownership models — is
+covered by `test/unit.provision.test.ts`, which needs no token. What cannot be
+exercised yet is anything that actually talks to Discord.

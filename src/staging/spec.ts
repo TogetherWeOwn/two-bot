@@ -1,11 +1,16 @@
 /**
  * The TWO Staging server, written down as code.
  *
- * The server itself does not exist yet - the founder creates it under TWO-21 -
- * but its shape was fixed by the CEO on 2026-08-19, so everything here is
- * known ahead of the credential landing. That is the point of this file: the
- * fixtures, the reset script and the verifier were all built against these
- * names, not against a server someone had to log in and read.
+ * The server itself does not exist yet, but its shape was fixed by the CEO on
+ * 2026-08-19, so everything here is known ahead of the credential landing.
+ * That is the point of this file: the fixtures, the reset script, the verifier
+ * and the provisioning script were all built against these names, not against
+ * a server someone had to log in and read.
+ *
+ * `scripts/staging-provision.ts` now BUILDS the server from this file - the
+ * bot creates its own guild - so these names are an instruction, not just an
+ * expectation. If the founder made the server by hand instead, the same script
+ * reconciles theirs against this spec.
  *
  * When the server does exist, `scripts/staging-verify.ts` checks reality
  * against this file and fails loudly on any difference. Do not "fix" a
@@ -39,6 +44,10 @@ export const STAGING_VOICE_CHANNELS = ['Voice 1'] as const;
  * into a rejected promise nobody awaited. This is the single most common
  * staging failure and it produces no error in the log. `staging-verify.ts`
  * checks it first for that reason.
+ *
+ * Unless the bot OWNS the guild, which it does when it created it: an owner
+ * bypasses hierarchy entirely. See `evaluateHierarchy` in ./provision.ts,
+ * which is the only place that distinction is made.
  */
 export const STAGING_ROLES = ['Moderator', 'Member', 'Game: Test'] as const;
 

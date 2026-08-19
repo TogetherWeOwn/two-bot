@@ -15,6 +15,15 @@
  * number, not a crash, so it can survive a long time. The fix is one drag in
  * Server Settings > Roles.
  *
+ * With one exception, which is now the normal case: a guild OWNER bypasses
+ * permission and hierarchy checks entirely, and the staging bot creates - and
+ * therefore owns - its own guild (scripts/staging-provision.ts). On that
+ * server the position check and the permission-mask check are both
+ * meaningless, and running them anyway would report three confident failures
+ * on a server that works. Both checks below branch on ownership. The scoped
+ * permission set still has to be proved somewhere; on a bot-owned guild it
+ * cannot be, and the note says so rather than quietly passing.
+ *
  * FAIL = staging cannot support the integration suite. WARN = it works but
  * differs from the spec. Exit code is non-zero only on FAIL.
  *
@@ -22,13 +31,13 @@
  */
 import {
   STAGING_PERMISSIONS,
-  STAGING_ROLES,
   STAGING_SERVER_NAME,
   STAGING_TEXT_CHANNELS,
   STAGING_VOICE_CHANNELS,
   describePermissions,
   stagingGuildId,
 } from '../src/staging/spec.ts';
+import { evaluateHierarchy, type PartialRole } from '../src/staging/provision.ts';
 
 const API = 'https://discord.com/api/v10';
 
@@ -73,10 +82,10 @@ const botId = me.body.id;
 pass('staging token valid', `bot "${me.body.username}" (${botId})`);
 
 // 2. the right server
-const guild = await api<{ id: string; name: string }>(`/guilds/${guildId}`);
+const guild = await api<{ id: string; name: string; owner_id: string }>(`/guilds/${guildId}`);
 if (guild.status !== 200 || !guild.body) {
   fail('bot is not in the staging guild', `HTTP ${guild.status} for guild ${guildId}`);
-  console.log('\nStopping: re-invite the bot with the scoped permission link.\n');
+  console.log('\nStopping: run scripts/staging-provision.ts, or re-invite the bot.\n');
   process.exit(1);
 }
 if (guild.body.name !== STAGING_SERVER_NAME) {
@@ -84,38 +93,39 @@ if (guild.body.name !== STAGING_SERVER_NAME) {
 } else {
   pass('server', `"${guild.body.name}" (${guild.body.id})`);
 }
+const ownerId = guild.body.owner_id ?? null;
+const weOwnIt = ownerId === botId;
+if (weOwnIt) {
+  pass('the bot owns this guild', 'created by scripts/staging-provision.ts');
+}
 
-// 3. roles exist, and the bot outranks the ones it must grant
-const roles = await api<Array<{ id: string; name: string; position: number; managed: boolean; tags?: { bot_id?: string } }>>(
-  `/guilds/${guildId}/roles`,
-);
+// 3. roles exist, and the bot can actually hand them out
+const roles = await api<PartialRole[]>(`/guilds/${guildId}/roles`);
 if (roles.status !== 200 || !roles.body) {
   fail('cannot read roles', `HTTP ${roles.status}`);
 } else {
-  const byName = new Map(roles.body.map((r) => [r.name, r]));
-  const botRole = roles.body.find((r) => r.tags?.bot_id === botId);
-  const botPos = botRole?.position ?? -1;
-  if (!botRole) {
-    fail('cannot find the bot\'s own managed role', 're-invite the bot');
-  } else {
-    pass('bot role', `"${botRole.name}" at position ${botPos}`);
-  }
+  const h = evaluateHierarchy({ roles: roles.body, botId, ownerId });
 
-  for (const name of STAGING_ROLES) {
-    const r = byName.get(name);
-    if (!r) {
-      fail(`role "${name}" is missing`, 'create it - see docs/STAGING.md');
-      continue;
-    }
-    if (botPos >= 0 && r.position >= botPos) {
+  for (const name of h.missing) fail(`role "${name}" is missing`, 'run scripts/staging-provision.ts --apply');
+
+  if (h.ownerBypass) {
+    pass(
+      'role hierarchy does not apply',
+      'the guild owner bypasses it, so every existing spec role is assignable: ' +
+        (h.assignable.join(', ') || 'none created yet'),
+    );
+  } else {
+    if (h.botRoleName) pass('bot role', `"${h.botRoleName}" at position ${h.botPosition}`);
+    for (const name of h.assignable) pass(`role "${name}" assignable`, `below the bot at ${h.botPosition}`);
+    for (const b of h.blocked) {
       fail(
-        `bot cannot assign "${name}"`,
-        `role is at position ${r.position}, bot at ${botPos}. ` +
-          'Drag the bot role ABOVE it in Server Settings > Roles. This fails SILENTLY.',
+        `bot cannot assign "${b.name}"`,
+        `role is at position ${b.position}, bot at ${h.botPosition}. ` +
+          'This fails SILENTLY - Discord returns 403 and nothing logs.',
       );
-    } else {
-      pass(`role "${name}" assignable`, `position ${r.position} < bot ${botPos}`);
     }
+    if (h.humanFix) console.log(`        ${h.humanFix}`);
+    else if (h.repositions.length) console.log('        Fixable: scripts/staging-provision.ts --apply moves them down.');
   }
 }
 
@@ -145,7 +155,16 @@ if (channels.status !== 200 || !channels.body) {
 // 5. permissions actually held
 const self = await api<{ roles: string[] }>(`/guilds/${guildId}/members/${botId}`);
 const allRoles = roles.body ?? [];
-if (self.status === 200 && self.body && allRoles.length) {
+if (weOwnIt) {
+  pass(
+    'permissions',
+    'owner - Discord grants everything and skips the mask entirely, so there is nothing to check',
+  );
+  console.log(
+    `        Note: the scoped set ${STAGING_PERMISSIONS} therefore cannot be proved on this server.\n` +
+      '        That proof belongs on the live invite, not here.',
+  );
+} else if (self.status === 200 && self.body && allRoles.length) {
   let mask = 0n;
   const held = new Set(self.body.roles);
   for (const r of allRoles) {
