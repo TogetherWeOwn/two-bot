@@ -1,21 +1,48 @@
 #!/usr/bin/env bash
 #
-# One-shot setup for the two-gaming GitHub org: repos, history, branch
-# protection, secret scanning.
+# One-shot setup for the TWO GitHub org: repos, history, branch protection,
+# secret scanning.
 #
 # Safe to re-run. Every step checks the current state first and skips or
 # updates rather than failing, so if it stops half way you fix the cause and
 # run it again.
 #
 #   ./scripts/setup-github.sh                 # do it
-#   ./scripts/setup-github.sh --dry-run       # print what it would do
+#   ./scripts/setup-github.sh --dry-run       # print what it would do, and
+#                                             # prove the token can do it
 #   ./scripts/setup-github.sh --verify        # only check the end state
 #
-# Needs: gh CLI, authenticated as a user with `admin:org` and `repo` on the
-# two-gaming org. See docs/GITHUB.md.
+# CREDENTIAL: a GitHub *fine-grained* personal access token scoped to the org,
+# in the environment as GH_TOKEN. gh reads that variable directly - there is no
+# `gh auth login` step and you should not do one. Permissions the token needs
+# (TWO-81, `github-access`):
+#
+#   Organization  Administration: write   Members: write
+#   Repository    Metadata: read          Administration: write
+#                 Contents: write         Workflows: write
+#                 Actions: write          Secrets: write
+#                 Environments: write     Pull requests: write
+#                 Issues: write
+#
+# These are fine-grained permission names, NOT the classic-PAT scopes
+# (`repo,admin:org,workflow`) an older version of this file told you to ask
+# for. --dry-run probes the token against the org and reports what it can
+# actually do before anything is created. See docs/GITHUB.md.
+#
+# ENVIRONMENT:
+#   TWO_GITHUB_ORG          org login (default below)
+#   TWO_REPO_VISIBILITY     private (default) | public - see create_repo
+#   TWO_ACCEPT_PUBLIC_REPOS 1 to confirm a public creation is intended
+#   TWO_SKIP_TOKEN_PROBE    1 to skip the dry-run token probe
+#   TWO_BOT_PATH / TWO_WEB_PATH / TWO_DESIGN_PATH   local working copies
 
 set -euo pipefail
 
+# The org was created as `TWO-Gaming`. GitHub org logins are case-insensitive
+# and both forms resolve to the same org id (318830450), so the lowercase
+# default here matches the bot's systemd unit and the CODEOWNERS files without
+# anything needing renaming. Set TWO_GITHUB_ORG=TWO-Gaming if you want the
+# canonical casing to appear in the git remotes.
 ORG="${TWO_GITHUB_ORG:-two-gaming}"
 BOT_REPO="two-bot"
 WEB_REPO="two-web"
@@ -126,7 +153,13 @@ for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
     --verify)  VERIFY_ONLY=1 ;;
-    -h|--help) sed -n '2,20p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    # Print the header comment block: everything from line 2 up to the line
+    # before `set -euo pipefail`. Computed rather than hardcoded, so editing
+    # the header cannot silently truncate --help (it used to say 2,20p and the
+    # header outgrew it).
+    -h|--help)
+      sed -n "2,$(($(grep -n '^set -euo pipefail' "${BASH_SOURCE[0]}" | head -1 | cut -d: -f1) - 1))p" "${BASH_SOURCE[0]}"
+      exit 0 ;;
     *) echo "unknown argument: $arg" >&2; exit 2 ;;
   esac
 done
@@ -150,10 +183,34 @@ say "Preflight"
 
 command -v gh >/dev/null || { bad "gh CLI not installed"; exit 1; }
 gh auth status >/dev/null 2>&1 || {
-  bad "gh is not authenticated. Run: gh auth login --scopes 'repo,admin:org,workflow'"
+  bad "gh has no credential."
+  bad ""
+  bad "Expected: a fine-grained personal access token for the org in GH_TOKEN."
+  bad "  export GH_TOKEN=<token>   # gh reads it directly; do NOT 'gh auth login'"
+  bad ""
+  bad "The token's permissions are listed at the top of this file and on TWO-81"
+  bad "as the 'github-access' document. They are fine-grained permission names,"
+  bad "not the classic scopes 'repo,admin:org,workflow'."
   exit 1
 }
-ok "gh authenticated as $(gh api user --jq .login)"
+# A fine-grained token is not attached to a human, so `gh api user` can return
+# the token owner rather than anything meaningful. Report it, but do not depend
+# on it.
+ok "gh authenticated as $(gh api user --jq .login 2>/dev/null || echo '<token, no user>')"
+
+# Classic PATs advertise their scopes in a response header; fine-grained tokens
+# send the header empty or not at all. That is the only reliable way to tell
+# which kind we were handed, and it changes what every 403 below means.
+TOKEN_KIND=unknown
+TOKEN_SCOPES="$(gh api -i rate_limit 2>/dev/null \
+  | tr -d '\r' | awk -F': ' 'tolower($1)=="x-oauth-scopes"{print $2}' | head -1)"
+if [ -n "${TOKEN_SCOPES// /}" ]; then
+  TOKEN_KIND=classic
+  ok "token type: classic PAT, scopes: $TOKEN_SCOPES"
+else
+  TOKEN_KIND=fine-grained
+  ok "token type: fine-grained (no x-oauth-scopes header)"
+fi
 
 gh api "orgs/$ORG" >/dev/null 2>&1 || {
   bad "org '$ORG' not reachable. Either it does not exist yet, or this account is not a member."
@@ -162,31 +219,155 @@ gh api "orgs/$ORG" >/dev/null 2>&1 || {
 }
 ok "org '$ORG' reachable"
 
+# ---------------------------------------------------------------------------
+# Repo visibility.
+#
+# Private is the default and should stay that way until TWO-35 has cleared
+# secrets out of the history. The switch exists because the founder is being
+# asked, on TWO-81, to choose between Team+private and Free+public - and if the
+# answer is Free+public, this script has to be able to act on it without a code
+# change.
+#
+# Public needs TWO_ACCEPT_PUBLIC_REPOS=1 as well as TWO_REPO_VISIBILITY=public.
+# Two variables for one decision is deliberate: making a repo public is the one
+# step here that cannot be taken back. Flipping it private again does not
+# un-clone it, un-fork it, or remove it from anyone's search index.
+VISIBILITY="${TWO_REPO_VISIBILITY:-private}"
+case "$VISIBILITY" in
+  private) ok "repo visibility: private" ;;
+  public)
+    if [ "${TWO_ACCEPT_PUBLIC_REPOS:-0}" != "1" ]; then
+      bad "TWO_REPO_VISIBILITY=public but TWO_ACCEPT_PUBLIC_REPOS is not 1."
+      bad ""
+      bad "Creating these repos public publishes their full history to the world"
+      bad "in one step, and TWO-35 has not yet cleared that history. Going back to"
+      bad "private later does not un-clone or un-index what was published."
+      bad ""
+      bad "If the founder has chosen Free+public with eyes open, set both:"
+      bad "  TWO_REPO_VISIBILITY=public TWO_ACCEPT_PUBLIC_REPOS=1"
+      exit 1
+    fi
+    warn "repo visibility: PUBLIC - history goes public on creation (TWO-35 risk accepted)"
+    ;;
+  *) bad "TWO_REPO_VISIBILITY must be 'private' or 'public', got '$VISIBILITY'"; exit 1 ;;
+esac
+
 # Plan matters: on GitHub Free, branch protection and rulesets are enforced on
-# PUBLIC repos only. Our repos must stay private until the launch hardening
-# pass, so a free org cannot give us a main that actually rejects a push.
+# PUBLIC repos only. So protection is real in two of the three combinations,
+# and the one that fails silently is free + private:
+#
+#             private          public
+#   free      NOT enforced     enforced
+#   team+     enforced         enforced
+#
+# That is why $VISIBILITY is resolved above this block rather than below it.
 PLAN="$(gh api "orgs/$ORG" --jq '.plan.name // "unknown"' 2>/dev/null || echo unknown)"
 ok "org plan: $PLAN"
 PROTECTION_AVAILABLE=1
 case "$PLAN" in
   free)
-    PROTECTION_AVAILABLE=0
-    warn "GitHub Free: branch protection on PRIVATE repos is not enforced."
-    warn "Protection will be written but GitHub will ignore it until the org is"
-    warn "on Team (\$4/user/month) or the repos go public. See docs/GITHUB.md."
-    warn ""
-    warn "Plan B applies instead: the .githooks/pre-push hook refuses a direct"
-    warn "push locally, and .github/workflows/main-guard.yml reports one loudly"
-    warn "after the fact. Together that is a speed bump and an alarm, not a lock."
-    if [ "${TWO_ACCEPT_UNPROTECTED_MAIN:-0}" != "1" ]; then
+    if [ "$VISIBILITY" = public ]; then
+      ok "GitHub Free + public repos: branch protection IS enforced"
+      warn "The trade is that everything in these repos is world-readable from"
+      warn "the moment it is pushed, including history TWO-35 has not cleared."
+    else
+      PROTECTION_AVAILABLE=0
+      warn "GitHub Free: branch protection on PRIVATE repos is not enforced."
+      warn "Protection will be written but GitHub will ignore it until the org is"
+      warn "on Team (\$4/user/month) or the repos go public. See docs/GITHUB.md."
       warn ""
-      warn "Set TWO_ACCEPT_UNPROTECTED_MAIN=1 to say out loud that this is the"
-      warn "accepted posture. Without it --verify will fail, on purpose: an"
-      warn "unguarded main should never become true by default."
+      warn "Plan B applies instead: the .githooks/pre-push hook refuses a direct"
+      warn "push locally, and .github/workflows/main-guard.yml reports one loudly"
+      warn "after the fact. Together that is a speed bump and an alarm, not a lock."
+      if [ "${TWO_ACCEPT_UNPROTECTED_MAIN:-0}" != "1" ]; then
+        warn ""
+        warn "Set TWO_ACCEPT_UNPROTECTED_MAIN=1 to say out loud that this is the"
+        warn "accepted posture. Without it --verify will fail, on purpose: an"
+        warn "unguarded main should never become true by default."
+      fi
     fi
     ;;
-  *) ok "plan supports branch protection on private repos" ;;
+  *) ok "plan supports branch protection on $VISIBILITY repos" ;;
 esac
+
+# ---------------------------------------------------------------------------
+# Does this token actually have the permissions we were promised?
+#
+# GitHub has no dry-run for a write. The mapping from a fine-grained permission
+# to an endpoint is documented but easy to get wrong by one permission, and the
+# way you find out is a 403 half way through setup, with some teams created and
+# some not. So on --dry-run we prove the two writes that gate everything else,
+# by doing them and then undoing them.
+#
+# Specifically this answers QA's question on TWO-40: does org `Members: write`
+# satisfy POST /orgs/{org}/teams for a fine-grained token? It creates a
+# throwaway team and deletes it again. Nothing else in the org is touched.
+#
+# TWO_SKIP_TOKEN_PROBE=1 turns it off.
+probe_token() {
+  say "Token probe (dry run only - creates and deletes a throwaway team)"
+
+  local probe_name="zz-preflight-token-check-$$"
+  local body slug http
+
+  # Read side first. If org read fails we already exited above, so this is
+  # about the writes.
+  if gh api "orgs/$ORG/teams" >/dev/null 2>&1; then
+    ok "can LIST teams (org Members: read)"
+  else
+    bad "cannot list teams - org 'Members' permission is missing entirely"
+    FAILED=1
+    return 0
+  fi
+
+  if ! body="$(gh api --method POST "orgs/$ORG/teams" \
+      -f "name=$probe_name" \
+      -f "description=Temporary permission probe from setup-github.sh --dry-run. Delete me." \
+      -f "privacy=closed" 2>&1)"; then
+    bad "cannot CREATE a team. POST /orgs/$ORG/teams was refused:"
+    printf '         %s\n' "$body" | head -5
+    bad ""
+    if [ "$TOKEN_KIND" = fine-grained ]; then
+      bad "For a fine-grained token this endpoint needs organization"
+      bad "'Members: write'. Add it to the token on TWO-81 and re-run --dry-run."
+    else
+      bad "For a classic PAT this endpoint needs the 'admin:org' scope."
+    fi
+    FAILED=1
+    return 0
+  fi
+
+  slug="$(printf '%s' "$body" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("slug",""))' 2>/dev/null || true)"
+  if [ -z "$slug" ]; then
+    warn "team created but the response had no slug; cannot clean up automatically."
+    warn "  Check for a team called '$probe_name' in $ORG and delete it by hand."
+    return 0
+  fi
+
+  ok "CAN create a team (org Members: write is sufficient) - created @$ORG/$slug"
+
+  if gh api --method DELETE "orgs/$ORG/teams/$slug" >/dev/null 2>&1; then
+    ok "CAN delete a team - probe team @$ORG/$slug removed, org is back as it was"
+  else
+    # Never leave this behind quietly. A stray team in CODEOWNERS-adjacent
+    # space is confusing, and it means the token can create but not clean up.
+    bad "created @$ORG/$slug but could NOT delete it. Remove it by hand:"
+    bad "  gh api --method DELETE orgs/$ORG/teams/$slug"
+    FAILED=1
+  fi
+
+  # Repo-level permissions (Administration, Contents, Workflows) cannot be
+  # probed before a repo exists, and creating a throwaway repo to test them is
+  # a worse trade than finding out on the real run - repo creation is
+  # idempotent here and every step reports its own failure.
+  skip "repo-level permissions are exercised on the real run, step by step"
+}
+
+if [ "$DRY_RUN" = 1 ] && [ "${TWO_SKIP_TOKEN_PROBE:-0}" != "1" ]; then
+  probe_token
+elif [ "$DRY_RUN" = 1 ]; then
+  skip "token probe skipped (TWO_SKIP_TOKEN_PROBE=1) - permissions unverified"
+fi
 
 # ---------------------------------------------------------------------------
 # create_team <slug> <display name> <description>
@@ -207,7 +388,12 @@ create_team() {
   if ! got="$(gh api --method POST "orgs/$ORG/teams" \
       -f "name=$tname" -f "description=$tdesc" -f "privacy=closed" \
       --jq .slug 2>/dev/null)"; then
-    bad "could not create team '$slug' - the token needs admin:org on $ORG"
+    if [ "$TOKEN_KIND" = classic ]; then
+      bad "could not create team '$slug' - the classic token needs admin:org on $ORG"
+    else
+      bad "could not create team '$slug' - the token needs organization"
+      bad "  'Members: write' on $ORG. Run --dry-run to confirm before retrying."
+    fi
     FAILED=1
     return 0
   fi
@@ -244,15 +430,19 @@ grant_team_repo() {
 # repo_exists <name>
 repo_exists() { gh api "repos/$ORG/$1" >/dev/null 2>&1; }
 
-# create_repo <name> - private, no auto-init (we push real history into it)
+# create_repo <name> - no auto-init (we push real history into it).
+# Visibility comes from $VISIBILITY, resolved and gated in Preflight.
 create_repo() {
   local name="$1"
+  local want_private=true
+  [ "$VISIBILITY" = public ] && want_private=false
+
   if repo_exists "$name"; then
     skip "$ORG/$name already exists"
   else
     run gh api --method POST "orgs/$ORG/repos" \
       -f "name=$name" \
-      -F "private=true" \
+      -F "private=$want_private" \
       -F "has_issues=false" \
       -F "has_wiki=false" \
       -F "has_projects=false" \
@@ -261,14 +451,27 @@ create_repo() {
       -F "allow_merge_commit=true" \
       -F "allow_rebase_merge=false" \
       -F "delete_branch_on_merge=true" >/dev/null
-    ok "created $ORG/$name (private)"
+    if [ "$DRY_RUN" = 1 ]; then
+      printf '   \033[90mwould create\033[0m %s/%s (%s)\n' "$ORG" "$name" "$VISIBILITY"
+      # Nothing exists to inspect, and claiming it does would make a dry run
+      # read like a real one. This is the visibility the real run would use.
+      return 0
+    fi
+    ok "created $ORG/$name ($VISIBILITY)"
   fi
 
-  # Private, always. Never flip this until TWO-35 has cleared history.
+  # Confirm what GitHub actually made, not what we asked for. An org can have a
+  # policy that forces one or the other, in which case the request quietly
+  # yields the opposite of the plan the founder chose.
   local vis
-  vis="$(gh api "repos/$ORG/$name" --jq .private 2>/dev/null || echo true)"
-  if [ "$vis" != "true" ]; then
-    bad "$ORG/$name is PUBLIC. It must be private until TWO-35 clears secrets and history."
+  vis="$(gh api "repos/$ORG/$name" --jq .private 2>/dev/null || echo "$want_private")"
+  if [ "$vis" != "$want_private" ]; then
+    if [ "$want_private" = true ]; then
+      bad "$ORG/$name is PUBLIC. It must be private until TWO-35 clears secrets and history."
+    else
+      bad "$ORG/$name is PRIVATE, but public was requested. On a Free org that means"
+      bad "  branch protection will not be enforced - the exact thing going public was for."
+    fi
     FAILED=1
   fi
 }
@@ -594,8 +797,16 @@ verify_repo() {
   local files=($3)
   if ! repo_exists "$name"; then bad "$name: does not exist"; FAILED=1; return; fi
 
-  local priv; priv="$(gh api "repos/$ORG/$name" --jq .private)"
-  [ "$priv" = "true" ] && ok "$name: private" || { bad "$name: PUBLIC - must be private until TWO-35"; FAILED=1; }
+  local priv want_priv=true
+  [ "$VISIBILITY" = public ] && want_priv=false
+  priv="$(gh api "repos/$ORG/$name" --jq .private)"
+  if [ "$priv" = "$want_priv" ]; then
+    ok "$name: $VISIBILITY"
+  elif [ "$want_priv" = true ]; then
+    bad "$name: PUBLIC - must be private until TWO-35"; FAILED=1
+  else
+    bad "$name: PRIVATE, but TWO_REPO_VISIBILITY=public was chosen"; FAILED=1
+  fi
 
   local db; db="$(gh api "repos/$ORG/$name" --jq .default_branch)"
   [ "$db" = "$DEFAULT_BRANCH" ] && ok "$name: default branch is $db" || { bad "$name: default branch is '$db', expected $DEFAULT_BRANCH"; FAILED=1; }

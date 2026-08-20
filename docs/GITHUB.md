@@ -5,11 +5,55 @@ decided once rather than per repo.
 
 | | |
 |---|---|
-| Org | `two-gaming` |
+| Org | `TWO-Gaming` (id `318830450`, created 2026-08-20) |
 | Repos | `two-bot` (this one), `two-web` (the Laravel site), `two-design` (tokens and brand) |
 | Visibility | **Private**, all three, until the launch hardening pass has cleared secrets and history |
 | Default branch | `main` |
 | Setup | [`scripts/setup-github.sh`](../scripts/setup-github.sh) — idempotent, re-runnable, `--dry-run` and `--verify` supported |
+
+Org logins are case-insensitive on GitHub, so `two-gaming` and `TWO-Gaming`
+resolve to the same org. The scripts, the CODEOWNERS files and the bot's systemd
+unit all use the lowercase form and **nothing needs renaming**. Set
+`TWO_GITHUB_ORG=TWO-Gaming` if you want the canonical casing in the git remotes.
+
+## The credential
+
+A **fine-grained** personal access token scoped to the org, delivered through
+the secrets channel and read from `GH_TOKEN`. `gh` picks that variable up
+directly — **do not run `gh auth login`**, and never paste the token into an
+issue, a comment, or a chat message.
+
+| Level | Permission | Why |
+|---|---|---|
+| Organization | `Administration: write` | create repos in the org |
+| Organization | `Members: write` | create the five teams |
+| Repository | `Metadata: read` | required by every other repo permission |
+| Repository | `Administration: write` | branch protection, merge settings, team access |
+| Repository | `Contents: write` | push history |
+| Repository | `Workflows: write` | push `.github/workflows/` |
+| Repository | `Actions`, `Secrets`, `Environments`, `Pull requests`, `Issues`: write | CI, the production environment gate, and review routing |
+
+The full spec is the `github-access` document on TWO-81. These are fine-grained
+permission *names* — they are not the classic-PAT scopes (`repo`, `admin:org`,
+`workflow`), and an older version of the setup script asked for the wrong thing.
+
+**Prove the token before using it.** `setup-github.sh --dry-run` reports whether
+it was handed a classic or fine-grained token, and then proves the org write by
+creating a throwaway team and deleting it again:
+
+```
+== Token probe (dry run only - creates and deletes a throwaway team)
+   ok    can LIST teams (org Members: read)
+   ok    CAN create a team (org Members: write is sufficient) - created @two-gaming/zz-preflight-token-check-1234
+   ok    CAN delete a team - probe team removed, org is back as it was
+```
+
+If creation is refused, the probe prints GitHub's own error and names the exact
+permission to add. That is the whole point: a missing permission should surface
+in a dry run, not half way through team creation with three teams made and two
+not. `TWO_SKIP_TOKEN_PROBE=1` turns it off. Repo-level permissions cannot be
+probed before a repo exists; they are exercised on the real run, step by step,
+and each step reports its own failure.
 
 ## The thing to know before you start
 
@@ -29,8 +73,29 @@ That leaves three options and only one of them is good:
 | Make repos public now | free | **No.** History and secrets have not been cleared yet. Private → public is easy; the reverse is not. |
 | Stay free + private, protection advisory only | free | Works right up until the day somebody is in a hurry. This is the situation the issue was written to prevent. |
 
+Only one of the three combinations fails, and it is the one that fails silently:
+
+| | private | public |
+|---|---|---|
+| **Free** | protection **not** enforced, silently | protection enforced |
+| **Team and up** | protection enforced | protection enforced |
+
 This is a spend decision, so it is the CEO's, not mine. The setup script
 detects a free plan and warns rather than pretending it worked.
+
+**If the answer is Free + public**, the script can act on it without a code
+change:
+
+```bash
+TWO_REPO_VISIBILITY=public TWO_ACCEPT_PUBLIC_REPOS=1 ./scripts/setup-github.sh
+```
+
+Both variables are required. Two of them for one decision is deliberate:
+publishing is the only step here that cannot be undone. Setting a repo back to
+private does not un-clone it, un-fork it, or remove it from anyone's search
+index — and TWO-35 has not yet cleared the history that would go out with it.
+With `TWO_REPO_VISIBILITY=public` set, the script stops treating a free plan as
+a problem, because on public repos protection genuinely is enforced.
 
 Verified again on 2026-08-19: GitHub's docs still scope both classic protected
 branches and rulesets to "public repositories with GitHub Free… public and
