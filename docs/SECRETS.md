@@ -5,8 +5,13 @@
 1. Secrets come from the environment. Never from a file in this repository.
 2. `.env` is gitignored. `.env.example` holds the *names* of the variables and
    never a value.
-3. In production, secrets live in `/etc/two-bot/two-bot.env`, root-owned,
-   `chmod 600`, loaded by systemd's `EnvironmentFile=`.
+3. In production, secrets are **systemd credentials**, not environment
+   variables. Source files live in `/etc/two-bot/credentials/`, root-owned,
+   `chmod 600`, and systemd copies each into a private per-service directory
+   mode `0400` owned by the service user. `/etc/two-bot/two-bot.env` still
+   exists and is still loaded by `EnvironmentFile=`, but it now holds
+   **non-secret configuration only**: guild ID, channel IDs, log level, feature
+   flags. See "Why credentials and not environment variables" below.
 4. A secret never goes into a log line, an issue comment, a chat message, or a
    screenshot. `src/core/log.ts` only logs what it is explicitly given, and no
    call site passes it the token.
@@ -14,11 +19,43 @@
    worry about how it happened second. Rotation is cheap; a live leaked token is
    somebody else's bot in our server.
 
+## Why credentials and not environment variables
+
+The bot is going onto a machine it **shares** with the website, Postgres and
+staging. That was not true when this file was written.
+
+An environment variable is readable from `/proc/<pid>/environ`, is inherited by
+every child process the bot spawns, and lands in a core dump. A systemd
+credential is a `0400` file in a private directory that exactly one Unix user
+can open. Against a fully compromised PHP-FPM worker running as the web user,
+the first is a hope and the second is a fact.
+
+Neither stops root. Nothing stops root — that is a custody question, answered by
+whoever owns the box (TWO-79), not by a config file. The full accounting is the
+`hosting-decision` document on TWO-37.
+
+| Secret | Credential name | Env fallback |
+|---|---|---|
+| Discord bot token | `discord_token` | `DISCORD_BOT_TOKEN`, then `DISCORD_TOKEN` |
+| Postgres URL | `database_url` | `TWO_DATABASE_URL` |
+| Internal-actions signing keys | `internal_keys` | `TWO_INTERNAL_KEYS` |
+
+The credential wins when present. The environment fallback is what makes local
+development, CI and the one-off scripts keep working unchanged — none of those
+run under systemd. Provisioning is in `deploy/two-bot.service`, and a credential
+file that is empty or whitespace falls through to the environment rather than
+starting the bot with an empty token.
+
+**When you migrate a live box: delete the token line from
+`/etc/two-bot/two-bot.env`.** The credential wins either way, so a stale copy
+left behind is not a broken deploy — it is just the exposure you were removing,
+still there, silently.
+
 ## What the bot needs
 
 | Variable | Required | What it is |
 |---|---|---|
-| `DISCORD_TOKEN` | yes | Bot token from the Discord developer application. |
+| `DISCORD_TOKEN` | yes | Bot token from the Discord developer application. Credential `discord_token` in production. |
 | `DISCORD_GUILD_ID` | no | Restrict to one server. |
 | `TWO_DB_PATH` | no | Defaults to `./data/two.db`. |
 | `TWO_INACTIVITY_DAYS` | no | Days of silence before flagging. Defaults to 14. |
@@ -92,5 +129,11 @@ of which blocks data collection:
   said this bot must not have — kick, ban, manage roles, send messages.
 
 Both are Discord-portal changes owned by whoever administers the server, and
-both are tracked on TWO-11. Everything before the token arrived was built and
+both are tracked on TWO-11. **They are not equally safe to act on.** Turning
+Message Content Intent off is safe today and should happen. Dropping
+Administrator is **not** safe today: the routed welcome (TWO-69) needs
+`Send Messages` and `Manage Roles`, and one-click join (TWO-57) additionally
+needs `Manage Events` and `Create Instant Invite`. Administrator is covering all
+four by accident; `Manage Server` implies none of them. Narrow the grant only
+once TWO-42 has reconciled the real set — see §8 of `docs/INTERNAL_ACTIONS.md`. Everything before the token arrived was built and
 verified against a local mock Discord (see `tools/mock-discord/`).

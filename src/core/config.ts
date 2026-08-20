@@ -2,7 +2,12 @@
  * Config comes from the environment only. Never from a committed file.
  * Load it with `node --env-file=.env src/index.ts` in dev, or via the systemd
  * EnvironmentFile in production. See docs/SECRETS.md.
+ *
+ * The one exception is the bot token, which comes from a systemd credential in
+ * production so it never enters the process environment - see
+ * `src/core/credentials.ts` for why that matters on a shared box.
  */
+import { readSecret } from './credentials.ts';
 
 export interface Config {
   discordToken: string;
@@ -38,15 +43,19 @@ export interface Config {
 }
 
 /**
- * The hosting environment provisions the token as DISCORD_BOT_TOKEN; the repo
- * and the local .env have always called it DISCORD_TOKEN. Accept both rather
+ * In production the token arrives as a systemd credential named
+ * `discord_token`, which keeps it out of the process environment on a box we
+ * share with the website. Locally and in CI it is an environment variable: the
+ * hosting environment provisions it as DISCORD_BOT_TOKEN, the repo and the
+ * local .env have always called it DISCORD_TOKEN, and we accept both rather
  * than make the deploy depend on which name someone remembered.
  */
 function requiredToken(): string {
-  const v = process.env.DISCORD_BOT_TOKEN || process.env.DISCORD_TOKEN;
+  const v = readSecret('discord_token', ['DISCORD_BOT_TOKEN', 'DISCORD_TOKEN']);
   if (!v) {
     throw new Error(
-      'Missing bot token. Set DISCORD_BOT_TOKEN (or DISCORD_TOKEN). See docs/SECRETS.md.',
+      'Missing bot token. Provide the systemd credential `discord_token`, or set ' +
+        'DISCORD_BOT_TOKEN (or DISCORD_TOKEN). See docs/SECRETS.md.',
     );
   }
   return v;
@@ -63,7 +72,8 @@ function requiredToken(): string {
  * else's database is not a failure mode worth having.
  */
 function resolveDbSpec(): string {
-  const url = process.env.TWO_DATABASE_URL;
+  // The URL carries a Postgres password, so it takes the credential path too.
+  const url = readSecret('database_url', ['TWO_DATABASE_URL']);
   if (url) return url;
   return process.env.TWO_DB_PATH || './data/two.db';
 }

@@ -11,12 +11,13 @@
  * | `TWO_INTERNAL_ACTIONS` | `1` to run the listener at all. |
  * | `TWO_INTERNAL_BIND_HOST` | Private address to bind. Default `127.0.0.1`. A public address refuses to start. |
  * | `TWO_INTERNAL_PORT` | Default `8787`. |
- * | `TWO_INTERNAL_KEYS` | `key-id:secret,key-id:secret`. A real secret - see docs/SECRETS.md. |
+ * | `TWO_INTERNAL_KEYS` | `key-id:secret,key-id:secret`. A real secret - see docs/SECRETS.md. In production it arrives as the systemd credential `internal_keys` instead. |
  * | `TWO_INTERNAL_ROLE_KEYS` | Extra `role-key:snowflake` pairs beyond the self-assignable set. |
  * | `TWO_INTERNAL_ALLOW_ADD_MEMBER` | `1` to enable `guild.add_member`. **Requires the CEO's sign-off (TWO-24).** |
  */
 import { parseKeys, type SigningKey } from './signing.ts';
 import { buildRoleKeys, type ActionName } from './actions.ts';
+import { readSecret, credentialSource } from '../core/credentials.ts';
 
 export interface InternalActionsConfig {
   host: string;
@@ -30,9 +31,14 @@ export interface InternalActionsConfig {
 export function loadInternalActionsConfig(env: NodeJS.ProcessEnv = process.env): InternalActionsConfig | null {
   if (env.TWO_INTERNAL_ACTIONS !== '1') return null;
 
-  const keys = parseKeys(env.TWO_INTERNAL_KEYS ?? '');
+  const keys = parseKeys(
+    readSecret('internal_keys', ['TWO_INTERNAL_KEYS'], credentialSource(env)) ?? '',
+  );
   if (keys.length === 0) {
-    throw new Error('TWO_INTERNAL_ACTIONS=1 but TWO_INTERNAL_KEYS is empty. See docs/SECRETS.md.');
+    throw new Error(
+      'TWO_INTERNAL_ACTIONS=1 but no signing keys. Provide the systemd credential ' +
+        '`internal_keys`, or set TWO_INTERNAL_KEYS. See docs/SECRETS.md.',
+    );
   }
 
   // role.assign is approved and unconditional. guild.add_member is built and

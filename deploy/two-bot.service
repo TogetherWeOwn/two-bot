@@ -7,6 +7,15 @@
 #
 # Restart-on-failure is the whole point of this file: if the bot crashes or the
 # box reboots, it comes back without anyone noticing.
+#
+# This unit is written for a SHARED machine. The bot sits next to the website,
+# Postgres, staging and the founder's own things, so two properties matter that
+# would not matter on a single-purpose VM:
+#
+#   1. No other non-root user can read the Discord bot token.  ->  LoadCredential
+#   2. The bot cannot take the box down for everyone else.     ->  MemoryMax/CPUQuota
+#
+# Neither stops root. See the `hosting-decision` document on TWO-37.
 
 [Unit]
 Description=TWO community Discord bot
@@ -21,9 +30,34 @@ Group=twobot
 WorkingDirectory=/opt/two-bot
 ExecStart=/usr/bin/node src/index.ts
 
-# Secrets live here, root-owned, chmod 600. Never in the repo, never in this file.
+# --- Secrets -----------------------------------------------------------------
+# Secrets come in as systemd credentials, NOT as environment variables. systemd
+# copies each file into a private per-service directory mode 0400 owned by
+# User=, and exports the path as $CREDENTIALS_DIRECTORY. src/core/credentials.ts
+# reads them from there.
+#
+# The difference this buys on a shared box: an environment variable is visible
+# in /proc/<pid>/environ, is inherited by every child process, and lands in a
+# core dump. A credential is a file exactly one Unix user can open. A fully
+# compromised PHP-FPM worker running as the web user cannot read it.
+#
+# Source files must be root-owned and chmod 600:
+#   sudo install -d -m 0700 -o root -g root /etc/two-bot/credentials
+#   sudo install -m 0600 /dev/null /etc/two-bot/credentials/discord_token
+#   sudo $EDITOR /etc/two-bot/credentials/discord_token   # token, no quotes, no trailing newline needed
+LoadCredential=discord_token:/etc/two-bot/credentials/discord_token
+# Optional. Uncomment as each lands - a missing file makes the unit fail to
+# start, so do not list a credential before it exists on the box.
+#LoadCredential=database_url:/etc/two-bot/credentials/database_url
+#LoadCredential=internal_keys:/etc/two-bot/credentials/internal_keys
+
+# Non-secret configuration only: guild ID, channel IDs, log level, feature
+# flags. Root-owned, chmod 600. The token MUST NOT be in this file any more -
+# if DISCORD_TOKEN is still here, delete the line; the credential above wins and
+# leaving a stale copy in the environment defeats the point.
 EnvironmentFile=/etc/two-bot/two-bot.env
 
+# --- Restart policy ----------------------------------------------------------
 # Restart always, with backoff, but give up if it is crash-looping so we get
 # paged instead of silently burning the Discord identify budget.
 Restart=always
@@ -39,19 +73,46 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=two-bot
 
-# Hardening. The bot needs the network and its own data directory. Nothing else.
+# --- Hardening ---------------------------------------------------------------
+# The bot needs the network and its own data directory. Nothing else.
 NoNewPrivileges=true
 PrivateTmp=true
+PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/opt/two-bot/data /var/backups/two-bot
 ProtectKernelTunables=true
 ProtectKernelModules=true
+ProtectKernelLogs=true
 ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
 RestrictNamespaces=true
 RestrictSUIDSGID=true
+RestrictRealtime=true
 LockPersonality=true
+UMask=0077
+# Empty set: the bot never needs a capability. Notably not CAP_NET_BIND_SERVICE
+# - the internal actions endpoint is on 8787, above 1024, on loopback.
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Co-tenancy: hide the website's and Postgres' processes from the bot, and the
+# bot's from them. Cheap, and it makes /proc a non-path between services.
+ProtectProc=invisible
+ProcSubset=pid
+# HTTPS to Discord and loopback for Postgres and the actions endpoint. Nothing
+# else, so a compromised dependency cannot open a raw socket.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+SystemCallArchitectures=native
+
+# --- Blast radius on a shared box --------------------------------------------
+# A leak or a runaway loop in the bot must not starve the website or Postgres.
+# 512M is roughly 4x steady state; CPUQuota is one core of eight.
 MemoryMax=512M
+CPUQuota=100%
+TasksMax=64
 
 [Install]
 WantedBy=multi-user.target

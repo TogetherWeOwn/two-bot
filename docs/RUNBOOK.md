@@ -181,7 +181,16 @@ sudo rsync -a --exclude node_modules --exclude data ./ /opt/two-bot/
 cd /opt/two-bot && sudo -u twobot npm ci --omit=dev
 sudo chown -R twobot:twobot /opt/two-bot /var/backups/two-bot
 
-# Secrets: root-owned, readable only by root (systemd reads it before dropping privileges).
+# The Discord token is a systemd credential, not an environment variable. On a
+# box we share with the website that is the difference between "the web user
+# cannot read the token" being a fact and being a hope. See docs/SECRETS.md.
+sudo install -d -m 0700 -o root -g root /etc/two-bot/credentials
+sudo install -m 600 /dev/null /etc/two-bot/credentials/discord_token
+sudo editor /etc/two-bot/credentials/discord_token   # the token, on one line, nothing else
+
+# Non-secret configuration: guild ID, channel IDs, log level, flags.
+# Root-owned, readable only by root (systemd reads it before dropping privileges).
+# Do NOT put DISCORD_TOKEN in here any more.
 sudo install -m 600 /dev/null /etc/two-bot/two-bot.env
 sudo editor /etc/two-bot/two-bot.env     # see .env.example for the keys
 
@@ -351,8 +360,11 @@ job in plain Node with no system dependency, and has actually been restored.
 
 ## Common problems
 
-**`Missing required env var DISCORD_TOKEN`** — `/etc/two-bot/two-bot.env` is
-missing, empty, or unreadable. Check `sudo ls -l /etc/two-bot/two-bot.env`.
+**`Missing bot token`** — the credential is missing. Check
+`sudo ls -l /etc/two-bot/credentials/discord_token`; it must exist, be
+root-owned, and not be empty. If systemd refuses to start the unit at all with
+`Failed to load credential`, the file named in a `LoadCredential=` line does not
+exist — comment out the optional ones you have not provisioned yet.
 
 **`invite_snapshot_failed` in the logs** — the bot lacks the *Manage Server*
 permission, so it cannot list invites. Joins are still recorded, but every one
