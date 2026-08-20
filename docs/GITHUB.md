@@ -351,6 +351,17 @@ headers. **Clean — nothing to rotate.** `.env` has never been tracked, and
 `audit/raw/` holds aggregate counts and public server metadata, not member
 personal data.
 
+**Re-checked 2026-08-20 with gitleaks itself**, rather than the hand-written
+regex sweep above — a real scanner has rules the sweep did not. It surfaced 5
+hits the first pass missed. All five were read by hand and none is a credential:
+a Discord **guild** ID (public — every member can read it), an obviously fake
+staging ID in a test fixture, and the literal placeholder `<bot token>` in a
+docs example. The conclusion is unchanged: nothing to rotate. The shapes are
+allowlisted narrowly in [`.gitleaks.toml`](../.gitleaks.toml), because a
+required check that is red for reasons nobody believes gets merged past.
+
+`two-design` was scanned the same way on the same date: 4 commits, no leaks.
+
 ## Moving a repo in
 
 Full history, always. No squash-into-a-fresh-repo — the reasoning behind a
@@ -398,6 +409,32 @@ that exists in one working copy and nowhere else is one lost directory from
 gone, and this repo is the reason that rule exists.
 
 ## Verifying it actually works
+
+### What was actually proved, 2026-08-20
+
+The org went live on this date. These are measurements, not expectations.
+
+| Claim | How it was proved | Result |
+|---|---|---|
+| `main-guard` ignores the initial import | pushed a first commit to a throwaway repo | **skipped**, correct |
+| `main-guard` catches a direct push | second commit pushed straight to `main`, no PR | **failed**, correct — `94c9759 was pushed to main by Rick7C2 without a pull request` |
+| `main-guard` passes a real merge | merged PR #1 in `two-bot` and `two-design` | **success**, correct |
+| `gitleaks` is not a paid dependency | ran the pinned binary in CI | **success** on `main` in both repos |
+| `two-bot` history is free of credentials | gitleaks 8.30.1 over all 47 commits | no leaks |
+| `two-design` history is free of credentials | gitleaks 8.30.1 over all 4 commits | no leaks |
+| Branch protection is unavailable, not silent | `PUT`/`GET` protection, `GET` rulesets | 403, nothing stored |
+
+The `main-guard` proof used a throwaway private repo, `zz-main-guard-proof`,
+which was deleted immediately afterwards. Proving a guard by tripping it is the
+only proof worth having, and doing it in a real repo would have meant a red mark
+on `main` that nobody could explain later.
+
+**The negative case is the one that matters here.** On the Free plan nothing
+refuses a bad push, so the only question worth answering is whether anything
+notices. It does, within a minute, with the pusher's name in a GitHub error
+annotation.
+
+### Re-running the check
 
 ```bash
 ./scripts/setup-github.sh --verify
