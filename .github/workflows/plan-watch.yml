@@ -1,0 +1,119 @@
+name: plan-watch
+
+# Has GitHub started allowing branch protection yet?
+#
+# The org is on GitHub Free with private repos, where GitHub refuses branch
+# protection outright and stores nothing. So moving to Team later does NOT
+# switch protection on - there is no saved rule waiting to be enforced, and
+# the day the plan changes is exactly the day nobody is thinking about branch
+# protection.
+#
+# This job is what remembers. It stays silent every week that GitHub is still
+# refusing, and the week it stops refusing it fails and files an issue that
+# carries the re-apply steps with it. See scripts/plan-watch.sh and TWO-85.
+#
+# A failure here is never flaky and never urgent-at-3am: it means somebody
+# should spend ten minutes running setup-github.sh.
+#
+# CREDENTIAL - read this before assuming the schedule is working.
+#
+# Both probes need permissions the workflow's own GITHUB_TOKEN cannot be
+# granted. `administration` is not a valid `permissions:` key at all (an
+# earlier version of this file tried it and GitHub refused to parse the
+# workflow), and the org-plan field is only returned to an org admin, which a
+# repo-scoped token is not. So the watcher is only armed when the repository
+# secret PLAN_WATCH_TOKEN is set to a fine-grained, READ-ONLY org token:
+#
+#   Organization  Administration: read     (org plan)
+#   Repository    Administration: read     (branch protection)
+#                 Metadata: read
+#
+# Read-only on purpose. This token sits in Actions secrets on an org with no
+# branch protection, so anyone who can push a workflow can read it. A leak of
+# this one discloses the plan name and the protection config; nothing can be
+# changed with it. Do NOT reuse the setup-github.sh write token here.
+#
+# Without that secret the job runs, reports that it cannot see, and exits 0.
+# It does not pretend to be watching. Tracked on TWO-85.
+
+on:
+  schedule:
+    # Mondays, 07:23 UTC. Off the hour on purpose - the top of the hour is
+    # when everyone else's cron fires and GitHub queues shared runners.
+    - cron: '23 7 * * 1'
+  # So the day the founder upgrades the plan, this can be run on the spot
+  # instead of waiting until Monday.
+  workflow_dispatch:
+  # A watcher nobody exercises is a watcher that has quietly broken. Running
+  # it on any PR that touches it proves the script still executes and shows
+  # exactly what the available token can and cannot see. Never files an issue
+  # on this path.
+  pull_request:
+    paths:
+      - 'scripts/plan-watch.sh'
+      - '.github/workflows/plan-watch.yml'
+
+# GitHub disables scheduled workflows in a repo with no activity for 60 days
+# and emails the owner. If this stops running, that is usually why - push
+# anything, or re-enable it from the Actions tab.
+
+permissions:
+  contents: read
+  # To file the reminder issue. Everything the probes need comes from
+  # PLAN_WATCH_TOKEN instead - see CREDENTIAL above.
+  issues: write
+
+jobs:
+  protection-available:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Probe, and speak up if branch protection is possible now
+        env:
+          # Falls back to the workflow token so the job still runs and still
+          # reports honestly when the secret is missing.
+          GH_TOKEN: ${{ secrets.PLAN_WATCH_TOKEN || github.token }}
+          ARMED: ${{ secrets.PLAN_WATCH_TOKEN != '' }}
+          # On a pull request this is a self-test, not an alarm.
+          FILE_ISSUE: ${{ github.event_name != 'pull_request' }}
+        run: |
+          set -o pipefail
+
+          if [ "$ARMED" != "true" ]; then
+            echo "::warning title=plan-watch is not armed::PLAN_WATCH_TOKEN is not set, so the probes cannot read branch protection or the org plan. This job is reporting, not watching. See TWO-85."
+          fi
+
+          args=""
+          if [ "$FILE_ISSUE" = "true" ] && [ "$ARMED" = "true" ]; then
+            args="--github-issue"
+          fi
+
+          # Tee the script's own reasoning into the run summary, so the run
+          # explains itself without anyone opening the log.
+          {
+            echo '### plan-watch'
+            echo
+            echo "armed: \`$ARMED\`  ·  event: \`${{ github.event_name }}\`"
+            echo
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          rc=0
+          ./scripts/plan-watch.sh $args 2>&1 \
+            | sed 's/\x1b\[[0-9;]*m//g' \
+            | tee -a "$GITHUB_STEP_SUMMARY" || rc=$?
+
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$rc" != 0 ]; then
+            echo "::error title=Branch protection is available now::GitHub is no longer refusing branch protection, and main is not protected. Run ./scripts/setup-github.sh - see the issue this job just filed."
+          fi
+
+          # A PR self-test reports what it saw; it does not fail the PR just
+          # because the plan changed. The scheduled run is the alarm.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "self-test complete (exit $rc, not failing the PR)"
+            exit 0
+          fi
+          exit "$rc"
