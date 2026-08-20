@@ -7,21 +7,26 @@
  * QA runs this between integration runs. It needs no help from an engineer,
  * which is the whole point of TWO-25.
  *
- * FOUR GUARDS, because the failure this prevents is unrecoverable - seeding
+ * FIVE GUARDS, because the failure this prevents is unrecoverable - seeding
  * ten fake members into the live funnel would corrupt every growth number we
  * have, and there is no undo:
  *
  *   1. It reads TWO_STAGING_DATABASE_URL. Not TWO_DATABASE_URL. A staging run
  *      cannot pick up the live connection string by inheriting the wrong shell.
  *   2. The database name must contain "staging" or "test".
- *   3. DISCORD_STAGING_GUILD_ID must be set and must not be the live guild.
- *   4. Deletes are scoped to that guild id, never TRUNCATE.
+ *   3. It must not point at the same host/database as TWO_DATABASE_URL, even
+ *      under different credentials.
+ *   4. DISCORD_STAGING_GUILD_ID must be set and must not be the live guild.
+ *   5. Deletes are scoped to that guild id, never TRUNCATE.
  *
- * Any guard failing exits 2 without touching the database.
+ * Guards 1-4 live in src/staging/readiness.ts so that this script's refusal and
+ * `staging-doctor.ts`'s diagnosis are the same code and cannot drift. Any guard
+ * failing exits 2 without touching the database.
  */
 import { openDb } from '../src/store/db.ts';
 import { EXPECTED_FUNNEL, resetStagingData, seedFixtures } from '../src/staging/fixtures.ts';
-import { LIVE_GUILD_ID, stagingGuildId } from '../src/staging/spec.ts';
+import { stagingGuildId } from '../src/staging/spec.ts';
+import { stagingEnvChecks } from '../src/staging/readiness.ts';
 import { EventStore } from '../src/store/eventStore.ts';
 import { joinedNeverPosted } from '../src/jobs/inactivity.ts';
 import type { EventType } from '../src/core/events.ts';
@@ -33,42 +38,29 @@ function die(msg: string): never {
   process.exit(2);
 }
 
-// --- guard 1: its own connection string ------------------------------------
-const url = process.env.TWO_STAGING_DATABASE_URL;
-if (!url) {
+// --- guards 1-4: the environment, checked once ------------------------------
+//
+// One shared implementation with staging-doctor.ts. A guard that only exists in
+// the script people run when they are already confused is worth less than a
+// guard that also explains itself in the one they run first.
+const envChecks = stagingEnvChecks(process.env);
+// Database first, because that is what this script actually opens - and the
+// token is not its business at all: resetting touches the database only, and
+// requiring a credential it never uses would just block QA.
+for (const id of ['database', 'guild'] as const) {
+  const c = envChecks.find((x) => x.id === id)!;
+  if (c.status === 'ok') continue;
   die(
-    'Missing TWO_STAGING_DATABASE_URL.\n' +
-      '  This is deliberately NOT TWO_DATABASE_URL - staging must never be one\n' +
-      '  forgotten env var away from the live funnel. See docs/STAGING.md.',
-  );
-}
-if (!url.startsWith('postgres://') && !url.startsWith('postgresql://')) {
-  die('TWO_STAGING_DATABASE_URL must be a Postgres URL.');
-}
-
-// --- guard 2: the database is named like a staging database ----------------
-const dbName = (() => {
-  try {
-    return new URL(url).pathname.replace(/^\//, '');
-  } catch {
-    return '';
-  }
-})();
-if (!/staging|test/i.test(dbName)) {
-  die(
-    `Database "${dbName || '(unparseable)'}" is not named like a staging database.\n` +
-      '  Expected the name to contain "staging" or "test". Refusing to wipe it.',
+    `${c.title}: ${c.detail}\n` +
+      (c.owner ? `  owner: ${c.owner}\n` : '') +
+      (c.action ? `  -> ${c.action}\n` : '') +
+      '  Nothing was written. See docs/STAGING.md, or run scripts/staging-doctor.ts.',
   );
 }
 
-// --- guard 3: a staging guild, and not the live one ------------------------
-let guildId: string;
-try {
-  guildId = stagingGuildId();
-} catch (err) {
-  die((err as Error).message);
-}
-if (guildId === LIVE_GUILD_ID) die('That is the live TWO guild id. Refusing.');
+const url = process.env.TWO_STAGING_DATABASE_URL!;
+const dbName = new URL(url).pathname.replace(/^\//, '');
+const guildId = stagingGuildId();
 
 // --- do the work -----------------------------------------------------------
 const db = await openDb(url);

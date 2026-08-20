@@ -3,10 +3,13 @@
 This is written for QA. You should never need to ask an engineer to reset
 staging, and you should never point a test at the live TWO server.
 
-**Status: the code is ready, the server is not.** The only thing outstanding
-is the `test-two` bot token (TWO-21). The server itself no longer needs a
-human — the bot creates it, see "Building the staging server" below.
-Everything else works today; the steps that need the token are marked.
+**Status: the code is ready, the environment is not.** Two things are
+outstanding, both with the founder: the `test-two` bot token (TWO-21) and a
+Postgres host for the staging database (TWO-11). The server itself no longer
+needs a human — the bot creates it, see "Building the staging server" below.
+Everything else works today; the steps that need the token are marked, and
+`scripts/staging-doctor.ts` will tell you where things stand without you
+having to read the rest of this page.
 
 ---
 
@@ -58,6 +61,48 @@ Never paste a token into an issue, a chat message, or a test file. See
 
 ---
 
+## Start here, every time
+
+```bash
+node scripts/staging-doctor.ts
+```
+
+One command, one answer. It reads your environment, and — only if the database
+is safe to open — looks inside it to see whether the schema is applied and the
+fixtures are the known state. It writes nothing, never contacts Discord, and
+never prints a token.
+
+The exit code is the useful part:
+
+| Code | Means | What you do |
+|---|---|---|
+| `0` | ready | reset, then run your suite |
+| `1` | something is set wrong | the `FIX` lines are yours; each one carries the command |
+| `3` | waiting on somebody | nothing. The line names the owner and the issue |
+
+**A `3` is not your setup being broken.** It is the difference between "I typed
+something wrong" and "the founder has not bound the token yet", and until this
+script existed the only way to tell them apart was to run four scripts and read
+four different refusals one at a time. As of 2026-08-20 a clean checkout with no
+staging variables bound prints exactly three `WAITING` lines: the token, the
+server (which waits on the token), and the database (which waits on a host).
+
+## Applying the schema to the staging database
+
+**Read the variable names twice.** `scripts/migrate.ts` is a general tool and
+only knows `TWO_DATABASE_URL` — the **live** name. To migrate staging you map
+the staging URL onto it, on one line, deliberately:
+
+```bash
+TWO_DATABASE_URL="$TWO_STAGING_DATABASE_URL" node scripts/migrate.ts
+```
+
+This is the one place in the whole staging flow where a typo points a schema
+change at production. The doctor prints this exact command when it finds
+pending migrations, so copy it from there rather than from memory.
+
+---
+
 ## Resetting between runs
 
 ```bash
@@ -97,14 +142,22 @@ joined-never-posted: 2 (900000000000000005, 900000000000000001)
 Known state. Safe to run the integration suite.
 ```
 
-### The four guards
+### The five guards
 
 The script exits `2` without touching anything if:
 
 1. `TWO_STAGING_DATABASE_URL` is unset or is not a Postgres URL.
 2. The database name does not contain `staging` or `test`.
-3. `DISCORD_STAGING_GUILD_ID` is unset, or is the live TWO guild.
-4. (Always) deletes are scoped by guild id — never `TRUNCATE`.
+3. It points at the same host and database as `TWO_DATABASE_URL` — **even under
+   a different username and password**. Two connection strings with different
+   credentials and the same target are the same database, and a reset against
+   the live one would delete every growth number we have with no undo.
+4. `DISCORD_STAGING_GUILD_ID` is unset, or is the live TWO guild.
+5. (Always) deletes are scoped by guild id — never `TRUNCATE`.
+
+Guards 1–4 are the same code the doctor runs (`src/staging/readiness.ts`), so
+the refusal you get here and the diagnosis you get there cannot drift apart.
+The refusal names the owner and the next step, same as the doctor does.
 
 ---
 
@@ -284,7 +337,11 @@ across deliberately, one command, where you can see it.
 
 ## What is still missing
 
-One thing from the founder, via TWO-21:
+`node scripts/staging-doctor.ts` answers this from your own environment, which
+is more reliable than a page someone has to remember to edit. What follows is
+the state on 2026-08-20.
+
+The first thing, from the founder, via TWO-21:
 
 1. `discord_staging_bot_token` — the `test-two` bot token in the secrets
    store, bound to QA and to me. The application already exists
@@ -292,21 +349,28 @@ One thing from the founder, via TWO-21:
 
    **Checked again 2026-08-20: still absent here.** What was present instead
    was the *live* bot's token under the generic name `DISCORD_BOT_TOKEN` —
-   which is correct for the production bot and useless for staging. "In the
-   store" and "bound to the agent that needs it" are different things, and
-   from outside they look identical. Report absence; do not improvise around
-   it.
+   which is correct for the production bot and useless for staging. The value
+   itself was never missing: it had been bound to the **Web Lead**, who does
+   not need it. "In the store" and "bound to the agent that needs it" are
+   different things, and from outside they look identical. Report absence; do
+   not improvise around it.
 
-That is now the whole dependency. The server no longer needs a human, and
-nobody needs to send us a guild id — `staging-provision.ts` creates the server
+The second, also the founder, via TWO-11:
+
+2. A Postgres host. The staging database can be a second database on the same
+   server the bot's Postgres migration (TWO-18) lands on — no extra spend —
+   but there is no server yet. Settled on the founder's own OVH box at $0;
+   access credentials sit behind the Infrastructure Engineer hire (TWO-79).
+
+Nobody needs to send us a guild id — `staging-provision.ts` creates the server
 and prints the id itself, the first time it runs.
 
-A staging Postgres database is also needed. It can be a second database on the
-same server the bot's Postgres migration (TWO-18) lands on — no extra spend.
-
-Until then: the fixtures, the reset script, the verifier and the provisioning
-script all exist. `staging-reset.ts` has been run end to end against a real
-Postgres database and is green, and every provisioning *decision* — create vs
-adopt, the ten-guild guard, role hierarchy under both ownership models — is
-covered by `test/unit.provision.test.ts`, which needs no token. What cannot be
-exercised yet is anything that actually talks to Discord.
+Until then: the fixtures, the reset script, the doctor, the verifier and the
+provisioning script all exist. Every *decision* any of them makes is covered by
+tests that need no token, no network and no Postgres —
+`test/unit.staging.test.ts`, `test/unit.provision.test.ts` and
+`test/unit.readiness.test.ts`, 65 tests between them. What cannot be exercised
+here is anything that actually talks to Discord, and the doctor's
+schema-and-fixture readout against a live Postgres connection: this environment
+has no Postgres at all, so the connecting is unproven even though every
+judgement it makes on the result is tested.
