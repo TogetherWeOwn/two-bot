@@ -9,11 +9,19 @@ name: plan-watch
 # protection.
 #
 # This job is what remembers. It stays silent every week that GitHub is still
-# refusing, and the week it stops refusing it fails and files an issue that
-# carries the re-apply steps with it. See scripts/plan-watch.sh and TWO-85.
+# refusing. The week it stops refusing, it fails, and the run summary carries
+# the whole re-apply runbook so nobody has to go looking for it.
 #
 # A failure here is never flaky and never urgent-at-3am: it means somebody
 # should spend ten minutes running setup-github.sh.
+#
+# WHY THE ALARM IS A RED X AND NOT AN ISSUE. GitHub Issues is disabled on
+# these repos - work is tracked in Paperclip, and standing up a second tracker
+# for one automated message would be worse than the problem. So the alarm is:
+# the failed run, the error annotation, the runbook in the run summary, and
+# GitHub's own email to whoever last touched the cron. scripts/plan-watch.sh
+# keeps a --github-issue mode for the day issues are enabled; this workflow
+# does not use it, because against these repos it would only ever fail.
 #
 # CREDENTIAL - read this before assuming the schedule is working.
 #
@@ -46,8 +54,8 @@ on:
   workflow_dispatch:
   # A watcher nobody exercises is a watcher that has quietly broken. Running
   # it on any PR that touches it proves the script still executes and shows
-  # exactly what the available token can and cannot see. Never files an issue
-  # on this path.
+  # exactly what the available token can and cannot see. This path reports
+  # only - it never fails the PR.
   pull_request:
     paths:
       - 'scripts/plan-watch.sh'
@@ -57,11 +65,10 @@ on:
 # and emails the owner. If this stops running, that is usually why - push
 # anything, or re-enable it from the Actions tab.
 
+# Nothing here writes. The probes read through PLAN_WATCH_TOKEN (see
+# CREDENTIAL above), and the alarm is the job's own exit status.
 permissions:
   contents: read
-  # To file the reminder issue. Everything the probes need comes from
-  # PLAN_WATCH_TOKEN instead - see CREDENTIAL above.
-  issues: write
 
 jobs:
   protection-available:
@@ -75,18 +82,11 @@ jobs:
           # reports honestly when the secret is missing.
           GH_TOKEN: ${{ secrets.PLAN_WATCH_TOKEN || github.token }}
           ARMED: ${{ secrets.PLAN_WATCH_TOKEN != '' }}
-          # On a pull request this is a self-test, not an alarm.
-          FILE_ISSUE: ${{ github.event_name != 'pull_request' }}
         run: |
           set -o pipefail
 
           if [ "$ARMED" != "true" ]; then
             echo "::warning title=plan-watch is not armed::PLAN_WATCH_TOKEN is not set, so the probes cannot read branch protection or the org plan. This job is reporting, not watching. See TWO-85."
-          fi
-
-          args=""
-          if [ "$FILE_ISSUE" = "true" ] && [ "$ARMED" = "true" ]; then
-            args="--github-issue"
           fi
 
           # Tee the script's own reasoning into the run summary, so the run
@@ -100,14 +100,14 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
           rc=0
-          ./scripts/plan-watch.sh $args 2>&1 \
+          ./scripts/plan-watch.sh 2>&1 \
             | sed 's/\x1b\[[0-9;]*m//g' \
             | tee -a "$GITHUB_STEP_SUMMARY" || rc=$?
 
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
           if [ "$rc" != 0 ]; then
-            echo "::error title=Branch protection is available now::GitHub is no longer refusing branch protection, and main is not protected. Run ./scripts/setup-github.sh - see the issue this job just filed."
+            echo "::error title=Branch protection is available now::GitHub is no longer refusing branch protection, and main is not protected. The re-apply runbook is in this run's summary. Start with ./scripts/setup-github.sh"
           fi
 
           # A PR self-test reports what it saw; it does not fail the PR just
