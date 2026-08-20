@@ -476,6 +476,57 @@ create_repo() {
   fi
 }
 
+# remote_protocol
+#
+# Which URL form the `origin` remotes get. This used to be hardcoded to SSH,
+# which was wrong: the credential we are actually given is a fine-grained PAT,
+# and there is no SSH key on the machine that runs this. Every repo would have
+# been created, protected and then failed at the push - the worst place to stop,
+# because the org looks finished and contains nothing.
+#
+# So: ask, do not assume. `ssh -T git@github.com` answers 1 for a recognised key
+# and 255 for "Permission denied (publickey)". If a key works we prefer SSH,
+# because it needs no credential helper. Otherwise HTTPS, authenticated by
+# GH_TOKEN through gh's credential helper. Override with TWO_REMOTE_PROTOCOL.
+#
+# The token is NEVER written into a remote URL. A URL with a PAT in it lands in
+# .git/config, and from there into every `git remote -v` and every bug report.
+REMOTE_PROTOCOL=""
+remote_protocol() {
+  [ -n "$REMOTE_PROTOCOL" ] && { printf '%s' "$REMOTE_PROTOCOL"; return 0; }
+
+  if [ -n "${TWO_REMOTE_PROTOCOL:-}" ]; then
+    REMOTE_PROTOCOL="$TWO_REMOTE_PROTOCOL"
+  elif timeout 20 ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes \
+         -T git@github.com >/dev/null 2>&1 || [ $? -eq 1 ]; then
+    REMOTE_PROTOCOL="ssh"
+  else
+    REMOTE_PROTOCOL="https"
+  fi
+  printf '%s' "$REMOTE_PROTOCOL"
+}
+
+# remote_url <repo-name>
+remote_url() {
+  if [ "$(remote_protocol)" = "ssh" ]; then
+    printf 'git@github.com:%s/%s.git' "$ORG" "$1"
+  else
+    printf 'https://github.com/%s/%s.git' "$ORG" "$1"
+  fi
+}
+
+# ensure_git_credentials
+#
+# On HTTPS, git needs to be told how to answer GitHub's password prompt. gh
+# ships a credential helper that reads GH_TOKEN, so nothing is stored on disk
+# and nothing expires behind our back. Configured on the repo, not globally -
+# this script should not reach outside the repos it was pointed at.
+ensure_git_credentials() {
+  local path="$1"
+  [ "$(remote_protocol)" = "https" ] || return 0
+  run git -C "$path" config credential."https://github.com".helper '!gh auth git-credential'
+}
+
 # push_history <local-path> <repo-name>
 # Pushes the full history. Never force, never squash - if the remote already
 # has commits we do not own, this stops rather than overwriting them.
@@ -486,7 +537,8 @@ push_history() {
     return 0
   fi
 
-  local url="git@github.com:$ORG/$name.git"
+  local url; url="$(remote_url "$name")"
+  ensure_git_credentials "$path"
   local current
   current="$(git -C "$path" remote get-url origin 2>/dev/null || true)"
   if [ -z "$current" ]; then

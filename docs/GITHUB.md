@@ -37,6 +37,15 @@ The full spec is the `github-access` document on TWO-81. These are fine-grained
 permission *names* — they are not the classic-PAT scopes (`repo`, `admin:org`,
 `workflow`), and an older version of the setup script asked for the wrong thing.
 
+**Remotes are HTTPS, not SSH.** A PAT authenticates HTTPS; it does not
+authenticate `git@github.com`, and there is no SSH key on the machine that runs
+the setup. The script probes `ssh -T git@github.com` and picks the form that
+actually works, so a machine that *does* have a key still gets SSH. Force it
+either way with `TWO_REMOTE_PROTOCOL=ssh|https`. On HTTPS it sets
+`credential.https://github.com.helper` to gh's helper, per repo — the token is
+read from `GH_TOKEN` at push time and is **never** written into a remote URL or
+into `.git/config`, where every `git remote -v` would print it.
+
 **Prove the token before using it.** `setup-github.sh --dry-run` reports whether
 it was handed a classic or fine-grained token, and then proves the org write by
 creating a throwaway team and deleting it again:
@@ -82,6 +91,31 @@ Only one of the three combinations fails, and it is the one that fails silently:
 
 This is a spend decision, so it is the CEO's, not mine. The setup script
 detects a free plan and warns rather than pretending it worked.
+
+### The decision, made 2026-08-20 (TWO-81)
+
+**Free plan, private repos, protection advisory.** The founder's words: *"C for
+now. Once we start making revenue I might pay for the team."* That is a recorded
+choice, not a shortcut, and it is what the org runs on today:
+
+```bash
+TWO_REPO_VISIBILITY=private TWO_ACCEPT_UNPROTECTED_MAIN=1 ./scripts/setup-github.sh
+```
+
+`TWO_ACCEPT_PUBLIC_REPOS` is **not** set and must not be — the repos stay
+private. `TWO_ACCEPT_UNPROTECTED_MAIN=1` is the gate below being answered, which
+is exactly what it was built for.
+
+**This is reversible, and that is the point.** GitHub *stores* the protection
+rules we write; on Free it simply declines to enforce them. Nothing is discarded
+and nothing has to be set up twice. If the org later moves to Team, those same
+rules start being enforced the moment the plan changes — no second setup job, no
+migration. One `./scripts/setup-github.sh --verify` run confirms it, and the
+`TWO_ACCEPT_UNPROTECTED_MAIN=1` flag comes back out.
+
+Until then the guard is [`main-guard.yml`](#plan-b-if-the-answer-is-no) in all
+three repos: it cannot refuse a direct push, but it turns one into a red X with
+a name on it within a minute.
 
 **If the answer is Free + public**, the script can act on it without a code
 change:
