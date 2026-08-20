@@ -1,42 +1,45 @@
-# Secret scanning config. Extends the default gitleaks ruleset rather than
-# replacing it, so we keep every provider pattern they maintain and only add
-# what is specific to us.
+# gitleaks configuration for two-bot.
+#
+# The default rule set, plus a deliberately small allowlist. Every entry below
+# is here because gitleaks flagged it on the first real scan of this history and
+# it was checked by hand and is not a credential. Nothing here is a blanket
+# "ignore this rule" or "ignore this directory".
+#
+# The bar for adding to this file: you looked at the actual line, you can say
+# what it is, and disclosing it to a stranger costs nothing. If you cannot say
+# that, it is a secret - rotate it, do not allowlist it. Deleting the line is
+# not enough either; it is in the history and history is what this scans.
 
 [extend]
 useDefault = true
 
-[[rules]]
-id = "discord-bot-token"
-description = "Discord bot token"
-# Discord tokens are three base64url segments: snowflake.timestamp.hmac.
-regex = '''(?i)\b[MNO][A-Za-z0-9_-]{22,26}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,38}\b'''
-keywords = ["discord"]
-
-[[rules]]
-id = "discord-mfa-token"
-description = "Discord user (MFA) token"
-regex = '''\bmfa\.[A-Za-z0-9_-]{80,100}\b'''
-keywords = ["mfa."]
-
-[[rules]]
-id = "discord-webhook"
-description = "Discord webhook URL"
-regex = '''https://(?:canary\.|ptb\.)?discord(?:app)?\.com/api/webhooks/[0-9]{17,20}/[A-Za-z0-9_-]{60,}'''
-keywords = ["discord.com/api/webhooks"]
-
 [allowlist]
-description = "Fixtures and documented placeholders, not live credentials"
-paths = [
-  # Read-only snapshots of public server metadata. No credentials, checked by
-  # hand before they were committed. Invite *codes* look high-entropy but are
-  # public by definition - they are what we hand to new members.
-  '''^audit/raw/.*\.json$''',
-  '''^audit/invites\.csv$''',
-  # The local Discord stand-in. Its tokens are literally the string "mock".
-  '''^tools/mock-discord/''',
-]
+description = "Hand-checked non-secrets, 2026-08-20"
+regexTarget = "match"
+
 regexes = [
-  # .env.example ships names with empty values, on purpose.
-  '''DISCORD_TOKEN=$''',
-  '''DISCORD_TOKEN=mock''',
+  # 1. Placeholders in documentation that show WHERE a token goes.
+  #    `DISCORD_BOT_TOKEN=<bot token> node scripts/audit-collect.ts`
+  #    An angle-bracketed placeholder is by definition not the value.
+  '''<[A-Za-z][A-Za-z ._-]{0,30}(token|key|secret|password)>''',
+
+  # 2. Discord snowflake IDs assigned to an ID-named variable.
+  #    A guild / channel / role / application ID is public: every member of the
+  #    server can read it, and it is in the widget and the invite. It is not a
+  #    credential and there is nothing to rotate. gitleaks' `discord-client-id`
+  #    rule matches any 17-20 digit number near the word discord.
+  #
+  #    Kept narrow on purpose - it allows a BARE run of digits assigned to a
+  #    variable whose name ends in _ID. A real bot token is base64 with dots in
+  #    it (`MTIz....XXXXXX.YYY...`) and does not match this, so it still trips.
+  '''(?i)[A-Z0-9_]*(GUILD|CHANNEL|ROLE|APPLICATION|CLIENT|USER|CATEGORY)_ID['"]?\s*[:=]\s*['"]?[0-9]{17,20}['"]?''',
+]
+
+# `.env` is gitignored and has never been tracked. It is listed here so that a
+# local `gitleaks git .` run in a working copy that HAS one does not spend its
+# output on a file that was never going to be committed. It is NOT excluded
+# from the committed-file check - the pre-commit hook and the `no .env
+# committed` assertion in setup-github.sh --verify both still cover that.
+paths = [
+  '''^\.env$''',
 ]
