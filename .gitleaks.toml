@@ -24,8 +24,26 @@ description = "Discord webhook URL"
 regex = '''https://(?:canary\.|ptb\.)?discord(?:app)?\.com/api/webhooks/[0-9]{17,20}/[A-Za-z0-9_-]{60,}'''
 keywords = ["discord.com/api/webhooks"]
 
+# ---------------------------------------------------------------------------
+# Allowlist.
+#
+# The bar for adding anything below: you looked at the actual line, you can say
+# what it is, and disclosing it to a stranger costs nothing. If you cannot say
+# that, it is a secret - rotate it, do not allowlist it. Deleting the line is
+# not enough either; it is in the history, and history is what this scans.
+# ---------------------------------------------------------------------------
+
 [allowlist]
 description = "Fixtures and documented placeholders, not live credentials"
+
+# Match the regexes below against the whole matched text, not against the bare
+# secret gitleaks extracted from it. Every regex here identifies a value by the
+# variable it is assigned to - `DISCORD_TOKEN=mock`, `..._GUILD_ID=1234...` -
+# and the variable name is not part of the secret, so on the default target
+# ("secret") none of them can ever match. Verified: without this line the
+# guild-ID false positives come straight back.
+regexTarget = "match"
+
 paths = [
   # Read-only snapshots of public server metadata. No credentials, checked by
   # hand before they were committed. Invite *codes* look high-entropy but are
@@ -35,8 +53,31 @@ paths = [
   # The local Discord stand-in. Its tokens are literally the string "mock".
   '''^tools/mock-discord/''',
 ]
+
 regexes = [
   # .env.example ships names with empty values, on purpose.
   '''DISCORD_TOKEN=$''',
   '''DISCORD_TOKEN=mock''',
+
+  # --- added 2026-08-20, from the first real scan of this history (TWO-40) ---
+  #
+  # Running the scanner for real against all 46 commits produced 5 hits. Every
+  # one was read by hand; none is a credential. Two shapes account for all of
+  # them, and both are allowlisted narrowly rather than by silencing the rule.
+
+  # 1. Placeholders in documentation that show WHERE a token goes, e.g.
+  #    `DISCORD_BOT_TOKEN=<bot token> node scripts/audit-collect.ts`.
+  #    An angle-bracketed placeholder is by definition not the value.
+  '''<[A-Za-z][A-Za-z ._-]{0,30}(token|key|secret|password)>''',
+
+  # 2. Discord snowflake IDs assigned to an ID-named variable. A guild,
+  #    channel, role or application ID is public - every member of the server
+  #    can read it, and it is in the widget and in the invite. There is nothing
+  #    to rotate. gitleaks' stock `discord-client-id` rule flags any 17-20
+  #    digit number near the word "discord".
+  #
+  #    Deliberately narrow: it allows a BARE run of digits assigned to a
+  #    variable whose name ends in _ID. A real bot token is base64 with dots in
+  #    it and does not match this, so `discord-bot-token` above still fires.
+  '''(?i)[A-Z0-9_]*(GUILD|CHANNEL|ROLE|APPLICATION|CLIENT|USER|CATEGORY)_ID['"]?\s*[:=]\s*['"]?[0-9]{17,20}['"]?''',
 ]

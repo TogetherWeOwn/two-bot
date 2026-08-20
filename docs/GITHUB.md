@@ -69,10 +69,12 @@ and each step reports its own failure.
 **On GitHub Free, branch protection does nothing on a private repository.**
 
 Rulesets and classic branch protection are enforced on public repos on every
-plan, but on private repos only from **GitHub Team** upward. The API call to
-protect a branch on a free org *succeeds* and the rule is then simply not
-applied — which is the worst possible failure mode, because the settings page
-looks correct.
+plan, but on private repos only from **GitHub Team** upward.
+
+*(An earlier version of this section said the API call succeeds and the rule is
+then silently not applied. That was wrong, and it was checked against the real
+org on 2026-08-20: the call returns 403 and nothing is stored. See
+[the decision](#the-decision-made-2026-08-20-two-81) for what that changes.)*
 
 That leaves three options and only one of them is good:
 
@@ -106,12 +108,36 @@ TWO_REPO_VISIBILITY=private TWO_ACCEPT_UNPROTECTED_MAIN=1 ./scripts/setup-github
 private. `TWO_ACCEPT_UNPROTECTED_MAIN=1` is the gate below being answered, which
 is exactly what it was built for.
 
-**This is reversible, and that is the point.** GitHub *stores* the protection
-rules we write; on Free it simply declines to enforce them. Nothing is discarded
-and nothing has to be set up twice. If the org later moves to Team, those same
-rules start being enforced the moment the plan changes — no second setup job, no
-migration. One `./scripts/setup-github.sh --verify` run confirms it, and the
-`TWO_ACCEPT_UNPROTECTED_MAIN=1` flag comes back out.
+**This is reversible — but not for free, and not by itself.** Measured against
+the real org on 2026-08-20, after the repos existed:
+
+```
+PUT  repos/two-gaming/two-bot/branches/main/protection  -> 403
+GET  repos/two-gaming/two-bot/branches/main/protection  -> 403
+GET  repos/two-gaming/two-bot/rulesets                  -> 403
+"Upgrade to GitHub Pro or make this repository public to enable this feature."
+```
+
+That corrects something this document and TWO-40 both used to say. GitHub does
+**not** accept the rule and quietly ignore it. It refuses outright, and stores
+nothing. Two consequences, one in each direction:
+
+- **Better than feared.** There is no silent failure mode. A settings page
+  cannot show a green padlock that means nothing, because there is no saved
+  rule to show. What you see is the truth.
+- **Worse than hoped.** Moving to GitHub Team later does **not** switch
+  protection on by itself. There is nothing stored to start enforcing. The
+  rules have to be written again.
+
+The upgrade path is still short, because writing them again is one command:
+
+```bash
+./scripts/setup-github.sh          # idempotent; writes protection, skips the rest
+./scripts/setup-github.sh --verify # confirms, with TWO_ACCEPT_UNPROTECTED_MAIN unset
+```
+
+That is minutes, not a migration — but it is a step somebody has to remember, so
+it belongs on whatever issue changes the plan.
 
 Until then the guard is [`main-guard.yml`](#plan-b-if-the-answer-is-no) in all
 three repos: it cannot refuse a direct push, but it turns one into a red X with

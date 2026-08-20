@@ -654,12 +654,34 @@ PY
     return 0
   fi
 
-  if printf '%s' "$payload" | gh api --method PUT \
-      "repos/$ORG/$name/branches/$DEFAULT_BRANCH/protection" --input - >/dev/null 2>&1; then
+  local err
+  if err="$(printf '%s' "$payload" | gh api --method PUT \
+      "repos/$ORG/$name/branches/$DEFAULT_BRANCH/protection" --input - 2>&1 >/dev/null)"; then
     ok "$name: protection written on $DEFAULT_BRANCH (PR required, CI ${checks[*]}, no self-approval, no force-push)"
+    return 0
+  fi
+
+  # Measured 2026-08-20 against the real org: GitHub answers 403 "Upgrade to
+  # GitHub Pro or make this repository public to enable this feature." It does
+  # NOT accept-and-ignore the rule. Nothing is stored - GET protection and GET
+  # rulesets are 403 too. That matters in two directions:
+  #
+  #   good  there is no silent failure mode. A settings page cannot lie to you
+  #         about being protected, because there is no rule to display.
+  #   bad   moving to Team later does NOT switch protection on by itself. The
+  #         rules have to be written again, by re-running this script.
+  #
+  # Under TWO_ACCEPT_UNPROTECTED_MAIN=1 this refusal is the recorded plan
+  # (TWO-81, Free + private), so it is a warning, not a failure. A run that
+  # always ends in red teaches everyone to ignore red.
+  if [ "${TWO_ACCEPT_UNPROTECTED_MAIN:-0}" = "1" ] && [ "$PROTECTION_AVAILABLE" = 0 ]; then
+    warn "$name: GitHub refused branch protection - private repo on a Free org, as expected."
+    warn "  This is the TWO-81 plan choice, not a regression. main-guard.yml is the guard."
+    warn "  On a later move to GitHub Team, re-run this script to write the rules for real."
   else
     bad "$name: could not write branch protection"
     [ "$PROTECTION_AVAILABLE" = 0 ] && bad "  most likely cause: private repo on a Free org"
+    [ -n "$err" ] && bad "  GitHub said: ${err%%$'\n'*}"
     FAILED=1
   fi
 }
