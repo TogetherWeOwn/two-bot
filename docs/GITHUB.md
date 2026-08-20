@@ -23,6 +23,25 @@ the secrets channel and read from `GH_TOKEN`. `gh` picks that variable up
 directly — **do not run `gh auth login`**, and never paste the token into an
 issue, a comment, or a chat message.
 
+`gh` having the token does **not** mean `git` does. All three repos are private,
+so the very first thing a new agent does — `git clone https://github.com/...` —
+fails with `could not read Username for 'https://github.com'`, before any README
+step runs. Two ways past it, and each repo's README now says so:
+
+```bash
+gh auth setup-git                  # once per machine, then git works everywhere
+```
+
+**`gh repo clone` is not a substitute.** It carries the credential through the
+clone itself and then leaves a repo with no helper configured, so the first
+`git push` from it fails the same way the clone would have. That was measured,
+not assumed — the branch carrying this very paragraph failed to push from a
+`gh repo clone` checkout. `gh auth setup-git` is the step that matters.
+
+`setup-github.sh` sets the same helper per repo on the working copies it pushes,
+which is why this never showed up until someone cloned from scratch. It was
+found on 2026-08-20 by doing exactly that.
+
 | Level | Permission | Why |
 |---|---|---|
 | Organization | `Administration: write` | create repos in the org |
@@ -423,6 +442,16 @@ The org went live on this date. These are measurements, not expectations.
 | `two-bot` history is free of credentials | gitleaks 8.30.1 over all 47 commits | no leaks |
 | `two-design` history is free of credentials | gitleaks 8.30.1 over all 4 commits | no leaks |
 | Branch protection is unavailable, not silent | `PUT`/`GET` protection, `GET` rulesets | 403, nothing stored |
+| `two-web` history pushed intact, not flattened | pushed the Web Lead's own clone; counted commits on the remote | 22 on `main`, oldest scaffold commit present |
+| `two-web` history is free of credentials | gitleaks 8.30.1 over all commits, before the push | no leaks |
+| A fresh clone reaches a running bot | cloned `two-bot` from the org into an empty dir, followed the README only | `npm ci` 1.5s, 247/247 tests in 23s, bot ran against the mock and recorded a full funnel |
+
+The fresh-clone run is the acceptance criterion for TWO-36 ("a fresh clone gets
+a new agent to a running local app using only the README"). It passed on the
+second attempt: the first died at `git clone` because the repo is private and
+the README said nothing about credentials. That is fixed above, and it is the
+kind of gap only an actual cold clone finds — everyone who already had a working
+copy had the helper set by the setup script.
 
 The `main-guard` proof used a throwaway private repo, `zz-main-guard-proof`,
 which was deleted immediately afterwards. Proving a guard by tripping it is the
