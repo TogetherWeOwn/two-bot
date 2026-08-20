@@ -117,9 +117,17 @@ is already here that I can break**.
 
 The script writes nothing — no installs, no `systemctl`, no config. Every
 command in it is a read. It reports the machine, what is already running, port
-conflicts on 8099 and 5432, the state of SSH and the firewall, and existing
-Postgres databases. It exits `0` if nothing is alarming and `1` with a list if
-something is.
+conflicts on 8099, 8787 and 5432, the state of SSH and the firewall, and
+existing Postgres databases. It exits `0` if nothing is alarming and `1` with a
+list if something is.
+
+Of those three ports, **8787** is the one to actually stop on. It is the
+internal actions endpoint the website calls, it only binds when
+`TWO_INTERNAL_ACTIONS=1`, and it binds on loopback — so it reads as harmless.
+It is not: `src/index.ts` awaits that bind during start-up, so if something on
+the box already holds 8787 the bot does not lose an endpoint, it fails to boot
+and crash-loops until systemd gives up. Set `TWO_INTERNAL_PORT` to something
+free before deploying, not after.
 
 It also refuses to say "clean" when it could not actually look — without root
 or without systemd the verdict is `unknown`, not a pass.
@@ -143,9 +151,18 @@ sudo bash scripts/bootstrap-host.sh
 Does everything in the long version below, in order. Idempotent — re-running it
 is also how you ship an update.
 
-It stops rather than guessing in three places: an existing system Node it would
-have to replace (exit `4`), empty secrets files (exit `3`), and a failed
+It stops rather than guessing in four places: an existing system Node it would
+have to replace (exit `4`), an app directory with files in it that this script
+did not put there (exit `5`), empty secrets files (exit `3`), and a failed
 preflight.
+
+Exit `5` guards the one genuinely destructive line in the script. Deploying
+runs `rsync -a --delete` into `TWO_APP_DIR`, which erases anything there that
+is not in the repo. `TWO_APP_DIR` is an environment variable, so a typo or a
+stale shell aims that at somebody else's directory. The script therefore only
+`--delete`s into a directory carrying `.two-bot-deploy`, a marker it writes
+itself after the first successful sync. If you hit exit `5`, look at the
+directory before you adopt it — that is the entire point of the stop.
 
 It stops and tells you what to do in two places: after creating the (empty)
 secrets files, and if `scripts/preflight.ts` fails. It will not start the

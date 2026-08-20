@@ -131,10 +131,48 @@ install -d -o root -g root -m 750 "$ENV_DIR"
 # --- Code ------------------------------------------------------------------
 # --delete keeps the deployed tree honest: a file removed from the repo goes
 # away here too, so nobody debugs a script that no longer exists upstream.
+#
+# On the founder's shared box that same flag is the single most destructive
+# command in this file. TWO_APP_DIR is an environment variable, so one typo or
+# one stale shell and `rsync -a --delete` empties somebody else's directory
+# instead. So: we only ever --delete into a directory we can prove we created.
+# The marker is written after the first successful sync and excluded from the
+# sync itself, so it survives every later run.
 say "Code"
+MARKER="$APP_DIR/.two-bot-deploy"
+if [ ! -e "$MARKER" ] && [ -n "$(ls -A "$APP_DIR" 2>/dev/null)" ]; then
+  cat >&2 <<EOF
+
+  Refusing to sync into $APP_DIR.
+
+  It already has files in it and no $MARKER, so this
+  script did not put them there. The next command would be:
+
+      rsync -a --delete "$SRC/" "$APP_DIR/"
+
+  which deletes everything in that directory that is not in the repo. On a
+  box shared with the website and Postgres that is not a recoverable typo.
+
+  Look first:
+
+      ls -la "$APP_DIR"
+      bash scripts/inventory-host.sh
+
+  Then choose one:
+
+    * wrong directory  -> set TWO_APP_DIR to the right one and re-run
+    * a previous deploy this script did not mark (installed by hand, or from
+      before this guard existed) -> adopt it, having looked:
+          sudo touch "$MARKER" && sudo bash scripts/bootstrap-host.sh
+
+EOF
+  exit 5
+fi
 rsync -a --delete \
   --exclude node_modules --exclude data --exclude .git --exclude .env \
+  --exclude .two-bot-deploy \
   "$SRC/" "$APP_DIR/"
+printf 'written by scripts/bootstrap-host.sh - this directory is managed by two-bot, rsync --delete runs here\n' > "$MARKER"
 chown -R "$APP_USER:$APP_USER" "$APP_DIR"
 install -d -o "$APP_USER" -g "$APP_USER" -m 750 "$APP_DIR/data"
 

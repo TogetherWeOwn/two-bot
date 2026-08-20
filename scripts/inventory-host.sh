@@ -32,8 +32,20 @@ NODE_MAJOR=24
 
 # Ports the TWO stack wants. A conflict here is not fatal - it just has to be
 # known before two services fight over the same socket at deploy time.
-declare -a WANT_PORTS=(8099 5432)
-declare -A PORT_OWNER=([8099]="two-dashboard" [5432]="Postgres (bot + website)")
+#
+# 8787 was missing from this list until now, and it is the expensive one. The
+# internal actions endpoint is optional (TWO_INTERNAL_ACTIONS=1) and binds
+# 127.0.0.1, so it looks harmless - but src/index.ts awaits that bind during
+# start-up, so EADDRINUSE is not a degraded endpoint, it is the whole bot
+# failing to boot and crash-looping until systemd gives up. It is also the port
+# the website reaches the bot on, so it is exactly the one a shared box is
+# likely to have already taken.
+declare -a WANT_PORTS=(8099 8787 5432)
+declare -A PORT_OWNER=(
+  [8099]="two-dashboard"
+  [8787]="two-bot internal actions endpoint (TWO_INTERNAL_PORT, website -> bot)"
+  [5432]="Postgres (bot + website)"
+)
 
 is_root=0
 [ "$(id -u)" -eq 0 ] && is_root=1
