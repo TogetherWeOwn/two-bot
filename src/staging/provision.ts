@@ -83,9 +83,20 @@ export type GuildChoice = (
 export function inspectGuildList(opts: {
   guilds: PartialGuild[];
   expectedGuildId?: string;
+  /**
+   * Who we actually authenticated as, when we know. These warnings used to
+   * name the application TWO-21 promised us regardless of which bot answered
+   * GET /users/@me, so a token from a different application produced advice
+   * pointing at a developer-portal page that had nothing to do with the bot in
+   * front of us. Describe the bot we are holding, not the one we expected.
+   */
+  bot?: { id: string; username: string };
 }): string[] {
-  const { guilds, expectedGuildId } = opts;
+  const { guilds, expectedGuildId, bot } = opts;
   if (guilds.length === 0) return [];
+
+  const botName = bot?.username ?? STAGING_BOT_APPLICATION_NAME;
+  const botId = bot?.id ?? STAGING_BOT_APPLICATION_ID;
 
   const describe = (g: PartialGuild) => `"${g.name}" (${g.id})`;
   const isOurs = (g: PartialGuild) =>
@@ -93,7 +104,7 @@ export function inspectGuildList(opts: {
   const unexpected = guilds.filter((g) => !isOurs(g));
 
   const warnings = [
-    `The ${STAGING_BOT_APPLICATION_NAME} bot is in ${guilds.length} guild(s): ` +
+    `The ${botName} bot is in ${guilds.length} guild(s): ` +
       `${guilds.map(describe).join(', ')}. It only needs "${STAGING_SERVER_NAME}".`,
   ];
 
@@ -104,8 +115,8 @@ export function inspectGuildList(opts: {
       unexpected.length === guilds.length ? 'all of them' : unexpected.map(describe).join(', ');
     warnings.push(
       `${unexpected.length} of those ${unexpected.length === 1 ? 'is' : 'are'} not ours: ${which}. ` +
-        `Someone added the staging bot to a server we did not ask for. ${STAGING_BOT_APPLICATION_NAME}'s ` +
-        `Public Bot setting lets anyone holding application ${STAGING_BOT_APPLICATION_ID} do that - ` +
+        `Someone added the staging bot to a server we did not ask for. ${botName}'s ` +
+        `Public Bot setting lets anyone holding application ${botId} do that - ` +
         'check it is off, and remove the bot from those guilds. Each one costs a guild-creation slot.',
     );
   }
@@ -130,9 +141,34 @@ export function inspectGuildList(opts: {
 export function chooseGuild(opts: {
   guilds: PartialGuild[];
   explicitGuildId?: string;
+  bot?: { id: string; username: string };
 }): GuildChoice {
-  const { guilds, explicitGuildId } = opts;
-  const warnings = inspectGuildList({ guilds, expectedGuildId: explicitGuildId });
+  const { guilds, explicitGuildId, bot } = opts;
+  const warnings = inspectGuildList({ guilds, expectedGuildId: explicitGuildId, bot });
+
+  // The staging bot must not be a member of the live TWO server, whatever we
+  // were about to do next. This used to be checked only against the guild we
+  // were pointed at, which missed the case that actually happened: the bot was
+  // in the live guild while we were creating a brand new staging one, so every
+  // check passed and the decision line read "Safe to create one".
+  //
+  // It is not safe. A bot in a guild receives that guild's gateway events and
+  // can act in it with whatever permissions the invite carried. Pointing the
+  // staging suite - including staging-reset, which deletes - at a process that
+  // is also sitting in production is the one outcome TWO-25 exists to prevent.
+  // Membership is the fact that matters, so membership is what we refuse on.
+  const liveMembership = guilds.find((g) => g.id === LIVE_GUILD_ID);
+  if (liveMembership) {
+    return {
+      action: 'abort',
+      warnings,
+      reason:
+        `The staging bot is a member of the LIVE TWO server ("${liveMembership.name}", ${LIVE_GUILD_ID}). ` +
+        'Refusing to provision anything while that is true - a staging bot in production can read live ' +
+        'member events and write to live channels.\n' +
+        '  Remove the bot from that server in Discord first, then re-run. Nothing was changed.',
+    };
+  }
 
   if (explicitGuildId) {
     if (explicitGuildId === LIVE_GUILD_ID) {

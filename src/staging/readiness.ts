@@ -124,10 +124,24 @@ function tokenCheck(env: Env): ReadinessCheck {
       detail: 'set, but not shaped like a bot token - Discord will judge it, not this check.',
     };
   }
+  // Not the live bot, but not the application TWO-21 said it would be either.
+  // The earlier version of this check called that 'ok' and printed "Continuing",
+  // on the reasoning that anything which is not the live bot is harmless. That
+  // is false: "not the live bot" says nothing about which servers the unknown
+  // bot is already in, and the first real token we got under this name turned
+  // out to be a third application sitting in the live TWO guild. An identity we
+  // cannot name is a stop, not a note.
   return {
     ...base,
-    status: 'ok',
-    detail: `application ${appId} - neither the live bot nor the expected staging one. Continuing.`,
+    status: 'blocked',
+    detail:
+      `application ${appId} - not the live bot, but not ${STAGING_BOT_APPLICATION_NAME} ` +
+      `(${STAGING_BOT_APPLICATION_ID}) either. We cannot say what this bot is or what it can reach.`,
+    owner: 'founder (TWO-21)',
+    action:
+      `confirm which application DISCORD_STAGING_BOT_TOKEN should come from and rebind it, or tell us ` +
+      `${appId} is the intended one and we will update STAGING_BOT_APPLICATION_ID. Do not run staging ` +
+      'writes against an unidentified bot',
   };
 }
 

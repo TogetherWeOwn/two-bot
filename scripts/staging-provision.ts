@@ -161,7 +161,7 @@ if (guildsRes.status !== 200 || !guildsRes.body) {
 const guilds = guildsRes.body;
 console.log(`  in guilds  ${guilds.length}${guilds.length ? `: ${guilds.map((g) => `${g.name} (${g.id})`).join(', ')}` : ''}`);
 
-const choice = chooseGuild({ guilds, explicitGuildId });
+const choice = chooseGuild({ guilds, explicitGuildId, bot: { id: botId, username: me.body.username } });
 
 // Warnings before the decision, because they are usually the explanation for
 // it. A staging bot in a guild nobody meant to add it to is worth seeing even

@@ -44,6 +44,36 @@ test('creates a guild only when the bot is in none like it', () => {
   assert.equal(c.action, 'create');
 });
 
+// The case that actually happened on TWO-25: the token we were given was a
+// bot already sitting in the live TWO server, and every other check passed.
+// Membership in production outranks every other decision this function makes.
+test('refuses to create when the bot is in the live TWO server', () => {
+  const c = chooseGuild({ guilds: [{ id: LIVE_GUILD_ID, name: 'TogetherWeOwn' }] });
+  assert.equal(c.action, 'abort');
+  assert.match(c.reason, /LIVE TWO server/);
+});
+
+test('refuses to reconcile a real staging guild while also in the live server', () => {
+  const c = chooseGuild({
+    guilds: [
+      { id: STAGING, name: STAGING_SERVER_NAME },
+      { id: LIVE_GUILD_ID, name: 'TogetherWeOwn' },
+    ],
+  });
+  assert.equal(c.action, 'abort');
+});
+
+test('live-server membership beats an explicit staging guild id', () => {
+  const c = chooseGuild({
+    guilds: [
+      { id: STAGING, name: STAGING_SERVER_NAME },
+      { id: LIVE_GUILD_ID, name: 'TogetherWeOwn' },
+    ],
+    explicitGuildId: STAGING,
+  });
+  assert.equal(c.action, 'abort');
+});
+
 test('adopts the existing TWO Staging instead of creating a second one', () => {
   const c = chooseGuild({ guilds: [{ id: STAGING, name: STAGING_SERVER_NAME }, ...filler(2)] });
   assert.equal(c.action, 'reconcile');

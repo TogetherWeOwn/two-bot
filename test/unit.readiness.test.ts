@@ -70,10 +70,16 @@ test('no check ever echoes the token it was given', () => {
   }
 });
 
-test('a token from some third application is allowed through, with a note', () => {
+// This test used to assert the opposite - that a third application was 'ok'
+// with a note - on the reasoning that anything which is not the live bot is
+// harmless. On 2026-08-20 the token bound to us was a third application that
+// was sitting in the live TWO guild, and this check printed "Continuing".
+// An identity we cannot name blocks.
+test('a token from some third application blocks on a named owner', () => {
   const c = get({ ...GOOD, DISCORD_STAGING_BOT_TOKEN: tokenFor('1234567890123456789') }, 'token');
-  assert.equal(c.status, 'ok');
-  assert.match(c.detail, /neither/i);
+  assert.equal(c.status, 'blocked');
+  assert.match(c.detail, /1234567890123456789/);
+  assert.match(c.owner ?? '', /founder/i);
 });
 
 test('a missing guild is a chore when the token works', () => {
