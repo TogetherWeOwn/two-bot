@@ -103,6 +103,36 @@ Keep `data/two.db` until the numbers have looked right for a week.
 
 ## Deploy
 
+### Step 0: look at the box first
+
+```bash
+bash scripts/inventory-host.sh          # read-only; sudo for the full picture
+```
+
+Not optional, and not the same question as "is the box healthy". Everything in
+this section was written assuming a fresh single-purpose VM. The bot is landing
+on the founder's existing **OVH VPS-4**, shared with the website, Postgres and
+staging. So the first question is not *how do I set this box up*, it is **what
+is already here that I can break**.
+
+The script writes nothing — no installs, no `systemctl`, no config. Every
+command in it is a read. It reports the machine, what is already running, port
+conflicts on 8099 and 5432, the state of SSH and the firewall, and existing
+Postgres databases. It exits `0` if nothing is alarming and `1` with a list if
+something is.
+
+It also refuses to say "clean" when it could not actually look — without root
+or without systemd the verdict is `unknown`, not a pass.
+
+The one thing to read closely is the **Node** section. Everything this deploy
+installs is namespaced — its own user, `/opt/two-bot`, `/etc/two-bot`, units
+prefixed `two-bot` — with a single exception: Node is installed system-wide. On
+a box where something else already runs on Node, that is an in-place upgrade of
+somebody else's runtime as a side effect of deploying a Discord bot.
+`bootstrap-host.sh` now refuses to do it and exits `4`; if the other services
+must stay put, install Node 24 alongside and point `ExecStart` in
+`deploy/two-bot.service` at it.
+
 ### The short way
 
 ```bash
@@ -110,8 +140,12 @@ git clone <repo> two-bot && cd two-bot
 sudo bash scripts/bootstrap-host.sh
 ```
 
-Does everything in the long version below, in order, on a stock Debian or
-Ubuntu cloud image. Idempotent — re-running it is also how you ship an update.
+Does everything in the long version below, in order. Idempotent — re-running it
+is also how you ship an update.
+
+It stops rather than guessing in three places: an existing system Node it would
+have to replace (exit `4`), empty secrets files (exit `3`), and a failed
+preflight.
 
 It stops and tells you what to do in two places: after creating the (empty)
 secrets files, and if `scripts/preflight.ts` fails. It will not start the

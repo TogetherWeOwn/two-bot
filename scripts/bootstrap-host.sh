@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
-# Take a fresh Debian/Ubuntu VM from nothing to a running two-bot under systemd.
+# Take a Debian/Ubuntu box from nothing to a running two-bot under systemd.
 #
+#   bash scripts/inventory-host.sh          # FIRST. read-only. what is already here?
 #   sudo apt-get install -y git rsync curl
 #   git clone <repo> two-bot && cd two-bot
 #   sudo bash scripts/bootstrap-host.sh
+#
+# Run the inventory first and mean it. This was written assuming a fresh
+# single-purpose VM. The box the bot is actually landing on is the founder's
+# existing OVH VPS-4, shared with the website, Postgres and staging (TWO-11,
+# TWO-21). Everything below is namespaced - its own user, /opt/two-bot,
+# /etc/two-bot, units prefixed two-bot - with exactly one exception, the Node
+# install, which is system-wide and is guarded accordingly.
 #
 # This is the "Deploy" section of docs/RUNBOOK.md, as one idempotent command.
 # The runbook stays the reference for what each step means and how to undo it;
@@ -67,6 +75,42 @@ if command -v node >/dev/null; then
   fi
 fi
 if [ "$need_node" -eq 1 ]; then
+  # Installing Node is the one thing here that reaches outside our own
+  # directories. If a Node is already present, something else on the box may be
+  # running on it, and `apt-get install nodejs` is an in-place major upgrade of
+  # that runtime - performed silently, as a side effect of deploying a Discord
+  # bot. On a shared host that is how you take the website down at 11pm.
+  #
+  # No Node at all: nothing to break, just install it.
+  if command -v node >/dev/null && [ "${TWO_ALLOW_NODE_REPLACE:-0}" != "1" ]; then
+    # `|| true`: every stage of this pipeline exits non-zero when it finds
+    # nothing, and under `set -euo pipefail` that would abort the script here
+    # with a bare exit 1 - swallowing the whole explanation below, which is the
+    # only reason this branch exists.
+    users="$(grep -sl 'node' /etc/systemd/system/*.service 2>/dev/null \
+             | xargs -r -n1 basename | grep -v '^two-bot' | paste -sd' ' - || true)"
+    cat >&2 <<EOF
+
+  Refusing to replace the system Node.
+
+  Found:    v$(node -p 'process.versions.node')  ($(command -v node))
+  Need:     v$NODE_MAJOR or newer
+  Also using node: ${users:-nothing else that I can see, but I can only see systemd units}
+
+  Upgrading in place would change the runtime under anything in that list.
+  Check it, then choose one:
+
+    bash scripts/inventory-host.sh              # what else is on this box
+    sudo TWO_ALLOW_NODE_REPLACE=1 bash scripts/bootstrap-host.sh
+
+  If the other services must stay on their Node version, do not force this -
+  install Node $NODE_MAJOR side-by-side (nvm/fnm under $APP_USER, or a distro
+  package that coexists) and point ExecStart in deploy/two-bot.service at it.
+  Nothing else in this script needs the system Node.
+
+EOF
+    exit 4
+  fi
   echo "installing Node $NODE_MAJOR from nodesource"
   curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash -
   apt-get install -y nodejs
