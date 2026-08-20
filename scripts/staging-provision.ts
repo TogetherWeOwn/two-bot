@@ -61,6 +61,7 @@ import {
 import {
   LIVE_GUILD_ID,
   STAGING_BOT_APPLICATION_ID,
+  STAGING_BOT_APPLICATION_NAME,
   STAGING_SERVER_NAME,
   checkStagingToken,
 } from '../src/staging/spec.ts';
@@ -71,8 +72,8 @@ const token = process.env.DISCORD_STAGING_BOT_TOKEN;
 if (!token) {
   console.error(
     '\nMissing DISCORD_STAGING_BOT_TOKEN.\n' +
-      `  This is the "Owen Staging" bot token (application ${STAGING_BOT_APPLICATION_ID}),\n` +
-      '  called `test-two` on the board. Not the live one. See docs/SECRETS.md.\n' +
+      `  This is the ${STAGING_BOT_APPLICATION_NAME} bot token (application ${STAGING_BOT_APPLICATION_ID}).\n` +
+      '  Not the live one. See docs/SECRETS.md.\n' +
       '  Refusing to run: there is no safe default for which server to build.\n',
   );
   process.exit(2);
@@ -161,6 +162,12 @@ const guilds = guildsRes.body;
 console.log(`  in guilds  ${guilds.length}${guilds.length ? `: ${guilds.map((g) => `${g.name} (${g.id})`).join(', ')}` : ''}`);
 
 const choice = chooseGuild({ guilds, explicitGuildId });
+
+// Warnings before the decision, because they are usually the explanation for
+// it. A staging bot in a guild nobody meant to add it to is worth seeing even
+// when the run then succeeds.
+for (const w of choice.warnings) console.log(`\n  WARNING    ${w}`);
+
 console.log(`\n  decision   ${choice.action.toUpperCase()}\n  because    ${choice.reason}\n`);
 
 if (choice.action === 'abort') {

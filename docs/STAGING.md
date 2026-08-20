@@ -4,7 +4,7 @@ This is written for QA. You should never need to ask an engineer to reset
 staging, and you should never point a test at the live TWO server.
 
 **Status: the code is ready, the server is not.** The only thing outstanding
-is the `Owen Staging` bot token (TWO-21). The server itself no longer needs a
+is the `test-two` bot token (TWO-21). The server itself no longer needs a
 human — the bot creates it, see "Building the staging server" below.
 Everything else works today; the steps that need the token are marked.
 
@@ -26,7 +26,7 @@ Everything else works today; the steps that need the token are marked.
 |---|---|---|
 | `TWO_STAGING_DATABASE_URL` | Postgres URL for the staging database | your secrets store |
 | `DISCORD_STAGING_GUILD_ID` | id of the `TWO Staging` server | printed by `staging-provision.ts` and posted on TWO-25 — not secret |
-| `DISCORD_STAGING_BOT_TOKEN` | the `Owen Staging` bot token | secrets store, bound to you and to me |
+| `DISCORD_STAGING_BOT_TOKEN` | the `test-two` bot token | secrets store, bound to you and to me |
 
 Note what is **not** here: `TWO_DATABASE_URL`, `DISCORD_GUILD_ID` and
 `DISCORD_BOT_TOKEN` are the live ones. The staging names are different on
@@ -42,7 +42,7 @@ written down in `src/staging/spec.ts` and checked at startup:
 | Application | id | Use |
 |---|---|---|
 | `Owen` | `1539711683898118154` | **live.** Never in a staging variable. |
-| `Owen Staging`, called `test-two` on the board | `1537629682449649724` | staging |
+| `test-two` (created 14 Aug, five days before `Owen`) | `1537629682449649724` | staging |
 
 `staging-provision.ts` and `staging-verify.ts` both decode the application id
 out of the token you gave them (it is the first dot-separated segment, base64)
@@ -181,6 +181,14 @@ Things worth knowing before you run it:
   it sounds: a bot can only create guilds while in fewer than ten, so a loop
   that made ten of them would permanently lose the ability to make another. The
   script refuses to create past eight.
+- **It counts the bot's guilds before it creates anything, and says what it
+  finds.** `GET /users/@me/guilds` runs first. Zero guilds is the normal first
+  run and prints nothing. Any guild the bot is in that is not ours prints a
+  `WARNING` naming it — the staging bot should only ever be in `TWO Staging`,
+  so anything else means somebody else invited it, which is possible while
+  `test-two` is still a Public Bot. At ten it stops with an explicit message
+  naming the count, the limit and the Public Bot setting, instead of letting
+  Discord refuse `POST /guilds` halfway through a QA run.
 - **If the founder made the server by hand**, invite the bot to it, set
   `DISCORD_STAGING_GUILD_ID`, and run the same script — it then only fills in
   what is missing and never creates anything.
@@ -232,7 +240,7 @@ is that the bot's own role sits *below* a role it is asked to grant. Discord
 returns 403, nothing logs an error, and the member simply never gets the role —
 so the funnel records someone who "chose not to pick a game". A wrong number,
 not a crash, which is why it can survive for days. The fix is one drag in
-**Server Settings → Roles**: put the `Owen Staging` role above `Moderator`,
+**Server Settings → Roles**: put the `test-two` role above `Moderator`,
 `Member` and `Game: Test`. `staging-verify.ts` checks this first.
 
 ---
@@ -245,7 +253,7 @@ not a crash, which is why it can survive for days. The fix is one drag in
 | Text channels | `#welcome` `#general` `#events` `#bot-log` |
 | Voice | `Voice 1` — a real one, because `first_voice_session` cannot be asserted without it |
 | Roles | `Moderator` `Member` `Game: Test` |
-| Bot application | `Owen Staging` — Public Bot **off**, Server Members Intent **on**, Presence **off**, Message Content **off** |
+| Bot application | `test-two` (`1537629682449649724`) — Server Members Intent **on** (already), Presence **off**, Message Content **off**. Public Bot should be **off**; as of 2026-08-20 it is still **on**, which is hygiene rather than a blocker — the provisioning script now detects the consequences itself |
 | Permissions | owner — implicit. `268520512` remains the scoped set the **live** bot is invited with |
 
 The permission integer decodes to: Add Reactions, View Channels, Send
@@ -278,11 +286,11 @@ across deliberately, one command, where you can see it.
 
 One thing from the founder, via TWO-21:
 
-1. `discord_staging_bot_token` — the `Owen Staging` bot token in the secrets
+1. `discord_staging_bot_token` — the `test-two` bot token in the secrets
    store, bound to QA and to me. The application already exists
    (`1537629682449649724`); the token needs to reach our environments.
 
-   **Checked 2026-08-19 23:5x: still absent here.** What was present instead
+   **Checked again 2026-08-20: still absent here.** What was present instead
    was the *live* bot's token under the generic name `DISCORD_BOT_TOKEN` —
    which is correct for the production bot and useless for staging. "In the
    store" and "bound to the agent that needs it" are different things, and

@@ -12,7 +12,10 @@
  *    just untidy - ten of them and the bot can never create a guild again, and
  *    a bot cannot hand ownership to a person, so there is no clean way back.
  *    `chooseGuild` therefore refuses to create whenever it is not certain, and
- *    keeps two guilds of headroom.
+ *    keeps two guilds of headroom. It also never fails quietly: any guild the
+ *    staging bot is in that we did not put it in comes back as a warning from
+ *    `inspectGuildList`, because the only way that happens is somebody else
+ *    inviting it - which the Public Bot setting allows.
  *
  * 2. OWNERSHIP CHANGES THE ROLE-HIERARCHY QUESTION. The usual staging failure
  *    is that the bot's role sits below a role it must grant, Discord answers
@@ -26,6 +29,8 @@
  */
 import {
   LIVE_GUILD_ID,
+  STAGING_BOT_APPLICATION_ID,
+  STAGING_BOT_APPLICATION_NAME,
   STAGING_ROLES,
   STAGING_SERVER_NAME,
   STAGING_TEXT_CHANNELS,
@@ -51,10 +56,68 @@ export type PartialRole = {
 };
 export type PartialChannel = { id: string; name: string; type: number };
 
-export type GuildChoice =
+export type GuildChoice = (
   | { action: 'create'; reason: string }
   | { action: 'reconcile'; guildId: string; reason: string }
-  | { action: 'abort'; reason: string };
+  | { action: 'abort'; reason: string }
+) & {
+  /**
+   * Things worth saying out loud whatever the decision was. Never empty when
+   * the staging bot is in a guild we did not expect it to be in.
+   */
+  warnings: string[];
+};
+
+/**
+ * What the bot's guild list says about the bot, independent of what we are
+ * about to do to it.
+ *
+ * A staging bot should be in its own staging server and nothing else. Any
+ * other guild means someone added it - which is possible today because
+ * `test-two` is still a Public Bot, and anyone holding the (public)
+ * application id can invite it to their own server. Each such guild also eats
+ * one of the ten slots the bot needs to create its own.
+ *
+ * Zero guilds is the normal first run and says nothing, so it prints nothing.
+ */
+export function inspectGuildList(opts: {
+  guilds: PartialGuild[];
+  expectedGuildId?: string;
+}): string[] {
+  const { guilds, expectedGuildId } = opts;
+  if (guilds.length === 0) return [];
+
+  const describe = (g: PartialGuild) => `"${g.name}" (${g.id})`;
+  const isOurs = (g: PartialGuild) =>
+    g.id === expectedGuildId || (!expectedGuildId && g.name === STAGING_SERVER_NAME);
+  const unexpected = guilds.filter((g) => !isOurs(g));
+
+  const warnings = [
+    `The ${STAGING_BOT_APPLICATION_NAME} bot is in ${guilds.length} guild(s): ` +
+      `${guilds.map(describe).join(', ')}. It only needs "${STAGING_SERVER_NAME}".`,
+  ];
+
+  if (unexpected.length) {
+    // No point reprinting the whole list when every guild is a stray - the
+    // line above already named them.
+    const which =
+      unexpected.length === guilds.length ? 'all of them' : unexpected.map(describe).join(', ');
+    warnings.push(
+      `${unexpected.length} of those ${unexpected.length === 1 ? 'is' : 'are'} not ours: ${which}. ` +
+        `Someone added the staging bot to a server we did not ask for. ${STAGING_BOT_APPLICATION_NAME}'s ` +
+        `Public Bot setting lets anyone holding application ${STAGING_BOT_APPLICATION_ID} do that - ` +
+        'check it is off, and remove the bot from those guilds. Each one costs a guild-creation slot.',
+    );
+  }
+  if (guilds.length >= GUILD_CREATE_HEADROOM) {
+    warnings.push(
+      `${guilds.length} of ${GUILD_CREATE_LIMIT} guild-creation slots are used. At ` +
+        `${GUILD_CREATE_LIMIT} this bot can never create a guild again, and a bot cannot hand ` +
+        'ownership of one to a person, so there is no way back.',
+    );
+  }
+  return warnings;
+}
 
 /**
  * Create a new staging guild, adopt an existing one, or stop and ask a human.
@@ -69,11 +132,13 @@ export function chooseGuild(opts: {
   explicitGuildId?: string;
 }): GuildChoice {
   const { guilds, explicitGuildId } = opts;
+  const warnings = inspectGuildList({ guilds, expectedGuildId: explicitGuildId });
 
   if (explicitGuildId) {
     if (explicitGuildId === LIVE_GUILD_ID) {
       return {
         action: 'abort',
+        warnings,
         reason:
           `DISCORD_STAGING_GUILD_ID is the LIVE TWO server (${LIVE_GUILD_ID}). ` +
           'Refusing to provision anything into it.',
@@ -83,6 +148,7 @@ export function chooseGuild(opts: {
     if (!found) {
       return {
         action: 'abort',
+        warnings,
         reason:
           `DISCORD_STAGING_GUILD_ID is ${explicitGuildId} but the staging bot is not in that guild. ` +
           'If the founder created the server by hand, invite the bot to it first, then re-run.',
@@ -91,6 +157,7 @@ export function chooseGuild(opts: {
     return {
       action: 'reconcile',
       guildId: found.id,
+      warnings,
       reason: `DISCORD_STAGING_GUILD_ID is set, so adopting "${found.name}" as-is and only filling in its contents.`,
     };
   }
@@ -100,29 +167,55 @@ export function chooseGuild(opts: {
     return {
       action: 'reconcile',
       guildId: matches[0].id,
+      warnings,
       reason: `Found exactly one "${STAGING_SERVER_NAME}" (${matches[0].id}). Reconciling it instead of creating a second.`,
     };
   }
   if (matches.length > 1) {
     return {
       action: 'abort',
+      warnings,
       reason:
         `The staging bot is in ${matches.length} guilds called "${STAGING_SERVER_NAME}" ` +
         `(${matches.map((g) => g.id).join(', ')}). A previous run went wrong. ` +
         'Pick the one to keep, set DISCORD_STAGING_GUILD_ID to it, and delete the others by hand.',
     };
   }
+
+  // From here we would be about to POST /guilds. Discord refuses that call
+  // outright at ten guilds; we stop earlier, at the headroom, because the
+  // tenth is unrecoverable. Both messages name the count and the limit so the
+  // failure reads as an explanation rather than an HTTP error deep in a QA run.
+  if (guilds.length >= GUILD_CREATE_LIMIT) {
+    return {
+      action: 'abort',
+      warnings,
+      reason:
+        `The ${STAGING_BOT_APPLICATION_NAME} bot is in ${guilds.length} guilds, at or past Discord's ` +
+        `${GUILD_CREATE_LIMIT}-guild limit for POST /guilds. Discord will refuse to create another, so ` +
+        'nothing was attempted.\n' +
+        `  Guilds: ${guilds.map((g) => `"${g.name}" (${g.id})`).join(', ')}.\n` +
+        `  Likely cause: ${STAGING_BOT_APPLICATION_NAME} is a Public Bot, so anyone holding application ` +
+        `${STAGING_BOT_APPLICATION_ID} can add it to their own server and spend a slot. Turn Public Bot ` +
+        'off in the developer portal, remove the bot from guilds it does not need, then re-run.',
+    };
+  }
   if (guilds.length >= GUILD_CREATE_HEADROOM) {
     return {
       action: 'abort',
+      warnings,
       reason:
-        `The staging bot is already in ${guilds.length} guilds and Discord blocks bot guild creation at ` +
-        `${GUILD_CREATE_LIMIT}. Refusing to create another - the last one is unrecoverable. ` +
-        'Remove the bot from guilds it does not need, or create the server by hand and set DISCORD_STAGING_GUILD_ID.',
+        `The ${STAGING_BOT_APPLICATION_NAME} bot is already in ${guilds.length} guilds and Discord blocks bot ` +
+        `guild creation at ${GUILD_CREATE_LIMIT}. Refusing to create another with only ` +
+        `${GUILD_CREATE_LIMIT - guilds.length} slot(s) left - the last one is unrecoverable.\n` +
+        `  Guilds: ${guilds.map((g) => `"${g.name}" (${g.id})`).join(', ')}.\n` +
+        `  Check ${STAGING_BOT_APPLICATION_NAME}'s Public Bot setting is off, remove the bot from guilds it ` +
+        'does not need, or create the server by hand and set DISCORD_STAGING_GUILD_ID.',
     };
   }
   return {
     action: 'create',
+    warnings,
     reason: `No "${STAGING_SERVER_NAME}" found and the bot is in ${guilds.length} guilds. Safe to create one.`,
   };
 }

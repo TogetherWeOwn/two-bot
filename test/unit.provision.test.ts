@@ -14,6 +14,7 @@ import {
   CHANNEL_TYPE_TEXT,
   CHANNEL_TYPE_VOICE,
   GUILD_CREATE_HEADROOM,
+  GUILD_CREATE_LIMIT,
   chooseGuild,
   evaluateHierarchy,
   guildCreatePayload,
@@ -23,6 +24,7 @@ import {
 } from '../src/staging/provision.ts';
 import {
   LIVE_GUILD_ID,
+  STAGING_BOT_APPLICATION_ID,
   STAGING_ROLES,
   STAGING_SERVER_NAME,
   STAGING_TEXT_CHANNELS,
@@ -66,6 +68,80 @@ test('refuses to create once the bot is near the ten-guild cliff', () => {
   const c = chooseGuild({ guilds: filler(GUILD_CREATE_HEADROOM) });
   assert.equal(c.action, 'abort');
   assert.match(c.reason, /unrecoverable/);
+  // The count and the limit are both named, so the abort explains itself.
+  assert.match(c.reason, new RegExp(`in ${GUILD_CREATE_HEADROOM} guilds`));
+  assert.match(c.reason, new RegExp(String(GUILD_CREATE_LIMIT)));
+  assert.match(c.reason, /Public Bot/);
+});
+
+test('at the hard ten-guild limit it aborts and blames the Public Bot setting', () => {
+  const c = chooseGuild({ guilds: filler(GUILD_CREATE_LIMIT) });
+  assert.equal(c.action, 'abort');
+  assert.match(c.reason, new RegExp(`in ${GUILD_CREATE_LIMIT} guilds`));
+  assert.match(c.reason, new RegExp(`${GUILD_CREATE_LIMIT}-guild limit`));
+  assert.match(c.reason, /Public Bot/);
+  assert.match(c.reason, new RegExp(STAGING_BOT_APPLICATION_ID));
+  // Every guild is named, because the fix is "go remove the bot from these".
+  for (const g of filler(GUILD_CREATE_LIMIT)) assert.match(c.reason, new RegExp(g.id));
+});
+
+test('past the limit too - a bot in eleven guilds is not a silent no-op', () => {
+  const c = chooseGuild({ guilds: filler(GUILD_CREATE_LIMIT + 1) });
+  assert.equal(c.action, 'abort');
+  assert.match(c.reason, /at or past/);
+});
+
+// --- the guild-list warnings ------------------------------------------------
+
+test('zero guilds warns about nothing - that is the normal first run', () => {
+  const c = chooseGuild({ guilds: [] });
+  assert.equal(c.action, 'create');
+  assert.deepEqual(c.warnings, []);
+});
+
+test('guilds we did not add the bot to are warned about by name', () => {
+  const c = chooseGuild({ guilds: filler(2) });
+  assert.equal(c.action, 'create', 'two strays must not block a first provision');
+  assert.equal(c.warnings.length, 2);
+  assert.match(c.warnings[0], /is in 2 guild\(s\)/);
+  assert.match(c.warnings[0], /"other 0"/);
+  assert.match(c.warnings[1], /2 of those are not ours: all of them/);
+  assert.match(c.warnings[1], /Public Bot/);
+  assert.match(c.warnings[1], new RegExp(STAGING_BOT_APPLICATION_ID));
+});
+
+test('our own staging server is not reported as a stray', () => {
+  const c = chooseGuild({ guilds: [{ id: STAGING, name: STAGING_SERVER_NAME }] });
+  assert.equal(c.action, 'reconcile');
+  assert.equal(c.warnings.length, 1, 'the count line only');
+  assert.ok(!c.warnings.some((w) => /not ours/.test(w)));
+});
+
+test('an explicitly named guild is not a stray either, but its neighbours are', () => {
+  const c = chooseGuild({
+    guilds: [{ id: STAGING, name: 'Owen test server' }, ...filler(1)],
+    explicitGuildId: STAGING,
+  });
+  assert.equal(c.action, 'reconcile');
+  const strays = c.warnings.filter((w) => /not ours/.test(w));
+  assert.equal(strays.length, 1);
+  assert.match(strays[0], /1 of those is not ours/);
+  assert.match(strays[0], /"other 0"/);
+  assert.ok(!strays[0].includes('Owen test server'));
+});
+
+test('running low on guild slots is called out even when the run can proceed', () => {
+  const c = chooseGuild({
+    guilds: [{ id: STAGING, name: STAGING_SERVER_NAME }, ...filler(GUILD_CREATE_HEADROOM - 1)],
+  });
+  assert.equal(c.action, 'reconcile', 'reconcile never calls POST /guilds, so it is allowed');
+  assert.ok(c.warnings.some((w) => /guild-creation slots are used/.test(w)));
+});
+
+test('the warnings survive an abort - the operator sees why before the refusal', () => {
+  const c = chooseGuild({ guilds: filler(GUILD_CREATE_LIMIT) });
+  assert.equal(c.action, 'abort');
+  assert.ok(c.warnings.length >= 2);
 });
 
 test('an explicit guild id means adopt, never create - the founder-built path', () => {

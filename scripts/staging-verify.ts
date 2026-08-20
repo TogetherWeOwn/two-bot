@@ -31,6 +31,7 @@
  */
 import {
   STAGING_BOT_APPLICATION_ID,
+  STAGING_BOT_APPLICATION_NAME,
   STAGING_PERMISSIONS,
   STAGING_SERVER_NAME,
   STAGING_TEXT_CHANNELS,
@@ -47,8 +48,8 @@ const token = process.env.DISCORD_STAGING_BOT_TOKEN;
 if (!token) {
   console.error(
     '\nMissing DISCORD_STAGING_BOT_TOKEN.\n' +
-      `  This is the "Owen Staging" bot token (application ${STAGING_BOT_APPLICATION_ID}),\n` +
-      '  called `test-two` on the board. Not the live one. See docs/SECRETS.md.\n',
+      `  This is the ${STAGING_BOT_APPLICATION_NAME} bot token (application ${STAGING_BOT_APPLICATION_ID}).\n` +
+      '  Not the live one. See docs/SECRETS.md.\n',
   );
   process.exit(2);
 }

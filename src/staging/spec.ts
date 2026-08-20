@@ -26,16 +26,20 @@
 export const LIVE_GUILD_ID = '326474832151838730';
 
 export const STAGING_SERVER_NAME = 'TWO Staging';
-export const STAGING_BOT_APPLICATION_NAME = 'Owen Staging';
+
+/**
+ * The staging application's real name. The 2026-08-19 spec called it
+ * `Owen Staging` and had the founder creating it; TWO-21 established that it
+ * already existed as `test-two`, made on 14 Aug, five days before the live
+ * `Owen`. Nothing is being renamed - the id below is the identity, the name is
+ * only what a human reads in the developer portal.
+ */
+export const STAGING_BOT_APPLICATION_NAME = 'test-two';
 
 /**
  * Discord application ids. These are public identifiers, not secrets - they
  * appear in every invite URL. They are written down because "which bot is this
  * token for" is otherwise unanswerable without pasting the token somewhere.
- *
- * The staging application is called `Owen Staging` in the developer portal and
- * `test-two` on the board. Same application, two names, which is exactly why
- * the id is the thing we check against.
  */
 export const LIVE_BOT_APPLICATION_ID = '1539711683898118154';
 export const STAGING_BOT_APPLICATION_ID = '1537629682449649724';
@@ -150,8 +154,9 @@ export function stagingGuildId(): string {
   const id = process.env.DISCORD_STAGING_GUILD_ID;
   if (!id) {
     throw new Error(
-      'Missing DISCORD_STAGING_GUILD_ID. The founder posts the staging guild id in ' +
-        'the TWO-21 thread - it is not a secret. See docs/STAGING.md.',
+      'Missing DISCORD_STAGING_GUILD_ID. No founder posts this any more: run ' +
+        '`npm run staging:provision -- --apply` and the bot creates the server and ' +
+        'prints its id. It is not a secret. See docs/STAGING.md.',
     );
   }
   if (id === LIVE_GUILD_ID) {
