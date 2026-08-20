@@ -28,6 +28,23 @@ without the numbers first.
 
 Requires **Node 24 or newer** (it runs TypeScript directly).
 
+All three repos are **private**, so git needs the credential before anything
+else. Run this once per machine — `gh` reads `GH_TOKEN` from the environment,
+and this hands the same token to git:
+
+```bash
+gh auth setup-git
+git clone https://github.com/TWO-Gaming/two-bot.git
+cd two-bot
+```
+
+Without it you get `could not read Username for 'https://github.com'`.
+`gh repo clone` gets you past the clone on its own, but **not** the first
+`git push` — the clone it leaves behind has no credential helper configured, so
+setup-git is the step that actually matters. Do it first.
+
+Then:
+
 ```bash
 npm ci --include=dev
 npm test            # unit + full end-to-end, no Discord token needed
