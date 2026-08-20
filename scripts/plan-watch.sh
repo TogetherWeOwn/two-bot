@@ -3,9 +3,17 @@
 # Watch for the day GitHub starts allowing branch protection, and say so.
 #
 #   ./scripts/plan-watch.sh                 # probe and report
-#   ./scripts/plan-watch.sh --github-issue  # also file/refresh a GitHub issue
-#                                           # when action is needed
 #   ./scripts/plan-watch.sh --runbook       # print the re-apply steps and exit
+#   ./scripts/plan-watch.sh --github-issue  # also file/refresh a GitHub issue
+#                                           # when action is needed. NOT used by
+#                                           # plan-watch.yml: GitHub Issues is
+#                                           # disabled on these repos (work is
+#                                           # tracked in Paperclip), so it would
+#                                           # only ever fail. Kept for the day
+#                                           # that changes; it degrades to a
+#                                           # warning rather than losing the
+#                                           # alarm, since the exit code carries
+#                                           # it either way.
 #
 # WHY THIS EXISTS (TWO-85)
 #
