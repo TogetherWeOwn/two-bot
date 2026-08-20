@@ -151,10 +151,18 @@ sudo bash scripts/bootstrap-host.sh
 Does everything in the long version below, in order. Idempotent — re-running it
 is also how you ship an update.
 
-It stops rather than guessing in four places: an existing system Node it would
+It stops rather than guessing in five places: an existing system Node it would
 have to replace (exit `4`), an app directory with files in it that this script
-did not put there (exit `5`), empty secrets files (exit `3`), and a failed
-preflight.
+did not put there (exit `5`), empty secrets files (exit `3`), the bot token
+found sitting in `two-bot.env` (exit `6`), and a failed preflight.
+
+Exit `6` is the one that looks like bureaucracy and is not. The token is a
+systemd credential now, and the credential wins over the environment — so a box
+with the token in *both* places runs perfectly while a second live copy of it
+sits in a file that gets read into a process environment. Nothing ever breaks,
+so nobody ever notices. The same stop catches a rotation where the old line was
+never deleted. Delete the `DISCORD_TOKEN` / `DISCORD_BOT_TOKEN` line from
+`/etc/two-bot/two-bot.env`, leave every other key alone, re-run.
 
 Exit `5` guards the one genuinely destructive line in the script. Deploying
 runs `rsync -a --delete` into `TWO_APP_DIR`, which erases anything there that
@@ -247,6 +255,56 @@ journalctl -u two-bot -f          # follow
 
 A healthy start logs `{"msg":"ready","user":"...","guilds":1}` within a few
 seconds. If you see `ready` you are connected to Discord.
+
+## Rotate the bot token
+
+**Due once at first deploy, then any time the token has been somewhere it should
+not have been.** There is one outstanding rotation: `DISCORD_BOT_TOKEN` was
+bound into the website agent's environment, which never needs it. That has been
+unbound, but unbinding is not rotation — the value was still readable by
+something that had no business holding it, so it gets reset. Background on
+TWO-76 / TWO-77; the instruction to do it at deploy time is on TWO-11.
+
+Rotation takes the bot offline from the moment of the reset until the new value
+is in place, so it is a sequenced maintenance action, not an errand. Budget five
+minutes and do it when nobody is mid-event.
+
+1. Discord Developer Portal → application **`Owen`** (`1539711683898118154`) →
+   **Bot** → **Reset Token**. The old token is dead the instant you click.
+2. The founder stores the new value as the Paperclip secret and binds it to the
+   **Founding Engineer** — and to nobody else.
+3. Put it on the box, in the credential file, not the environment:
+
+   ```bash
+   sudo editor /etc/two-bot/credentials/discord_token   # new token, one line
+   sudo ls -l /etc/two-bot/credentials/discord_token    # root:root, 0600, non-empty
+   ```
+
+4. **Delete any `DISCORD_TOKEN` / `DISCORD_BOT_TOKEN` line from
+   `/etc/two-bot/two-bot.env` at the same moment.** The credential wins, so a
+   stale copy there would never break anything and would never be noticed —
+   which is the exposure this whole step exists to remove.
+   `bootstrap-host.sh` refuses to deploy (exit `6`) if it finds one.
+5. Restart and confirm it actually reconnected — `active (running)` alone only
+   means the process has not exited yet:
+
+   ```bash
+   sudo systemctl restart two-bot
+   journalctl -u two-bot --since '-2 min' | grep '"msg":"ready"'
+   ```
+
+   No `ready` line means it is up without a Discord session. The likely cause is
+   a truncated paste into the credential file.
+
+6. Anything else holding the old token now has a dead one: the agent runtime's
+   `DISCORD_BOT_TOKEN`, and any shell you left `scripts/capture.ts` running in.
+   Both pick the new value up on their next start; neither loses data, because
+   `capture.ts` is idempotent and the bot re-reads the invite counters at boot.
+
+**If the reset would add risk to a first production bring-up, bring it up first
+and rotate the same day.** A working deploy carrying a token that had a bad
+neighbour for a week beats a broken deploy. What is not acceptable is the
+rotation quietly never happening.
 
 ## What are the numbers?
 

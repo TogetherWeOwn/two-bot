@@ -180,15 +180,34 @@ say "Dependencies"
 sudo -u "$APP_USER" sh -c "cd '$APP_DIR' && npm ci --omit=dev"
 
 # --- Secrets ---------------------------------------------------------------
-# Created empty and never touched again. systemd reads two-bot.env as root
-# before dropping privileges, so the bot's own user cannot read the token.
+# Created empty and never touched again, and never printed.
+#
+# Two different kinds of file, deliberately not one:
+#
+#   credentials/discord_token   the bot token. A systemd credential, so it is
+#                               a 0400 file readable by exactly one Unix user
+#                               and it never enters any process environment.
+#   two-bot.env                 non-secret configuration only - guild ID,
+#                               channel IDs, log level, flags.
+#
+# On a box shared with the website that split is the whole point: an
+# environment variable is visible in /proc/<pid>/environ and inherited by every
+# child process. See deploy/two-bot.service and docs/SECRETS.md.
 say "Secrets"
+CRED_DIR="$ENV_DIR/credentials"
+TOKEN_FILE="$CRED_DIR/discord_token"
+install -d -o root -g root -m 700 "$CRED_DIR"
 new_secrets=0
-if [ -s "$ENV_DIR/two-bot.env" ]; then
+if [ -s "$TOKEN_FILE" ]; then
+  echo "$TOKEN_FILE present - left alone"
+else
+  install -o root -g root -m 600 /dev/null "$TOKEN_FILE"
+  new_secrets=1
+fi
+if [ -e "$ENV_DIR/two-bot.env" ]; then
   echo "$ENV_DIR/two-bot.env present - left alone"
 else
   install -o root -g root -m 600 /dev/null "$ENV_DIR/two-bot.env"
-  new_secrets=1
 fi
 if [ -s "$ENV_DIR/backup.env" ]; then
   echo "$ENV_DIR/backup.env present - left alone"
@@ -196,12 +215,55 @@ else
   install -o "$APP_USER" -g "$APP_USER" -m 600 /dev/null "$ENV_DIR/backup.env"
   new_secrets=1
 fi
+
+# A token in two-bot.env is the failure this whole split exists to prevent, and
+# it is invisible once the bot is running: the credential wins, so the bot works
+# perfectly while a second copy of the live token sits in a file that is read
+# into an environment. Rotating and leaving the old line behind looks like it
+# worked, too. So: stop, and say which of the two cases this is.
+if grep -Eq '^[[:space:]]*(export[[:space:]]+)?(DISCORD_TOKEN|DISCORD_BOT_TOKEN)[[:space:]]*=[[:space:]]*[^[:space:]]' \
+     "$ENV_DIR/two-bot.env" 2>/dev/null; then
+  if [ -s "$TOKEN_FILE" ]; then
+    cat >&2 <<EOF
+
+  Refusing to deploy: the bot token is in two files.
+
+  $TOKEN_FILE has a value, and
+  $ENV_DIR/two-bot.env also sets DISCORD_TOKEN / DISCORD_BOT_TOKEN.
+
+  The credential wins, so the bot would run fine and you would never notice -
+  which is exactly why this stops. Delete the token line from
+
+      sudo editor $ENV_DIR/two-bot.env
+
+  leaving the non-secret keys, then re-run me. If the two values differ, the
+  one in $TOKEN_FILE is the one in use.
+
+EOF
+  else
+    cat >&2 <<EOF
+
+  The bot token is in $ENV_DIR/two-bot.env.
+
+  That is the old layout. It now goes in a systemd credential file instead:
+
+      sudo editor $TOKEN_FILE          # the token, one line, no quotes
+      sudo editor $ENV_DIR/two-bot.env # delete the DISCORD_TOKEN line
+
+  Everything else in two-bot.env stays where it is. docs/SECRETS.md says why.
+
+EOF
+  fi
+  exit 6
+fi
+
 if [ "$new_secrets" -eq 1 ]; then
   cat <<EOF
 
   Secrets files are empty. Fill them in before this can start, then re-run me:
 
-    sudo editor $ENV_DIR/two-bot.env     # DISCORD_BOT_TOKEN, DISCORD_GUILD_ID, TWO_DATABASE_URL
+    sudo editor $TOKEN_FILE              # the bot token, one line, nothing else
+    sudo editor $ENV_DIR/two-bot.env     # DISCORD_GUILD_ID, TWO_DATABASE_URL - no token
     sudo editor $ENV_DIR/backup.env      # TWO_DATABASE_URL, TWO_RESTORE_URL, TWO_BACKUP_UPLOAD_CMD
 
   Keys and what each one does: .env.example and docs/SECRETS.md.
@@ -221,11 +283,15 @@ install -m 644 \
 systemctl daemon-reload
 
 # --- Preflight -------------------------------------------------------------
-# Against the real credential in the real env file, before anything starts.
+# Against the real token and the real config, as the real user, before anything
+# starts. The token arrives the same way the service gets it - as a credential,
+# not an environment variable - so this also proves the credential file itself
+# is readable and non-empty before systemd tries to start the unit.
 say "Preflight"
 set +e
 systemd-run --quiet --pipe --wait --collect \
   --uid="$APP_USER" \
+  --property=LoadCredential="discord_token:$TOKEN_FILE" \
   --property=EnvironmentFile="$ENV_DIR/two-bot.env" \
   --working-directory="$APP_DIR" \
   /usr/bin/node "$APP_DIR/scripts/preflight.ts"

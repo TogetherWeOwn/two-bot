@@ -17,7 +17,12 @@
    call site passes it the token.
 5. If a token is exposed, rotate it in the Discord developer portal first and
    worry about how it happened second. Rotation is cheap; a live leaked token is
-   somebody else's bot in our server.
+   somebody else's bot in our server. The step-by-step, including the part
+   people forget — deleting the old copy — is **"Rotate the bot token"** in
+   `docs/RUNBOOK.md`.
+6. Un-binding a secret from somewhere it should not have been is not the same as
+   rotating it. The value was still readable while it was there. Un-bind, then
+   rotate.
 
 ## Why credentials and not environment variables
 

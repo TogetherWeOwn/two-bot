@@ -13,13 +13,21 @@
  * more access than the feature needs. Exit code is non-zero only on FAIL, so
  * this is safe to wire into a deploy step.
  *
- * The token is read from the environment and never printed. See docs/SECRETS.md.
+ * The token is never printed. See docs/SECRETS.md.
  */
+import { readSecret } from '../src/core/credentials.ts';
+
 const API = 'https://discord.com/api/v10';
 
-const token = process.env.DISCORD_TOKEN;
+// Same lookup order as src/core/config.ts: the systemd credential first, then
+// the environment. On the shared box the token is a credential file, not an
+// environment variable, so a preflight that only read the environment would
+// report "missing token" on the one machine that matters. From a laptop or the
+// agent runtime nothing changes - there is no credential directory, so it falls
+// straight through to DISCORD_BOT_TOKEN / DISCORD_TOKEN as before.
+const token = readSecret('discord_token', ['DISCORD_BOT_TOKEN', 'DISCORD_TOKEN']);
 if (!token) {
-  console.error('Missing required env var DISCORD_TOKEN. See docs/SECRETS.md.');
+  console.error('Missing bot token. Set DISCORD_TOKEN (or DISCORD_BOT_TOKEN). See docs/SECRETS.md.');
   process.exit(2);
 }
 const guildFilter = process.env.DISCORD_GUILD_ID || null;
