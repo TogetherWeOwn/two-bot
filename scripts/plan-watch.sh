@@ -46,12 +46,30 @@
 #                       already on (someone did the work)
 #   1  ACTION NEEDED  - protection is now possible and main is not protected
 #   2  usage error
+#   3  WATCHER BROKEN - the org or repo this watcher points at does not exist.
+#                       Nothing is being watched. See "MISSING TARGET" below.
 #
 # An "I could not tell" outcome exits 0 with a loud warning, never silently.
 # A watcher that reports all-clear when it is actually broken is worse than
 # no watcher, so unknown is always spoken out loud but never treated as an
 # alarm - a weekly red X nobody can act on gets muted, and then the real one
 # gets muted with it.
+#
+# MISSING TARGET (TOG-131)
+#
+# The exception to that rule. "I could not tell because my token is thin" is
+# expected weekly and must stay quiet. "I could not tell because the org I
+# probe no longer exists" is neither expected nor fixable by waiting, and it
+# used to land in the same quiet exit-0 bucket - green check, nobody watching.
+# Those two are now separated, because only one of them has an action.
+#
+# Telling them apart needs care: GitHub answers 404, not 403, for a private
+# resource a token cannot see, so a bare 404 on the protection endpoint is
+# genuinely ambiguous. So existence is established with a SEPARATE pair of
+# probes that need no privilege at all - `orgs/$ORG` and `repos/$ORG/$REPO`,
+# reachable with metadata:read, which is the floor for any token that can run
+# this script. A 404 from those is a structural fact, not a permission
+# accident, and that is the only thing that exits 3.
 #
 # CREDENTIAL
 #   GH_TOKEN. In CI this is the workflow's GITHUB_TOKEN, which needs
@@ -63,7 +81,16 @@
 
 set -euo pipefail
 
-ORG="${TWO_GITHUB_ORG:-two-gaming}"
+# All three repos were transferred to TogetherWeOwn; two-gaming is an empty
+# org we keep only so its 301 redirects stay alive (TOG-131 decided that, and
+# decided never to recreate a repo of the same name inside it).
+#
+# Do not point this back at two-gaming to "use the redirect". The redirect
+# carries repos/two-gaming/two-bot, so probe 1 would keep working and look
+# fine - but orgs/two-gaming resolves to the EMPTY org, whose plan is not ours
+# and which we hold no admin on. Probe 2 would then read unknown forever and
+# could never fire, which is half this watcher dead with a green check on it.
+ORG="${TWO_GITHUB_ORG:-TogetherWeOwn}"
 DEFAULT_BRANCH="main"
 BOT_REPO="two-bot"
 WEB_REPO="two-web"
@@ -202,6 +229,10 @@ probe_protection() {
       echo "unknown:the token lacks admin on $WATCH_REPO" ;;
     *"Branch not found"*)
       echo "unknown:$DEFAULT_BRANCH does not exist on $WATCH_REPO" ;;
+    # Deliberately still "unknown" and not "missing". A 404 here can mean the
+    # token cannot see a private repo just as easily as it can mean the repo
+    # is gone. probe_target_exists() is what decides that question, using
+    # endpoints where a 404 is unambiguous.
     *"Not Found"*)
       echo "unknown:$ORG/$WATCH_REPO not visible to this token" ;;
     *) echo "unknown:unrecognised response: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)" ;;
@@ -220,8 +251,51 @@ probe_plan() {
   fi
 }
 
+# Probe 0: does the thing we are watching still exist at all?
+#
+# Runs before the other two, because if this fails their answers are noise.
+# Both endpoints need only metadata:read - the floor for any token that gets
+# this far - so unlike the protection endpoint, a 404 from here is a fact
+# about the world and not about our credential. Prints one reason per line;
+# empty output means the target is intact.
+probe_target_exists() {
+  local out
+
+  if ! out="$(gh api "orgs/$ORG" 2>&1)"; then
+    case "$out" in
+      *"Not Found"*) echo "the org '$ORG' does not exist on GitHub" ;;
+      # Anything else - rate limit, network, an outage - is not evidence of
+      # absence, and must not trip the alarm.
+      *) ;;
+    esac
+  fi
+
+  if ! out="$(gh api "repos/$ORG/$WATCH_REPO" 2>&1)"; then
+    case "$out" in
+      *"Not Found"*) echo "the repo '$ORG/$WATCH_REPO' does not exist, or this token cannot see it at all" ;;
+      *) ;;
+    esac
+  fi
+}
+
 say "Is branch protection available yet?"
 ok "org: $ORG   repo probed: $WATCH_REPO"
+
+MISSING="$(probe_target_exists)"
+if [ -n "$MISSING" ]; then
+  say "WATCHER BROKEN - it is not pointed at anything"
+  while IFS= read -r reason; do act "$reason"; done <<<"$MISSING"
+  echo
+  warn "This is not the quiet 'could not tell' case. The other two probes are"
+  warn "not being run, because against a target that is not there they would"
+  warn "return 'unknown' and this job would go green while watching nothing."
+  echo
+  warn "Branch protection on the real repos is therefore UNWATCHED as of now."
+  warn "Fix by pointing the watcher at the right place, then re-run:"
+  warn "    TWO_GITHUB_ORG=<org> TWO_WATCH_REPO=<repo> ./scripts/plan-watch.sh"
+  warn "and make that the new default in this script. Origin: TWO-85, TOG-131."
+  exit 3
+fi
 
 PROTECTION="$(probe_protection)"
 PLAN="$(probe_plan)"
@@ -272,4 +346,7 @@ warn "Neither probe gave a usable answer, so this watcher is not currently"
 warn "watching anything. That is the failure worth fixing: check GH_TOKEN and"
 warn "its permissions. Exiting 0 because there is nothing to act on - but do"
 warn "not read this as all-clear."
+warn ""
+warn "$ORG/$WATCH_REPO does exist - probe 0 confirmed that - so this is a"
+warn "credential problem, not a moved-or-deleted target. Set PLAN_WATCH_TOKEN."
 exit 0

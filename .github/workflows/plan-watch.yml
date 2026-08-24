@@ -12,8 +12,15 @@ name: plan-watch
 # refusing. The week it stops refusing, it fails, and the run summary carries
 # the whole re-apply runbook so nobody has to go looking for it.
 #
-# A failure here is never flaky and never urgent-at-3am: it means somebody
-# should spend ten minutes running setup-github.sh.
+# A failure here is never flaky and never urgent-at-3am. There are two of
+# them, and they want different things:
+#
+#   exit 1  the plan changed - spend ten minutes running setup-github.sh
+#   exit 3  the watcher is pointed at an org or repo that does not exist, so
+#           nothing is being watched. Repoint it; do NOT run setup-github.sh
+#
+# exit 3 exists because it used to be an exit 0 (TOG-131): when the probes
+# 404'd, the job went green and the watcher was blind with nobody told.
 #
 # WHY THE ALARM IS A RED X AND NOT AN ISSUE. GitHub Issues is disabled on
 # these repos - work is tracked in Paperclip, and standing up a second tracker
@@ -43,6 +50,11 @@ name: plan-watch
 #
 # Without that secret the job runs, reports that it cannot see, and exits 0.
 # It does not pretend to be watching. Tracked on TWO-85.
+#
+# That quiet exit-0 is only correct for a thin credential. It is NOT how a
+# missing target is handled - plan-watch.sh establishes existence separately,
+# through endpoints that need only metadata:read, so "my token is small" and
+# "the org is gone" cannot be confused for one another.
 
 on:
   schedule:
@@ -106,9 +118,16 @@ jobs:
 
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
-          if [ "$rc" != 0 ]; then
-            echo "::error title=Branch protection is available now::GitHub is no longer refusing branch protection, and main is not protected. The re-apply runbook is in this run's summary. Start with ./scripts/setup-github.sh"
-          fi
+          # rc=1 and rc=3 are different alarms and must not share an
+          # annotation - "protection is available now" on a run that actually
+          # means "this watcher is pointed at nothing" would send whoever
+          # reads it to the wrong runbook.
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=Branch protection is available now::GitHub is no longer refusing branch protection, and main is not protected. The re-apply runbook is in this run's summary. Start with ./scripts/setup-github.sh" ;;
+            3) echo "::error title=plan-watch is watching nothing::The org or repo this watcher probes does not exist, so branch protection is now UNWATCHED. This is a broken watcher, not a plan change - do NOT run setup-github.sh. Repoint TWO_GITHUB_ORG/TWO_WATCH_REPO in scripts/plan-watch.sh. See TOG-131." ;;
+            *) echo "::error title=plan-watch exited $rc::Unexpected exit code from scripts/plan-watch.sh - see the run summary." ;;
+          esac
 
           # A PR self-test reports what it saw; it does not fail the PR just
           # because the plan changed. The scheduled run is the alarm.
