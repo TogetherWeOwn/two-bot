@@ -1,43 +1,49 @@
 # Who gets asked to review what, in two-web.
 #
 # SUPERSEDED - DO NOT COPY THIS OVER two-web/.github/CODEOWNERS.
-# The Web Lead committed a fuller version in two-web itself (TWO-39). This copy
-# is kept only as the record of which teams the bot side expects; both files
-# name the same four. See ../README.md.
+# The Web Lead committed a fuller version in two-web itself (TWO-39), and TOG-128
+# has since rewritten it. That file is the source of truth; this copy is only the
+# record of which paths the bot side expects to be routed. See ../README.md.
 #
-# Handles are GitHub teams in the two-gaming org, not individuals, so a review
-# request never dies because one account is asleep.
+# This used to name @two-gaming/<team> handles, on the reasoning that a team
+# review request never dies because one account is asleep. The teams went with
+# the org: the repos are in TogetherWeOwn now and it has no teams. A CODEOWNERS
+# rule naming a handle without write access is dropped by GitHub silently - no
+# warning, no reviewer - so a template still naming them was a trap for whoever
+# copied it next. Handles below match what TOG-128 landed in two-web. Promote
+# back to real teams when a second person has write access; the path split below
+# is already drawn along those lines.
 
-# Default: the Web Lead owns the application.
-*                             @two-gaming/web-lead
+# Default: the application.
+*                             @Rick7C2
 
-# Anything a member sees. Frontend reviews the markup, styles and JS; the Web
-# Lead still sees it because views call into the backend.
-/resources/views/             @two-gaming/frontend @two-gaming/web-lead
-/resources/js/                @two-gaming/frontend
-/resources/css/               @two-gaming/frontend
-/tailwind.config.js           @two-gaming/frontend
-/vite.config.js               @two-gaming/frontend
+# Anything a member sees: markup, styles and JS. Views call into the backend, so
+# frontend and backend concerns meet here.
+/resources/views/             @Rick7C2
+/resources/js/                @Rick7C2
+/resources/css/               @Rick7C2
+/tailwind.config.js           @Rick7C2
+/vite.config.js               @Rick7C2
 
 # Backend: schema, policies, and the request path.
-/app/                         @two-gaming/web-lead
-/routes/                      @two-gaming/web-lead
-/database/                    @two-gaming/web-lead
-/config/                      @two-gaming/web-lead
+/app/                         @Rick7C2
+/routes/                      @Rick7C2
+/database/                    @Rick7C2
+/config/                      @Rick7C2
 
-# Tests and CI are QA's as well. "Make CI green" is the easiest thing in the
-# repo to get wrong on purpose.
-/tests/                       @two-gaming/qa @two-gaming/web-lead
-/.github/workflows/           @two-gaming/qa @two-gaming/web-lead
-/phpunit.xml                  @two-gaming/qa
-/phpstan.neon                 @two-gaming/qa
-/pint.json                    @two-gaming/qa
+# Tests and CI. "Make CI green" is the easiest thing in the repo to get wrong on
+# purpose, so these paths are called out even though the owner is the same.
+/tests/                       @Rick7C2
+/.github/workflows/           @Rick7C2
+/phpunit.xml                  @Rick7C2
+/phpstan.neon                 @Rick7C2
+/pint.json                    @Rick7C2
 
-# The boundary with the bot. The website reads the bot's contract and must
-# never hold the bot token; changes here get the Founding Engineer's eyes.
-/config/services.php          @two-gaming/web-lead @two-gaming/founding-engineer
-/app/Services/Discord/        @two-gaming/web-lead @two-gaming/founding-engineer
+# The boundary with the bot. The website reads the bot's contract and must never
+# hold the bot token.
+/config/services.php          @Rick7C2
+/app/Services/Discord/        @Rick7C2
 
 # Secrets posture.
-/.env.example                 @two-gaming/web-lead @two-gaming/founding-engineer
-/.gitignore                   @two-gaming/web-lead @two-gaming/founding-engineer
+/.env.example                 @Rick7C2
+/.gitignore                   @Rick7C2

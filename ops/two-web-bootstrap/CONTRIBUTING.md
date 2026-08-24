@@ -9,7 +9,7 @@
 Requires **PHP 8.3+**, **Composer**, and **Node 20+**.
 
 ```bash
-git clone git@github.com:two-gaming/two-web.git
+git clone git@github.com:TogetherWeOwn/two-web.git
 cd two-web
 composer setup      # install, .env, app key, migrate, npm install, build
 composer dev        # serve + queue + vite

@@ -15,7 +15,7 @@
 
 [Unit]
 Description=TWO growth dashboard
-Documentation=https://github.com/two-gaming/two-bot/blob/main/docs/DASHBOARD.md
+Documentation=https://github.com/TogetherWeOwn/two-bot/blob/main/docs/DASHBOARD.md
 After=network-online.target
 Wants=network-online.target
 
