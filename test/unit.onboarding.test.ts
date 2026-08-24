@@ -21,8 +21,12 @@ import {
   GAME_HUB_CHANNEL_ID,
   GAME_PICKS,
   GATED_CATEGORIES,
+  INTRO_CHANNEL_ID,
+  LANDING_CHANNEL_ID,
   pickByKey,
 } from '../src/onboarding/catalog.ts';
+import { resolveLandingChannels } from '../src/core/config.ts';
+import { welcomeText } from '../src/discord/onboarding.ts';
 
 const GUILD = '326474832151838730';
 const MEMBER = '900000000000009999';
@@ -69,6 +73,55 @@ test('every gated category maps to a game pick that targets a channel inside it'
     assert.ok(pick, `no pick grants ${cat.roleName}, so ${cat.categoryName} can never be reached`);
     assert.ok(pick.primaryChannelId, `${pick.key} must have a primary channel`);
   }
+});
+
+// --- the landing channel ----------------------------------------------------
+
+test('onboarding defaults to the TOG-94 landing channel instead of switching itself off', () => {
+  const before = process.env.DISCORD_LANDING_CHANNEL_IDS;
+  try {
+    delete process.env.DISCORD_LANDING_CHANNEL_IDS;
+    const resolved = resolveLandingChannels();
+    // The old behaviour was an empty list, which disabled onboarding entirely.
+    // That was correct while nobody had chosen a channel; it is now a bug.
+    assert.deepEqual(resolved.ids, [LANDING_CHANNEL_ID]);
+    assert.equal(resolved.source, 'default');
+  } finally {
+    if (before === undefined) delete process.env.DISCORD_LANDING_CHANNEL_IDS;
+    else process.env.DISCORD_LANDING_CHANNEL_IDS = before;
+  }
+});
+
+test('an explicit landing channel still wins, so staging can point elsewhere', () => {
+  const before = process.env.DISCORD_LANDING_CHANNEL_IDS;
+  try {
+    process.env.DISCORD_LANDING_CHANNEL_IDS = ' 111111111111111111 , 222222222222222222 ';
+    const resolved = resolveLandingChannels();
+    assert.deepEqual(resolved.ids, ['111111111111111111', '222222222222222222']);
+    assert.equal(resolved.source, 'env');
+  } finally {
+    if (before === undefined) delete process.env.DISCORD_LANDING_CHANNEL_IDS;
+    else process.env.DISCORD_LANDING_CHANNEL_IDS = before;
+  }
+});
+
+// --- the welcome copy -------------------------------------------------------
+
+test('the welcome addresses one member and never mass-mentions', () => {
+  const text = welcomeText('<@900000000000009999>');
+
+  assert.match(text, /<@900000000000009999>/, 'must mention the member it is welcoming');
+  assert.match(text, new RegExp(`<#${INTRO_CHANNEL_ID}>`), 'must link the intro channel');
+
+  // The single hard constraint on this issue is no mass messaging. The welcome
+  // is the one public post onboarding makes, so an @everyone or @here smuggled
+  // into the copy would ping the whole server on every single join.
+  assert.ok(!text.includes('@everyone'), 'the welcome must never ping @everyone');
+  assert.ok(!text.includes('@here'), 'the welcome must never ping @here');
+
+  // Discord hard-caps a message at 2000 characters, and a welcome that needs
+  // scrolling has already lost the person it is talking to.
+  assert.ok(text.length < 400, `welcome is ${text.length} chars - too long to read at a glance`);
 });
 
 // --- when do we prompt ------------------------------------------------------

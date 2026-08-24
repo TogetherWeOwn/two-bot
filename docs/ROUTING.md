@@ -28,11 +28,28 @@ that member sees. This is a hard constraint from the issue, and
 
 | Variable | Meaning |
 | --- | --- |
-| `DISCORD_LANDING_CHANNEL_IDS` | Comma-separated. Where the welcome is posted. **If empty, onboarding does not run.** |
+| `DISCORD_LANDING_CHANNEL_IDS` | Comma-separated. Where the welcome is posted. **Empty = `#💬〢general`**, the TOG-94 default. |
 | `TWO_ONBOARDING_DRY_RUN` | `1` = show the picker and record the funnel, but grant no roles. |
 
-Onboarding is off by default on purpose. On a live 100-member server, a bot that
-guesses which channel to post into is worse than a bot that does nothing.
+### Why the landing channel is `#💬〢general`
+
+The two channels that sound right are the two that do not work. `#👋〢welcome`
+and `#🚀〢quick-start-guide` are both **hidden from a brand-new member** — a
+newcomer sees 27 of 112 channels, and neither of those is among them. Of the
+LOBBY channels they can see, `#💬〢general` is the only one they can both read
+and post in, and Discord's own welcome screen already points there. The full
+walkthrough is in `audit/new-member-walkthrough.txt`.
+
+Onboarding used to be **off** unless this variable was set, because on a live
+100-member server a bot that guesses where to post is worse than a bot that does
+nothing. That reasoning applied to a guess. The channel is now a decision
+(TOG-94), so it is the default and onboarding is on. The env var still wins when
+set, which is how staging — sharing no channel ids with production — points
+somewhere real without a code change.
+
+Fail-closed behaviour is unchanged: a landing channel the bot cannot find or
+cannot post in is refused by `botCanPost`, which logs
+`onboarding_no_landing_channel` and posts nothing at all.
 
 ## The catalog
 

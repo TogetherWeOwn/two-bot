@@ -8,6 +8,7 @@
  * `src/core/credentials.ts` for why that matters on a shared box.
  */
 import { readSecret } from './credentials.ts';
+import { LANDING_CHANNEL_ID } from '../onboarding/catalog.ts';
 
 export interface Config {
   discordToken: string;
@@ -30,6 +31,8 @@ export interface Config {
    * post in wins, so this can list a preferred channel and a backstop.
    */
   landingChannelIds: string[];
+  /** Whether the above came from the environment or from the TOG-94 default. */
+  landingChannelSource: 'env' | 'default';
   /** Onboarding observes and logs but changes nothing. */
   onboardingDryRun: boolean;
   /**
@@ -71,6 +74,32 @@ function requiredToken(): string {
  * DATABASE_URL of their own, and silently pointing the funnel log at somebody
  * else's database is not a failure mode worth having.
  */
+/**
+ * Where the welcome post goes.
+ *
+ * This used to be env-only, and empty meant onboarding did not run at all. That
+ * was the right default while nobody had decided the channel: posting into a
+ * guessed room on a live 100-member server is worse than staying quiet. The
+ * channel is now decided (TOG-94 - `#💬〢general`, see `LANDING_CHANNEL_ID`), so
+ * the default is a decision rather than a guess and the deploy no longer
+ * depends on someone remembering an environment variable.
+ *
+ * The env var still wins when set. That is what lets staging - which shares no
+ * channel ids with production - point somewhere real without touching code.
+ *
+ * Fail-closed is unchanged either way: a landing channel the bot cannot find or
+ * cannot post in is refused by `botCanPost`, which logs
+ * `onboarding_no_landing_channel` and posts nothing.
+ */
+export function resolveLandingChannels(): { ids: string[]; source: 'env' | 'default' } {
+  const fromEnv = (process.env.DISCORD_LANDING_CHANNEL_IDS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (fromEnv.length) return { ids: fromEnv, source: 'env' };
+  return { ids: [LANDING_CHANNEL_ID], source: 'default' };
+}
+
 function resolveDbSpec(): string {
   // The URL carries a Postgres password, so it takes the credential path too.
   const url = readSecret('database_url', ['TWO_DATABASE_URL']);
@@ -79,13 +108,12 @@ function resolveDbSpec(): string {
 }
 
 export function loadConfig(): Config {
+  const landing = resolveLandingChannels();
   return {
     discordToken: requiredToken(),
     guildId: process.env.DISCORD_GUILD_ID || null,
-    landingChannelIds: (process.env.DISCORD_LANDING_CHANNEL_IDS || '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean),
+    landingChannelIds: landing.ids,
+    landingChannelSource: landing.source,
     onboardingDryRun: process.env.TWO_ONBOARDING_DRY_RUN === '1',
     staffAlertChannelId: process.env.DISCORD_STAFF_ALERT_CHANNEL_ID || null,
     raidJoinThreshold: Number(process.env.TWO_RAID_JOIN_THRESHOLD ?? 5),

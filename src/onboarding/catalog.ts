@@ -22,6 +22,17 @@
 
 export const GUILD_ID = '326474832151838730';
 
+/**
+ * 💬〢general - where the welcome post goes.
+ *
+ * Decided on TOG-94. The two channels that sound right are the two that do not
+ * work: `#👋〢welcome` and `#🚀〢quick-start-guide` are both hidden from a
+ * brand-new member. Of the 27 channels a newcomer can actually see, this is the
+ * only one in LOBBY they can both read and post in, and Discord's own welcome
+ * screen already points here. Evidence: `audit/new-member-walkthrough.txt`.
+ */
+export const LANDING_CHANNEL_ID = '1045943373007171674';
+
 /** 🎮〢game-hub - a forum every verified Member can already see. */
 export const GAME_HUB_CHANNEL_ID = '1092312335529541632';
 

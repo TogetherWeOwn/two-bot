@@ -56,22 +56,20 @@ log.info('raid_watch_enabled', {
 
 registerHandlers(client, { handlers, invites, raid });
 
-// Onboarding (TWO-7). Skipped entirely if no landing channel is configured -
-// better to run the funnel with onboarding off than to post into a guessed
-// channel on a live 100-member server.
-if (cfg.landingChannelIds.length === 0) {
-  log.error('onboarding_disabled', { reason: 'DISCORD_LANDING_CHANNEL_IDS is empty' });
-} else {
-  registerOnboarding(client, {
-    recorder: new OnboardingRecorder(store),
-    landingChannelIds: cfg.landingChannelIds,
-    dryRun: cfg.onboardingDryRun,
-  });
-  log.info('onboarding_enabled', {
-    landingChannelIds: cfg.landingChannelIds,
-    dryRun: cfg.onboardingDryRun,
-  });
-}
+// Onboarding (TOG-94). On by default now that the landing channel is a decision
+// and not a guess - see `resolveLandingChannels` in core/config.ts. `source` is
+// logged because "which channel, and who chose it" is the first question anyone
+// debugging a missing welcome post will ask.
+registerOnboarding(client, {
+  recorder: new OnboardingRecorder(store),
+  landingChannelIds: cfg.landingChannelIds,
+  dryRun: cfg.onboardingDryRun,
+});
+log.info('onboarding_enabled', {
+  landingChannelIds: cfg.landingChannelIds,
+  source: cfg.landingChannelSource,
+  dryRun: cfg.onboardingDryRun,
+});
 
 // The internal actions endpoint (TWO-24 / TWO-59). Off unless
 // TWO_INTERNAL_ACTIONS=1 - a bot without it runs exactly as before and opens

@@ -18,7 +18,12 @@
  * FAIL = onboarding is broken or lying. DARK = the flow works but falls back to
  * the hub. Exit is non-zero only on FAIL, so DARK does not block a deploy.
  */
-import { ALL_PICKS, GAME_PICKS, GATED_CATEGORIES } from '../src/onboarding/catalog.ts';
+import {
+  ALL_PICKS,
+  GAME_PICKS,
+  GATED_CATEGORIES,
+  LANDING_CHANNEL_ID,
+} from '../src/onboarding/catalog.ts';
 
 const API = 'https://discord.com/api/v10';
 const TOKEN = process.env.DISCORD_BOT_TOKEN ?? process.env.DISCORD_TOKEN;
@@ -30,6 +35,8 @@ if (!TOKEN || !GUILD) {
 }
 
 const VIEW_CHANNEL = 1n << 10n;
+const SEND_MESSAGES = 1n << 11n;
+const ADMINISTRATOR = 1n << 3n;
 
 let fails = 0;
 let darks = 0;
@@ -133,6 +140,73 @@ for (const p of ALL_PICKS) {
     continue;
   }
   pass(`${p.key} -> "${r.name}" assignable`);
+}
+
+/**
+ * Same resolution rules as `canView`, for an arbitrary permission bit and for a
+ * holder whose base permissions come from every role they hold rather than from
+ * `@everyone` alone. The bot needs that second part: its Administrator bit
+ * arrives on its own role, not on `@everyone`.
+ *
+ * Like `canView`, this reads the channel's OWN overwrites and never walks up to
+ * the parent category - see the note there for why that distinction is the
+ * whole reason this script exists.
+ */
+function resolveFor(channel: Channel, heldRoleIds: string[], bit: bigint): boolean {
+  let base = 0n;
+  for (const id of heldRoleIds) base |= BigInt(roleById.get(id)?.permissions ?? '0');
+  if (base & ADMINISTRATOR) return true;
+
+  let allowed = (base & bit) !== 0n;
+  const ows = channel.permission_overwrites ?? [];
+
+  const everyoneOw = ows.find((o) => o.id === GUILD);
+  if (everyoneOw) {
+    if (BigInt(everyoneOw.deny) & bit) allowed = false;
+    if (BigInt(everyoneOw.allow) & bit) allowed = true;
+  }
+
+  const roleOws = ows.filter((o) => o.type === 0 && heldRoleIds.includes(o.id) && o.id !== GUILD);
+  if (roleOws.some((o) => BigInt(o.deny) & bit)) allowed = false;
+  if (roleOws.some((o) => BigInt(o.allow) & bit)) allowed = true;
+
+  return allowed;
+}
+
+console.log('\nlanding channel (where the welcome is posted)');
+{
+  const ch = chById.get(LANDING_CHANNEL_ID);
+  if (!ch) {
+    fail(`landing channel ${LANDING_CHANNEL_ID} no longer exists`);
+  } else {
+    // A brand-new member holds nothing but @everyone at the moment we welcome
+    // them: they have just cleared the rules gate, not earned Member.
+    const newcomer = [GUILD];
+
+    if (resolveFor(ch, newcomer, VIEW_CHANNEL)) {
+      pass(`#${ch.name} is visible to a brand-new member`);
+    } else {
+      fail(
+        `#${ch.name} is invisible to a brand-new member - the welcome would be posted where its own recipient cannot read it`,
+      );
+    }
+
+    if (resolveFor(ch, newcomer, SEND_MESSAGES)) {
+      pass(`#${ch.name} lets a brand-new member post`);
+    } else {
+      dark(`#${ch.name} does not let a brand-new member post - they can read the welcome but not reply`);
+    }
+
+    // Exactly the condition `botCanPost` applies at runtime. A FAIL here means
+    // onboarding logs `onboarding_no_landing_channel` and every new member
+    // silently gets nothing at all.
+    const botHeld = [GUILD, ...botMember.roles];
+    if (resolveFor(ch, botHeld, VIEW_CHANNEL) && resolveFor(ch, botHeld, SEND_MESSAGES)) {
+      pass(`the bot can post in #${ch.name}`);
+    } else {
+      fail(`the bot cannot post in #${ch.name} - onboarding would stay silent for every new member`);
+    }
+  }
 }
 
 console.log('\ndestinations');

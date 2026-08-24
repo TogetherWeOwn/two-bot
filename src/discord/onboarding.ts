@@ -76,19 +76,28 @@ export function buildGameSelect(selected: readonly string[] = []): ActionRowBuil
 }
 
 /**
- * The welcome text. Deliberately plain and short.
+ * The welcome text.
  *
- * Tone and brand are the CEO's call, not mine - this is a placeholder that
- * says the necessary thing in as few words as possible, and it is the one
- * string in this file anyone should feel free to rewrite without touching
- * logic. See docs/ROUTING.md.
+ * No longer a placeholder: on TOG-94 the wording was delegated to the assignee
+ * to draft and ship. It is still the one string in this file anyone should feel
+ * free to rewrite without touching logic.
+ *
+ * Three things it is trying to do, in order:
+ *   1. Address the person. This is the only public message onboarding ever
+ *      sends, and it should not read like a broadcast.
+ *   2. Give exactly one instruction. The menu sits directly underneath it, so
+ *      anything else competes with the thing we want them to do.
+ *   3. Lower the stakes - "change it any time" matters when the alternative is
+ *      a newcomer worrying they are picking a permanent team.
+ *
+ * Four short lines, because the picker and not the prose is the product.
  */
 export function welcomeText(memberMention: string): string {
   return [
-    `${memberMention} welcome to TWO.`,
+    `${memberMention} — welcome to TWO 👋`,
     '',
-    'Pick what you play below and I will open the right channels for you.',
-    `You can change this any time, and there is an intro thread in <#${INTRO_CHANNEL_ID}> if you want one.`,
+    "Pick what you play below and I'll open the right channels for you. Choose as many as you like.",
+    `You can change your picks any time. If you'd like to say hello first, there's <#${INTRO_CHANNEL_ID}>.`,
   ].join('\n');
 }
 
