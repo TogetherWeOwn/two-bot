@@ -78,6 +78,16 @@
 #   org-plan probe additionally needs an org-scoped token; GITHUB_TOKEN cannot
 #   read it and is expected to come back unknown there. Either signal alone is
 #   enough to fire.
+#
+#   The armed caller is NOT plan-watch.yml. It is the weekly Paperclip
+#   watcher (TOG-313), which mints a short-lived GitHub App token scoped to
+#   `organization_administration=read,administration=read,metadata=read` and
+#   exports it as GH_TOKEN. Under that token this script answers both probes
+#   with no "unknown" - verified 2026-08-24. plan-watch.yml still runs the
+#   same script weekly against GITHUB_TOKEN, where it reports two unknowns
+#   and says so; that path is a self-test, not the alarm. See the CREDENTIAL
+#   header in .github/workflows/plan-watch.yml for why the App key is not
+#   stored in Actions secrets (TOG-307).
 
 set -euo pipefail
 
