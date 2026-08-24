@@ -19,10 +19,15 @@ belong to the bot.
 **`CODEOWNERS` here is superseded.** The Web Lead has committed a fuller one at
 `two-web/.github/CODEOWNERS` (TWO-39) covering paths this copy does not, such as
 `phpunit.dusk.xml`. Copying this file over theirs would lose review routing.
-It is kept only as the record of which four teams the bot side expects —
-`web-lead`, `frontend`, `qa`, `founding-engineer` — and both files agree on
-those. `setup-github.sh --verify` reads whatever is actually committed in the
-repo, so their version is the one that gets checked.
+It is kept only as the record of which paths the bot side expects to be routed.
+`setup-github.sh --verify` reads whatever is actually committed in the repo, so
+their version is the one that gets checked.
+
+Both files used to name four `@two-gaming/*` teams — `web-lead`, `frontend`,
+`qa`, `founding-engineer`. Those teams did not survive the move to TogetherWeOwn,
+which has none. TOG-128 repointed the live file at individual accounts and
+TOG-129 repointed this copy to match, so the two agree again, on handles rather
+than on teams.
 
 The last three are only load-bearing if the org stays on GitHub Free, where
 GitHub enforces nothing on a private repo's `main`. The hooks refuse a direct

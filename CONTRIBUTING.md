@@ -6,7 +6,7 @@ Requires **Node 24 or newer** and nothing else. No database server, no Docker,
 no build step.
 
 ```bash
-git clone git@github.com:two-gaming/two-bot.git
+git clone git@github.com:TogetherWeOwn/two-bot.git
 cd two-bot
 npm ci --include=dev
 npm test

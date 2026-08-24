@@ -19,7 +19,7 @@
 
 [Unit]
 Description=TWO community Discord bot
-Documentation=https://github.com/two-gaming/two-bot
+Documentation=https://github.com/TogetherWeOwn/two-bot
 After=network-online.target
 Wants=network-online.target
 
