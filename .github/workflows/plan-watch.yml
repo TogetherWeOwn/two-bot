@@ -51,6 +51,33 @@ name: plan-watch
 # Without that secret the job runs, reports that it cannot see, and exits 0.
 # It does not pretend to be watching. Tracked on TWO-85.
 #
+# WHERE THE ARMED ALARM ACTUALLY LIVES (TOG-307)
+#
+# PLAN_WATCH_TOKEN is still unset, and this job is still the unarmed
+# self-test described above. Do not read its weekly green check as coverage.
+# The armed probe runs weekly out of Paperclip instead, on TOG-313.
+#
+# It was moved there because the credential problem has no good Actions-side
+# answer. The org's GitHub App CAN issue both permissions this job needs -
+# verified 2026-08-24, `organization_administration: read` plus
+# `administration: read` runs plan-watch.sh with every probe answering - but
+# App installation tokens expire after an hour, so there is nothing static to
+# put in a secret. The obvious workaround, storing the App's private key here
+# so the job mints its own token, was rejected on purpose: that installation
+# is org-admin grade (secrets: write, members: write, actions: write, every
+# repo), so a key sitting in Actions secrets on an org with no branch
+# protection is org admin for anyone who can push a workflow. That is a far
+# worse leak than the read-only PAT this header asks for, to watch a repo
+# that is already unprotected.
+#
+# So the choice is deliberate, not an oversight: no agent can mint a
+# long-lived read-only token, and the one credential that could be stored
+# here must not be. Paperclip mints a fresh scoped token per check and stores
+# nothing.
+#
+# If PLAN_WATCH_TOKEN is ever set by hand, this job arms itself and TOG-313
+# becomes redundant - close it rather than running two alarms.
+#
 # That quiet exit-0 is only correct for a thin credential. It is NOT how a
 # missing target is handled - plan-watch.sh establishes existence separately,
 # through endpoints that need only metadata:read, so "my token is small" and
@@ -98,7 +125,7 @@ jobs:
           set -o pipefail
 
           if [ "$ARMED" != "true" ]; then
-            echo "::warning title=plan-watch is not armed::PLAN_WATCH_TOKEN is not set, so the probes cannot read branch protection or the org plan. This job is reporting, not watching. See TWO-85."
+            echo "::warning title=plan-watch is not armed here::PLAN_WATCH_TOKEN is not set, so the probes cannot read branch protection or the org plan. This job is reporting, not watching - and that is the expected steady state. The armed weekly probe runs from Paperclip on TOG-313; see the CREDENTIAL header for why it cannot run here. See TWO-85, TOG-307."
           fi
 
           # Tee the script's own reasoning into the run summary, so the run
