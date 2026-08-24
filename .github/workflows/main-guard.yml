@@ -5,10 +5,24 @@ name: main-guard
 # On GitHub Team the server answers that question by rejecting the push, and
 # this workflow never has anything to say. On GitHub Free with a private repo
 # the server does not reject anything, so this is how we find out - loudly,
-# within a minute, on the repo itself rather than in somebody's memory.
+# within a couple of minutes, on the repo itself rather than in somebody's
+# memory.
 #
 # It cannot prevent the push. It makes the push impossible to miss. Every run
-# that fails here is a real event worth a conversation, not a flaky test.
+# that fails here is a real event worth a conversation, not a flaky test - so
+# the job has to be certain before it accuses anyone.
+#
+# Being certain is the hard part. `commits/{sha}/pulls` is a derived index that
+# GitHub builds *after* the merge, and a few seconds after a merge it commonly
+# still answers `[]`. Reading that as proof of a direct push is how this job
+# used to cry wolf on every legitimate merge. So now it:
+#
+#   1. asks the pull request records themselves first - `merge_commit_sha` is
+#      written on the PR at merge time, so it is fresh immediately;
+#   2. falls back to the derived `commits/{sha}/pulls` index;
+#   3. retries both with backoff before concluding anything;
+#   4. distinguishes "the API said no" from "the API did not answer", and never
+#      reports a direct push on the strength of a failed request.
 
 on:
   push:
@@ -31,20 +45,119 @@ jobs:
           SHA: ${{ github.sha }}
           REPO: ${{ github.repository }}
           ACTOR: ${{ github.actor }}
+          # Read through an env var, never interpolated into the script body:
+          # a commit message is attacker-controlled text.
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           set -euo pipefail
 
-          prs="$(gh api "repos/$REPO/commits/$SHA/pulls" \
-                   --jq '[.[] | select(.merged_at != null) | .number] | join(",")' \
-                 2>/dev/null || echo "")"
+          # Seconds to wait *before* each attempt. The first attempt is
+          # immediate; the ladder below gives up after ~100s of waiting, which
+          # is far longer than the propagation delay we are guarding against
+          # and still fast enough to be noticed.
+          DELAYS="0 3 6 10 15 25 40"
 
-          if [ -n "$prs" ]; then
-            echo "ok: $SHA came from merged PR #${prs}"
-            echo "### main-guard: ok" >> "$GITHUB_STEP_SUMMARY"
-            echo "\`$SHA\` arrived through merged PR #${prs}." >> "$GITHUB_STEP_SUMMARY"
+          err="$(mktemp)"
+          found=""
+          via=""
+          attempts=0
+          reads_ok=0
+          reads_failed=0
+          last_error=""
+
+          for delay in $DELAYS; do
+            if [ "$delay" -gt 0 ]; then
+              echo "no answer yet; waiting ${delay}s before retrying"
+              sleep "$delay"
+            fi
+            attempts=$((attempts + 1))
+
+            # --- Source 1: the pull request records ------------------------
+            # `merge_commit_sha` is set on the PR itself when it merges, so
+            # this does not depend on any index being rebuilt. It covers all
+            # three merge styles: for squash and rebase merges GitHub still
+            # records the commit that actually landed on main. Sorting by
+            # `updated` puts a just-merged PR on the first page.
+            if out="$(gh api -X GET "repos/$REPO/pulls" \
+                        -f state=closed -f sort=updated -f direction=desc \
+                        -F per_page=100 \
+                        --jq '[ .[]
+                                | select(.merged_at != null)
+                                | select(.merge_commit_sha == env.SHA
+                                         or .head.sha == env.SHA)
+                                | .number ] | join(",")' \
+                        2>"$err")"; then
+              reads_ok=$((reads_ok + 1))
+              if [ -n "$out" ]; then
+                found="$out"
+                via="the pull request record"
+                break
+              fi
+            else
+              reads_failed=$((reads_failed + 1))
+              last_error="$(tr -d '\r' < "$err" | tail -n 2)"
+              echo "attempt $attempts: pulls list query failed: $last_error"
+            fi
+
+            # --- Source 2: the derived commit -> PR index ------------------
+            # Authoritative once it has caught up, and it also catches commits
+            # that reached main some other way but are genuinely part of a
+            # merged PR. Eventually consistent, hence the retry loop.
+            if out="$(gh api "repos/$REPO/commits/$SHA/pulls" \
+                        --jq '[ .[] | select(.merged_at != null) | .number ] | join(",")' \
+                        2>"$err")"; then
+              reads_ok=$((reads_ok + 1))
+              if [ -n "$out" ]; then
+                found="$out"
+                via="the commit-to-pull-request index"
+                break
+              fi
+            else
+              reads_failed=$((reads_failed + 1))
+              last_error="$(tr -d '\r' < "$err" | tail -n 2)"
+              echo "attempt $attempts: commit pulls query failed: $last_error"
+            fi
+          done
+
+          if [ -n "$found" ]; then
+            echo "ok: $SHA came from merged PR #${found} (via ${via}, attempt ${attempts}, ${SECONDS}s)"
+            {
+              echo "### main-guard: ok"
+              echo
+              echo "\`$SHA\` arrived through merged PR #${found}."
+              echo
+              echo "_Confirmed by ${via} on attempt ${attempts} after ${SECONDS}s._"
+            } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
+          # Every single request failed. We know nothing. Fail the job so the
+          # gap is visible, but do not accuse anybody of anything.
+          if [ "$reads_ok" -eq 0 ]; then
+            {
+              echo "### main-guard: could not verify"
+              echo
+              echo "Every attempt to ask GitHub about \`$SHA\` failed, so this run"
+              echo "cannot say whether the commit arrived through a pull request."
+              echo "**This is not a finding about \`$ACTOR\`.**"
+              echo
+              echo "| | |"
+              echo "|---|---|"
+              echo "| Commit | \`$SHA\` |"
+              echo "| Attempts | ${attempts} over ${SECONDS}s |"
+              echo "| Failed requests | ${reads_failed} |"
+              echo "| Last error | \`${last_error}\` |"
+              echo
+              echo "Re-run this job. If it keeps failing this way, the token or the"
+              echo "API is the problem, not the branch."
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            echo "::error title=main-guard could not verify::Could not reach the GitHub API to check whether $SHA arrived by pull request"
+            exit 1
+          fi
+
+          # GitHub answered, repeatedly, over ~${SECONDS}s, and kept saying no
+          # merged pull request contains this commit. That is a real finding.
           {
             echo "### main-guard: DIRECT PUSH TO MAIN"
             echo
@@ -54,6 +167,8 @@ jobs:
             echo "|---|---|"
             echo "| Pushed by | \`$ACTOR\` |"
             echo "| Commit | \`$SHA\` |"
+            echo "| Subject | \`$(printf '%s' "$COMMIT_MESSAGE" | head -n 1 | tr -d '`')\` |"
+            echo "| Checked | ${attempts} attempts over ${SECONDS}s, ${reads_ok} clean reads |"
             echo
             echo "This skipped review and it skipped required checks."
             echo "If it was an accident, open a PR with the same change so it gets reviewed"
@@ -61,5 +176,5 @@ jobs:
             echo "server refuses the push instead of this job reporting it afterwards."
           } >> "$GITHUB_STEP_SUMMARY"
 
-          echo "::error title=Direct push to main::$SHA was pushed to main by $ACTOR without a pull request"
+          echo "::error title=Direct push to main::$SHA was pushed to main by $ACTOR without a pull request (checked ${attempts} times over ${SECONDS}s)"
           exit 1
