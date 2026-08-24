@@ -34,7 +34,7 @@ and this hands the same token to git:
 
 ```bash
 gh auth setup-git
-git clone https://github.com/TWO-Gaming/two-bot.git
+git clone https://github.com/TogetherWeOwn/two-bot.git
 cd two-bot
 ```
 
