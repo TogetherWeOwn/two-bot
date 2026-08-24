@@ -1,4 +1,4 @@
-import { nowIso, type FunnelEvent } from './events.ts';
+import { MESSAGE_RUNGS, nowIso, type FunnelEvent } from './events.ts';
 import type { EventStore } from '../store/eventStore.ts';
 import { VoiceSessionTracker } from './voiceSessions.ts';
 import { log } from './log.ts';
@@ -108,23 +108,42 @@ export class FunnelHandlers {
     return e;
   }
 
+  /**
+   * Every message updates recency. Only the first THREE are funnel milestones,
+   * because AM7's text half is "3 or more messages within 7 days" and the third
+   * one is where that bar is cleared (TWO-95). After the third rung is filled
+   * this is a recency update and nothing else - we stop counting at the bar,
+   * so a busy member costs one indexed read per message and no writes.
+   */
   async onMessage(i: MessageInput): Promise<FunnelEvent | null> {
     if (i.isBot) return null;
     const at = i.occurredAt ?? nowIso();
-    // Every message updates recency; only the first one is a funnel milestone.
     await this.store.touchActivity(i.guildId, i.memberId, at);
-    if (await this.store.hasEvent(i.guildId, i.memberId, 'first_message')) return null;
 
-    const e: FunnelEvent = {
-      guildId: i.guildId,
-      memberId: i.memberId,
-      eventType: 'first_message',
-      occurredAt: at,
-      source: `channel:${i.channelId}`,
-    };
-    await this.store.record(e);
-    log.info('first_message', { memberId: i.memberId, channelId: i.channelId });
-    return e;
+    // One message fills at most one rung: the lowest empty one. The loop is for
+    // the two-process race - the bot and the website can both read the same
+    // empty rung, and the idempotency key lets exactly one of them have it.
+    // Without the retry the loser drops a message that should have advanced the
+    // ladder, which under-counts AM7. It cannot spin: every iteration either
+    // fills a rung or finds the ladder full.
+    for (let attempt = 0; attempt < MESSAGE_RUNGS.length; attempt++) {
+      const rung = await this.store.nextMessageRung(i.guildId, i.memberId, at);
+      if (!rung) return null;
+
+      const e: FunnelEvent = {
+        guildId: i.guildId,
+        memberId: i.memberId,
+        eventType: rung,
+        occurredAt: at,
+        source: `channel:${i.channelId}`,
+      };
+      const r = await this.store.record(e);
+      if (r.inserted) {
+        log.info(rung, { memberId: i.memberId, channelId: i.channelId });
+        return e;
+      }
+    }
+    return null;
   }
 
   /**

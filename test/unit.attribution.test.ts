@@ -161,6 +161,42 @@ test('the proxy is flagged and the exact voice-only floor is kept', () => {
   assert.equal(r.usedMessageProxy, true);
 });
 
+test('AM7 splits three ways so a reader can see which half is soft', () => {
+  const rows = [
+    member({ memberId: 'a', firstVoiceAt: at(1) }),
+    // Third message on file and inside the window: exact, not the proxy.
+    member({ memberId: 'b', firstMessageAt: at(1), thirdMessageAt: at(3) }),
+    member({ memberId: 'c', firstMessageAt: at(1) }), // no third on file: proxy
+  ];
+  const r = rollUp(rows, { nowMs: NOW });
+  assert.equal(r.totals.am7, 3);
+  assert.equal(r.totals.am7Voice, 1);
+  assert.equal(r.totals.am7Messages, 1);
+  assert.equal(r.totals.am7MessageProxy, 1);
+  // voice + messages is the exact floor; the proxy is the whole gap between
+  // that floor and the printed total.
+  assert.equal(
+    r.totals.am7Voice + r.totals.am7Messages + r.totals.am7MessageProxy,
+    r.totals.am7,
+  );
+});
+
+test('once every member has a third message on file, AM7 stops being a bound', () => {
+  // The state TWO-95 is aiming at: nothing rests on the proxy, so the report
+  // drops the upper-bound caveat and the number can be quoted as a count.
+  const rows = [
+    member({ memberId: 'a', firstVoiceAt: at(1) }),
+    member({ memberId: 'b', firstMessageAt: at(1), thirdMessageAt: at(3) }),
+    // Posted twice, never a third: correctly NOT AM7, where the proxy would
+    // have admitted them.
+    member({ memberId: 'c', firstMessageAt: at(1), thirdMessageAt: at(400) }),
+  ];
+  const r = rollUp(rows, { nowMs: NOW });
+  assert.equal(r.usedMessageProxy, false);
+  assert.equal(r.totals.am7MessageProxy, 0);
+  assert.equal(r.totals.am7, 2);
+});
+
 test('distinct joiners are counted once even across two codes', () => {
   const rows = [
     member({ memberId: 'a', source: 'invite:ONE', joinedAt: at(0) }),

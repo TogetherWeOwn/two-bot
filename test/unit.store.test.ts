@@ -12,6 +12,8 @@ import { EventStore } from '../src/store/eventStore.ts';
 import { FunnelHandlers } from '../src/core/handlers.ts';
 import { InviteTracker } from '../src/core/inviteTracker.ts';
 import { flagInactive, joinedNeverPosted } from '../src/jobs/inactivity.ts';
+import { MESSAGE_RUNGS } from '../src/core/events.ts';
+import { AM7_MESSAGE_THRESHOLD } from '../src/analytics/attribution.ts';
 import { openTestDb, type TestDb } from './helpers/testDb.ts';
 
 const G = '1';
@@ -51,7 +53,7 @@ test('bots are excluded from the funnel', async () => {
   assert.equal(await store.countByType('first_message'), 0);
 });
 
-test('first_message fires once, later messages only move recency', async () => {
+test('first_message fires once, and two messages are not yet a third', async () => {
   const { h, store, db } = fixture();
   await h.onJoin({ guildId: G, memberId: 'm1', isBot: false, source: 'invite:x' });
   await h.onMessage({ guildId: G, memberId: 'm1', isBot: false, channelId: 'c1', occurredAt: '2026-08-01T00:00:00.000Z' });
@@ -60,6 +62,80 @@ test('first_message fires once, later messages only move recency', async () => {
   const m = (await db.prepare(`SELECT * FROM members WHERE member_id='m1'`).get()) as any;
   assert.equal(m.first_message_at, '2026-08-01T00:00:00.000Z');
   assert.equal(m.last_active_at, '2026-08-05T00:00:00.000Z');
+  // Two messages is not the AM7 text bar, and the column says so rather than
+  // guessing. This is the case the old proxy silently admitted.
+  assert.equal(m.third_message_at, null);
+});
+
+// --- the message ladder (TWO-95) --------------------------------------------
+
+test('the ladder is exactly as long as the AM7 bar', () => {
+  // If someone raises AM7 to 5 messages, the ladder has to grow with it or the
+  // report goes quietly back to being an upper bound.
+  assert.equal(MESSAGE_RUNGS.length, AM7_MESSAGE_THRESHOLD);
+  assert.equal(MESSAGE_RUNGS.at(-1), 'third_message');
+});
+
+test('the third message is recorded, and it is the third one - not the latest', async () => {
+  const { h, store, db } = fixture();
+  await h.onJoin({ guildId: G, memberId: 'm1', isBot: false, source: 'invite:x' });
+  for (const day of ['01', '02', '03', '04', '05']) {
+    await h.onMessage({
+      guildId: G, memberId: 'm1', isBot: false, channelId: 'c1',
+      occurredAt: `2026-08-${day}T00:00:00.000Z`,
+    });
+  }
+  const m = (await db.prepare(`SELECT * FROM members WHERE member_id='m1'`).get()) as any;
+  assert.equal(m.third_message_at, '2026-08-03T00:00:00.000Z');
+  assert.equal(m.last_active_at, '2026-08-05T00:00:00.000Z');
+  // Five messages, three rungs. We stop counting at the bar.
+  assert.equal(await store.countByType('first_message'), 1);
+  assert.equal(await store.countByType('second_message'), 1);
+  assert.equal(await store.countByType('third_message'), 1);
+});
+
+test('a redelivered message does not climb the ladder twice', async () => {
+  // A gateway resume replays frames we have already handled, and a replay
+  // carries the original timestamp. Counting it again would inflate AM7, which
+  // is the exact failure this column exists to end.
+  const { h, db } = fixture();
+  const at = '2026-08-01T00:00:00.000Z';
+  await h.onJoin({ guildId: G, memberId: 'm1', isBot: false, source: 'invite:x' });
+  for (let i = 0; i < 3; i++) {
+    await h.onMessage({ guildId: G, memberId: 'm1', isBot: false, channelId: 'c1', occurredAt: at });
+  }
+  const m = (await db.prepare(`SELECT * FROM members WHERE member_id='m1'`).get()) as any;
+  assert.equal(m.first_message_at, at);
+  assert.equal(m.third_message_at, null);
+});
+
+test('nextMessageRung reports the rung a message would fill', async () => {
+  const { h, store } = fixture();
+  assert.equal(await store.nextMessageRung(G, 'm1', '2026-08-01T00:00:00.000Z'), 'first_message');
+  await h.onMessage({ guildId: G, memberId: 'm1', isBot: false, channelId: 'c1', occurredAt: '2026-08-01T00:00:00.000Z' });
+  assert.equal(await store.nextMessageRung(G, 'm1', '2026-08-02T00:00:00.000Z'), 'second_message');
+  await h.onMessage({ guildId: G, memberId: 'm1', isBot: false, channelId: 'c1', occurredAt: '2026-08-02T00:00:00.000Z' });
+  assert.equal(await store.nextMessageRung(G, 'm1', '2026-08-03T00:00:00.000Z'), 'third_message');
+  await h.onMessage({ guildId: G, memberId: 'm1', isBot: false, channelId: 'c1', occurredAt: '2026-08-03T00:00:00.000Z' });
+  // Ladder full. Every later message is recency only.
+  assert.equal(await store.nextMessageRung(G, 'm1', '2026-08-09T00:00:00.000Z'), null);
+});
+
+test('a backfilled older third message moves the milestone earlier, never later', async () => {
+  // recordEarliest is what makes a deeper re-scan safe: it may only improve the
+  // timestamp. A member whose true third message was inside their 7-day window
+  // becomes AM7 on a re-run; one already recorded early never regresses.
+  const { store, db } = fixture();
+  const rung = (occurredAt: string) => ({
+    guildId: G, memberId: 'm1', eventType: 'third_message' as const,
+    occurredAt, source: 'channel:c1',
+  });
+  await store.recordEarliest(rung('2026-08-20T00:00:00.000Z'));
+  await store.recordEarliest(rung('2026-08-02T00:00:00.000Z'));
+  await store.recordEarliest(rung('2026-08-11T00:00:00.000Z'));
+  const m = (await db.prepare(`SELECT * FROM members WHERE member_id='m1'`).get()) as any;
+  assert.equal(m.third_message_at, '2026-08-02T00:00:00.000Z');
+  assert.equal(await store.countByType('third_message'), 1);
 });
 
 test('clearing the rules gate is its own event, once per member', async () => {

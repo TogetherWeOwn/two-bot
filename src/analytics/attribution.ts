@@ -21,14 +21,22 @@
  *
  * WHAT THE DATA CANNOT YET DO, STATED ONCE HERE
  *
- *  1. "3 or more messages" needs a per-member message count and we do not
- *     store one. `members` holds first_message_at and nothing else. So a
- *     record whose `thirdMessageAt` is null falls back to first_message_at,
- *     which admits people who posted exactly once or twice. That makes AM7 an
- *     UPPER BOUND. Every roll-up carries `am7MessageProxy` so the report can
- *     say how much of the number rests on it, and `am7Voice` is the exact
- *     lower bound. Closing this is a separate, small change - see the child
- *     issue referenced in scripts/attribution.ts.
+ *  1. "3 or more messages" is answered by `members.third_message_at`, which
+ *     TWO-95 added: the moment a member's third message landed. A timestamp
+ *     rather than a count, because the question is "by day 7?" and a running
+ *     total cannot answer it - 40 messages today says nothing about day 7.
+ *
+ *     A record whose `thirdMessageAt` is null still falls back to
+ *     first_message_at, which admits people who posted once or twice, and to
+ *     that extent AM7 is still an upper bound. But null now means one specific,
+ *     fixable thing - nobody has scanned that member's history since the change
+ *     - and `npm run backfill:messages` is what fixes it. It is no longer a
+ *     permanent property of the schema.
+ *
+ *     The roll-up splits AM7 three ways so a reader never has to guess which
+ *     they are looking at: `am7Voice` and `am7Messages` are both exact, and
+ *     `am7MessageProxy` is the residual that is still soft. When that residual
+ *     is zero, AM7 is a count and can be quoted as one.
  *
  *  2. "active again in the 30 days after joining" needs every activity, and
  *     the events table cannot give it: first_message and first_voice_session
@@ -215,9 +223,16 @@ export interface AttributionRow {
   /** Joins old enough to have had their 7 days. The AM7 denominator. */
   am7Eligible: number;
   am7: number;
-  /** Of `am7`, how many cleared the bar on voice alone. The exact lower bound. */
+  /** Of `am7`, how many cleared the bar on voice alone. Exact. */
   am7Voice: number;
-  /** Of `am7`, how many were admitted by the first_message proxy. See header note 1. */
+  /** Of `am7`, how many cleared the 3-message bar with a third message on file. Exact. */
+  am7Messages: number;
+  /**
+   * Of `am7`, how many were admitted by the first_message proxy because no
+   * third message is on file for them - so they posted at least once and we
+   * cannot say whether it was three times. The only soft part of AM7, and the
+   * only reason the total is ever an upper bound. See header note 1.
+   */
   am7MessageProxy: number;
 
   /** AM7 members old enough to have had their 30 days. The AM30 denominator. */
@@ -237,6 +252,7 @@ function emptyRow(source: string): AttributionRow {
     am7Eligible: 0,
     am7: 0,
     am7Voice: 0,
+    am7Messages: 0,
     am7MessageProxy: 0,
     am30Eligible: 0,
     am30: 0,
@@ -319,6 +335,9 @@ export function rollUp(joins: JoinRecord[], opts: RollUpOptions): RollUp {
     if (act.basis === 'voice') {
       r.am7Voice++;
       totals.am7Voice++;
+    } else if (act.basis === 'messages') {
+      r.am7Messages++;
+      totals.am7Messages++;
     } else if (act.basis === 'message-proxy') {
       r.am7MessageProxy++;
       totals.am7MessageProxy++;

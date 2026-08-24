@@ -68,6 +68,26 @@ class SqliteDb implements Db {
   }
 }
 
+/**
+ * Add a nullable column to an existing database if it is not already there.
+ *
+ * `schema.sql` is all CREATE TABLE IF NOT EXISTS, which is a no-op against a
+ * database that already has the table - so a column added to that file reaches
+ * new databases and silently misses every existing one, including the live
+ * `data/two.db`. Postgres has real migrations for this; the SQLite path
+ * deliberately does not (migrations/README.md: not worth a second dialect for a
+ * driver being deleted in TWO-70). This is the minimum that keeps the two
+ * dialects agreeing until then.
+ *
+ * Additive and nullable only. Anything needing a default, a backfill or a
+ * rewrite is a real migration and does not belong here.
+ */
+function ensureColumn(raw: DatabaseSync, table: string, column: string, type: string): void {
+  const cols = raw.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+  if (cols.some((c) => c.name === column)) return;
+  raw.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+}
+
 /** Open a SQLite database. `:memory:` gives an ephemeral one. */
 export async function openSqlite(path: string): Promise<Db> {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
@@ -80,12 +100,14 @@ export async function openSqlite(path: string): Promise<Db> {
   // several minutes of re-scanning Discord.
   raw.exec('PRAGMA busy_timeout = 15000;');
   raw.exec(readFileSync(join(here, 'schema.sql'), 'utf8'));
+  // Mirrors migrations/0008_members_third_message_at.sql (TWO-95).
+  ensureColumn(raw, 'members', 'third_message_at', 'TEXT');
   // schema.sql is the whole schema, so every migration whose tables it already
   // contains is recorded as applied. Adding a migration means adding its
   // tables above and its id here, or a database that is later moved to
   // Postgres will try to apply it a second time.
   const stamp = raw.prepare(`INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?, ?)`);
-  for (const id of ['0001_initial', '0002_internal_actions']) {
+  for (const id of ['0001_initial', '0002_internal_actions', '0008_members_third_message_at']) {
     stamp.run(id, new Date().toISOString());
   }
   return new SqliteDb(raw);
