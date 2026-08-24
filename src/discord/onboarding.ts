@@ -178,6 +178,18 @@ export function registerOnboarding(client: Client, deps: OnboardingDeps): void {
     if (oldMember.pending && !newMember.pending) void promptMember(newMember);
   });
 
+  registerGameSelect(client, deps);
+}
+
+/**
+ * Just the picker's interaction handler, without the welcome post.
+ *
+ * Split out for TOG-93: when the routed welcome owns the rules-gate-clear
+ * moment, the picker must keep working - the panel posted in a channel outlives
+ * any one welcome, and roles are how "what does this community play" is
+ * answered - but it must not also post a second greeting.
+ */
+export function registerGameSelect(client: Client, deps: OnboardingDeps): void {
   client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     if (!interaction.isStringSelectMenu()) return;
     if (interaction.customId !== GAME_SELECT_ID) return;

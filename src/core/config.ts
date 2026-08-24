@@ -30,6 +30,18 @@ export interface Config {
    * post in wins, so this can list a preferred channel and a backstop.
    */
   landingChannelIds: string[];
+  /**
+   * TOG-93 / TWO-66 §5.3. When set, the rules-gate-clear moment belongs to the
+   * routed Sunday Squad welcome, posted in this channel - the text chat of the
+   * voice room the event runs in, so the greeting and the connect control are
+   * on one screen. The game picker keeps working; it just stops posting a
+   * second greeting of its own.
+   *
+   * Unset = the pre-TOG-93 behaviour, exactly. This is one flag rather than a
+   * rewrite because it is the only lever that has to be reversible in seconds
+   * on a live server if the copy lands badly.
+   */
+  anchorWelcomeChannelId: string | null;
   /** Onboarding observes and logs but changes nothing. */
   onboardingDryRun: boolean;
   /**
@@ -96,6 +108,7 @@ export function loadConfig(): Config {
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean),
+    anchorWelcomeChannelId: process.env.DISCORD_ANCHOR_WELCOME_CHANNEL_ID || null,
     onboardingDryRun: process.env.TWO_ONBOARDING_DRY_RUN === '1',
     staffAlertChannelId: process.env.DISCORD_STAFF_ALERT_CHANNEL_ID || null,
     raidJoinThreshold: Number(process.env.TWO_RAID_JOIN_THRESHOLD ?? 5),
