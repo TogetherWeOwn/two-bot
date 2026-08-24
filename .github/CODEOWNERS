@@ -1,28 +1,38 @@
 # Who gets asked to review what.
 #
-# GitHub requires review from a code owner before a PR can merge (branch
-# protection enforces it). The point is not ceremony: it is that the person
-# who knows a file is the person who sees the change to it.
+# Handles here are individual GitHub accounts, not teams. The TogetherWeOwn org
+# has no teams and one member with write access, so a team would be a group of
+# one. When a second person has write access, promote the functions that genuinely
+# have two people to real teams; the path rules below are already split along
+# those lines.
 #
-# Handles are GitHub *teams* in the two-gaming org, not individuals, so a
-# review request never dies because one account is asleep. Teams are created
-# once by the org owner; see docs/GITHUB.md for the list and who is in each.
+# This file is advisory. Earlier revisions of this comment claimed "branch
+# protection enforces it" — that is not true here. The org is on the free plan
+# and this repo is private, so branch protection and rulesets are unavailable and
+# GitHub cannot require a code owner's approval. What this file still does is
+# auto-request the owner as a reviewer when a PR opens.
+#
+# A rule naming an account without write access to this repo is silently dropped
+# by GitHub. That is how this file broke: it named teams in the old two-gaming
+# org, none of which exist here.
+#
+# Note: scripts/setup-github.sh and docs/GITHUB.md still describe the old
+# two-gaming team model and are no longer the source of truth for this file.
 
-# Default: everything in this repo belongs to the bot owner.
-*                           @two-gaming/founding-engineer
+# Default: everything in this repo.
+*                           @Rick7C2
 
-# Tests and CI are QA's call as well as the bot owner's. Both must approve,
-# because "make CI green" is the single easiest thing to get wrong on purpose.
-/test/                      @two-gaming/founding-engineer @two-gaming/qa
-/.github/workflows/         @two-gaming/founding-engineer @two-gaming/qa
+# Tests and CI, called out because "make CI green" is the single easiest thing to
+# get wrong on purpose.
+/test/                      @Rick7C2
+/.github/workflows/         @Rick7C2
 
-# The contract the website reads. A change here can break two-web silently,
-# so the Web Lead sees it before it lands.
-/docs/EVENTS.md             @two-gaming/founding-engineer @two-gaming/web-lead
+# The contract the website reads. A change here can break two-web silently.
+/docs/EVENTS.md             @Rick7C2
 
 # Secrets, privacy and deploy posture. Changes here are reviewed, always.
-/docs/SECRETS.md            @two-gaming/founding-engineer
-/docs/PRIVACY.md            @two-gaming/founding-engineer
-/deploy/                    @two-gaming/founding-engineer
-/.gitignore                 @two-gaming/founding-engineer
-/.env.example               @two-gaming/founding-engineer
+/docs/SECRETS.md            @Rick7C2
+/docs/PRIVACY.md            @Rick7C2
+/deploy/                    @Rick7C2
+/.gitignore                 @Rick7C2
+/.env.example               @Rick7C2
