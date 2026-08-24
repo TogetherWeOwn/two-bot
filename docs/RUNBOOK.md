@@ -413,11 +413,36 @@ worse than none.
 
 ### Off-box destination
 
-Set `TWO_BACKUP_UPLOAD_CMD` in `/etc/two-bot/backup.env` to a command that takes
-the backup file path as its last argument, for example:
+`scripts/pg-backup.ts` splits `TWO_BACKUP_UPLOAD_CMD` on whitespace and appends
+the dump path as the **last** argument. Two consequences, and they bite:
+
+1. **The dump ends up as the last positional.** That is what `cp -t DIR FILE`
+   wants. It is the opposite of what `rclone copy SRC DST`, `aws s3 cp SRC DST`
+   and `scp SRC DST` want — those would read the dump as the *destination*.
+2. **No argument can contain a space**, because the split has no notion of
+   quoting.
+
+So use a wrapper. `deploy/two-backup-upload` is one — edit the destination line
+in it, then:
+
+```bash
+sudo install -m 755 deploy/two-backup-upload /usr/local/bin/two-backup-upload
+```
 
 ```
-TWO_BACKUP_UPLOAD_CMD=/usr/bin/rclone copy --config /etc/two-bot/rclone.conf --to backup:two-funnel
+TWO_BACKUP_UPLOAD_CMD=/usr/local/bin/two-backup-upload
+```
+
+pg-backup.ts appends the dump path, the wrapper takes it as `"$1"` and puts it
+where the real tool wants it. The env var stays a single bare word, so neither
+problem above can come back when the destination changes.
+
+The only form safe to inline is one where the file genuinely belongs last and
+nothing needs quoting — which in practice means a same-box staging copy, and
+that is not an off-box backup:
+
+```
+TWO_BACKUP_UPLOAD_CMD=/bin/cp -t /srv/backup-staging
 ```
 
 If it is unset the backup still runs, and warns that it is sitting on the same
@@ -425,7 +450,9 @@ disk as the database — which protects against corruption and mistakes but not
 against losing the machine.
 
 > **Not yet configured.** Object storage costs money, so the destination and its
-> credentials are a CEO decision. Tracked on TWO-47.
+> credentials are a CEO decision. Tracked on TOG-69 — which is blocked on this
+> branch landing, because `pg-backup.ts` and the upload hook do not exist on
+> `main`.
 
 ### Why not `pg_dump`
 

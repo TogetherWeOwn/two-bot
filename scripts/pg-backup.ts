@@ -6,6 +6,9 @@
  * Reads TWO_DATABASE_URL, writes `two-funnel-<stamp>.ndjson.gz` into
  * TWO_BACKUP_DIR (default ./backups), keeps TWO_BACKUP_KEEP (default 14), then
  * runs TWO_BACKUP_UPLOAD_CMD with the file path appended as the last argument.
+ * That argv shape is src/store/uploadCmd.ts - read it before writing the
+ * variable, because tools whose last positional is the DESTINATION (rclone,
+ * aws s3 cp, scp) need a wrapper. deploy/two-backup-upload is that wrapper.
  *
  * Run by two-bot-backup.timer at 04:17 UTC. Safe while the bot is up: the dump
  * is one REPEATABLE READ snapshot. See src/store/dump.ts and docs/RUNBOOK.md.
@@ -19,6 +22,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { openDb, isPostgresSpec } from '../src/store/db.ts';
 import { dump } from '../src/store/dump.ts';
+import { buildUploadArgv } from '../src/store/uploadCmd.ts';
 
 const url = process.env.TWO_DATABASE_URL?.trim();
 if (!url || !isPostgresSpec(url)) {
@@ -64,12 +68,11 @@ for (const old of mine.slice(keep)) {
   unlinkSync(join(dest, old.f));
 }
 
-if (uploadCmd) {
-  // Split on whitespace: the documented form is a plain command plus flags.
-  const parts = uploadCmd.split(/\s+/).filter(Boolean);
-  const [cmd, ...cmdArgs] = parts;
+const upload = buildUploadArgv(uploadCmd, out);
+if (upload) {
+  const { cmd, args: uploadArgs } = upload;
   try {
-    execFileSync(cmd, [...cmdArgs, out], { stdio: 'inherit' });
+    execFileSync(cmd, uploadArgs, { stdio: 'inherit' });
     console.log(`backup: uploaded via ${cmd}`);
   } catch (err) {
     // The local copy exists; the off-box copy does not. That is a real
