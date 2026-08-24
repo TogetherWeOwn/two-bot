@@ -381,10 +381,35 @@ systemctl status two-bot-restore-drill
 journalctl -u two-bot-restore-drill -n 40
 ```
 
-**Last drill performed by hand: 2026-08-19.** 4,947 events / 1,874 members /
-16 invite snapshots dumped and restored into a scratch database; counts matched
-per table, the restored copy produced a byte-identical funnel report, and the
-`events` id sequence resumed correctly so new writes did not collide.
+**Last drill: 2026-08-24 (TOG-37), against a synthetic database, not
+production.** 4,009 events / 1,874 members / 5 invite snapshots were loaded
+into SQLite through the bot's own write path, migrated with
+`scripts/migrate-sqlite-to-postgres.ts`, dumped with `scripts/pg-backup.ts`,
+copied off-box by `TWO_BACKUP_UPLOAD_CMD`, and restored from *that off-box
+copy* into a scratch database. What was checked:
+
+- row counts matched per table against the dump manifest — `RESTORE VERIFIED`
+- the MD5 of every `events` row, all columns, was identical before and after;
+  likewise `members`. Counts alone would not have caught one row dropped and
+  one duplicated
+- the set of `events.idempotency_key` hashed identically, so a re-delivered
+  join is still recognised as a duplicate after a restore
+- `scripts/funnel.ts` produced byte-identical output from the original SQLite
+  file, the migrated Postgres database, and the restored copy
+- the `events` id sequence resumed at 4010, so the first write after the
+  restore did not collide
+
+> **Not yet drilled against production data.** No box is running this build
+> yet, so there is no production database to dump. The first real drill happens
+> when the bot is live on Postgres in staging — tracked on TOG-45. Until then,
+> the procedure is proven and the data it has been proven on is synthetic.
+
+An earlier revision of this file recorded a drill on 2026-08-19 with different
+numbers (4,947 / 1,874 / 16). That drill was performed against a different
+deployment of this codebase and the scripts it describes were never committed
+to this repository, so the claim could not be reproduced here. It has been
+replaced rather than kept, because a runbook entry that cannot be re-run is
+worse than none.
 
 ### Off-box destination
 

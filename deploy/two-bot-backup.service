@@ -3,9 +3,16 @@
 #   sudo cp deploy/two-bot-backup.{service,timer} /etc/systemd/system/
 #   sudo systemctl enable --now two-bot-backup.timer
 #   systemctl list-timers two-bot-backup
+#
+# Backs up Postgres. The old SQLite snapshot (scripts/backup.sh) is still there
+# for a box that has not migrated yet, but this unit no longer calls it.
+#
+# Note this unit does NOT get the Discord token. A backup needs the database and
+# nothing else, which is why the connection string lives in its own environment
+# file rather than in the bot's.
 
 [Unit]
-Description=Back up the TWO bot database
+Description=Back up the TWO bot funnel log
 After=two-bot.service
 
 [Service]
@@ -13,7 +20,31 @@ Type=oneshot
 User=twobot
 Group=twobot
 WorkingDirectory=/opt/two-bot
-Environment=TWO_DB_PATH=/opt/two-bot/data/two.db
+
+# TWO_DATABASE_URL, TWO_BACKUP_UPLOAD_CMD, and whatever credentials that upload
+# command needs. Root-owned, chmod 600. See docs/RUNBOOK.md.
+EnvironmentFile=/etc/two-bot/backup.env
 Environment=TWO_BACKUP_DIR=/var/backups/two-bot
-ExecStart=/usr/bin/bash /opt/two-bot/scripts/backup.sh
-ReadWritePaths=/opt/two-bot/data /var/backups/two-bot
+Environment=TWO_BACKUP_KEEP=14
+ExecStart=/usr/bin/node /opt/two-bot/scripts/pg-backup.ts
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=two-bot-backup
+
+# Same posture as the bot: this writes to one directory and talks to Postgres.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/backups/two-bot
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+UMask=0077
+CapabilityBoundingSet=
+AmbientCapabilities=
