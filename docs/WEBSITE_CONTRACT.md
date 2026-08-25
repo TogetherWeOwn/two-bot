@@ -77,7 +77,7 @@ answers.
 
 | Column | Type | Notes |
 |---|---|---|
-| `human_member_count` | int, **nullable** | Members in the server, **bots excluded**. 84 at the last audit, not 107. |
+| `human_member_count` | int, **nullable** | Members in the server, **bots excluded**. 84 at the last audit, not 107 — but read the note below before you write copy against 84. |
 | `online_count` | int, **nullable** | Humans currently online, bots excluded. **Null in v1** — see §6.1. |
 | `counts_updated_at` | text, nullable | When `human_member_count` was last read from Discord. Null if never. |
 | `online_updated_at` | text, nullable | When `online_count` was last read. Separate from the above because the two go stale at very different rates. |
@@ -85,6 +85,21 @@ answers.
 **The timestamps are returned even when the value beside them has aged out**, so
 you can render "as of 09:14" on the degraded path instead of going silent with
 no explanation.
+
+> **Do not hardcode 84, and do not design a layout that only looks right at two
+> digits.** 84 is the human roster as read on 2026-08-19. Roughly 30 of those 84
+> arrived in three mass-joins and have never done anything — they are raid
+> accounts (`src/analytics/anomalies.ts`; the 2026-08-19 audit bounds them at 31
+> of the 84 stuck at the rules gate). When raid removal runs, this counter drops
+> to somewhere near **54** in a single step. That is a real correction, not an
+> outage, and the view will report it without ceremony.
+>
+> Publishing 84 today and 54 next week is the same class of error as publishing
+> 107 when 84 are human — it is just a slower version of it. The contract's
+> position is that the view returns the live number and the page renders
+> whatever it returns. Whether raid accounts are excluded *before* they are
+> removed is a collector policy decision that belongs to the counter work
+> (TOG-73), not to this view's shape, so it can change without a version bump.
 
 ### `web_v1.rank_counts` — one row per rank
 
