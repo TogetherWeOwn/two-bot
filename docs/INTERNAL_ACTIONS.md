@@ -1,21 +1,24 @@
 # The internal actions endpoint
 
-**Status: `v0.2` — the pre-Postgres slice is built and tested (TWO-59). The
-rest is still specification (TWO-24).**
+**Status: `v0.3` — the endpoint is complete and tested (TOG-44). Nothing on
+this page is specification any more.**
 
-What exists today, in `src/internal/`: the listener with its private-interface
-guard, HMAC verification, the skew and replay checks, per-key rate limiting,
-the full typed error envelope, structured per-request logging, and the two
-naturally-idempotent actions — `role.assign` (live) and `guild.add_member`
-(built, and switched off until the CEO signs off; see §3).
+All four allowlisted actions are built. Three are live by default —
+`role.assign`, `announcement.post`, `event.upsert` — and `guild.add_member`
+is built and tested but switched off until the CEO signs off (§3).
 
-Still specification: `announcement.post` and `event.upsert`, the durable
-`idempotency_key → result` store, and the durable audit trail. Those need
-Postgres, so they wait on TWO-18. Calling one of them today returns a typed
-`action_not_allowed`, not a 500.
+The pieces that were waiting on Postgres landed with TOG-37 and are now in
+`src/internal/store.ts` and `migrations/0002_internal_actions.sql`: the durable
+`idempotency_key → result` store, the durable audit trail, and a replay guard
+that is a table rather than a process's memory. **The restart-reopens-a-replay-
+window limit described in earlier revisions of this document no longer
+applies.**
+
+Still not built, and tracked separately: join attribution for one-click joins
+(§7).
 
 The wire format below is what is implemented. If something here is wrong for
-the caller, say so on TWO-24.
+the caller, say so on TOG-44.
 
 The website never holds the Discord bot token. When it needs something to
 happen in the TWO server, it calls **one** endpoint on the bot, over the
@@ -29,8 +32,12 @@ cannot kick, cannot ban, cannot change permissions, because there is no verb
 for it here.
 
 **The allowlist does not widen without the CEO's sign-off.** That is not my
-call to make and it is written into TWO-24. A new action means a comment on
-TWO-24, an approval, and a line in the changelog at the bottom of this file.
+call to make and it is written into TOG-44. A new action means a comment on
+TOG-44, an approval, and a line in the changelog at the bottom of this file.
+
+For the avoidance of doubt: **`announcement.post` and `event.upsert` going live
+in `v0.3` did not widen the allowlist.** Both were named in the original scope
+and have been in this table since `v0.1`; what changed is that they now work.
 
 ---
 
@@ -88,6 +95,12 @@ They are different things and using one for both breaks retries.
 - Nonce remembered for **240 seconds** (twice the skew window). A repeat inside
   that window → rejected as a replay, and no Discord call is made.
 
+Nonces live in `internal_nonces`, so **a bot restart forgets nothing** and the
+replay guard holds across a deploy. They are scoped per key id: a replay is a
+recording of a signed request and therefore always carries the original's key
+id, so scoping catches every replay that can exist while making it impossible
+for one caller to burn a nonce value out from under another.
+
 Both sides must run NTP. A drifting clock on the website presents as
 intermittent, inexplicable 401s.
 
@@ -131,7 +144,8 @@ prose. It is authoritative: if it is `false`, retrying will fail the same way.
 | 401 | `unauthorized` | false | Bad signature, unknown key id, or missing auth headers. |
 | 401 | `stale_request` | false | Timestamp outside the skew window. Fix your clock. |
 | 403 | `action_not_allowed` | false | Well-formed, but that action is not on the allowlist. |
-| 409 | `replayed` | false | Nonce already seen. For *needs key* actions the original result is returned instead — see §3. |
+| 409 | `replayed` | false | Nonce already seen. Retrying this exact request never becomes anything else — send a **fresh nonce**. |
+| 409 | `in_progress` | **true** | An earlier attempt at this same `Idempotency-Key` has not finished. Retry with the same key and a fresh nonce; you will get the stored result once it lands. |
 | 422 | `discord_rejected` | false | Discord answered, and said no. `message` carries its reason. |
 | 429 | `rate_limited` | true | Ours or Discord's. Honour `Retry-After`. |
 | 500 | `internal` | true | Our bug. It is in my logs with this `request_id`. |
@@ -141,16 +155,22 @@ prose. It is authoritative: if it is `false`, retrying will fail the same way.
 There is no response that requires reading English to handle. That is the
 point of the table: the site degrades gracefully, it does not white-screen.
 
+**One response header:** `Idempotent-Replay: true` on a `200` means the result
+came from the store rather than from a fresh Discord call — the operation
+happened on an earlier attempt. The `result` body is byte-identical to what
+that attempt returned, so a caller that ignores the header is still correct;
+it is there for logging and for showing "already posted" rather than "posted".
+
 ---
 
 ## 3. The allowlist
 
 | Action | Status | Idempotency | Discord permission needed |
 |---|---|---|---|
-| `role.assign` | **approved and live** (TWO-24) | natural — assigning a held role is a no-op | Manage Roles |
-| `announcement.post` | approved, not built — needs the durable store | **needs key** | View Channel + Send Messages in the target channel |
-| `event.upsert` | approved, not built — needs the durable store | **needs key** on create; update is natural | Manage Events |
-| `guild.add_member` | **built and tested, switched off — awaiting CEO sign-off** (TWO-57) | natural — Discord returns 204 if already a member | Create Instant Invite |
+| `role.assign` | **live** | natural — assigning a held role is a no-op | Manage Roles |
+| `announcement.post` | **live** | **needs key** | View Channel + Send Messages in the target channel |
+| `event.upsert` | **live** | **needs key** on create; update is natural | Manage Events |
+| `guild.add_member` | **built and tested, switched off — awaiting CEO sign-off** (TOG-57) | natural — Discord returns 204 if already a member | Create Instant Invite |
 
 `guild.add_member` only answers when `TWO_INTERNAL_ALLOW_ADD_MEMBER=1`, and
 that flag is the record of the CEO's decision rather than a convenience. With
@@ -164,13 +184,21 @@ from the roles a member can already self-assign in the onboarding menu
 a member does not already have by clicking. `TWO_INTERNAL_ROLE_KEYS` adds
 named exceptions to that, one snowflake at a time.
 
+`announcement.post` and `event.upsert` have the same arrangement in the
+`channel_key` map, with one difference: it **starts empty**. There is no safe
+set of channels to inherit and no way to guess which channel is "announcements",
+so a bot with no `TWO_INTERNAL_CHANNEL_KEYS` refuses every post with
+`action_not_allowed`. That is the correct answer rather than a gap — naming a
+channel is a deliberate act by whoever runs the bot.
+
 **Natural** means Discord itself makes the repeat harmless, so the bot needs no
 stored state to be safe. **Needs key** means a repeat would produce a second
 announcement or a duplicate event, so the bot stores `idempotency_key →
 result` and replays the stored result instead of acting again.
 
-That distinction is not academic — see §6. It decides what can ship before the
-Postgres migration lands and what cannot.
+That distinction is not academic — it decides which actions the caller must
+send an `Idempotency-Key` for. A *needs key* action without one is a
+`malformed`, not a best-effort attempt.
 
 ### `role.assign`
 
@@ -197,16 +225,50 @@ not a permission bit, and it is the most common way this action breaks.
 will not post to a channel that is not in the key map, so a bug on the website
 cannot address an arbitrary channel.
 
+`body` is at most **2000 characters** — Discord's own ceiling, enforced here so
+you get a typed `malformed` naming the field instead of a bare 400 from
+Discord.
+
+`result: { "outcome": "posted", "message_id": "…" }`. The message id comes back
+on a replay too, so a retry still tells you *which* message you have.
+
+**The announcement cannot ping anybody.** Every post is sent with
+`allowed_mentions: { parse: [] }`. The text is posted verbatim — `@everyone`
+appears in the message as typed — but it notifies nobody. An announcement is
+written by whoever has that form on the website, and that form does not get to
+alert a live server of a hundred people.
+
 ### `event.upsert`
 
 ```json
 { "action": "event.upsert", "event_key": "…", "name": "…",
-  "starts_at": "…", "ends_at": "…", "channel_key": "…", "description": "…" }
+  "starts_at": "…", "ends_at": "…", "location": "…", "description": "…" }
 ```
 
 `event_key` is the website's own stable identifier. The bot keeps
 `event_key → discord_event_id`, so the same call creates once and updates
-thereafter. `Idempotency-Key` required on first create.
+thereafter. `Idempotency-Key` required on every call.
+
+Note the two guarantees are different and you need both. The **idempotency
+key** makes a *retry of one request* safe. The **event_key mapping** makes a
+*deliberate edit next week* land on the same Discord event instead of creating
+a second one — send a fresh idempotency key for that, because it is a new
+operation.
+
+**Where the event happens: send exactly one of `channel_key` or `location`.**
+Discord takes either an event inside a voice channel or an "external" one with
+a place written on it, never both and never neither; sending both or neither is
+a `malformed` naming the fields rather than Discord's unexplained 400.
+
+- `channel_key` → a voice-channel event, resolved through the same channel
+  allowlist as `announcement.post`.
+- `location` → an external event, free text.
+
+`starts_at` and `ends_at` are ISO-8601 instants, both required, and `ends_at`
+must be after `starts_at`. `name` is at most 100 characters, `description` at
+most 1000.
+
+`result: { "outcome": "created" | "updated", "event_id": "…" }`.
 
 ### `guild.add_member` — **proposed, not yet approved**
 
@@ -214,8 +276,8 @@ thereafter. `Idempotency-Key` required on first create.
 { "action": "guild.add_member", "discord_id": "…", "access_token": "…" }
 ```
 
-The one action that recruits members. Requested by the Web Lead on TWO-24 for
-TWO-57: the live WordPress site puts a visitor **into the server** on one
+The one action that recruits members. Requested by the Web Lead on TOG-44 for
+TOG-57: the live WordPress site puts a visitor **into the server** on one
 click, and the Laravel replacement has to keep that. It is TWO's only working
 web-to-Discord conversion path.
 
@@ -259,9 +321,32 @@ is visibly a clock problem rather than an unexplained pile of 401s.
 Never logged: shared secrets, the bot token, `access_token`, announcement body
 content beyond its length.
 
-The durable audit trail (who called what, when, and what happened) lands in the
-EventStore, which is why the full endpoint waits on TWO-18. Structured stdout
-logging does not wait on anything.
+**The durable audit trail** is `internal_action_log`, one row per request,
+accepted or rejected:
+
+```sql
+SELECT created_at, key_id, action, idempotency_key, outcome, code, status, reason, duration_ms
+  FROM internal_action_log
+ WHERE created_at > '2026-08-25'
+ ORDER BY created_at DESC;
+```
+
+`request_id` is the primary key, so a row joins straight to the website's own
+logs and to our stdout line. `key_id` and `action` are NULL on requests
+rejected before we knew who was calling — an unauthenticated caller must not be
+able to write rows attributed to a real one.
+
+Two properties of this table worth knowing:
+
+- **It never holds a request body.** Not the announcement text, not an
+  `access_token`, not a signature. `internal_idempotency` stores a *sha256* of
+  the body so a key reused for different content can be caught, and nothing
+  else. A test asserts this across all three tables.
+- **Writing it is best-effort, deliberately.** The response is already sent by
+  the time the audit row is written, so a database outage degrades the trail
+  rather than failing a request the bot has already carried out. The failure is
+  itself logged as `internal_audit_write_failed`, so a silent gap is not
+  possible.
 
 ---
 
@@ -303,32 +388,34 @@ worst outcome is one redundant click.
 
 ---
 
-## 6. What is blocked on what
+## 6. What is built, and the one thing that is not
 
-The endpoint as a whole is blocked on **TWO-18** (SQLite → Postgres), which is
-in turn waiting on the CEO's decision about where the database lives (TWO-46).
+The Postgres dependency (TOG-37) landed on 2026-08-25, and with it everything
+this section used to list as blocked.
 
-But it is not blocked uniformly, and the split matters because TWO-57 is the
-member-recruiting path:
-
-| Piece | Needs Postgres? |
+| Piece | State |
 |---|---|
-| HTTP listener, HMAC verify, skew and nonce replay guard, rate limit | **No** — in-process, single bot process |
-| Typed error envelope | **No** |
-| Structured request logging | **No** |
-| `role.assign`, `guild.add_member` | **No** — naturally idempotent, no stored key |
-| `announcement.post`, `event.upsert` create | **Yes** — durable `idempotency_key → result` |
-| Durable audit trail in the EventStore | **Yes** |
-| Join attribution for one-click joins (§7) | **Yes** |
+| HTTP listener, HMAC verify, skew, rate limit | **built** |
+| Typed error envelope | **built** |
+| Structured request logging | **built** |
+| `role.assign`, `guild.add_member` | **built** (the latter switched off, §3) |
+| `announcement.post`, `event.upsert` | **built** |
+| Durable `idempotency_key → result` | **built** — `internal_idempotency` |
+| Durable audit trail | **built** — `internal_action_log` |
+| Nonce replay guard surviving a restart | **built** — `internal_nonces` |
+| Join attribution for one-click joins (§7) | **not built** |
 
-So roughly two-thirds of this endpoint, including the action that recruits
-members, can be built and tested before TWO-18 unblocks. Tracked as a child of
-TWO-24.
+**The honest limit that remains, and it is not the old one.** Idempotency is
+at-most-once inside a living process. If the bot dies *between* claiming a key
+and recording the result — a window that is exactly the length of one Discord
+call — the row is left `in_flight`, and after 60 seconds another attempt may
+take it over and re-post. The alternative is leaving that operation
+permanently stuck, which is worse. The window is bounded, it requires a crash
+inside a sub-second window to reach, and every claim and takeover is in
+`internal_action_log`.
 
-The in-memory nonce cache is honest about its limit: a bot restart forgets it,
-which re-opens a ≤240-second replay window. For the two naturally-idempotent
-actions a replay is a no-op anyway, so this is acceptable for the pre-Postgres
-slice and gets backed by a table when TWO-18 lands.
+The old limit — "a restart re-opens a ≤240-second replay window" — is gone.
+Nonces are a table.
 
 ---
 
@@ -375,8 +462,14 @@ Invite; they are separate bits.
 | `event.upsert` | Manage Events |
 | `guild.add_member` | **Create Instant Invite** |
 
-TWO-42 must not land until this list is reconciled, or one-click join dies
-silently on the day the permissions are tightened. Flagged on TWO-24.
+TOG-42 must not land until this list is reconciled, or one-click join dies
+silently on the day the permissions are tightened. Flagged on TOG-44.
+
+**`v0.3` adds two entries to this bill.** `announcement.post` needs View
+Channel + Send Messages in whichever channel `TWO_INTERNAL_CHANNEL_KEYS` names,
+and `event.upsert` needs **Manage Events** — a separate bit that Manage Server
+does not imply. Both are live now, so the reconciliation TOG-42 owes this page
+covers four actions rather than two.
 
 ---
 
@@ -403,8 +496,7 @@ else, and it rotates independently of the bot token.
 ## 10. Tests, before the code
 
 Named here so the list is agreed before there is anything to argue about.
-Everything below is green as of TWO-59 except the one marked *deferred*, which
-needs the durable store.
+**Everything below is green.** Nothing on this list is deferred any more.
 
 - Valid request for each allowlisted action → the expected Discord call.
 - Tampered body, valid signature → `unauthorized`.
@@ -413,14 +505,29 @@ needs the durable store.
 - Timestamp 121s old, and 121s in the future → `stale_request`.
 - Replayed nonce inside the window → `replayed`, **and no Discord call made**.
 - Same idempotency key, fresh nonce → the stored result, **and no second post**.
-  *(deferred — needs the durable store, TWO-18.)*
+- Same idempotency key, *different body* → `malformed`, not somebody else's result.
+- A key-requiring action with no `Idempotency-Key`, or a malformed one → `malformed`.
+- Two overlapping attempts at one key → the second gets `in_progress`, and only
+  the claim holder calls Discord.
+- A failed attempt releases its key, so the retry is a real second attempt and
+  not a cached failure.
+- The replay guard holds across a restart (two servers, one store).
 - Action not on the allowlist → `action_not_allowed`.
+- A `channel_key` outside the map → `action_not_allowed`, nothing sent.
+- `event.upsert` creates once, then updates the same Discord event.
+- `event.upsert` with both or neither of `channel_key`/`location`, or with
+  `ends_at` before `starts_at` → `malformed`.
 - Malformed JSON, missing field, wrong type → `malformed`.
 - Over the rate limit → `429` with `Retry-After`.
 - Discord 5xx / timeout / 429 → the right typed error, no retry storm.
 - `guild.add_member`: 201 → `added`; 204 → `already_member`.
 - `guild.add_member`: `access_token` appears in no log line, on success, on
   rejection, and on a thrown exception.
+- Every request lands in `internal_action_log`, accepted or rejected, with the
+  key id withheld on an unauthenticated one.
+- **No request body reaches any of the three tables** — asserted by putting a
+  marker string through `announcement.post` and `guild.add_member` and grepping
+  the lot.
 
 ---
 
@@ -438,14 +545,27 @@ and opens no port.
 | `TWO_INTERNAL_PORT` | Default `8787`. |
 | `TWO_INTERNAL_KEYS` | `key-id:secret,key-id:secret`. Minimum 32 characters each. A real secret — see `docs/SECRETS.md`. |
 | `TWO_INTERNAL_ROLE_KEYS` | Extra `role-key:<snowflake>` pairs beyond the self-assignable set. |
+| `TWO_INTERNAL_CHANNEL_KEYS` | `channel-key:<snowflake>` pairs for `announcement.post` and `event.upsert`. **Empty by default** — with none set, there is no channel the website may address. |
 | `TWO_INTERNAL_ALLOW_ADD_MEMBER` | `1` to enable `guild.add_member`. **Requires the CEO's sign-off.** |
 
 `DISCORD_GUILD_ID` is required when the endpoint is on — the actions act on one
 guild, and guessing which is not a thing this should do.
 
+The endpoint uses the bot's existing database; there is nothing extra to
+configure for it. `migrations/0002_internal_actions.sql` is applied by the
+normal `npm run migrate`, and the four tables are covered by the same backups
+as everything else.
+
+At boot the listener logs `internal_actions_listening` with `durable: true`
+when the store is wired. **If you ever see `durable: false` in production,
+the replay guard is running in process memory and a restart re-opens a
+240-second window** — that is a misconfiguration, not a mode.
+
 Tests: `test/unit.internalauth.test.ts` (signature, skew, replay, buckets, bind
-guard, error table) and `test/e2e.internalactions.test.ts` (the §10 list over
-real HTTP, against `tools/mock-discord`).
+guard, error table), `test/unit.internalstore.test.ts` (nonce expiry, claim
+takeover, the sweep — everything with a clock in it), and
+`test/e2e.internalactions.test.ts` (the §10 list over real HTTP, against
+`tools/mock-discord`).
 
 ---
 
@@ -455,3 +575,4 @@ real HTTP, against `tools/mock-discord`).
 |---|---|---|
 | `v0.1` | 2026-08-19 | First specification. Three approved actions from TWO-24, plus `guild.add_member` proposed on TWO-57 and awaiting CEO sign-off. |
 | `v0.2` | 2026-08-19 | TWO-59: the pre-Postgres slice implemented — listener, HMAC, skew, replay, rate limits, error envelope, request logging, `role.assign` live and `guild.add_member` built but switched off. No wire-format change. |
+| `v0.3` | 2026-08-25 | TOG-44: the endpoint completed on top of Postgres (TOG-37). `announcement.post` and `event.upsert` built and live; durable idempotency store, durable audit trail, table-backed replay guard. **The allowlist did not widen** — both new actions were approved in the original scope. Additive wire changes only: one new error code `in_progress` (409, retryable), one new response header `Idempotent-Replay`, and `event.upsert` now takes `location` as the alternative to `channel_key`. |

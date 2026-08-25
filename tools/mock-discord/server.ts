@@ -320,6 +320,21 @@ export async function startMockDiscord(
       });
     }
 
+    // Scheduled events, for event.upsert (TOG-44). Create answers with a new
+    // id; modify echoes the one in the path. The bot stores that id against
+    // the website's event_key, so a test can assert the second call was a
+    // PATCH of the first event rather than a second POST.
+    m = /\/api\/v10\/guilds\/\d+\/scheduled-events$/.exec(url);
+    if (m && method === 'POST') {
+      const b = (body ?? {}) as Record<string, unknown>;
+      return json({ ...b, id: snowflake(), guild_id: GUILD_ID, status: 1 });
+    }
+    m = /\/api\/v10\/guilds\/\d+\/scheduled-events\/(\d+)$/.exec(url);
+    if (m && method === 'PATCH') {
+      const b = (body ?? {}) as Record<string, unknown>;
+      return json({ ...b, id: m[1], guild_id: GUILD_ID, status: 1 });
+    }
+
     // Interaction ack (deferReply) and the follow-up edit.
     if (/\/api\/v10\/interactions\/\d+\/[^/]+\/callback/.test(url) && method === 'POST') {
       return noContent();
