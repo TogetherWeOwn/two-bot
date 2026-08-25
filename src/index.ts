@@ -11,6 +11,8 @@ import { RaidWatch } from './analytics/raidWatch.ts';
 import { makeRaidAnnouncer } from './discord/raidAlert.ts';
 import { OnboardingRecorder } from './onboarding/flow.ts';
 import { flagInactive } from './jobs/inactivity.ts';
+import { startPresenceProbe, type PresenceProbeHandle } from './jobs/presenceProbe.ts';
+import { DiscordRest } from './discord/rest.ts';
 import { loadInternalActionsConfig } from './internal/config.ts';
 import { startInternalActions, type InternalServer } from './internal/server.ts';
 import { KeyRing } from './internal/signing.ts';
@@ -128,6 +130,32 @@ if (internalCfg) {
   });
 }
 
+// The internal presence instrument (TOG-469). Hourly, REST-only, and nothing
+// it collects is reachable from the website - the table is in the bot schema,
+// which the website's role is REVOKEd from, and no `web_v1` view reads it.
+//
+// Needs a guild to ask about and a Postgres to write to; the table arrives in
+// migration 0004 and the SQLite bootstrap does not have it. Missing either is
+// a logged skip, never a crash - this is an instrument for an internal
+// question and it does not get to stop the funnel from recording joins.
+let presenceProbe: PresenceProbeHandle | null = null;
+if (!cfg.presenceProbe) {
+  log.info('presence_probe_disabled', { reason: 'TWO_PRESENCE_PROBE=0' });
+} else if (!cfg.guildId) {
+  log.info('presence_probe_disabled', { reason: 'DISCORD_GUILD_ID is unset' });
+} else if (db.kind !== 'postgres') {
+  log.info('presence_probe_disabled', { reason: 'needs Postgres (migration 0004)' });
+} else {
+  presenceProbe = startPresenceProbe({
+    db,
+    rest: new DiscordRest({
+      token: cfg.discordToken,
+      base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+    }),
+    guildId: cfg.guildId,
+  });
+}
+
 // Inactivity sweep once an hour. Cheap query; no outbound messages.
 const sweep = setInterval(
   () => {
@@ -142,6 +170,7 @@ sweep.unref();
 async function shutdown(signal: string) {
   log.info('shutdown', { signal });
   clearInterval(sweep);
+  presenceProbe?.stop();
   if (internal) await internal.close();
   try {
     await client.destroy();

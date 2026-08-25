@@ -40,6 +40,16 @@ export interface Config {
   /** Joins inside `raidWindowSeconds` that raise an alert. */
   raidJoinThreshold: number;
   raidWindowSeconds: number;
+  /**
+   * The internal presence instrument (TOG-469). On by default, because a
+   * trend instrument that nobody remembered to switch on collects nothing and
+   * the decision it feeds expires by default instead of on evidence.
+   *
+   * Set TWO_PRESENCE_PROBE=0 to stop collecting. It needs DISCORD_GUILD_ID and
+   * Postgres; without either it stays off and says so at boot. Nothing it
+   * collects is ever rendered - see migrations/0004_presence_probe.sql.
+   */
+  presenceProbe: boolean;
 }
 
 /**
@@ -90,6 +100,7 @@ export function loadConfig(): Config {
     staffAlertChannelId: process.env.DISCORD_STAFF_ALERT_CHANNEL_ID || null,
     raidJoinThreshold: Number(process.env.TWO_RAID_JOIN_THRESHOLD ?? 5),
     raidWindowSeconds: Number(process.env.TWO_RAID_WINDOW_SECONDS ?? 60),
+    presenceProbe: process.env.TWO_PRESENCE_PROBE !== '0',
     dbPath: resolveDbSpec(),
     dbPoolMax: Number(process.env.TWO_DB_POOL_MAX ?? 5),
     inactivityDays: Number(process.env.TWO_INACTIVITY_DAYS ?? 14),
