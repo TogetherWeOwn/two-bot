@@ -99,13 +99,14 @@
 #   alarm was blind and green at the same time - precisely the failure mode
 #   TOG-131 and TOG-307 were about.
 #
-#   Consequence worth noticing: because the surviving probes need no
-#   privilege, this script no longer needs a credential that only Paperclip
-#   can mint, and PLAN_WATCH_TOKEN is no longer required for it to be armed.
-#   plan-watch.yml can therefore become the alarm rather than a self-test.
-#   See the CREDENTIAL header in .github/workflows/plan-watch.yml, and
-#   TOG-307 for why the App private key is not stored in Actions secrets -
-#   that reasoning still stands, it is just no longer load-bearing.
+#   Consequence, since acted on in TOG-383: because the surviving probes need
+#   no privilege, this script no longer needs a credential that only Paperclip
+#   can mint. plan-watch.yml IS the alarm now - armed, on the default
+#   GITHUB_TOKEN - and the Paperclip watcher is retired. PLAN_WATCH_TOKEN is
+#   obsolete; nothing reads it. See the CREDENTIAL header in
+#   .github/workflows/plan-watch.yml, and TOG-307 for why the App private key
+#   is not stored in Actions secrets - that reasoning still stands, it is just
+#   no longer load-bearing.
 #
 #   The org-plan probe (probe 2) still needs an org-scoped token and is still
 #   expected to come back unknown. It is now purely corroborating; probe 1
