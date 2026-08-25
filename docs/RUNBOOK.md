@@ -313,6 +313,31 @@ cd /opt/two-bot
 sudo -u twobot --preserve-env=TWO_DATABASE_URL node scripts/funnel.ts 7
 ```
 
+## When should we run the community event?
+
+Off the voice session log, not off a guess:
+
+```bash
+cd /opt/two-bot
+# last 90 days, hours bucketed in UTC
+sudo -u twobot --preserve-env=TWO_DATABASE_URL node scripts/voice-sessions.ts 90
+# ...or in the timezone most members are actually in
+sudo -u twobot --preserve-env=TWO_DATABASE_URL node scripts/voice-sessions.ts 90 --offset=-5
+```
+
+Two things to read before the recommendation:
+
+* **The coverage block.** It prints the span the listener actually observed. If
+  that span is under 28 days the report says so and the day-of-week result is
+  not yet evidence - one unusual week would be the whole signal.
+* **A zero.** `0 sessions` does **not** mean nobody uses voice. It much more
+  likely means no bot with the gateway listener has been running. The report
+  prints both causes and refuses to pick one, because it cannot tell. Check the
+  service is up before drawing any conclusion from an empty report.
+
+Voice history cannot be backfilled - Discord serves none over REST. Every hour
+the listener is down is an hour of this data that does not exist later.
+
 ## It restarted on its own
 
 Expected and fine - `Restart=always` handles crashes and reboots. Check how

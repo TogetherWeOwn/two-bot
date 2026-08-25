@@ -15,6 +15,7 @@
     "test:e2e": "node --test test/e2e.*.test.ts",
     "typecheck": "tsc --noEmit",
     "funnel": "node scripts/funnel.ts",
+    "voice": "node scripts/voice-sessions.ts",
     "attribution": "node scripts/attribution.ts",
     "dashboard": "node scripts/dashboard.ts",
     "roster": "node scripts/roster.ts",
