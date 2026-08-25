@@ -24,6 +24,9 @@ node scripts/raid-list.ts --ids       # ids only, for pasting into a mod tool
 node scripts/raid-list.ts --verify    # confirm each one against the live server
 ```
 
+Removing them is a separate tool, `scripts/raid-remove.ts`. See **Removing the
+accounts** below: dry run by default, kick rather than ban, safe to re-run.
+
 ## The gates the server already has, and why they did not help
 
 This is the part that was wrong in the first draft of TWO-56, so it is written
@@ -111,6 +114,64 @@ Monday. The channel is a CEO choice, so it stays unset until they name one.
 The detector goes live with the bot itself (TWO-11). Until the bot is deployed,
 nothing is watching in real time.
 
+## Removing the accounts
+
+`scripts/raid-remove.ts` (TOG-451). The list and the removal are deliberately
+two tools: producing the list is evidence-gathering and safe to do at any time,
+removing is a moderation action a human has authorised.
+
+```
+node scripts/raid-list.ts --ids > data/targets.txt
+node scripts/raid-remove.ts --ids-from data/targets.txt                     # dry run
+node scripts/raid-remove.ts --ids-from data/targets.txt --execute --expect 30
+```
+
+**It kicks. It never bans.** A kicked account can come back through the rules
+gate; a banned one cannot, and unbanning thirty accounts by hand is not a
+realistic undo. There is no ban code path to switch on — `src/discord/kick.ts`
+has one method, and a test fails if a second one appears.
+
+**Dry run is the default and it cannot reach Discord.** Without `--execute` the
+script never constructs a client at all, so the dry run is read-only by
+construction rather than by intention. It prints the same per-account lines the
+real run would.
+
+**The target list is an input, never a constant.** `--ids-from` takes a file or
+`-` for stdin, in the format `raid-list.ts --ids` already prints (`#` comments
+and blank lines are fine). No count and no id is hardcoded anywhere in the tool.
+
+**`--execute` requires `--expect <n>`** and refuses if the file disagrees. The
+authorised count was still open when this was written — the authorisation says
+nineteen in one sentence and implies thirty in another (TOG-411) — so the
+operator states the number they believe they are authorised for and the tool
+checks it. A list that grew between being produced and being run stops here.
+
+**Every account gets a durable line** in `data/raid-removal-audit.jsonl`
+(`--audit` to move it) — id, action, outcome, HTTP status, timestamp — appended
+and fsync'd before the next account is touched. That path is gitignored: it
+names individual members and must not reach GitHub (docs/PRIVACY.md).
+
+**Re-running the same command is safe.** Anything already kicked or already gone
+is skipped without a request; anything that failed is retried. Killed between a
+successful kick and its audit line, the retry gets a 404 and records
+`already_gone` — kick is idempotent at Discord, which is the other reason it is
+a kick. Three consecutive failures end the run rather than repeating a missing
+permission thirty times.
+
+Exit codes: `0` clean · `1` aborted, or some accounts failed · `2` refused to
+start (bad list, count mismatch, no token).
+
+The dry run also cross-checks against `data/server-audit-2026-08-19.json`. That
+file holds **no member roster** — its own `note` says so, and pointing
+`--ids-from` at it gets a specific error rather than an empty run. What it does
+hold is the envelope: 84 human members, 31 stuck at the rules gate. Every
+confirmed raid account was pending at that gate, so a target list longer than 31
+is flagged as containing something that evidence does not explain.
+
+Execution itself is TOG-411, and it is blocked: the Discord credentials for this
+server are not held by this company (TOG-432). `--execute` without a token says
+so and exits rather than sending anyone looking for one.
+
 ## If an alert fires
 
 1. **Look before acting.** A genuine surge — a stream drop, a post that landed —
@@ -118,7 +179,8 @@ nothing is watching in real time.
    which invite sent them.
 2. If it is a raid: Server Settings → Safety Setup, **pause invites**. That stops
    the arrival rate at the source and is reversible in one click.
-3. Remove the accounts. `node scripts/raid-list.ts --ids` after the window is
-   labelled in `src/analytics/anomalies.ts`.
+3. Remove the accounts, once a human has authorised it. Label the window in
+   `src/analytics/anomalies.ts` first, then `node scripts/raid-list.ts --ids`
+   into `node scripts/raid-remove.ts` — dry run, read it, then `--execute`.
 4. Add the window to `ANOMALIES` with `kind: 'raid'`, so the funnel stops
    counting it as community behaviour and the account list can find it later.
