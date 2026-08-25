@@ -618,6 +618,34 @@ push_extra_branches() {
 # Classic branch protection: it is the API that reports its own effect
 # honestly, which matters because on a free org the call succeeds and the
 # rule does nothing.
+#
+# WHY NO REQUIRED APPROVALS (TOG-240, re-measured TOG-111 2026-08-25)
+#
+# This function used to write `required_approving_review_count: 1` with
+# `require_code_owner_reviews: True`. Measured against the real org, that
+# combination does not gate merges - it stops them completely:
+#
+#   - Every agent-authored PR is opened by ONE shared App identity. Verified on
+#     two-bot: PRs #6 through #14 are all `togetherweown[bot]`.
+#   - GitHub refuses to let an author approve their own pull request, so that
+#     identity can never clear its own gate. It 422s.
+#   - `.github/CODEOWNERS` names exactly one account, `@Rick7C2`, a human. Its
+#     own header says the org "has one member with write access".
+#
+# So every PR the fleet opens would wait on one person hand-approving it, and
+# `require_last_push_approval` means that approval dies on the next push - so it
+# has to be the LAST event before merge, every time. That is a deadlock, not a
+# control, and the reviewer pool is agents that may be asleep. TOG-240 recorded
+# that decision; this function contradicted it until TOG-111.
+#
+# What actually enforces quality here does not need anyone awake: a PR is still
+# required, required status checks (CI + gitleaks) must be green, admins get no
+# bypass, and force-push and deletion are refused. Human sign-off is required
+# where it is affordable and where it matters - the `production` environment
+# reviewer gate at DEPLOY time, not at merge time.
+#
+# Raise the count to 1 when a second human has write access. Nothing else in
+# this payload needs to change.
 protect() {
   local name="$1"; shift
   local checks=("$@")
@@ -633,12 +661,20 @@ print(json.dumps({
     "required_status_checks": {"strict": True, "contexts": contexts},
     # No admin bypass. If it does not apply to me it is not a rule.
     "enforce_admins": True,
+    # Present (not None) so a pull request is still REQUIRED before merging -
+    # that is what this key controls. The approval count below is a separate
+    # sub-setting, and it is deliberately 0. See the block comment above.
     "required_pull_request_reviews": {
-        "required_approving_review_count": 1,
-        # The whole point: you cannot approve your own work.
+        "required_approving_review_count": 0,
+        # Both are inert at count 0 and both are kept on purpose: the day a
+        # second human gets write access, raising the count to 1 is the only
+        # edit needed and self-approval is already refused.
         "require_last_push_approval": True,
         "dismiss_stale_reviews": True,
-        "require_code_owner_reviews": True,
+        # Left False deliberately. GitHub only enforces code-owner review when
+        # the approval count is >= 1, so True here would be decorative today
+        # and would silently become a second gate the day the count is raised.
+        "require_code_owner_reviews": False,
     },
     "restrictions": None,
     "allow_force_pushes": False,
@@ -657,7 +693,7 @@ PY
   local err
   if err="$(printf '%s' "$payload" | gh api --method PUT \
       "repos/$ORG/$name/branches/$DEFAULT_BRANCH/protection" --input - 2>&1 >/dev/null)"; then
-    ok "$name: protection written on $DEFAULT_BRANCH (PR required, CI ${checks[*]}, no self-approval, no force-push)"
+    ok "$name: protection written on $DEFAULT_BRANCH (PR required, CI ${checks[*]}, 0 approvals by design, no force-push)"
     return 0
   fi
 
@@ -887,7 +923,10 @@ verify_repo() {
 
   local p
   if p="$(gh api "repos/$ORG/$name/branches/$DEFAULT_BRANCH/protection" 2>/dev/null)"; then
-    local pr checks admins selfapp
+    local pr checks admins selfapp prreq
+    # Presence of the whole block is the "require a pull request before merging"
+    # toggle. It is a separate thing from how many approvals that PR needs.
+    prreq="$(printf '%s' "$p"   | python3 -c 'import json,sys; d=json.load(sys.stdin); print("required_pull_request_reviews" in d)')"
     pr="$(printf '%s' "$p"      | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("required_pull_request_reviews",{}).get("required_approving_review_count",0))')"
     selfapp="$(printf '%s' "$p" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("required_pull_request_reviews",{}).get("require_last_push_approval",False))')"
     checks="$(printf '%s' "$p"  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(",".join(d.get("required_status_checks",{}).get("contexts",[])) or "NONE")')"
@@ -896,9 +935,20 @@ verify_repo() {
     local stale
     stale="$(printf '%s' "$p"   | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("required_pull_request_reviews",{}).get("dismiss_stale_reviews",False))')"
 
-    [ "$pr" -ge 1 ]           && ok "$name: PR review required ($pr approval)"        || { bad "$name: no review required"; FAILED=1; }
-    [ "$selfapp" = "True" ]   && ok "$name: self-approval blocked"                    || { bad "$name: self-approval NOT blocked"; FAILED=1; }
-    [ "$stale" = "True" ]     && ok "$name: stale approvals dismissed on new commits" || { bad "$name: stale approvals survive a force-push"; FAILED=1; }
+    # A pull request must be REQUIRED. That is `required_pull_request_reviews`
+    # being present at all, which is what `prreq` reads - NOT the approval
+    # count. Asserting the count is >= 1 is what used to be here and it asserted
+    # the deadlock described above protect(): one shared bot identity that
+    # cannot approve itself, one human code owner. Zero approvals is the
+    # recorded posture (TOG-240 / TOG-111), so it is checked as such.
+    [ "$prreq" = "True" ]     && ok "$name: pull request required before merge"       || { bad "$name: direct pushes to $DEFAULT_BRANCH allowed - no PR required"; FAILED=1; }
+    if [ "$pr" -ge 1 ]; then
+      ok "$name: PR review required ($pr approval)"
+      [ "$selfapp" = "True" ] && ok "$name: self-approval blocked"                    || { bad "$name: self-approval NOT blocked"; FAILED=1; }
+      [ "$stale" = "True" ]   && ok "$name: stale approvals dismissed on new commits" || { bad "$name: stale approvals survive a force-push"; FAILED=1; }
+    else
+      ok "$name: 0 required approvals - deliberate (TOG-240), CI is the gate"
+    fi
     [ "$checks" != "NONE" ]   && ok "$name: CI required ($checks)"                    || { bad "$name: no required status checks - a red PR can merge"; FAILED=1; }
     [ "$admins" = "True" ]    && ok "$name: admins included, no bypass"               || { bad "$name: admins can bypass"; FAILED=1; }
 
