@@ -63,6 +63,16 @@ tests execute:
 TWO_TEST_DATABASE_URL=postgres://localhost:5432/two_bot_test npm test
 ```
 
+Beware that `npm test` cannot tell you whether the Postgres-only suites ran. When
+the URL is absent they skip themselves, and node:test reports a skipped suite as
+`# tests 0 # skipped 0`, exit 0 — the counters cannot see it. So CI runs this
+instead, which fails if `e2e.webcontract`, `e2e.backup` or `e2e.concurrency`
+reports a skip or comes back short:
+
+```bash
+TWO_TEST_DATABASE_URL=postgres://localhost:5432/two_bot_test npm run test:postgres
+```
+
 (`--include=dev` matters: if `NODE_ENV=production` is set, npm quietly skips
 devDependencies and `npm run typecheck` then fails with `tsc: not found`.)
 
