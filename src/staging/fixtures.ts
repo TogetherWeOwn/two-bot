@@ -107,6 +107,13 @@ export const EXPECTED_FUNNEL: Readonly<Record<EventType, number>> = {
   channel_routed: 2,
   first_message: 7,
   first_voice_session: 1,
+  // Zero on purpose. The staging fixtures seed the funnel by writing events
+  // directly, and nothing in them opens a voice session yet; these rows only
+  // appear once a real gateway listener runs against the staging guild
+  // (TOG-99 / TWO-11). Left explicit so the day someone seeds a session, the
+  // count moving off zero shows up in the diff.
+  voice_session_start: 0,
+  voice_session_end: 0,
   member_inactive: 1,
   member_leave: 2,
 };

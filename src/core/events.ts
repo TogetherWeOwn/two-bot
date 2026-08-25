@@ -20,6 +20,18 @@ export const EVENT_TYPES = [
   // ------------------------------------------------------------------------
   'first_message',
   'first_voice_session',
+  // --- repeatable voice sessions (TOG-99) ---------------------------------
+  // first_voice_session fires once per member and members.last_active_at is a
+  // single rolling column, so between them they answer "did they come back"
+  // and nothing else. These two answer "how often" and "at what time of day",
+  // which is what scheduling an event off real attendance needs (TWO-66).
+  //
+  // One pair per visit to a voice channel. A move from channel A to channel B
+  // is an end for A and a start for B, because "which room" is the question
+  // the source field exists to answer.
+  'voice_session_start',
+  'voice_session_end',
+  // ------------------------------------------------------------------------
   'member_inactive',
   'member_leave',
 ] as const;
@@ -61,6 +73,11 @@ export function idempotencyKey(e: FunnelEvent): string {
   // back to the picker and change what they play. Counting reach still works -
   // use COUNT(DISTINCT member_id). onboarding_prompted stays once-per-member so
   // a re-post can never inflate the top of the onboarding funnel.
+  //
+  // voice_session_start / voice_session_end are repeatable BY DESIGN and that
+  // is the whole point of them - a member who turns up every week must produce
+  // a row every week. Counting people rather than visits still works the same
+  // way it does for member_join: COUNT(DISTINCT member_id).
   const repeatable: EventType[] = [
     'invite_click',
     'member_join',
@@ -68,6 +85,8 @@ export function idempotencyKey(e: FunnelEvent): string {
     'member_leave',
     'game_roles_selected',
     'channel_routed',
+    'voice_session_start',
+    'voice_session_end',
   ];
   if (repeatable.includes(e.eventType)) {
     return `${e.guildId}:${e.memberId ?? 'anon'}:${e.eventType}:${e.occurredAt}`;

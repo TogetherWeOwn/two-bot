@@ -1,4 +1,5 @@
 import { Client, GatewayIntentBits, Events, type Guild } from 'discord.js';
+import { nowIso } from '../core/events.ts';
 import type { FunnelHandlers } from '../core/handlers.ts';
 import type { InviteTracker, InviteState } from '../core/inviteTracker.ts';
 import type { RaidWatch } from '../analytics/raidWatch.ts';
@@ -12,7 +13,7 @@ import { log } from '../core/log.ts';
  *   Guilds              - required for any guild event at all
  *   GuildMembers        - member_join / member_leave        (PRIVILEGED)
  *   GuildMessages       - first_message                     (metadata only)
- *   GuildVoiceStates    - first_voice_session
+ *   GuildVoiceStates    - first_voice_session + voice_session_start/end
  *   GuildInvites        - invite create/delete for attribution
  *
  * We deliberately do NOT request MessageContent. We count that a message
@@ -119,15 +120,48 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
   });
 
   client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
-    // Only a transition into a channel counts as a session start.
+    // Discord fires this for mute, deafen, camera and go-live too. Only a
+    // change of channel is a session boundary.
     if (oldState.channelId === newState.channelId) return;
-    if (!newState.channelId || !newState.guild) return;
-    await handlers.onVoiceJoin({
-      guildId: newState.guild.id,
-      memberId: newState.id,
-      isBot: !!newState.member?.user?.bot,
-      channelId: newState.channelId,
-    });
+    const guild = newState.guild ?? oldState.guild;
+    if (!guild) return;
+    const memberId = newState.id ?? oldState.id;
+    const isBot = !!(newState.member ?? oldState.member)?.user?.bot;
+
+    // One timestamp for both halves. On a move from A to B the end and the
+    // start are the same instant, and taking nowIso() twice would make the
+    // pair look like a gap.
+    const at = nowIso();
+
+    // End first, so a move reads as end(A) then start(B) in occurred order.
+    if (oldState.channelId) {
+      await handlers.onVoiceLeave({
+        guildId: guild.id,
+        memberId,
+        isBot,
+        channelId: oldState.channelId,
+        occurredAt: at,
+      });
+    }
+    if (newState.channelId) {
+      await handlers.onVoiceJoin({
+        guildId: guild.id,
+        memberId,
+        isBot,
+        channelId: newState.channelId,
+        occurredAt: at,
+      });
+    }
+  });
+
+  // A reconnect means we may have missed leaves while we were away, so every
+  // session we think is open is now unproven. Dropping them costs the duration
+  // on those sessions (they end with startKnown: false) and is the only
+  // alternative to reporting a duration that silently includes the outage.
+  client.on(Events.ShardResume, () => {
+    const dropped = handlers.voiceSessions.openCount;
+    handlers.voiceSessions.clear();
+    if (dropped) log.info('voice_sessions_dropped_on_resume', { dropped });
   });
 
   client.on(Events.InviteCreate, async (invite) => {
