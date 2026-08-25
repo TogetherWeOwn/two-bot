@@ -132,7 +132,7 @@ are tested without a network, a token, or a server.
   database, which protects against corruption but not against losing the
   machine. The nightly dump and the restore both work and have been drilled
   (`docs/RUNBOOK.md`); all that is missing is somewhere to put them, which is a
-  spend decision. TWO-47.
+  spend decision. TOG-69 (was TWO-47).
 - **A Postgres for staging and production.** The bot runs on Postgres now
   (TWO-18) and the website writes the same database. Neither environment has a
   TWO-owned Postgres yet — the migration was proven against a development
