@@ -13,10 +13,11 @@
  * | `TWO_INTERNAL_PORT` | Default `8787`. |
  * | `TWO_INTERNAL_KEYS` | `key-id:secret,key-id:secret`. A real secret - see docs/SECRETS.md. In production it arrives as the systemd credential `internal_keys` instead. |
  * | `TWO_INTERNAL_ROLE_KEYS` | Extra `role-key:snowflake` pairs beyond the self-assignable set. |
- * | `TWO_INTERNAL_ALLOW_ADD_MEMBER` | `1` to enable `guild.add_member`. **Requires the CEO's sign-off (TWO-24).** |
+ * | `TWO_INTERNAL_CHANNEL_KEYS` | `channel-key:snowflake` pairs. Empty by default, and `announcement.post` can address nothing without it. |
+ * | `TWO_INTERNAL_ALLOW_ADD_MEMBER` | `1` to enable `guild.add_member`. **Requires the CEO's sign-off (TOG-44).** |
  */
 import { parseKeys, type SigningKey } from './signing.ts';
-import { buildRoleKeys, type ActionName } from './actions.ts';
+import { buildRoleKeys, buildChannelKeys, type ActionName } from './actions.ts';
 import { readSecret, credentialSource } from '../core/credentials.ts';
 
 export interface InternalActionsConfig {
@@ -24,6 +25,7 @@ export interface InternalActionsConfig {
   port: number;
   keys: SigningKey[];
   roleKeys: Map<string, string>;
+  channelKeys: Map<string, string>;
   enabled: Set<ActionName>;
 }
 
@@ -41,10 +43,15 @@ export function loadInternalActionsConfig(env: NodeJS.ProcessEnv = process.env):
     );
   }
 
-  // role.assign is approved and unconditional. guild.add_member is built and
-  // tested but stays dark until the CEO signs off on the allowlist entry - the
-  // flag is the record of that decision, not a convenience.
-  const enabled = new Set<ActionName>(['role.assign']);
+  // The three Phase 1 actions are approved and unconditional - they are what
+  // the endpoint was asked for. guild.add_member is built and tested but stays
+  // dark until the CEO signs off on the allowlist entry; the flag is the
+  // record of that decision, not a convenience.
+  //
+  // announcement.post being on is not the same as it being able to do
+  // anything: with no TWO_INTERNAL_CHANNEL_KEYS there is no channel it may
+  // address, so an unconfigured bot refuses every post by key lookup.
+  const enabled = new Set<ActionName>(['role.assign', 'announcement.post', 'event.upsert']);
   if (env.TWO_INTERNAL_ALLOW_ADD_MEMBER === '1') enabled.add('guild.add_member');
 
   return {
@@ -52,6 +59,7 @@ export function loadInternalActionsConfig(env: NodeJS.ProcessEnv = process.env):
     port: Number(env.TWO_INTERNAL_PORT ?? 8787),
     keys,
     roleKeys: buildRoleKeys(env.TWO_INTERNAL_ROLE_KEYS ?? ''),
+    channelKeys: buildChannelKeys(env.TWO_INTERNAL_CHANNEL_KEYS ?? ''),
     enabled,
   };
 }

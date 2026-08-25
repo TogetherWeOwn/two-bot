@@ -16,11 +16,58 @@ const API = 'https://discord.com/api/v10';
 
 export type AddMemberOutcome = 'added' | 'already_member';
 
+/**
+ * A Discord scheduled event, as event.upsert sends it.
+ *
+ * `channelId` and `location` are the two mutually exclusive ways Discord will
+ * accept an event: one inside a voice channel, one "external" with a place
+ * written on it. Exactly one is set - actions.ts enforces that before we get
+ * here, because Discord's own error for getting it wrong is a bare 400.
+ */
+export interface ScheduledEventInput {
+  name: string;
+  startsAt: string;
+  endsAt: string;
+  description?: string;
+  channelId?: string;
+  location?: string;
+}
+
 export interface ActionDiscord {
   /** Current role ids, or null if we could not read the member. */
   memberRoles(guildId: string, userId: string): Promise<string[] | null>;
   addRole(guildId: string, userId: string, roleId: string): Promise<void>;
   addMember(guildId: string, userId: string, accessToken: string): Promise<AddMemberOutcome>;
+  /** Post to a channel. Returns Discord's message id, for the stored result. */
+  postMessage(channelId: string, content: string): Promise<string>;
+  /** Create a scheduled event. Returns its Discord id. */
+  createEvent(guildId: string, input: ScheduledEventInput): Promise<string>;
+  /** Modify an existing scheduled event in place. */
+  updateEvent(guildId: string, eventId: string, input: ScheduledEventInput): Promise<void>;
+}
+
+/** GUILD_ONLY. The only privacy level Discord accepts for a guild event. */
+const PRIVACY_GUILD_ONLY = 2;
+/** entity_type: 2 = VOICE (needs channel_id), 3 = EXTERNAL (needs location). */
+const ENTITY_VOICE = 2;
+const ENTITY_EXTERNAL = 3;
+
+function scheduledEventBody(input: ScheduledEventInput): Record<string, unknown> {
+  const common = {
+    name: input.name,
+    description: input.description,
+    scheduled_start_time: input.startsAt,
+    scheduled_end_time: input.endsAt,
+    privacy_level: PRIVACY_GUILD_ONLY,
+  };
+  return input.channelId
+    ? { ...common, entity_type: ENTITY_VOICE, channel_id: input.channelId }
+    : {
+        ...common,
+        entity_type: ENTITY_EXTERNAL,
+        channel_id: null,
+        entity_metadata: { location: input.location },
+      };
 }
 
 export interface DiscordActionsOptions {
@@ -31,6 +78,14 @@ export interface DiscordActionsOptions {
   addMemberTimeoutMs?: number;
   /** Budget for the role calls, ms. */
   roleTimeoutMs?: number;
+  /**
+   * Budget for announcement.post and event.upsert, ms.
+   *
+   * Wider than the member-facing calls on purpose: these run from a queued
+   * Laravel job with nobody waiting, so the right trade is to give Discord
+   * time to answer rather than to fail fast and retry (§5).
+   */
+  contentTimeoutMs?: number;
   fetchImpl?: typeof fetch;
 }
 
@@ -39,6 +94,7 @@ export class DiscordActions implements ActionDiscord {
   private base: string;
   private addMemberTimeout: number;
   private roleTimeout: number;
+  private contentTimeout: number;
   private fetchImpl: typeof fetch;
 
   constructor(o: DiscordActionsOptions) {
@@ -46,6 +102,7 @@ export class DiscordActions implements ActionDiscord {
     this.base = o.base ?? API;
     this.addMemberTimeout = o.addMemberTimeoutMs ?? 1500;
     this.roleTimeout = o.roleTimeoutMs ?? 2000;
+    this.contentTimeout = o.contentTimeoutMs ?? 5000;
     this.fetchImpl = o.fetchImpl ?? fetch;
   }
 
@@ -90,6 +147,50 @@ export class DiscordActions implements ActionDiscord {
     // as present rather than telling a person who is now in the server that
     // they are not.
     return 'already_member';
+  }
+
+  /**
+   * `announcement.post`. Returns the message id, which goes into the stored
+   * idempotency result so a retry can hand back the id of the message we
+   * already posted rather than posting a second one.
+   *
+   * `allowed_mentions` is empty on purpose: an announcement is written on the
+   * website by whoever has that form, and the endpoint is not going to let
+   * that reach through to an @everyone ping on a live server. Content is
+   * posted verbatim; only its ability to notify is removed.
+   */
+  async postMessage(channelId: string, content: string): Promise<string> {
+    const res = await this.call(
+      'POST',
+      `/channels/${channelId}/messages`,
+      { content, allowed_mentions: { parse: [] } },
+      this.contentTimeout,
+    );
+    throwForStatus(res);
+    const body = (await readJson(res)) as { id?: unknown } | null;
+    return typeof body?.id === 'string' ? body.id : '';
+  }
+
+  async createEvent(guildId: string, input: ScheduledEventInput): Promise<string> {
+    const res = await this.call(
+      'POST',
+      `/guilds/${guildId}/scheduled-events`,
+      scheduledEventBody(input),
+      this.contentTimeout,
+    );
+    throwForStatus(res);
+    const body = (await readJson(res)) as { id?: unknown } | null;
+    return typeof body?.id === 'string' ? body.id : '';
+  }
+
+  async updateEvent(guildId: string, eventId: string, input: ScheduledEventInput): Promise<void> {
+    const res = await this.call(
+      'PATCH',
+      `/guilds/${guildId}/scheduled-events/${eventId}`,
+      scheduledEventBody(input),
+      this.contentTimeout,
+    );
+    throwForStatus(res);
   }
 
   private async call(

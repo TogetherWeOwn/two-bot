@@ -80,8 +80,13 @@ export async function openSqlite(path: string): Promise<Db> {
   // several minutes of re-scanning Discord.
   raw.exec('PRAGMA busy_timeout = 15000;');
   raw.exec(readFileSync(join(here, 'schema.sql'), 'utf8'));
-  raw
-    .prepare(`INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?, ?)`)
-    .run('0001_initial', new Date().toISOString());
+  // schema.sql is the whole schema, so every migration whose tables it already
+  // contains is recorded as applied. Adding a migration means adding its
+  // tables above and its id here, or a database that is later moved to
+  // Postgres will try to apply it a second time.
+  const stamp = raw.prepare(`INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?, ?)`);
+  for (const id of ['0001_initial', '0002_internal_actions']) {
+    stamp.run(id, new Date().toISOString());
+  }
   return new SqliteDb(raw);
 }

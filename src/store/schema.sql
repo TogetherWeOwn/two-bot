@@ -61,6 +61,73 @@ CREATE TABLE IF NOT EXISTS invite_snapshots (
 );
 
 -- ---------------------------------------------------------------------------
+-- The durable state behind POST /internal/actions (TOG-44).
+--
+-- Kept byte-for-byte equivalent to migrations/0002_internal_actions.sql, which
+-- is the Postgres side of the same four tables and carries the full commentary
+-- on why each one exists. They are duplicated rather than shared because the
+-- SQLite path bootstraps from this file and never runs a migration.
+--
+-- None of these tables holds a request body. See docs/INTERNAL_ACTIONS.md §4.
+-- ---------------------------------------------------------------------------
+
+-- Replay guard that survives a restart. Keyed by (key_id, nonce): a replay is
+-- a recording of a signed request, so it always carries the original key id.
+CREATE TABLE IF NOT EXISTS internal_nonces (
+  key_id  TEXT NOT NULL,
+  nonce   TEXT NOT NULL,
+  seen_at TEXT NOT NULL,
+  PRIMARY KEY (key_id, nonce)
+);
+
+CREATE INDEX IF NOT EXISTS idx_internal_nonces_seen ON internal_nonces (seen_at);
+
+-- idempotency_key -> stored result. The "a timeout was a lie" table.
+CREATE TABLE IF NOT EXISTS internal_idempotency (
+  key_id          TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  action          TEXT NOT NULL,
+  request_hash    TEXT NOT NULL,   -- sha256 of the raw body. Never the body.
+  state           TEXT NOT NULL,   -- 'in_flight' | 'done'
+  outcome         TEXT,
+  result_json     TEXT,
+  claimed_at      TEXT NOT NULL,
+  completed_at    TEXT,
+  PRIMARY KEY (key_id, idempotency_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_internal_idem_state ON internal_idempotency (state, claimed_at);
+
+-- The durable audit trail. One row per request, accepted or rejected.
+CREATE TABLE IF NOT EXISTS internal_action_log (
+  request_id      TEXT PRIMARY KEY,
+  key_id          TEXT,
+  action          TEXT,
+  idempotency_key TEXT,
+  outcome         TEXT    NOT NULL,
+  code            TEXT,
+  status          INTEGER NOT NULL,
+  reason          TEXT,
+  duration_ms     INTEGER NOT NULL,
+  created_at      TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_internal_log_time   ON internal_action_log (created_at);
+CREATE INDEX IF NOT EXISTS idx_internal_log_action ON internal_action_log (action, created_at);
+CREATE INDEX IF NOT EXISTS idx_internal_log_key    ON internal_action_log (key_id, created_at);
+
+-- The website's event_key -> Discord's scheduled event id. This is what makes
+-- event.upsert an upsert.
+CREATE TABLE IF NOT EXISTS internal_discord_events (
+  guild_id         TEXT NOT NULL,
+  event_key        TEXT NOT NULL,
+  discord_event_id TEXT NOT NULL,
+  created_at       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL,
+  PRIMARY KEY (guild_id, event_key)
+);
+
+-- ---------------------------------------------------------------------------
 -- schema_migrations: applied migration ids.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS schema_migrations (
