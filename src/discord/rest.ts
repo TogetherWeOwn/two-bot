@@ -87,6 +87,8 @@ export class DiscordRest {
 export interface RawMember {
   user?: { id: string; bot?: boolean };
   joined_at?: string | null;
+  /** Discord role snowflakes. Callers keep only the aggregate or highest rank. */
+  roles?: string[];
 }
 export interface RawInvite {
   code: string;
@@ -117,16 +119,32 @@ export interface RawMessage {
 
 /** Page a guild's full member list. `joined_at` here is Discord's own record. */
 export async function fetchAllMembers(rest: DiscordRest, guildId: string): Promise<RawMember[]> {
+  return (await fetchAllMembersStrict(rest, guildId)) ?? [];
+}
+
+/**
+ * Page a guild's full member list, preserving a failed page as `null`.
+ *
+ * Backfill historically treated an inaccessible page as the end of the list.
+ * A live count cannot: publishing a partial roster as a real count is the same
+ * category of error as publishing 0 on failure. Collectors use this strict path.
+ */
+export async function fetchAllMembersStrict(
+  rest: DiscordRest,
+  guildId: string,
+): Promise<RawMember[] | null> {
   const out: RawMember[] = [];
   let after = '0';
   for (;;) {
     const batch = await rest.get<RawMember[]>(
       `/guilds/${guildId}/members?limit=1000&after=${after}`,
     );
-    if (!batch || batch.length === 0) break;
+    if (!batch) return null;
+    if (batch.length === 0) break;
     out.push(...batch);
     const last = batch[batch.length - 1]?.user?.id;
-    if (!last || batch.length < 1000) break;
+    if (!last) return null;
+    if (batch.length < 1000) break;
     after = last;
   }
   return out;

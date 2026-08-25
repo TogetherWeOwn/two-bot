@@ -69,6 +69,11 @@ export const BOT_TABLES = [
   'rank_snapshots',
   'member_ranks',
   'scheduled_events',
+  // 0004 is an internal instrument and 0005 holds bot-owned snapshot/exclusion
+  // state. Neither is reachable from a contract view except through aggregates.
+  'presence_probe',
+  'counter_snapshots',
+  'member_exclusions',
 ];
 
 function ident(schema: string, name: string): string {

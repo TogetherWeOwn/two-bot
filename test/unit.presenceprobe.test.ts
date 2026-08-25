@@ -32,7 +32,7 @@ import {
   countBotFloor,
   PRESENCE_PROBE_INTERVAL_MS,
 } from '../src/jobs/presenceProbe.ts';
-import { DiscordRest } from '../src/discord/rest.ts';
+import { stubRest } from './helpers/stubRest.ts';
 import {
   evaluateTrigger,
   dailyPeaks,
@@ -124,6 +124,9 @@ describe('presence probe containment', () => {
       join('scripts', 'presence-trend.ts'),
       join('test', 'unit.presenceprobe.test.ts'),
       join('test', 'helpers', 'testDb.ts'),
+      // The role verifier names every bot-owned table so a specific denial is
+      // proven in addition to the relation census. It has no rendering path.
+      join('src', 'store', 'webRoleCheck.ts'),
     ]);
     // The BARE identifier only. `\b` on both sides deliberately does not match
     // `presence_probe_enabled` (a log event name) or `0004_presence_probe.sql`
@@ -176,27 +179,6 @@ describe('presence probe containment', () => {
 // ---------------------------------------------------------------------------
 // 2. Collection.
 // ---------------------------------------------------------------------------
-
-/** A DiscordRest wired to a stub, recording the paths it was asked for. */
-function stubRest(handler: (path: string) => unknown) {
-  const paths: string[] = [];
-  const rest = new DiscordRest({
-    token: 'test-token',
-    base: 'https://discord.test/api/v10',
-    minIntervalMs: 0,
-    fetchImpl: (async (url: string) => {
-      const path = String(url).replace('https://discord.test/api/v10', '');
-      paths.push(path);
-      const body = handler(path);
-      if (body === undefined) return new Response('', { status: 404 });
-      return new Response(JSON.stringify(body), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      });
-    }) as unknown as typeof fetch,
-  });
-  return { rest, paths };
-}
 
 describe('presence probe collection', () => {
   let db: Db;

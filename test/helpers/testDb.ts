@@ -49,6 +49,8 @@ const TABLES = [
   // TOG-469's internal instrument. Truncated like any other test data - it is
   // emphatically NOT part of the web contract, and no view reads it.
   'presence_probe',
+  'counter_snapshots',
+  'member_exclusions',
 ];
 
 /**
