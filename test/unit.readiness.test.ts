@@ -103,11 +103,15 @@ test('the live guild id in the staging variable is a fix, not a wait', () => {
   assert.match(c.detail, /LIVE/);
 });
 
-test('a missing database names the host issue and the Postgres one', () => {
+test('a missing database is the keyboard-holder\'s job, not a wait on anyone', () => {
+  // Was `blocked` on the founder until TOG-45 provisioned `two_bot_staging`
+  // (2026-08-25). The host exists and the schema is applied, so an unset
+  // variable is one export - naming an owner here would park QA behind a
+  // person who has nothing left to do.
   const c = get({ ...GOOD, TWO_STAGING_DATABASE_URL: undefined }, 'database');
-  assert.equal(c.status, 'blocked');
-  assert.match(c.owner ?? '', /TWO-11/);
-  assert.match(c.owner ?? '', /TWO-18/);
+  assert.equal(c.status, 'fix');
+  assert.equal(c.owner, undefined);
+  assert.match(c.action ?? '', /two_bot_staging/);
 });
 
 test('a SQLite path is refused - staging runs the same engine as live', () => {
@@ -174,10 +178,25 @@ test('a wrong value outranks a missing one - it can bite today', () => {
 });
 
 test('waiting on someone exits 3, distinctly from a setup error', () => {
-  const checks = stagingEnvChecks({});
+  // The database is set here on purpose. Since TOG-45 it is settable without
+  // anyone's help, so a bare `{}` environment carries a real `fix` and would
+  // score `fix` by the rule below - correctly, but it would no longer be
+  // testing what this test is about. The pure wait is: database done, token
+  // not bound.
+  const checks = stagingEnvChecks({ TWO_STAGING_DATABASE_URL: GOOD.TWO_STAGING_DATABASE_URL });
   assert.equal(verdict(checks), 'blocked');
   assert.equal(EXIT_CODE[verdict(checks)], 3);
   assert.equal(checks.every((c) => c.status !== 'blocked' || c.owner), true);
+});
+
+test('an empty environment now has something the operator can do themselves', () => {
+  // Guards the TOG-45 change end to end: before it, a clean checkout printed
+  // three WAITING lines and exited 3 - "nothing you can do". The database is
+  // no longer one of them.
+  const checks = stagingEnvChecks({});
+  assert.equal(verdict(checks), 'fix');
+  assert.equal(checks.filter((c) => c.status === 'blocked').length, 2);
+  assert.equal(checks.find((c) => c.id === 'database')!.status, 'fix');
 });
 
 // --- what the doctor says once it can open the database ---------------------
