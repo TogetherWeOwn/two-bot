@@ -11,6 +11,10 @@ without the numbers first.
 
 - Records every step of the join funnel: `member_join`, `first_message`,
   `first_voice_session`, `member_inactive`, `member_leave`.
+- Records every voice visit, not just the first: `voice_session_start` /
+  `voice_session_end`, with a duration where we saw both halves. That is what
+  makes "how often does this person turn up, and when" answerable. Needs a
+  running gateway listener; see `docs/EVENTS.md` limit 5.
 - Attributes each join to the invite that brought the member in, and says
   `unknown` when it honestly cannot tell.
 - Flags members who have gone quiet, and can list everyone who joined and never

@@ -39,6 +39,13 @@
  *     That is what this reads. Decided on TWO-64 against the alternative of a
  *     new repeatable voice_session event - see the comment on that issue.
  *
+ *     TOG-99 has since ADDED that event (voice_session_start/end) for the
+ *     questions last_active_at cannot answer - how often, and at what time of
+ *     day. AM30 still reads last_active_at and should keep doing so: the
+ *     session events cover voice only and produce no rows for any period the
+ *     bot was down, so switching AM30 onto them would silently under-report
+ *     everyone who is active by message and everyone active during an outage.
+ *
  *     last_active_at is a LAST value, so the rule has a floor and no ceiling:
  *
  *       AM30 = was AM7, left_at IS NULL, and last_active_at is at or after
