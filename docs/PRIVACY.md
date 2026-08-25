@@ -68,6 +68,12 @@ This makes historical counts drop slightly, which is correct.
   needs explicit CEO sign-off before it is built, not after.
 - **Nothing here reads a channel members talk in.** Not the live bot, not the
   backfill.
+- **No presence intent.** `src/discord/client.ts` requests five intents and
+  `GuildPresences` is not one of them, so we never see a member's online
+  status. The bot does record the guild's `approximate_presence_count` hourly
+  (TOG-469) — but that is a single number for the whole server from a REST
+  response, with no per-member data in it at all, and it is never published. A
+  test asserts both halves of that. See `docs/PRESENCE_PROBE.md`.
 
 > **The bot account currently holds Administrator.** An earlier version of this
 > page said it could not kick, ban or manage roles. That is no longer true: it
