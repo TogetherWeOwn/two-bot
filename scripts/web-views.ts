@@ -11,7 +11,7 @@
  * updating the contract *before* the new code rolls, and being able to look at
  * what the website can currently see without starting the bot.
  *
- * Run scripts/migrate.ts first - the views read tables that migration 0002
+ * Run scripts/migrate.ts first - the views read tables that migration 0003
  * creates.
  */
 import { openDb, isPostgresSpec } from '../src/store/db.ts';

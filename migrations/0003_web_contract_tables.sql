@@ -1,4 +1,4 @@
--- 0002_web_contract_tables: the bot-owned tables behind the `web_v1` contract.
+-- 0003_web_contract_tables: the bot-owned tables behind the `web_v1` contract.
 --
 -- This file creates TABLES only. The views the website actually reads live in
 -- `sql/web_v1.sql` and are applied by `npm run web:views`, not by a migration,
