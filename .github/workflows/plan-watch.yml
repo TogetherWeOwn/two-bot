@@ -2,9 +2,9 @@ name: plan-watch
 
 # Has GitHub started allowing branch protection yet?
 #
-# The org is on GitHub Free with private repos, where GitHub refuses branch
-# protection outright and stores nothing. So moving to Team later does NOT
-# switch protection on - there is no saved rule waiting to be enforced, and
+# The org spent a long time on GitHub Free with private repos, where GitHub
+# refuses branch protection outright and stores nothing. So changing plan does
+# NOT switch protection on - there is no saved rule waiting to be enforced, and
 # the day the plan changes is exactly the day nobody is thinking about branch
 # protection.
 #
@@ -30,58 +30,30 @@ name: plan-watch
 # keeps a --github-issue mode for the day issues are enabled; this workflow
 # does not use it, because against these repos it would only ever fail.
 #
-# CREDENTIAL - read this before assuming the schedule is working.
+# CREDENTIAL - the default GITHUB_TOKEN, and nothing else (TOG-383).
 #
-# Both probes need permissions the workflow's own GITHUB_TOKEN cannot be
-# granted. `administration` is not a valid `permissions:` key at all (an
-# earlier version of this file tried it and GitHub refused to parse the
-# workflow), and the org-plan field is only returned to an org admin, which a
-# repo-scoped token is not. So the watcher is only armed when the repository
-# secret PLAN_WATCH_TOKEN is set to a fine-grained, READ-ONLY org token:
+# This job used to be an unarmed self-test. Both probes read through the
+# `administration`-gated branch-protection endpoint, which a workflow token
+# cannot be granted (`administration` is not even a valid `permissions:` key),
+# so it reported two unknowns and exited 0 while the real alarm ran weekly out
+# of Paperclip on TOG-313.
 #
-#   Organization  Administration: read     (org plan)
-#   Repository    Administration: read     (branch protection)
-#                 Metadata: read
+# TOG-313 removed that dependency: plan-watch.sh now reconstructs the same
+# verdict from `branches/{b}` (`.protected`) and `rulesets` (200 vs 403), which
+# need only `contents: read` + `metadata: read` - exactly what the token below
+# already has. Nothing privileged is left, so the alarm lives here. The
+# repository secret PLAN_WATCH_TOKEN that used to be the way to arm this is
+# gone: delete it if it was ever created, and do not add one.
 #
-# Read-only on purpose. This token sits in Actions secrets on an org with no
-# branch protection, so anyone who can push a workflow can read it. A leak of
-# this one discloses the plan name and the protection config; nothing can be
-# changed with it. Do NOT reuse the setup-github.sh write token here.
+# The App private key is still deliberately NOT stored in Actions secrets. That
+# reasoning is unchanged and still correct - the installation is org-admin
+# grade, so a key sitting in Actions secrets on an org with no branch
+# protection is org admin for anyone who can push a workflow - it is simply no
+# longer load-bearing, because nothing here needs it. Full argument: TOG-307.
 #
-# Without that secret the job runs, reports that it cannot see, and exits 0.
-# It does not pretend to be watching. Tracked on TWO-85.
-#
-# WHERE THE ARMED ALARM ACTUALLY LIVES (TOG-307)
-#
-# PLAN_WATCH_TOKEN is still unset, and this job is still the unarmed
-# self-test described above. Do not read its weekly green check as coverage.
-# The armed probe runs weekly out of Paperclip instead, on TOG-313.
-#
-# It was moved there because the credential problem has no good Actions-side
-# answer. The org's GitHub App CAN issue both permissions this job needs -
-# verified 2026-08-24, `organization_administration: read` plus
-# `administration: read` runs plan-watch.sh with every probe answering - but
-# App installation tokens expire after an hour, so there is nothing static to
-# put in a secret. The obvious workaround, storing the App's private key here
-# so the job mints its own token, was rejected on purpose: that installation
-# is org-admin grade (secrets: write, members: write, actions: write, every
-# repo), so a key sitting in Actions secrets on an org with no branch
-# protection is org admin for anyone who can push a workflow. That is a far
-# worse leak than the read-only PAT this header asks for, to watch a repo
-# that is already unprotected.
-#
-# So the choice is deliberate, not an oversight: no agent can mint a
-# long-lived read-only token, and the one credential that could be stored
-# here must not be. Paperclip mints a fresh scoped token per check and stores
-# nothing.
-#
-# If PLAN_WATCH_TOKEN is ever set by hand, this job arms itself and TOG-313
-# becomes redundant - close it rather than running two alarms.
-#
-# That quiet exit-0 is only correct for a thin credential. It is NOT how a
-# missing target is handled - plan-watch.sh establishes existence separately,
-# through endpoints that need only metadata:read, so "my token is small" and
-# "the org is gone" cannot be confused for one another.
+# The org-plan probe still comes back unknown (it needs an org-scoped token),
+# and that is expected: it only corroborates now. The branch-protection probe
+# alone reaches a verdict, and either signal is enough to fire.
 
 on:
   schedule:
@@ -91,10 +63,22 @@ on:
   # So the day the founder upgrades the plan, this can be run on the spot
   # instead of waiting until Monday.
   workflow_dispatch:
-  # A watcher nobody exercises is a watcher that has quietly broken. Running
-  # it on any PR that touches it proves the script still executes and shows
-  # exactly what the available token can and cannot see. This path reports
-  # only - it never fails the PR.
+  # A watcher nobody exercises is a watcher that has quietly broken. Running it
+  # whenever it changes proves the script still executes against the token it
+  # will actually have on Monday.
+  #
+  # On main this is a full alarm, same as the schedule - a change that breaks
+  # the watcher should be visible on the commit that made it, not six days
+  # later. It is also the only armed trigger reachable without `actions:
+  # write`, which the agents maintaining this repo do not have, so it is what
+  # proves an arming change actually took.
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/plan-watch.sh'
+      - '.github/workflows/plan-watch.yml'
+  # On a PR it reports only - it never fails the PR, because the plan changing
+  # is not that PR's fault.
   pull_request:
     paths:
       - 'scripts/plan-watch.sh'
@@ -104,8 +88,9 @@ on:
 # and emails the owner. If this stops running, that is usually why - push
 # anything, or re-enable it from the Actions tab.
 
-# Nothing here writes. The probes read through PLAN_WATCH_TOKEN (see
-# CREDENTIAL above), and the alarm is the job's own exit status.
+# Nothing here writes. `contents: read` is not a formality here - it is the
+# permission the surviving probes actually run on. The alarm is the job's own
+# exit status.
 permissions:
   contents: read
 
@@ -117,23 +102,16 @@ jobs:
 
       - name: Probe, and speak up if branch protection is possible now
         env:
-          # Falls back to the workflow token so the job still runs and still
-          # reports honestly when the secret is missing.
-          GH_TOKEN: ${{ secrets.PLAN_WATCH_TOKEN || github.token }}
-          ARMED: ${{ secrets.PLAN_WATCH_TOKEN != '' }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -o pipefail
-
-          if [ "$ARMED" != "true" ]; then
-            echo "::warning title=plan-watch is not armed here::PLAN_WATCH_TOKEN is not set, so the probes cannot read branch protection or the org plan. This job is reporting, not watching - and that is the expected steady state. The armed weekly probe runs from Paperclip on TOG-313; see the CREDENTIAL header for why it cannot run here. See TWO-85, TOG-307."
-          fi
 
           # Tee the script's own reasoning into the run summary, so the run
           # explains itself without anyone opening the log.
           {
             echo '### plan-watch'
             echo
-            echo "armed: \`$ARMED\`  ·  event: \`${{ github.event_name }}\`"
+            echo "armed  ·  event: \`${{ github.event_name }}\`"
             echo
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
@@ -157,7 +135,7 @@ jobs:
           esac
 
           # A PR self-test reports what it saw; it does not fail the PR just
-          # because the plan changed. The scheduled run is the alarm.
+          # because the plan changed. Every other event is the alarm.
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             echo "self-test complete (exit $rc, not failing the PR)"
             exit 0

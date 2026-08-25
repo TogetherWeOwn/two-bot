@@ -164,12 +164,17 @@ the whole re-apply runbook in its own run summary.
 `./scripts/plan-watch.sh --runbook` prints those steps at any time. Full
 reasoning: TWO-85.
 
-**The watcher is not armed yet.** Both of its probes need permissions a
-workflow's `GITHUB_TOKEN` cannot be granted — `administration` is not even a
-valid `permissions:` key, and the org plan is only shown to an org admin. So it
-needs a fine-grained **read-only** org token in the repository secret
-`PLAN_WATCH_TOKEN`. Until that exists the job runs weekly, says it cannot see,
-and exits 0 — it does not pretend to be watching.
+**The watcher is armed, on the default `GITHUB_TOKEN`, with no secret to set.**
+It used to need permissions a workflow token cannot be granted —
+`administration` is not even a valid `permissions:` key, and the org plan is
+only shown to an org admin — so it ran unarmed, reported that it could not see,
+and exited 0. `plan-watch.sh` now reconstructs the same verdict from
+`branches/{b}` (`.protected`) and `rulesets` (200 vs 403), which need only
+`contents: read` + `metadata: read`. The repository secret `PLAN_WATCH_TOKEN`
+is obsolete: delete it if it was ever created, and do not add one (TOG-383).
+
+The org-plan probe still comes back unknown and that is expected — it only
+corroborates. The branch-protection probe alone reaches a verdict.
 
 The remaining manual step is the one no script can check for itself — that
 GitHub, and not just the local hook, rejects a direct push:
@@ -218,7 +223,7 @@ It is two controls: one that stops the accident, one that catches the bypass.
 | [`.githooks/pre-push`](../.githooks/pre-push) | Refuses a direct push to `main`, a non-fast-forward push to `main`, and deleting `main`. The initial import is allowed, because that is how history gets in. Escape hatch is `TWO_ALLOW_MAIN_PUSH=1` — deliberate, documented, and it prints a warning. |
 | [`.githooks/pre-commit`](../.githooks/pre-commit) | Refuses `.env`, `.pem`, `.p12`, ssh keys, `.npmrc`, service-account JSON, by filename. Filenames only, so it costs no measurable time and does not get uninstalled out of irritation. |
 | [`main-guard.yml`](../.github/workflows/main-guard.yml) | On every push to `main`, asks GitHub whether that commit is attached to a merged PR. If not, the run fails with the actor's name in it. |
-| [`plan-watch.yml`](../.github/workflows/plan-watch.yml) | Weekly, asks GitHub whether it is still refusing branch protection. Silent while the answer is yes. The week it changes, the job fails with the re-apply runbook in its summary — so Plan B ends deliberately rather than by being forgotten. Needs `PLAN_WATCH_TOKEN` to see anything; unarmed today. |
+| [`plan-watch.yml`](../.github/workflows/plan-watch.yml) | Weekly, asks GitHub whether it is still refusing branch protection. Silent while the answer is yes. The week it changes, the job fails with the re-apply runbook in its summary — so Plan B ends deliberately rather than by being forgotten. **Armed**, on the default `GITHUB_TOKEN`; no secret to set (TOG-383). Also runs on any push or PR that touches the watcher, so it cannot rot unnoticed. |
 
 Install is automatic — `npm ci` runs `npm run hooks:install`, which sets
 `core.hooksPath` to the versioned `.githooks/` directory. `setup-github.sh`
