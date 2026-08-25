@@ -12,6 +12,7 @@ export type ErrorCode =
   | 'stale_request'
   | 'action_not_allowed'
   | 'replayed'
+  | 'in_progress'
   | 'discord_rejected'
   | 'rate_limited'
   | 'internal'
@@ -30,6 +31,12 @@ const CODES: Record<ErrorCode, CodeSpec> = {
   stale_request: { status: 401, retryable: false },
   action_not_allowed: { status: 403, retryable: false },
   replayed: { status: 409, retryable: false },
+  // The one 409 that IS retryable, and the distinction is the whole point of
+  // the idempotency key: an earlier attempt at this same operation has not
+  // finished yet. Retrying with the same key is exactly right and will get
+  // either the stored result or another in_progress. Retrying a `replayed`
+  // never becomes anything else.
+  in_progress: { status: 409, retryable: true },
   discord_rejected: { status: 422, retryable: false },
   rate_limited: { status: 429, retryable: true },
   internal: { status: 500, retryable: true },

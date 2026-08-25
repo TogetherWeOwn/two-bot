@@ -7,10 +7,10 @@
  * from a fixed allowlist, and this process decides whether to do it. That is
  * the entire trust model, and it survives the website being compromised.
  *
- * Scope of this file (TWO-59): the pre-Postgres slice. Listener, HMAC, skew,
- * replay, rate limit, typed errors, structured logging, and the two naturally
- * idempotent actions. The durable idempotency-key store and the durable audit
- * trail are TWO-24, behind TWO-18.
+ * Scope of this file: the whole endpoint. Listener, HMAC, skew, replay, rate
+ * limit, typed errors, structured logging, all four allowlisted actions, and -
+ * since TOG-44 put the durable store behind it - idempotency keys and the
+ * durable audit trail.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -29,11 +29,26 @@ import {
 import { ACTIONS_PATH, type KeyRing } from './signing.ts';
 import { NonceCache, withinSkew } from './nonce.ts';
 import { ADD_MEMBER_BUCKET, DEFAULT_BUCKET, TokenBuckets } from './rateLimit.ts';
-import { assertAllowed, runAction, type ActionContext } from './actions.ts';
+import {
+  assertAllowed,
+  runAction,
+  NEEDS_IDEMPOTENCY_KEY,
+  type ActionContext,
+  type ActionOutcome,
+} from './actions.ts';
 import type { ActionDiscord } from './discordActions.ts';
+import { requestHash, type InternalActionStore } from './store.ts';
 
 /** Anything larger than this is a bug on the caller, not a request. */
 const MAX_BODY_BYTES = 64 * 1024;
+
+/**
+ * What we accept as an Idempotency-Key. A UUID is what the doc asks for, but
+ * anything opaque and bounded is safe - it is only ever compared, never
+ * interpreted. The bound matters because it is a primary key column and it
+ * lands in the audit trail.
+ */
+const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{8,200}$/;
 
 export interface InternalServerOptions {
   host: string;
@@ -42,8 +57,19 @@ export interface InternalServerOptions {
   guildId: string;
   discord: ActionDiscord;
   roleKeys: Map<string, string>;
+  /** Channels announcement.post and event.upsert may address, by key. */
+  channelKeys?: Map<string, string>;
   /** Which implemented actions are live. See ActionContext.enabled. */
   enabled: Set<string>;
+  /**
+   * Durable state: nonces, idempotency keys, the audit trail.
+   *
+   * Optional so the auth-only tests can start a listener without a database.
+   * When it is absent the replay guard falls back to the in-process cache,
+   * which a restart forgets, and the two key-requiring actions refuse to run
+   * at all rather than run unprotected.
+   */
+  store?: InternalActionStore | null;
   skewSeconds?: number;
   nonceTtlSeconds?: number;
   maxBodyBytes?: number;
@@ -86,6 +112,10 @@ export async function startInternalActions(opts: InternalServerOptions): Promise
     port: addr.port,
     keyIds: opts.keys.size,
     enabled: [...opts.enabled].sort(),
+    // False means the replay guard is in-process and a restart re-opens a
+    // ≤240s window. Said out loud at boot so it is a known state.
+    durable: Boolean(opts.store),
+    channelKeys: opts.channelKeys?.size ?? 0,
   });
 
   return {
@@ -111,7 +141,7 @@ async function handle(
   const startedAt = Date.now();
   // Filled in as we learn them, so the log line is useful even when we reject
   // early. Nothing from the request body is ever added here.
-  const seen: { keyId: string | null; action: string | null } = { keyId: null, action: null };
+  const seen: Seen = { keyId: null, action: null, idempotencyKey: null };
 
   try {
     // Any route but ours is a 404. Rejecting before reading a body means a
@@ -119,21 +149,32 @@ async function handle(
     if (req.method !== 'POST' || (req.url ?? '').split('?')[0] !== ACTIONS_PATH) {
       res.writeHead(404, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: false, error: { code: 'malformed', message: 'Unknown route', retryable: false }, request_id: requestId }));
-      logLine({ requestId, seen, outcome: 'rejected', code: 'malformed', status: 404, reason: 'unknown_route', startedAt });
+      await finish(opts, { requestId, seen, outcome: 'rejected', code: 'malformed', status: 404, reason: 'unknown_route', startedAt });
       return;
     }
 
     const raw = await readBody(req, maxBody);
     const result = await authoriseAndRun(req, raw, opts, nonces, buckets, seen);
 
-    respond(res, 200, successBody(result.result, requestId));
-    logLine({ requestId, seen, outcome: result.outcome, code: null, status: 200, reason: null, startedAt });
+    // A replayed result is a success and looks like one, because the operation
+    // really did happen. The header is how a caller tells "I posted that" from
+    // "you already posted that" without the result shape changing under it.
+    respond(res, 200, successBody(result.result, requestId), result.replayed ? { 'idempotent-replay': 'true' } : undefined);
+    await finish(opts, {
+      requestId,
+      seen,
+      outcome: result.replayed ? `replayed:${result.outcome}` : result.outcome,
+      code: null,
+      status: 200,
+      reason: result.replayed ? 'idempotent_replay' : null,
+      startedAt,
+    });
   } catch (err) {
     const actionErr = toActionError(err);
     const status = statusFor(actionErr.code);
     const headers = actionErr.retryAfter ? { 'retry-after': String(actionErr.retryAfter) } : undefined;
     respond(res, status, errorBody(actionErr, requestId), headers);
-    logLine({
+    await finish(opts, {
       requestId,
       seen,
       outcome: 'rejected',
@@ -143,6 +184,36 @@ async function handle(
       startedAt,
       extra: actionErr.code === 'internal' ? safeErrorFields(err) : undefined,
     });
+  }
+}
+
+/**
+ * The two records of a request: the structured stdout line and the durable
+ * audit row. Both, always, for every request.
+ *
+ * The audit write is best-effort *by design*. The response has already been
+ * sent by the time we get here, so throwing would only produce an unhandled
+ * rejection - and if the database is down we would rather lose an audit row
+ * than have the endpoint start failing requests it has already carried out.
+ * The failure is itself logged, so a silent gap in the trail is not possible.
+ */
+async function finish(opts: InternalServerOptions, a: LogArgs): Promise<void> {
+  logLine(a);
+  if (!opts.store) return;
+  try {
+    await opts.store.recordAudit({
+      requestId: a.requestId,
+      keyId: a.seen.keyId,
+      action: a.seen.action,
+      idempotencyKey: a.seen.idempotencyKey,
+      outcome: a.outcome,
+      code: a.code,
+      status: a.status,
+      reason: a.reason,
+      durationMs: Date.now() - a.startedAt,
+    });
+  } catch (err) {
+    log.error('internal_audit_write_failed', { requestId: a.requestId, err: String(err) });
   }
 }
 
@@ -161,8 +232,8 @@ async function authoriseAndRun(
   opts: InternalServerOptions,
   nonces: NonceCache,
   buckets: TokenBuckets,
-  seen: { keyId: string | null; action: string | null },
-) {
+  seen: Seen,
+): Promise<ActionOutcome & { replayed: boolean }> {
   const keyId = header(req, 'x-two-key-id');
   const timestamp = header(req, 'x-two-timestamp');
   const nonce = header(req, 'x-two-nonce');
@@ -182,7 +253,10 @@ async function authoriseAndRun(
     });
   }
 
-  if (!nonces.offer(nonce)) {
+  // Durable when there is a store, in-process otherwise. The difference is
+  // what a restart forgets: with the table, nothing.
+  const fresh = opts.store ? await opts.store.offerNonce(keyId, nonce) : nonces.offer(nonce);
+  if (!fresh) {
     throw new ActionError('replayed', 'This nonce has already been used', { logReason: 'replayed_nonce' });
   }
 
@@ -201,7 +275,8 @@ async function authoriseAndRun(
   }
   seen.action = action.slice(0, 64);
 
-  assertAllowed(action, opts.enabled);
+  const store = opts.store ?? null;
+  assertAllowed(action, { enabled: opts.enabled, store });
 
   // The tighter bucket on the one action that touches membership.
   if (action === 'guild.add_member') {
@@ -218,9 +293,82 @@ async function authoriseAndRun(
     guildId: opts.guildId,
     discord: opts.discord,
     roleKeys: opts.roleKeys,
+    channelKeys: opts.channelKeys ?? new Map(),
     enabled: opts.enabled,
+    store,
   };
-  return runAction(action, body, ctx);
+
+  if (!NEEDS_IDEMPOTENCY_KEY.has(action)) {
+    return { ...(await runAction(action, body, ctx)), replayed: false };
+  }
+  return runIdempotently(req, raw, action, body, ctx, store!, keyId, seen);
+}
+
+/**
+ * The retry-safe path, for the actions where a repeat would post a second
+ * announcement or create a duplicate event.
+ *
+ * The claim is taken BEFORE the Discord call and the result is written AFTER
+ * it, so the window in which a crash loses the record is exactly the Discord
+ * call itself. A crash there leaves an `in_flight` row that another request
+ * may take over once it is stale (store.ts, CLAIM_STALE_SECONDS) - which can
+ * re-post, and that is the honest trade: we cannot both guarantee at-most-once
+ * across a process death and stay unstuck. At-most-once inside a living
+ * process, and a bounded, logged window across a crash.
+ */
+async function runIdempotently(
+  req: IncomingMessage,
+  raw: Buffer,
+  action: Parameters<typeof runAction>[0],
+  body: Record<string, unknown>,
+  ctx: ActionContext,
+  store: InternalActionStore,
+  keyId: string,
+  seen: Seen,
+): Promise<ActionOutcome & { replayed: boolean }> {
+  const idempotencyKey = header(req, 'idempotency-key').trim();
+  if (!idempotencyKey) {
+    throw new ActionError('malformed', `"${action}" requires an Idempotency-Key header`, {
+      logReason: 'missing_idempotency_key',
+    });
+  }
+  if (!IDEMPOTENCY_KEY_PATTERN.test(idempotencyKey)) {
+    throw new ActionError('malformed', 'Idempotency-Key must be 8-200 characters of [A-Za-z0-9._:-]', {
+      logReason: 'bad_idempotency_key',
+    });
+  }
+  seen.idempotencyKey = idempotencyKey;
+
+  const claim = await store.claim(keyId, idempotencyKey, action, requestHash(raw));
+
+  if (claim.state === 'replayed') {
+    return { result: claim.stored.result, outcome: claim.stored.outcome, replayed: true };
+  }
+  if (claim.state === 'in_flight') {
+    throw new ActionError('in_progress', 'An earlier attempt at this operation is still running', {
+      logReason: 'idempotency_in_flight',
+    });
+  }
+  if (claim.state === 'mismatch') {
+    // Same key, different body. Handing back the other operation's result
+    // would hide a caller bug; a 400 names it on the first occurrence.
+    throw new ActionError('malformed', 'This Idempotency-Key was used for a different request', {
+      logReason: 'idempotency_key_reused',
+    });
+  }
+
+  try {
+    const outcome = await runAction(action, body, ctx);
+    await store.complete(keyId, idempotencyKey, { outcome: outcome.outcome, result: outcome.result });
+    return { ...outcome, replayed: false };
+  } catch (err) {
+    // Give the key back, so a retry of a retryable failure is a real second
+    // attempt rather than a cached error. See store.release().
+    await store.release(keyId, idempotencyKey).catch((releaseErr: unknown) => {
+      log.error('internal_idempotency_release_failed', { err: String(releaseErr) });
+    });
+    throw err;
+  }
 }
 
 function parseBody(req: IncomingMessage, raw: Buffer): Record<string, unknown> {
@@ -297,9 +445,21 @@ function safeErrorFields(err: unknown): Record<string, unknown> {
   return { errName: typeof e?.name === 'string' ? e.name : typeof err, errAt: frame ?? null };
 }
 
+/**
+ * What we have learned about a request so far. Deliberately three scalars and
+ * not the request: nothing from the body may be added here, because one of our
+ * bodies carries a live member OAuth token and this struct reaches both the
+ * log line and the audit table.
+ */
+interface Seen {
+  keyId: string | null;
+  action: string | null;
+  idempotencyKey: string | null;
+}
+
 interface LogArgs {
   requestId: string;
-  seen: { keyId: string | null; action: string | null };
+  seen: Seen;
   outcome: string;
   code: ErrorCode | null;
   status: number;
@@ -320,6 +480,7 @@ function logLine(a: LogArgs): void {
     requestId: a.requestId,
     keyId: a.seen.keyId,
     action: a.seen.action,
+    idempotencyKey: a.seen.idempotencyKey,
     outcome: a.outcome,
     code: a.code,
     status: a.status,

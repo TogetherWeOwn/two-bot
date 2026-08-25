@@ -14,6 +14,7 @@ import { loadInternalActionsConfig } from './internal/config.ts';
 import { startInternalActions, type InternalServer } from './internal/server.ts';
 import { KeyRing } from './internal/signing.ts';
 import { DiscordActions } from './internal/discordActions.ts';
+import { InternalActionStore } from './internal/store.ts';
 
 const cfg = loadConfig();
 setLogLevel(cfg.logLevel);
@@ -93,7 +94,11 @@ if (internalCfg) {
       base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
     }),
     roleKeys: internalCfg.roleKeys,
+    channelKeys: internalCfg.channelKeys,
     enabled: internalCfg.enabled,
+    // The durable nonce, idempotency and audit tables (TOG-44). The same
+    // database as everything else, so it is covered by the same backups.
+    store: new InternalActionStore(db),
   });
 }
 

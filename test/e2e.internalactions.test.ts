@@ -17,9 +17,16 @@ import { randomBytes } from 'node:crypto';
 import { startMockDiscord, type MockDiscord } from '../tools/mock-discord/server.ts';
 import { startInternalActions, type InternalServer, type InternalServerOptions } from '../src/internal/server.ts';
 import { KeyRing, sign } from '../src/internal/signing.ts';
-import { buildRoleKeys } from '../src/internal/actions.ts';
-import { DiscordActions, type ActionDiscord, type AddMemberOutcome } from '../src/internal/discordActions.ts';
+import { buildRoleKeys, buildChannelKeys, IMPLEMENTED_ACTIONS } from '../src/internal/actions.ts';
+import {
+  DiscordActions,
+  type ActionDiscord,
+  type AddMemberOutcome,
+  type ScheduledEventInput,
+} from '../src/internal/discordActions.ts';
 import { AUTH_FAILURE_MESSAGE } from '../src/internal/errors.ts';
+import { InternalActionStore } from '../src/internal/store.ts';
+import { openTestDb, type TestDb } from './helpers/testDb.ts';
 
 const KEY_ID = 'web-prod';
 const SECRET = 'k'.repeat(48);
@@ -27,25 +34,41 @@ const OTHER_SECRET = 'z'.repeat(48);
 const MEMBER = '900000000000009999';
 const ROLE_KEY = 'rocketleague';
 const ROLE_ID = '1065438504521322526'; // src/onboarding/catalog.ts
-const ALL_ACTIONS = new Set(['role.assign', 'guild.add_member']);
+const ALL_ACTIONS = new Set<string>(IMPLEMENTED_ACTIONS);
+/** The one channel the website is allowed to address in these tests. */
+const CHANNEL_KEY = 'announcements';
+const CHANNEL_ID = '1045943373007171674';
+const CHANNEL_KEY_SPEC = `${CHANNEL_KEY}:${CHANNEL_ID}`;
 
 let mock: MockDiscord;
+let testDb: TestDb;
 const servers: InternalServer[] = [];
 
 before(async () => {
   mock = await startMockDiscord();
+  // The durable store is not optional any more: idempotency, the replay guard
+  // and the audit trail all live in it, so these tests run against a real
+  // database (SQLite in memory by default, Postgres when pointed at one).
+  testDb = await openTestDb(import.meta.filename);
 });
 after(async () => {
   for (const s of servers) await s.close();
   await mock.close();
+  await testDb.cleanup();
 });
 beforeEach(() => {
   mock.captured.length = 0;
 });
 
+/** A fresh store per server, so one test's nonces cannot reject another's. */
+function freshStore(): InternalActionStore {
+  return new InternalActionStore(testDb.db);
+}
+
 /** A client that records what it was asked to do and nothing else. */
 function recordingDiscord(over: Partial<ActionDiscord> = {}) {
   const calls: string[] = [];
+  let nextEventId = 1;
   const client: ActionDiscord = {
     async memberRoles(_g, _u) {
       calls.push('memberRoles');
@@ -57,6 +80,17 @@ function recordingDiscord(over: Partial<ActionDiscord> = {}) {
     async addMember(_g, u, _t): Promise<AddMemberOutcome> {
       calls.push(`addMember:${u}`);
       return 'added';
+    },
+    async postMessage(c, _content) {
+      calls.push(`postMessage:${c}`);
+      return `msg-${calls.length}`;
+    },
+    async createEvent(_g, i: ScheduledEventInput) {
+      calls.push(`createEvent:${i.name}`);
+      return `evt-${nextEventId++}`;
+    },
+    async updateEvent(_g, id, i: ScheduledEventInput) {
+      calls.push(`updateEvent:${id}:${i.name}`);
     },
     ...over,
   };
@@ -71,7 +105,9 @@ async function start(over: Partial<InternalServerOptions> = {}): Promise<Interna
     guildId: mock.guildId,
     discord: recordingDiscord().client,
     roleKeys: buildRoleKeys(),
+    channelKeys: buildChannelKeys(CHANNEL_KEY_SPEC),
     enabled: new Set(ALL_ACTIONS),
+    store: freshStore(),
     ...over,
   });
   servers.push(srv);
@@ -101,15 +137,19 @@ interface CallOptions {
   signature?: string;
   contentType?: string | null;
   omitAuth?: boolean;
+  /** Sent as Idempotency-Key. Required by announcement.post and event.upsert. */
+  idempotencyKey?: string;
 }
 
 interface CallResult {
   status: number;
   retryAfter: string | null;
+  /** The Idempotent-Replay header: set only when the result came from the store. */
+  replayed: boolean;
   body: {
     ok: boolean;
     request_id: string;
-    result?: { outcome?: string };
+    result?: { outcome?: string; message_id?: string; event_id?: string };
     error?: { code: string; message: string; retryable: boolean };
   };
 }
@@ -129,17 +169,38 @@ async function call(srv: InternalServer, o: CallOptions = {}): Promise<CallResul
     headers['x-two-nonce'] = nonce;
     headers['x-two-signature'] = signature;
   }
+  if (o.idempotencyKey !== undefined) headers['idempotency-key'] = o.idempotencyKey;
 
   const res = await fetch(srv.url, { method: 'POST', headers, body: raw });
   return {
     status: res.status,
     retryAfter: res.headers.get('retry-after'),
+    replayed: res.headers.get('idempotent-replay') === 'true',
     body: (await res.json()) as CallResult['body'],
   };
 }
 
 const roleAssign = { action: 'role.assign', discord_id: MEMBER, role_key: ROLE_KEY };
 const addMember = (token: string) => ({ action: 'guild.add_member', discord_id: MEMBER, access_token: token });
+const announcement = (text = 'Server maintenance at 20:00 UTC.') => ({
+  action: 'announcement.post',
+  channel_key: CHANNEL_KEY,
+  body: text,
+});
+const eventUpsert = (over: Record<string, unknown> = {}) => ({
+  action: 'event.upsert',
+  event_key: 'launch-night',
+  name: 'Launch Night',
+  starts_at: '2026-09-01T19:00:00.000Z',
+  ends_at: '2026-09-01T22:00:00.000Z',
+  location: 'The Together We Own server',
+  ...over,
+});
+
+/** A fresh idempotency key. Unique per call, like a real caller's UUID. */
+function newKey(): string {
+  return `idem-${randomBytes(12).toString('hex')}`;
+}
 
 /** The structured log lines emitted while `fn` runs, parsed. */
 function jsonLines(captured: string): Record<string, unknown>[] {
@@ -370,12 +431,16 @@ test('an action outside the allowlist is refused, including one we have not buil
   assert.equal(invented.status, 403);
   assert.equal(invented.body.error?.code, 'action_not_allowed');
 
-  // Approved in the spec, but it needs the durable idempotency store. A typed
-  // refusal beats a 500 while the website is being written against the doc.
-  const pending = await call(srv, { body: { action: 'announcement.post', channel_key: 'announcements', body: 'hi' } });
-  assert.equal(pending.status, 403);
-  assert.equal(pending.body.error?.code, 'action_not_allowed');
-  assert.equal(pending.body.error?.retryable, false);
+  // A channel the website was not given a key for. The key map is the second
+  // allowlist inside the first: a bug on the site cannot address an arbitrary
+  // channel even though announcement.post itself is live.
+  const wrongChannel = await call(srv, {
+    body: { action: 'announcement.post', channel_key: 'staff-only', body: 'hi' },
+    idempotencyKey: newKey(),
+  });
+  assert.equal(wrongChannel.status, 403);
+  assert.equal(wrongChannel.body.error?.code, 'action_not_allowed');
+  assert.equal(wrongChannel.body.error?.retryable, false);
 
   assert.deepEqual(calls, []);
 });
@@ -587,4 +652,278 @@ test('the listener refuses to start on a public address or with no keys', async 
     }),
     /no signing keys/,
   );
+});
+
+// --- idempotency (TOG-44) ----------------------------------------------------
+//
+// The two §10 cases that were deferred until there was a durable store, plus
+// the ones the store made reachable. This is the section that decides whether
+// a timeout on the website turns into a second announcement on a live server.
+
+test('announcement.post posts once and returns the message id', async () => {
+  const srv = await startAgainstMock();
+  const res = await call(srv, { body: announcement(), idempotencyKey: newKey() });
+
+  assert.equal(res.status, 200);
+  assert.equal(res.body.result?.outcome, 'posted');
+  assert.equal(typeof res.body.result?.message_id, 'string');
+  assert.equal(res.replayed, false);
+
+  const posts = mock.captured.filter((c) => c.method === 'POST' && c.url.endsWith('/messages'));
+  assert.equal(posts.length, 1, 'exactly one message');
+  assert.match(posts[0].url, new RegExp(`/channels/${CHANNEL_ID}/messages$`));
+  // Posted verbatim, but unable to notify anybody. An announcement is written
+  // by whoever has the form on the website; it does not get to @everyone.
+  const sent = posts[0].body as { content: string; allowed_mentions: { parse: string[] } };
+  assert.equal(sent.content, 'Server maintenance at 20:00 UTC.');
+  assert.deepEqual(sent.allowed_mentions.parse, []);
+});
+
+test('a retry with the same idempotency key is a no-op and replays the result', async () => {
+  // The case the issue is really about: "you must not double-post an
+  // announcement because a timeout was a lie." A retry carries the SAME
+  // Idempotency-Key and a NEW nonce - that is what distinguishes it from a
+  // replay of the traffic.
+  const { client, calls } = recordingDiscord();
+  const srv = await start({ discord: client });
+  const key = newKey();
+
+  const first = await call(srv, { body: announcement(), idempotencyKey: key });
+  assert.equal(first.status, 200);
+  assert.equal(first.replayed, false);
+  assert.deepEqual(calls, [`postMessage:${CHANNEL_ID}`]);
+
+  const retry = await call(srv, { body: announcement(), idempotencyKey: key });
+  assert.equal(retry.status, 200, 'a retry is a success, not an error');
+  assert.equal(retry.replayed, true, 'and it says so in the header');
+  assert.deepEqual(retry.body.result, first.body.result, 'byte-identical to what it got the first time');
+  assert.deepEqual(calls, [`postMessage:${CHANNEL_ID}`], 'Discord was called exactly once');
+});
+
+test('the same idempotency key with a different body is a caller bug, not a replay', async () => {
+  const { client, calls } = recordingDiscord();
+  const srv = await start({ discord: client });
+  const key = newKey();
+
+  await call(srv, { body: announcement('first'), idempotencyKey: key });
+  const reused = await call(srv, { body: announcement('something else entirely'), idempotencyKey: key });
+
+  assert.equal(reused.status, 400);
+  assert.equal(reused.body.error?.code, 'malformed');
+  assert.equal(reused.body.error?.retryable, false);
+  assert.deepEqual(calls, [`postMessage:${CHANNEL_ID}`], 'the second body never reached Discord');
+});
+
+test('an action that needs a key refuses to run without one', async () => {
+  const { client, calls } = recordingDiscord();
+  const srv = await start({ discord: client });
+
+  for (const [name, key] of [['absent', undefined], ['too short', 'abc'], ['illegal characters', 'a key with spaces']] as const) {
+    const res = await call(srv, { body: announcement(), idempotencyKey: key });
+    assert.equal(res.status, 400, name);
+    assert.equal(res.body.error?.code, 'malformed', name);
+  }
+  assert.deepEqual(calls, [], 'nothing without a usable key reached Discord');
+});
+
+test('a failed attempt releases its key, so a retry is a real second attempt', async () => {
+  // The website is told `retryable: true` for a 502. If we cached the failure
+  // against the idempotency key, that promise would be a lie.
+  let attempts = 0;
+  const { client, calls } = recordingDiscord({
+    async postMessage(c, _content) {
+      attempts++;
+      if (attempts === 1) throw new Error('Discord fell over');
+      calls.push(`postMessage:${c}`);
+      return 'msg-recovered';
+    },
+  });
+  const srv = await start({ discord: client });
+  const key = newKey();
+
+  const failed = await call(srv, { body: announcement(), idempotencyKey: key });
+  assert.equal(failed.status, 500);
+  assert.equal(failed.body.error?.retryable, true);
+
+  const retry = await call(srv, { body: announcement(), idempotencyKey: key });
+  assert.equal(retry.status, 200, 'the key was given back');
+  assert.equal(retry.replayed, false, 'and this is a real attempt, not a cached one');
+  assert.equal(retry.body.result?.message_id, 'msg-recovered');
+  assert.equal(attempts, 2);
+});
+
+test('a concurrent retry gets in_progress, which is the one retryable 409', async () => {
+  // Two attempts at the same operation overlapping. The second must not run
+  // the action, and must not be told `replayed` either - nothing has finished
+  // yet, so the honest answer is "come back".
+  let release: (() => void) | null = null;
+  const held = new Promise<void>((r) => {
+    release = r;
+  });
+  const { client, calls } = recordingDiscord({
+    async postMessage(c, _content) {
+      calls.push(`postMessage:${c}`);
+      await held;
+      return 'msg-slow';
+    },
+  });
+  const srv = await start({ discord: client });
+  const key = newKey();
+
+  const slow = call(srv, { body: announcement(), idempotencyKey: key });
+  // Let the first request claim the key before the second one arrives.
+  await new Promise((r) => setTimeout(r, 30));
+  const overlapping = await call(srv, { body: announcement(), idempotencyKey: key });
+
+  assert.equal(overlapping.status, 409);
+  assert.equal(overlapping.body.error?.code, 'in_progress');
+  assert.equal(overlapping.body.error?.retryable, true, 'retrying this one DOES eventually change the answer');
+
+  release!();
+  assert.equal((await slow).status, 200);
+  assert.deepEqual(calls, [`postMessage:${CHANNEL_ID}`], 'only the claim holder called Discord');
+});
+
+test('the replay guard survives a restart, because it is a table now', async () => {
+  // The limit called out in §6: the in-process cache used to forget every
+  // nonce on restart, re-opening a ≤240s replay window. Two servers sharing
+  // one store stand in for the same process before and after a bounce.
+  const nonce = randomBytes(16).toString('hex');
+  const store = freshStore();
+  const before = await start({ store });
+  const first = await call(before, { body: roleAssign, nonce });
+  assert.equal(first.status, 200);
+
+  const { client, calls } = recordingDiscord();
+  const after = await start({ store, discord: client });
+  const replay = await call(after, { body: roleAssign, nonce });
+
+  assert.equal(replay.status, 409);
+  assert.equal(replay.body.error?.code, 'replayed');
+  assert.deepEqual(calls, [], 'the replay reached Discord not at all');
+});
+
+// --- event.upsert ------------------------------------------------------------
+
+test('event.upsert creates once and updates thereafter', async () => {
+  const srv = await startAgainstMock();
+
+  const created = await call(srv, { body: eventUpsert(), idempotencyKey: newKey() });
+  assert.equal(created.status, 200);
+  assert.equal(created.body.result?.outcome, 'created');
+  const eventId = created.body.result?.event_id;
+  assert.equal(typeof eventId, 'string');
+
+  // A new idempotency key: this is a deliberate second call, not a retry.
+  const updated = await call(srv, {
+    body: eventUpsert({ name: 'Launch Night (moved)' }),
+    idempotencyKey: newKey(),
+  });
+  assert.equal(updated.status, 200);
+  assert.equal(updated.body.result?.outcome, 'updated');
+  assert.equal(updated.body.result?.event_id, eventId, 'the same Discord event, not a duplicate');
+
+  const posts = mock.captured.filter((c) => c.method === 'POST' && c.url.endsWith('/scheduled-events'));
+  const patches = mock.captured.filter((c) => c.method === 'PATCH' && c.url.includes('/scheduled-events/'));
+  assert.equal(posts.length, 1, 'exactly one event was ever created');
+  assert.equal(patches.length, 1);
+  assert.match(patches[0].url, new RegExp(`/scheduled-events/${eventId}$`));
+});
+
+test('event.upsert insists on exactly one of channel_key and location', async () => {
+  const { client, calls } = recordingDiscord();
+  const srv = await start({ discord: client });
+
+  const neither = await call(srv, {
+    body: eventUpsert({ location: undefined }),
+    idempotencyKey: newKey(),
+  });
+  assert.equal(neither.status, 400);
+  assert.equal(neither.body.error?.code, 'malformed');
+
+  const both = await call(srv, {
+    body: eventUpsert({ channel_key: CHANNEL_KEY }),
+    idempotencyKey: newKey(),
+  });
+  assert.equal(both.status, 400);
+  assert.equal(both.body.error?.code, 'malformed');
+
+  const backwards = await call(srv, {
+    body: eventUpsert({ ends_at: '2026-09-01T18:00:00.000Z' }),
+    idempotencyKey: newKey(),
+  });
+  assert.equal(backwards.status, 400);
+  assert.equal(backwards.body.error?.code, 'malformed');
+
+  assert.deepEqual(calls, [], 'nothing ambiguous reached Discord');
+});
+
+// --- the durable audit trail (§4) --------------------------------------------
+
+test('every request lands in the audit trail, accepted or rejected', async () => {
+  const store = freshStore();
+  const srv = await start({ store });
+
+  const ok = await call(srv, { body: roleAssign });
+  const bad = await call(srv, { body: roleAssign, secret: OTHER_SECRET });
+  // The audit write happens after the response is flushed.
+  await new Promise((r) => setTimeout(r, 50));
+
+  const rows = await testDb.db
+    .prepare(`SELECT * FROM internal_action_log WHERE request_id IN (?, ?)`)
+    .all<Record<string, unknown>>(ok.body.request_id, bad.body.request_id);
+  assert.equal(rows.length, 2, 'both the success and the rejection are recorded');
+
+  const accepted = rows.find((r) => r.request_id === ok.body.request_id)!;
+  assert.equal(accepted.key_id, KEY_ID);
+  assert.equal(accepted.action, 'role.assign');
+  assert.equal(accepted.outcome, 'assigned');
+  assert.equal(accepted.status, 200);
+  assert.equal(accepted.code, null);
+
+  const rejected = rows.find((r) => r.request_id === bad.body.request_id)!;
+  assert.equal(rejected.outcome, 'rejected');
+  assert.equal(rejected.code, 'unauthorized');
+  assert.equal(rejected.status, 401);
+  // We could not trust the key id on a failed signature, so we do not record
+  // one. An unauthenticated caller must not be able to write rows attributed
+  // to a real caller.
+  assert.equal(rejected.action, null);
+});
+
+test('the audit trail records an idempotent replay as a replay', async () => {
+  const store = freshStore();
+  const srv = await start({ store });
+  const key = newKey();
+
+  await call(srv, { body: announcement(), idempotencyKey: key });
+  const retry = await call(srv, { body: announcement(), idempotencyKey: key });
+  await new Promise((r) => setTimeout(r, 50));
+
+  const row = await testDb.db
+    .prepare(`SELECT * FROM internal_action_log WHERE request_id = ?`)
+    .get<Record<string, unknown>>(retry.body.request_id);
+
+  assert.equal(row?.outcome, 'replayed:posted');
+  assert.equal(row?.idempotency_key, key, 'so the two attempts can be joined up');
+  assert.equal(row?.status, 200);
+});
+
+test('no request body ever reaches the database', async () => {
+  // The standing rule from §4, asserted rather than intended. One of our
+  // bodies carries a live member OAuth token; the announcement body is the
+  // other thing that must not be stored.
+  const store = freshStore();
+  const srv = await start({ store });
+  const secretish = 'oauth-token-do-not-store-me';
+
+  await call(srv, { body: announcement(secretish), idempotencyKey: newKey() });
+  await call(srv, { body: addMember(secretish), idempotencyKey: newKey() });
+  await new Promise((r) => setTimeout(r, 50));
+
+  for (const table of ['internal_action_log', 'internal_idempotency', 'internal_nonces']) {
+    const rows = await testDb.db.prepare(`SELECT * FROM ${table}`).all<Record<string, unknown>>();
+    const dumped = JSON.stringify(rows);
+    assert.equal(dumped.includes(secretish), false, `${table} contains a request body`);
+  }
 });
