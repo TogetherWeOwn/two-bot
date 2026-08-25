@@ -42,7 +42,8 @@
     "restore:pg": "node scripts/pg-restore.ts",
     "web:views": "node scripts/web-views.ts",
     "web:role": "node scripts/provision-web-role.ts",
-    "verify:web-role": "node scripts/verify-web-role.ts"
+    "verify:web-role": "node scripts/verify-web-role.ts",
+    "presence:trend": "node scripts/presence-trend.ts"
   },
   "dependencies": {
     "discord.js": "^14.27.0",

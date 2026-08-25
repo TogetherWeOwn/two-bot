@@ -46,6 +46,9 @@ const TABLES = [
   'rank_snapshots',
   'member_ranks',
   'scheduled_events',
+  // TOG-469's internal instrument. Truncated like any other test data - it is
+  // emphatically NOT part of the web contract, and no view reads it.
+  'presence_probe',
 ];
 
 /**

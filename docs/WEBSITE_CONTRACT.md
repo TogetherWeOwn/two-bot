@@ -247,6 +247,13 @@ page, and these are numbers that would hurt us on the way past.
   trend arrows, sparkline series.
 - **Usernames, nicknames, avatars, emails, IPs.** We do not have them.
 - **Message content.** We do not request the intent, so it does not exist.
+- **`approximate_presence_count`, at any grain.** We now collect it hourly into
+  `presence_probe` (TOG-469, migration 0004) as an internal instrument, to test
+  on a series rather than one reading whether the online number would ever be
+  worth publishing. It is **not** a candidate for this contract and adding a
+  view over it is not a small change: it counts our 23 bots as people, which is
+  the same error as publishing 107 members when 84 are human. A test asserts no
+  file in `sql/` names that table. See `docs/PRESENCE_PROBE.md`.
 
 The full never-show list is the Web Lead's, in `two-design/docs/CONTENT.md`.
 This section mirrors it at the data layer so the rule is enforced by what the
