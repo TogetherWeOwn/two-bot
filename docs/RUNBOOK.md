@@ -449,6 +449,31 @@ failed rather than letting it pass quietly for six months.
 The dump runs in a single `REPEATABLE READ` transaction, so it is a snapshot of
 one instant. You do **not** need to stop the bot to take one.
 
+`TWO_BACKUP_KEEP` must be a positive whole number. Leave it unset for the
+default of 14; set it to anything that is not a number and the run aborts
+before it dumps, rather than pruning. This is deliberate and worth knowing why:
+`Number('')` is `0`, `Number('fourteen')` is `NaN`, and `Array.slice()` treats
+both as `0` — so a typo here used to mean *delete every backup on the box*,
+including the one written seconds earlier. It is pinned by
+`test/unit.backupretention.test.ts`.
+
+### Is a backup file any good?
+
+`--dry-run` reads a dump end to end and checks it against its own manifest —
+format version, table names, the end marker that a full disk would have cut
+off, and the row count. It writes nothing, runs no migrations and opens no
+transaction, and `TWO_RESTORE_URL` is optional, so you can point it at an
+off-box copy from wherever that copy landed:
+
+```bash
+node scripts/pg-restore.ts ./two-funnel-<stamp>.ndjson.gz --dry-run
+```
+
+`DRY RUN VERIFIED` and exit 0 means the file is internally consistent. It does
+**not** mean the restore will succeed — only a real restore into the scratch
+database proves that. Set `TWO_RESTORE_URL` as well to also see the row counts
+the restore would be overwriting.
+
 ### Restore
 
 ```bash
@@ -485,18 +510,79 @@ systemctl status two-bot-restore-drill
 journalctl -u two-bot-restore-drill -n 40
 ```
 
-**Last drill performed by hand: 2026-08-19.** 4,947 events / 1,874 members /
-16 invite snapshots dumped and restored into a scratch database; counts matched
-per table, the restored copy produced a byte-identical funnel report, and the
-`events` id sequence resumed correctly so new writes did not collide.
+**Last drill: 2026-08-24 (TOG-37), against a synthetic database, not
+production.** 4,009 events / 1,874 members / 5 invite snapshots were loaded
+into SQLite through the bot's own write path, migrated with
+`scripts/migrate-sqlite-to-postgres.ts`, dumped with `scripts/pg-backup.ts`,
+copied off-box by `TWO_BACKUP_UPLOAD_CMD`, and restored from *that off-box
+copy* into a scratch database. What was checked:
+
+- row counts matched per table against the dump manifest — `RESTORE VERIFIED`
+- the MD5 of every `events` row, all columns, was identical before and after;
+  likewise `members`. Counts alone would not have caught one row dropped and
+  one duplicated
+- the set of `events.idempotency_key` hashed identically, so a re-delivered
+  join is still recognised as a duplicate after a restore
+- `scripts/funnel.ts` produced byte-identical output from the original SQLite
+  file, the migrated Postgres database, and the restored copy
+- the `events` id sequence resumed at 4010, so the first write after the
+  restore did not collide
+
+> **Not yet drilled against production data.** No box is running this build
+> yet, so there is no production database to dump. The first real drill happens
+> when the bot is live on Postgres in staging — tracked on TOG-45. Until then,
+> the procedure is proven and the data it has been proven on is synthetic.
+
+**Re-verified 2026-08-25 (TOG-37, after review TOG-342).** Not a new drill —
+no off-box copy was involved — but the scripts changed, so the parts that could
+be re-run were. Against an ephemeral PostgreSQL 18.4: the full suite (284 tests)
+passed; `migrate-sqlite-to-postgres.ts` copied a 54-event / 40-member SQLite
+database and reported `MIGRATION VERIFIED` with the id sequence at 55; the same
+migration re-run over its own output with `--allow-nonempty` also verified,
+which it could not do before; and with the id sequence deliberately detached it
+reported `MIGRATION FAILED` and exited 1, where it previously reported `ok`.
+`pg-restore.ts --dry-run` verified a good dump and rejected both a truncated one
+and one naming a table the bot does not own.
+
+An earlier revision of this file recorded a drill on 2026-08-19 with different
+numbers (4,947 / 1,874 / 16). That drill was performed against a different
+deployment of this codebase and the scripts it describes were never committed
+to this repository, so the claim could not be reproduced here. It has been
+replaced rather than kept, because a runbook entry that cannot be re-run is
+worse than none.
 
 ### Off-box destination
 
-Set `TWO_BACKUP_UPLOAD_CMD` in `/etc/two-bot/backup.env` to a command that takes
-the backup file path as its last argument, for example:
+`scripts/pg-backup.ts` splits `TWO_BACKUP_UPLOAD_CMD` on whitespace and appends
+the dump path as the **last** argument. Two consequences, and they bite:
+
+1. **The dump ends up as the last positional.** That is what `cp -t DIR FILE`
+   wants. It is the opposite of what `rclone copy SRC DST`, `aws s3 cp SRC DST`
+   and `scp SRC DST` want — those would read the dump as the *destination*.
+2. **No argument can contain a space**, because the split has no notion of
+   quoting.
+
+So use a wrapper. `deploy/two-backup-upload` is one — edit the destination line
+in it, then:
+
+```bash
+sudo install -m 755 deploy/two-backup-upload /usr/local/bin/two-backup-upload
+```
 
 ```
-TWO_BACKUP_UPLOAD_CMD=/usr/bin/rclone copy --config /etc/two-bot/rclone.conf --to backup:two-funnel
+TWO_BACKUP_UPLOAD_CMD=/usr/local/bin/two-backup-upload
+```
+
+pg-backup.ts appends the dump path, the wrapper takes it as `"$1"` and puts it
+where the real tool wants it. The env var stays a single bare word, so neither
+problem above can come back when the destination changes.
+
+The only form safe to inline is one where the file genuinely belongs last and
+nothing needs quoting — which in practice means a same-box staging copy, and
+that is not an off-box backup:
+
+```
+TWO_BACKUP_UPLOAD_CMD=/bin/cp -t /srv/backup-staging
 ```
 
 If it is unset the backup still runs, and warns that it is sitting on the same
@@ -504,7 +590,9 @@ disk as the database — which protects against corruption and mistakes but not
 against losing the machine.
 
 > **Not yet configured.** Object storage costs money, so the destination and its
-> credentials are a CEO decision. Tracked on TWO-47.
+> credentials are a CEO decision. Tracked on TOG-69 — which is blocked on this
+> branch landing, because `pg-backup.ts` and the upload hook do not exist on
+> `main`.
 
 ### Why not `pg_dump`
 

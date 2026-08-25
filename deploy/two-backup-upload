@@ -1,0 +1,31 @@
+#!/bin/sh
+# Copies one nightly backup off the box. Installed as /usr/local/bin/two-backup-upload
+# and pointed at by TWO_BACKUP_UPLOAD_CMD in /etc/two-bot/backup.env.
+#
+# scripts/pg-backup.ts runs TWO_BACKUP_UPLOAD_CMD with the dump path appended as
+# the LAST argument, after splitting the variable on whitespace. That is fine for
+# tools whose last positional is the source (`cp -t DIR FILE`), and wrong for
+# every tool whose last positional is the destination — `rclone copy SRC DST`,
+# `aws s3 cp SRC DST`, `scp SRC DST`. It also means no argument can contain a
+# space. This wrapper takes the path as "$1" and puts it where the tool wants it,
+# so both problems go away and the env var stays a single bare word.
+#
+# Exit non-zero on failure: pg-backup.ts treats that as a failed backup and lets
+# systemd surface it. Do not swallow errors here.
+#
+# EDIT THE DESTINATION BELOW before installing. It is not chosen yet — see TOG-69.
+set -eu
+
+if [ $# -ne 1 ]; then
+	echo "two-backup-upload: expected exactly one argument (the dump path)" >&2
+	exit 2
+fi
+
+dump=$1
+[ -f "$dump" ] || { echo "two-backup-upload: no such file: $dump" >&2; exit 2; }
+
+exec /usr/bin/rclone copy --config /etc/two-bot/rclone.conf "$dump" backup:two-funnel
+
+# Alternatives, same shape — the dump is the SOURCE, the remote is the DESTINATION:
+#   exec /usr/bin/aws s3 cp "$dump" s3://two-funnel-backups/
+#   exec /usr/bin/scp -i /etc/two-bot/backup_id_ed25519 "$dump" backup@host:/srv/two-funnel/
