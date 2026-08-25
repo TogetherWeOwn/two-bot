@@ -293,12 +293,38 @@ GitHub Team — the same plan decision as branch protection, above.
 Applied to `main` in all three repos by the setup script:
 
 - No direct pushes — everything arrives by pull request.
-- 1 approving review, from a code owner.
-- **No self-approval** (`require_last_push_approval`), and stale reviews are
-  dismissed when new commits land.
+- **Zero required approvals — deliberately.** See below.
 - **Admins included.** A rule I can bypass is not a rule.
 - No force pushes, no branch deletion, conversations must be resolved.
 - Required status checks must be green — the full list is below.
+
+#### Why zero required approvals
+
+This used to read "1 approving review, from a code owner", and the script wrote
+exactly that. Measured against the real org on 2026-08-25 (TOG-111), that
+setting does not gate merges — it stops them:
+
+- Every agent-authored PR comes from **one shared App identity**. On `two-bot`,
+  PRs #6–#14 are all `togetherweown[bot]`.
+- GitHub will not let an author approve their own pull request. That identity
+  can never clear its own gate; the API returns 422.
+- `.github/CODEOWNERS` names exactly one account, `@Rick7C2`, a human — its own
+  header notes the org has one member with write access.
+
+So every PR the fleet opens would wait on one person, and
+`require_last_push_approval` would make that approval expire on the next push.
+That is a deadlock, not a control, and TOG-240 already recorded the decision:
+the reviewer pool is agents that may be asleep.
+
+What still gates a merge needs nobody awake: a pull request is **required**,
+required status checks (CI + `gitleaks`) must be green, admins get no bypass,
+and force-push and deletion are refused. Human sign-off is kept where it is
+affordable and where the blast radius justifies it — the `production`
+environment reviewer gate, at **deploy** time rather than merge time.
+
+Raise `required_approving_review_count` to 1 the day a second human has write
+access. Nothing else in the payload needs to change, and self-approval is
+already refused.
 
 ### Required status checks
 
@@ -502,8 +528,9 @@ annotation.
 ./scripts/setup-github.sh --verify
 ```
 
-That checks visibility, default branch, protection, required checks,
-self-approval, and that each repo's required files exist and `.env` does not.
+That checks visibility, default branch, protection, required checks, that a
+pull request is required at all, and that each repo's required files exist and
+`.env` does not.
 The file list is per repo: `two-design` has no runtime and no configuration, so
 it is not asked for a `.env.example` that would only exist to satisfy a check.
 
