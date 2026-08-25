@@ -15,6 +15,7 @@
  */
 import { basename } from 'node:path';
 import { openDb, isPostgresSpec, type Db } from '../../src/store/db.ts';
+import { webSchemaFor } from '../../src/store/webContract.ts';
 
 export const TEST_PG_URL = process.env.TWO_TEST_DATABASE_URL ?? '';
 export const usingPostgres = isPostgresSpec(TEST_PG_URL);
@@ -29,10 +30,37 @@ function schemaFor(label: string): string {
   return `test_${clean || 'anon'}`;
 }
 
-const TABLES = ['events', 'members', 'invite_snapshots'];
+/**
+ * Emptied between fixtures.
+ *
+ * `rank_ladder` and `web_contract_meta` are NOT here: they are seed rows from
+ * migration 0002, not test data, and `web_v1.rank_counts` left-joins from the
+ * ladder to guarantee all five ranks always come back. Truncating it would make
+ * that guarantee silently untestable.
+ */
+const TABLES = [
+  'events',
+  'members',
+  'invite_snapshots',
+  'guild_counters',
+  'rank_snapshots',
+  'member_ranks',
+  'scheduled_events',
+];
+
+/**
+ * The SQLite path bootstraps from src/store/schema.sql, which the migrations do
+ * not touch - so it only has the original three. Everything migration 0002 adds
+ * is Postgres-only, like the views that read it.
+ */
+const SQLITE_TABLES = ['events', 'members', 'invite_snapshots'];
 
 export interface TestDb {
   db: Db;
+  /** Schema holding the bot's tables. `main` on SQLite, `test_*` on Postgres. */
+  schema?: string;
+  /** Schema the contract views go in, when there are any. Postgres only. */
+  webSchema?: string;
   /** Empty every table, leaving the schema in place. */
   reset(): Promise<void>;
   cleanup(): Promise<void>;
@@ -47,7 +75,7 @@ export async function openTestDb(label: string): Promise<TestDb> {
     return {
       db,
       async reset() {
-        for (const t of TABLES) await db.exec(`DELETE FROM ${t}`);
+        for (const t of SQLITE_TABLES) await db.exec(`DELETE FROM ${t}`);
         // Restart the rowid counter so event ids look the same as a fresh
         // database - `recent()` and any id assertion depend on it.
         await db.exec(`DELETE FROM sqlite_sequence WHERE name = 'events'`);
@@ -59,8 +87,14 @@ export async function openTestDb(label: string): Promise<TestDb> {
   }
 
   const schema = schemaFor(label);
+  // The contract views get their own schema per test file too, or parallel
+  // files would CREATE OR REPLACE each other's views mid-run and every one of
+  // them would end up reading one file's tables. See src/store/webContract.ts.
+  const webSchema = webSchemaFor(schema);
+
   // Start from a clean slate even if a previous run died mid-test.
   const bootstrap = await openDb(TEST_PG_URL, { skipMigrations: true });
+  await bootstrap.exec(`DROP SCHEMA IF EXISTS ${webSchema} CASCADE`);
   await bootstrap.exec(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
   await bootstrap.close();
 
@@ -68,10 +102,16 @@ export async function openTestDb(label: string): Promise<TestDb> {
 
   return {
     db,
+    schema,
+    webSchema,
     async reset() {
       await db.exec(`TRUNCATE ${TABLES.join(', ')} RESTART IDENTITY`);
     },
     async cleanup() {
+      // Views first: they depend on the tables, and CASCADE on the bot schema
+      // would drop them without the schema itself, leaving an empty husk behind
+      // for the next run to trip over.
+      await db.exec(`DROP SCHEMA IF EXISTS ${webSchema} CASCADE`);
       await db.exec(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
       await db.close();
     },
