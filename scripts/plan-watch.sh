@@ -71,23 +71,45 @@
 # this script. A 404 from those is a structural fact, not a permission
 # accident, and that is the only thing that exits 3.
 #
-# CREDENTIAL
-#   GH_TOKEN. In CI this is the workflow's GITHUB_TOKEN, which needs
-#   `administration: read` to read branch protection at all - without it every
-#   probe lands in "unknown" and this watcher quietly stops working. The
-#   org-plan probe additionally needs an org-scoped token; GITHUB_TOKEN cannot
-#   read it and is expected to come back unknown there. Either signal alone is
-#   enough to fire.
+# CREDENTIAL (rewritten 2026-08-25, TOG-313)
+#   GH_TOKEN. A plain repo-scoped token - `contents: read` + `metadata: read`,
+#   which the workflow GITHUB_TOKEN already has - is now enough to reach a
+#   real verdict. It cannot read `branches/{b}/protection` (403 "Resource not
+#   accessible by integration"), so probe 1 falls back to two endpoints that
+#   are NOT gated on `administration`:
 #
-#   The armed caller is NOT plan-watch.yml. It is the weekly Paperclip
-#   watcher (TOG-313), which mints a short-lived GitHub App token scoped to
-#   `organization_administration=read,administration=read,metadata=read` and
-#   exports it as GH_TOKEN. Under that token this script answers both probes
-#   with no "unknown" - verified 2026-08-24. plan-watch.yml still runs the
-#   same script weekly against GITHUB_TOKEN, where it reports two unknowns
-#   and says so; that path is a self-test, not the alarm. See the CREDENTIAL
-#   header in .github/workflows/plan-watch.yml for why the App key is not
-#   stored in Actions secrets (TOG-307).
+#     repos/{o}/{r}/branches/{b}  -> .protected   is protection enforced?
+#     repos/{o}/{r}/rulesets      -> 200 vs 403   does the plan allow it?
+#
+#   Together those reconstruct the answer the admin-gated endpoint used to
+#   give. See probe_protection_thin() for the truth table.
+#
+#   THIS REPLACES THE PREVIOUS DESIGN, WHICH HAD STOPPED WORKING. The header
+#   here used to say the armed caller was the weekly Paperclip watcher
+#   (TOG-313), minting a GitHub App token scoped
+#   `organization_administration=read,administration=read,metadata=read` -
+#   verified 2026-08-24. On 2026-08-25 the App token broker refuses both of
+#   those outright: "Permission \"administration\" is not in this project's
+#   profile (contents, pull_requests, issues, metadata, checks, statuses,
+#   workflows)." No agent can mint them any more.
+#
+#   That mattered because the old failure was SILENT: with both probes
+#   unreadable the script reported two unknowns and exited 0, and the armed
+#   watcher's runbook read exit 0 as "still the Free posture, all clear". The
+#   alarm was blind and green at the same time - precisely the failure mode
+#   TOG-131 and TOG-307 were about.
+#
+#   Consequence worth noticing: because the surviving probes need no
+#   privilege, this script no longer needs a credential that only Paperclip
+#   can mint, and PLAN_WATCH_TOKEN is no longer required for it to be armed.
+#   plan-watch.yml can therefore become the alarm rather than a self-test.
+#   See the CREDENTIAL header in .github/workflows/plan-watch.yml, and
+#   TOG-307 for why the App private key is not stored in Actions secrets -
+#   that reasoning still stands, it is just no longer load-bearing.
+#
+#   The org-plan probe (probe 2) still needs an org-scoped token and is still
+#   expected to come back unknown. It is now purely corroborating; probe 1
+#   alone reaches a verdict.
 
 set -euo pipefail
 
@@ -214,6 +236,89 @@ file_github_issue() {
 command -v gh >/dev/null || { echo "gh CLI not installed" >&2; exit 2; }
 
 # ---------------------------------------------------------------------------
+# Probe 1a: is protection actually ENFORCED on the default branch?
+#
+# `repos/{o}/{r}/branches/{b}` needs only contents+metadata read - no
+# `administration` - and reports `.protected` as a plain boolean. That makes it
+# the one probe here that keeps working under a thin token, which is why it is
+# the fallback for probe 1 rather than a nice-to-have (TOG-313, 2026-08-25).
+#
+# On its own it cannot tell you WHY main is unprotected: `false` is the answer
+# both when the plan forbids protection and when the plan allows it but nobody
+# switched it on. probe_capability() is what separates those two.
+probe_enforcement() {
+  local out rc
+  set +e
+  out="$(gh api "repos/$ORG/$WATCH_REPO/branches/$DEFAULT_BRANCH" --jq '.protected' 2>&1)"
+  rc=$?
+  set -e
+
+  if [ $rc -ne 0 ]; then echo "unknown"; return; fi
+  case "$out" in
+    true)  echo "protected" ;;
+    false) echo "unprotected" ;;
+    *)     echo "unknown" ;;
+  esac
+}
+
+# Probe 1b: does this plan permit branch rules at all?
+#
+# Same trick, same thin token: `repos/{o}/{r}/rulesets` answers 200 (usually an
+# empty array) on a plan that supports rules, and 403 with GitHub's literal
+# upgrade message on Free-with-private. It is the capability half of the old
+# `administration`-gated protection probe, obtained without `administration`.
+#
+# Strict in the same direction as probe 1: only the literal upgrade message
+# counts as "refused". Anything else is unknown, so a permission failure can
+# never be mistaken for a quiet all-clear.
+probe_capability() {
+  local out rc
+  set +e
+  out="$(gh api "repos/$ORG/$WATCH_REPO/rulesets" 2>&1)"
+  rc=$?
+  set -e
+
+  if [ $rc -eq 0 ]; then echo "available"; return; fi
+  case "$out" in
+    *"Upgrade to GitHub"*) echo "refused" ;;
+    *)                     echo "unknown" ;;
+  esac
+}
+
+# Reconstruct probe 1's answer from the two thin-token probes.
+#
+# The truth table is the whole point, so it is written out rather than implied:
+#
+#   enforcement  capability   ->  verdict
+#   protected    (any)            protected     someone did the work
+#   unprotected  refused          refused       Free posture, nothing to do
+#   unprotected  available        unprotected   ACTION NEEDED - this fires
+#   unprotected  unknown          unknown       stay loud, do not guess
+#   unknown      (any)            unknown
+#
+# Note the asymmetry: an unknown capability with main unprotected reports
+# unknown rather than firing. Being unable to read the plan is not evidence
+# that the plan changed, and a weekly alarm nobody can act on gets muted -
+# taking the real one with it.
+probe_protection_thin() {
+  local enforcement capability
+  enforcement="$(probe_enforcement)"
+  capability="$(probe_capability)"
+
+  case "$enforcement" in
+    protected) echo "protected"; return ;;
+    unknown)
+      echo "unknown:the token can read neither branch protection nor $DEFAULT_BRANCH itself"
+      return ;;
+  esac
+
+  case "$capability" in
+    refused)   echo "refused" ;;
+    available) echo "unprotected" ;;
+    *)         echo "unknown:$DEFAULT_BRANCH is unprotected, but this token cannot tell whether the plan allows protection (rulesets unreadable)" ;;
+  esac
+}
+
 # Probe 1: does the branch protection endpoint work on this repo?
 #
 # Classification is deliberately strict. "refused" - the quiet, nothing-to-do
@@ -221,6 +326,11 @@ command -v gh >/dev/null || { echo "gh CLI not installed" >&2; exit 2; }
 # 403 is a token or permission problem and comes back unknown, because a
 # permission 403 misread as a plan 403 is exactly how this watcher would go
 # blind without anyone noticing.
+#
+# When the token cannot read the protection endpoint at all, we no longer stop
+# at "unknown" - we reconstruct the same answer from probes 1a and 1b, which
+# need no `administration`. That combination is what keeps the alarm alive
+# under a repo-scoped token (TOG-313).
 probe_protection() {
   local out rc
   set +e
@@ -233,10 +343,8 @@ probe_protection() {
   case "$out" in
     *"Upgrade to GitHub"*)                 echo "refused" ;;
     *"Branch not protected"*)              echo "unprotected" ;;
-    *"Resource not accessible by integration"*)
-      echo "unknown:the token cannot read branch protection (needs administration: read)" ;;
-    *"Must have admin rights"*)
-      echo "unknown:the token lacks admin on $WATCH_REPO" ;;
+    *"Resource not accessible by integration"*|*"Must have admin rights"*)
+      probe_protection_thin ;;
     *"Branch not found"*)
       echo "unknown:$DEFAULT_BRANCH does not exist on $WATCH_REPO" ;;
     # Deliberately still "unknown" and not "missing". A 404 here can mean the
@@ -353,10 +461,16 @@ fi
 
 say "Could not tell"
 warn "Neither probe gave a usable answer, so this watcher is not currently"
-warn "watching anything. That is the failure worth fixing: check GH_TOKEN and"
-warn "its permissions. Exiting 0 because there is nothing to act on - but do"
-warn "not read this as all-clear."
+warn "watching anything. That is the failure worth fixing. Exiting 0 because"
+warn "there is nothing to act on - but do NOT read this as all-clear."
 warn ""
 warn "$ORG/$WATCH_REPO does exist - probe 0 confirmed that - so this is a"
-warn "credential problem, not a moved-or-deleted target. Set PLAN_WATCH_TOKEN."
+warn "credential problem, not a moved-or-deleted target."
+warn ""
+warn "Reaching here now means something narrower than it used to. Probe 1's"
+warn "fallback needs only contents+metadata read, so a token that cannot"
+warn "answer it cannot read the repo at all. Check GH_TOKEN is set and not"
+warn "expired before assuming a permissions problem. Do NOT go looking for"
+warn "PLAN_WATCH_TOKEN or an administration-scoped token: this script no"
+warn "longer uses either, and no agent can mint them (TOG-313)."
 exit 0
