@@ -335,7 +335,7 @@ assumed either. It is a data-model question for TOG-49.
 One role, `two_web_ro`, that can read the views and genuinely nothing else.
 
 ```
-npm run migrate          # tables (migration 0002)
+npm run migrate          # tables (migration 0003)
 npm run web:views        # the schema and the nine views (sql/web_v1.sql)
 TWO_WEB_RO_PASSWORD=... npm run web:role
 npm run verify:web-role  # prove it
@@ -363,12 +363,12 @@ than aspirational.
 
 ### How we know
 
-`npm run verify:web-role` connects **as** `two_web_ro` and runs 28 checks. It
+`npm run verify:web-role` connects **as** `two_web_ro` and runs 32 checks. It
 does not read a permissions table and infer an answer — several ways of asking
 Postgres "can this role read that" give an answer that is true in the catalogue
 and wrong at the point of use. It tries the queries and reads the refusal.
 
-Run against a clean database on 2026-08-25, all 28 passed:
+Run against a clean database on 2026-08-25, all 32 passed:
 
 ```
 ok    read web_v1.contract_meta … web_v1.funnel_by_source   (9 views, readable)
@@ -378,9 +378,9 @@ ok    rank_counts returns all five ranks in ladder order
 ok    contract_meta reports v1.0           -  v1.0
 ok    cannot read public.events            -  refused (42501)
 ok    cannot read public.members           -  refused (42501)
-      … and invite_snapshots, schema_migrations, web_contract_meta,
-        guild_counters, rank_ladder, rank_snapshots, member_ranks,
-        scheduled_events — all refused (42501)
+      … and invite_snapshots, schema_migrations, the four internal_* tables,
+        web_contract_meta, guild_counters, rank_ladder, rank_snapshots,
+        member_ranks, scheduled_events — all refused (42501)
 ok    cannot write to a contract view      -  refused (42501)
 ok    cannot write to the bot's tables     -  refused (25006)
 ok    cannot create a table                -  refused (25006)
@@ -389,7 +389,7 @@ ok    session is read-only by default      -  default_transaction_read_only = on
 ok    can select from the contract views and nothing else
                                            -  exactly 9 relations, all in web_v1
 
-verify-web-role: 28 passed, 0 failed (role two_web_ro, schema web_v1).
+verify-web-role: 32 passed, 0 failed (role two_web_ro, schema web_v1).
 ```
 
 That last check is the one that earns the phrase "and nothing else". Everything
@@ -425,8 +425,8 @@ migration that touches this database — that is a real gap, not a formality.
 |---|---|
 | This document | Published, **`v1.0`** |
 | `web_v1` schema and its 9 views | **Live.** `sql/web_v1.sql`, applied by `npm run web:views` and at bot startup |
-| Tables behind them | **Live.** `migrations/0002_web_contract_tables.sql` |
-| `two_web_ro` role and grants | **Live.** `npm run web:role`, proven by `npm run verify:web-role` (28/28) |
+| Tables behind them | **Live.** `migrations/0003_web_contract_tables.sql` |
+| `two_web_ro` role and grants | **Live.** `npm run web:role`, proven by `npm run verify:web-role` (32/32) |
 | Tests | `test/e2e.webcontract.test.ts` — 22 cases, Postgres only. Not yet run by CI: TOG-465 |
 | Counter cache + rank snapshot collector | TOG-73, not started |
 | Scheduled events poller | TOG-74, not started |
@@ -444,5 +444,5 @@ migration. See the note at the top of `sql/web_v1.sql`.
 
 | Version | Date | Change |
 |---|---|---|
-| `v1.0` | 2026-08-25 | **Live.** Schema, nine views, the tables behind them and the `two_web_ro` role created and verified against Postgres — 28/28 role checks, 22 tests, whole suite green on both drivers. No shape the Lead asked for moved between `v0.1` and here. New in this version: the freshness ceilings live in the views rather than being a promise about the collector; the zero rule is a schema constraint as well as collector behaviour; `rank_changed` is pre-whitelisted in `member_milestones` so TOG-73 needs no contract change; an in-progress event stays as `next_event`. TWO-\* references renumbered to their TOG equivalents (TOG-73, TOG-74, TOG-75). |
+| `v1.0` | 2026-08-25 | **Live.** Schema, nine views, the tables behind them and the `two_web_ro` role created and verified against Postgres — 32/32 role checks, 22 tests, whole suite green on both drivers. No shape the Lead asked for moved between `v0.1` and here. New in this version: the freshness ceilings live in the views rather than being a promise about the collector; the zero rule is a schema constraint as well as collector behaviour; `rank_changed` is pre-whitelisted in `member_milestones` so TOG-73 needs no contract change; an in-progress event stays as `next_event`. TWO-\* references renumbered to their TOG equivalents (TOG-73, TOG-74, TOG-75). |
 | `v0.1` | 2026-08-19 | First draft. Written against the Web Lead's field list on TOG-43 and `two-design/docs/CONTENT.md` / `COMPONENTS.md`. Not frozen. |

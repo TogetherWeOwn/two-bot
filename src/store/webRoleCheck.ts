@@ -41,12 +41,28 @@ export interface CheckOptions {
   botTables?: string[];
 }
 
-/** Every table migrations 0001 and 0002 create. All of them must be denied. */
+/**
+ * Every table the migrations create. All of them must be denied.
+ *
+ * Keep this in step when a migration adds one. It is not the safety net — the
+ * census check at the end of `runWebRoleChecks` catches a table nobody listed
+ * here — but a named check says *which* table and why, where a census failure
+ * only says that something is readable.
+ */
 export const BOT_TABLES = [
+  // 0001 — the funnel log
   'events',
   'members',
   'invite_snapshots',
   'schema_migrations',
+  // 0002 — internal actions (TOG-44). The audit trail and the idempotency
+  // hashes in particular have no business behind a public website.
+  'internal_nonces',
+  'internal_idempotency',
+  'internal_action_log',
+  'internal_discord_events',
+  // 0003 — the tables behind this contract. The website reads the views over
+  // them, never these.
   'web_contract_meta',
   'guild_counters',
   'rank_ladder',

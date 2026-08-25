@@ -24,7 +24,7 @@ export const WEB_CONTRACT_SCHEMA = 'web_v1';
 
 /**
  * The full version this build implements. Must match the row seeded in
- * migration 0002 and the changelog in docs/WEBSITE_CONTRACT.md.
+ * migration 0003 and the changelog in docs/WEBSITE_CONTRACT.md.
  */
 export const WEB_CONTRACT_VERSION = '1.0';
 
