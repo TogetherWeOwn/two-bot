@@ -186,14 +186,20 @@ function databaseCheck(env: Env): ReadinessCheck {
   const base = { id: 'database' as const, title: 'staging database' };
 
   if (!url) {
+    // This used to be `blocked` on the founder, for a Postgres host that did
+    // not exist. It does now: TOG-45 provisioned `two_bot_staging` on the
+    // shared server on 2026-08-25 and applied all four migrations. So an unset
+    // variable is no longer a wait on anybody - it is one export, by whoever
+    // is at the keyboard. Leaving it `blocked` would send QA to queue behind a
+    // founder for something already done, which is the exact failure this
+    // module exists to prevent.
     return {
       ...base,
-      status: 'blocked',
+      status: 'fix',
       detail: 'TWO_STAGING_DATABASE_URL is not set.',
-      owner: 'founder (TWO-11 host, then TWO-18 Postgres)',
       action:
-        'a second database on whatever Postgres server TWO-18 lands on - no extra spend, ' +
-        'but it needs the host first',
+        'export it to the provisioned staging database - `two_bot_staging` on the same ' +
+        'Postgres server as the rest of the estate. See docs/STAGING.md',
     };
   }
   if (!/^postgres(ql)?:\/\//.test(url)) {
