@@ -1,6 +1,7 @@
 import { loadConfig } from './core/config.ts';
 import { setLogLevel, log } from './core/log.ts';
 import { openDb, isPostgresSpec } from './store/db.ts';
+import { applyWebContract } from './store/webContract.ts';
 import { EventStore } from './store/eventStore.ts';
 import { InviteTracker } from './core/inviteTracker.ts';
 import { FunnelHandlers } from './core/handlers.ts';
@@ -26,6 +27,31 @@ log.info('datastore_open', {
   target: isPostgresSpec(cfg.dbPath) ? 'postgres' : cfg.dbPath,
   poolMax: db.kind === 'postgres' ? cfg.dbPoolMax : undefined,
 });
+
+// Keep the website's read-only views (docs/WEBSITE_CONTRACT.md) in step with
+// the code that owns them. Idempotent, so this is a no-op on a normal boot.
+//
+// Deliberately NOT fatal. The bot's job is recording funnel events, and those
+// are the only thing here we cannot recover after the fact; refusing to start -
+// and therefore dropping joins on the floor - to protect a view the website
+// reads would be the wrong trade. This is loud instead, and it has a detection
+// path that does not rely on anyone reading a log: `npm run web:views -- --status`
+// reports missing views, and `npm run verify:web-role` fails CI.
+if (db.kind === 'postgres') {
+  try {
+    const applied = await applyWebContract(db);
+    log.info('web_contract_ready', { ...applied });
+  } catch (err) {
+    log.error('web_contract_failed', {
+      err: String(err),
+      // CREATE OR REPLACE VIEW cannot rename, reorder or retype a column, so
+      // this is usually not a typo: it is a change that needs a web_v2 schema
+      // rather than an edit. See docs/WEBSITE_CONTRACT.md §1.
+      hint: 'run `npm run web:views` for the full error',
+    });
+  }
+}
+
 const store = new EventStore(db);
 const invites = new InviteTracker(db);
 const handlers = new FunnelHandlers(store);
