@@ -44,6 +44,85 @@ If it prints `INCOMPLETE: hit the N-page cap`, there is older history it did not
 reach — re-run with a larger `--max-pages`. Do not quote numbers from a
 truncated run as if they were the whole picture.
 
+## Wave 0 pre-flight for the server redesign (one-off, read-only)
+
+**Run this before Wave 1 of the TOG-34 redesign, and read the verdict before
+touching the server.** Wave 6 deletes 159 roles. A recreated role gets a new id
+and no members, so the two holder CSVs this writes are the *only* record that
+will exist afterwards — there is no way to reconstruct them later.
+
+Needs the `DISCORD_BOT_TOKEN` secret, which is bound to the Founding Engineer
+and to nobody else. Two commands, in this order:
+
+```bash
+DISCORD_TOKEN=... DISCORD_GUILD_ID=... node scripts/preflight.ts   # 1. intents
+DISCORD_TOKEN=... npm run wave0                                    # 2. the exports
+```
+
+Run `preflight.ts` **first and read it**. Wave 0 reads the full member list, and
+`GET /guilds/{id}/members` returns 403 unless the **Server Members** privileged
+intent is on in the developer portal. That toggle is the single most likely
+reason a first attempt wastes a run.
+
+Nothing here can change the server. The script reaches Discord only through
+`DiscordRest.get`, which hardcodes GET and has no write sibling — the same
+construction as `scripts/audit-collect.ts`.
+
+### What the exit code means
+
+`npm run wave0` exits non-zero in three quite different situations, and only one
+of them is a failure to re-run:
+
+| Exit | Meaning | What to do |
+|---|---|---|
+| `0` | No drift; all artefacts written. | Proceed to the Wick check below. |
+| `1` | **Both holder CSVs and the report were written**, but drift was found. | Not a crash. Read the drift list and explain every line before Wave 1 — this is the §7 stop rule doing its job. |
+| `2` | No token in the environment. | Nothing ran. Supply the credential. |
+| `3` | The member list came back empty. | **Nothing was written, deliberately.** An empty read is not an empty server; zero-row CSVs here would destroy the data Wave 6 cannot recover. Fix the intent, re-run. |
+
+Exit `1` is the one that gets misread. If you wrap this in `set -e` or a CI
+step, a drift result will look like a failed job when in fact it produced
+everything it was asked to and is telling you to go and think.
+
+### Where the output lands
+
+Four files in `data/wave0/`:
+
+```
+game-role-holders.csv     Shooter / Survival / Horror Games holders
+bankick-holders.csv       Officer, Game Master, Staff, SySOp — with the Wave 6 action per role
+voice-baseline.csv        unique members in voice per week, last 90 days
+wave0-report.md           the full run, including the verdict
+```
+
+`voice-baseline.csv` is the one file that may legitimately be missing: it is not
+written at all when `#voice-log` cannot be read, rather than being written empty.
+The other three are always present on any exit except `2` and `3`.
+
+**These name individual members, and they must never reach GitHub.** `data/*`
+is gitignored precisely so they cannot be committed by accident — verified: all
+four paths are ignored, while `data/server-audit-*.json` is explicitly
+un-ignored because the drift check needs it as its base. Do not paste holder
+rows into an issue, a PR or a chat channel either. `docs/PRIVACY.md` permits
+storing member ids; it does not permit publishing them.
+
+An unreadable `#voice-log` is reported as **UNKNOWN**, never as a zero baseline
+— an empty channel and a channel we cannot read are different facts, and only
+one of them is good news.
+
+### The step no script can do
+
+Section 1 of the report prints what the API knows about Wick and then states
+that the whitelist itself is **UNVERIFIED**. That is not a bug to fix. Wick's
+anti-nuke whitelist lives inside Wick, and Discord exposes no endpoint for
+another application's private configuration.
+
+Someone with dashboard access must open **Wick → anti-nuke → whitelist** and
+confirm our bot is on it **before Wave 1**. If anti-nuke is armed and we are not
+whitelisted, the likely outcome is Wick banning our own bot midway through Wave
+5 or 6 while behaving exactly as configured. The script will never report this
+as passing, no matter how green everything else is.
+
 ## Keep attribution alive before there is a host
 
 ```bash
