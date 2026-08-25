@@ -408,14 +408,15 @@ It has been checked against a deliberate over-grant: `GRANT SELECT ON
 public.events TO two_web_ro` makes it fail two checks and exit non-zero. A
 verification nobody has seen fail is not a verification.
 
-⚠️ **It does not run in CI yet, and it should.** CI has no Postgres service, so
-every Postgres-only test — this contract's 22, the backup round trip, the
-concurrent-writer test — skips itself on every run and reports green by absence
-rather than by passing. The job that fixes it is written and verified locally
-but cannot be pushed: our GitHub App has no `workflows` permission, so the
-remote rejects any commit that touches `.github/workflows/`. Tracked as
-**TOG-465**. Until it lands, run `npm run verify:web-role` by hand after any
-migration that touches this database — that is a real gap, not a formality.
+**It runs in CI, on every pull request.** The `postgres` job in
+`.github/workflows/ci.yml` starts a `postgres:17` service, sets
+`TWO_TEST_DATABASE_URL`, and runs the whole suite against it — so this
+contract's 22 cases, the backup round trip and the concurrent-writer test now
+pass by passing rather than by skipping. The same job then runs the deploy
+sequence in §7 end to end, `migrate` → `web:views` → `web:role` →
+`verify:web-role`, so a migration that quietly hands `two_web_ro` more access
+than it needs fails the PR that introduced it. A documented step nothing
+executes is how a runbook rots; this one is executed. Landed by TOG-465.
 
 ---
 
@@ -427,7 +428,7 @@ migration that touches this database — that is a real gap, not a formality.
 | `web_v1` schema and its 9 views | **Live.** `sql/web_v1.sql`, applied by `npm run web:views` and at bot startup |
 | Tables behind them | **Live.** `migrations/0003_web_contract_tables.sql` |
 | `two_web_ro` role and grants | **Live.** `npm run web:role`, proven by `npm run verify:web-role` (32/32) |
-| Tests | `test/e2e.webcontract.test.ts` — 22 cases, Postgres only. Not yet run by CI: TOG-465 |
+| Tests | `test/e2e.webcontract.test.ts` — 22 cases, Postgres only. **Run by CI** in the `postgres` job (TOG-465) |
 | Counter cache + rank snapshot collector | TOG-73, not started |
 | Scheduled events poller | TOG-74, not started |
 | Presence intent decision | TOG-75, with the CEO |
