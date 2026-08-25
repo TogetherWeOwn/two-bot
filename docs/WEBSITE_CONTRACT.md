@@ -77,7 +77,7 @@ answers.
 
 | Column | Type | Notes |
 |---|---|---|
-| `human_member_count` | int, **nullable** | Members in the server, **bots excluded**. 84 at the last audit, not 107. |
+| `human_member_count` | int, **nullable** | Members in the server, **bots and dynamically-derived raid accounts excluded from the same Discord snapshot**. 54 at the last grounded audit (107 total − 23 bots − 30 raid accounts). |
 | `online_count` | int, **nullable** | Humans currently online, bots excluded. **Null in v1** — see §6.1. |
 | `counts_updated_at` | text, nullable | When `human_member_count` was last read from Discord. Null if never. |
 | `online_updated_at` | text, nullable | When `online_count` was last read. Separate from the above because the two go stale at very different rates. |
@@ -116,10 +116,11 @@ Soldier, Member and Prospect. From the 2026-08-19 audit, humans only:
 | Veteran | 7 | 1 |
 | Legend | 6 | 6 |
 
-`holders_count` sums to 122 against 84 human members — publish that as a ladder
-and the columns visibly do not add up. `member_count` sums to 51, which is the
-number of humans who have any rank at all. The other 33 are the 31 stuck at the
-rules screen (none of whom hold a rank role) plus 2 with no roles.
+The 2026-08-19 audit's `holders_count` sums to 122 against 84 Discord human
+accounts — publish that as a ladder and the columns visibly do not add up. The
+collector removes the same raid exclusion set from both columns and the live
+counter; the published exclusive sum must therefore never exceed the published
+human member count. Read the current figures from the view, not this audit.
 
 The `member_count` column above is derived from the cumulative audit figures by
 subtraction, which is right only if the ranks are strictly nested. That is what
@@ -370,12 +371,12 @@ than aspirational.
 
 ### How we know
 
-`npm run verify:web-role` connects **as** `two_web_ro` and runs 32 checks. It
+`npm run verify:web-role` connects **as** `two_web_ro` and runs 35 checks. It
 does not read a permissions table and infer an answer — several ways of asking
 Postgres "can this role read that" give an answer that is true in the catalogue
 and wrong at the point of use. It tries the queries and reads the refusal.
 
-Run against a clean database on 2026-08-25, all 32 passed:
+Run against a clean database on 2026-08-25, all 35 passed:
 
 ```
 ok    read web_v1.contract_meta … web_v1.funnel_by_source   (9 views, readable)
@@ -396,7 +397,7 @@ ok    session is read-only by default      -  default_transaction_read_only = on
 ok    can select from the contract views and nothing else
                                            -  exactly 9 relations, all in web_v1
 
-verify-web-role: 32 passed, 0 failed (role two_web_ro, schema web_v1).
+verify-web-role: 35 passed, 0 failed (role two_web_ro, schema web_v1).
 ```
 
 That last check is the one that earns the phrase "and nothing else". Everything
@@ -418,7 +419,7 @@ verification nobody has seen fail is not a verification.
 **It runs in CI, on every pull request.** The `postgres` job in
 `.github/workflows/ci.yml` starts a `postgres:17` service, sets
 `TWO_TEST_DATABASE_URL`, and runs the whole suite against it — so this
-contract's 22 cases, the backup round trip and the concurrent-writer test now
+contract's 23 cases, the backup round trip and the concurrent-writer test now
 pass by passing rather than by skipping. The same job then runs the deploy
 sequence in §7 end to end, `migrate` → `web:views` → `web:role` →
 `verify:web-role`, so a migration that quietly hands `two_web_ro` more access
@@ -434,9 +435,9 @@ executes is how a runbook rots; this one is executed. Landed by TOG-465.
 | This document | Published, **`v1.0`** |
 | `web_v1` schema and its 9 views | **Live.** `sql/web_v1.sql`, applied by `npm run web:views` and at bot startup |
 | Tables behind them | **Live.** `migrations/0003_web_contract_tables.sql` |
-| `two_web_ro` role and grants | **Live.** `npm run web:role`, proven by `npm run verify:web-role` (32/32) |
-| Tests | `test/e2e.webcontract.test.ts` — 22 cases, Postgres only. **Run by CI** in the `postgres` job (TOG-465) |
-| Counter cache + rank snapshot collector | TOG-73, not started |
+| `two_web_ro` role and grants | **Live.** `npm run web:role`, proven by `npm run verify:web-role` (35/35) |
+| Tests | `test/e2e.webcontract.test.ts` — 23 cases, Postgres only. **Run by CI** in the `postgres` job (TOG-465) |
+| Counter cache + rank snapshot collector | **Implemented by TOG-73.** 60s member cache, 10m rank snapshot; failed or ungrounded reads write nothing |
 | Scheduled events poller | TOG-74, not started |
 | Presence intent decision | TOG-75, with the CEO |
 
@@ -452,5 +453,6 @@ migration. See the note at the top of `sql/web_v1.sql`.
 
 | Version | Date | Change |
 |---|---|---|
+| `v1.0.1` | 2026-08-25 | **Documentation correction only; runtime contract remains `1.0`.** `human_member_count` excludes the dynamically-derived raid set as well as bots, yielding 54 on the grounded 2026-08-19 snapshot rather than the raw 84 Discord human accounts. TOG-73 applies the same exclusion to rank counts and public member rows and writes nothing when any raid window is ungrounded. No view shape or `contract_meta` value changed. |
 | `v1.0` | 2026-08-25 | **Live.** Schema, nine views, the tables behind them and the `two_web_ro` role created and verified against Postgres — 32/32 role checks, 22 tests, whole suite green on both drivers. No shape the Lead asked for moved between `v0.1` and here. New in this version: the freshness ceilings live in the views rather than being a promise about the collector; the zero rule is a schema constraint as well as collector behaviour; `rank_changed` is pre-whitelisted in `member_milestones` so TOG-73 needs no contract change; an in-progress event stays as `next_event`. TWO-\* references renumbered to their TOG equivalents (TOG-73, TOG-74, TOG-75). |
 | `v0.1` | 2026-08-19 | First draft. Written against the Web Lead's field list on TOG-43 and `two-design/docs/CONTENT.md` / `COMPONENTS.md`. Not frozen. |

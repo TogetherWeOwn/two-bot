@@ -248,6 +248,24 @@ describe('web_v1 contract', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE_U
     assert.equal(row?.rank_key, 'soldier');
   });
 
+  test('members excludes the same raid accounts as live and rank counts', async () => {
+    await db
+      .prepare(`INSERT INTO members (guild_id, member_id, joined_at, is_bot) VALUES (?, ?, ?, ?)`)
+      .run(GUILD, 'human', agoMinutes(60), 0);
+    await db
+      .prepare(`INSERT INTO members (guild_id, member_id, joined_at, is_bot) VALUES (?, ?, ?, ?)`)
+      .run(GUILD, 'raid', agoMinutes(60), 0);
+    await db
+      .prepare(
+        `INSERT INTO member_exclusions (guild_id, member_id, reason, updated_at)
+         VALUES (?, ?, 'raid', ?)`,
+      )
+      .run(GUILD, 'raid', agoMinutes(5));
+
+    const rows = await db.prepare(`SELECT member_id FROM ${web}.members ORDER BY member_id`).all();
+    assert.deepEqual(rows.map((row) => row.member_id), ['human']);
+  });
+
   test('members exposes no name, avatar or activity column', async () => {
     // §4 of the contract, enforced by what the website CAN read rather than by
     // what it chooses to render. Cheapest place to enforce a rule is the place
