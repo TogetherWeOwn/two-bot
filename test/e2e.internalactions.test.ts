@@ -374,8 +374,17 @@ test('a timestamp outside the window is stale, in both directions', async () => 
     assert.equal(res.body.error?.code, 'stale_request');
     assert.equal(res.body.error?.retryable, false);
   }
-  // And the edge inside the window is fine.
-  const ok = await call(srv, { body: roleAssign, timestamp: String(now - 119) });
+  // And a timestamp inside the window is fine.
+  //
+  // 110 rather than 119. `now` is stamped before the two rejected calls above,
+  // and the window is checked when the request is SERVED - so the headroom
+  // here is 120s minus however long this test has been running. At 119 that is
+  // one second, which the SQLite run makes comfortably and the Postgres run
+  // does not always: two round trips through a real database ahead of this
+  // line is enough to age the timestamp out and fail a test that is not about
+  // timing at all. The boundary itself is already pinned by the ±121s
+  // rejections above; this call only needs to be inside it.
+  const ok = await call(srv, { body: roleAssign, timestamp: String(now - 110) });
   assert.equal(ok.status, 200);
   assert.deepEqual(calls, ['memberRoles', `addRole:${ROLE_ID}`]);
 });
