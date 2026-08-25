@@ -162,7 +162,12 @@ SELECT
 FROM members m
 LEFT JOIN member_ranks mr
        ON mr.guild_id = m.guild_id AND mr.member_id = m.member_id
-WHERE m.is_bot = 0;
+WHERE m.is_bot = 0
+  AND NOT EXISTS (
+    SELECT 1
+      FROM member_exclusions me
+     WHERE me.guild_id = m.guild_id AND me.member_id = m.member_id
+  );
 
 -- ---------------------------------------------------------------------------
 -- member_milestones - the event history a profile is allowed to show

@@ -12,6 +12,10 @@ import { makeRaidAnnouncer } from './discord/raidAlert.ts';
 import { OnboardingRecorder } from './onboarding/flow.ts';
 import { flagInactive } from './jobs/inactivity.ts';
 import { startPresenceProbe, type PresenceProbeHandle } from './jobs/presenceProbe.ts';
+import {
+  startCommunitySnapshots,
+  type CommunitySnapshotHandle,
+} from './jobs/communitySnapshots.ts';
 import { DiscordRest } from './discord/rest.ts';
 import { loadInternalActionsConfig } from './internal/config.ts';
 import { startInternalActions, type InternalServer } from './internal/server.ts';
@@ -156,6 +160,27 @@ if (!cfg.presenceProbe) {
   });
 }
 
+// The published member/rank snapshots (TOG-73). A full member list is read in
+// one pass so bots and dynamically-derived raid accounts are excluded from the
+// counter, rank aggregates and public member projection by the same decision.
+// The collector is Postgres-only because migrations 0003 and 0005 own its
+// tables. A failed or ungrounded read writes nothing and ages out in web_v1.
+let communitySnapshots: CommunitySnapshotHandle | null = null;
+if (!cfg.guildId) {
+  log.info('community_snapshots_disabled', { reason: 'DISCORD_GUILD_ID is unset' });
+} else if (db.kind !== 'postgres') {
+  log.info('community_snapshots_disabled', { reason: 'needs Postgres (migrations 0003 and 0005)' });
+} else {
+  communitySnapshots = startCommunitySnapshots({
+    db,
+    rest: new DiscordRest({
+      token: cfg.discordToken,
+      base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+    }),
+    guildId: cfg.guildId,
+  });
+}
+
 // Inactivity sweep once an hour. Cheap query; no outbound messages.
 const sweep = setInterval(
   () => {
@@ -171,6 +196,7 @@ async function shutdown(signal: string) {
   log.info('shutdown', { signal });
   clearInterval(sweep);
   presenceProbe?.stop();
+  communitySnapshots?.stop();
   if (internal) await internal.close();
   try {
     await client.destroy();
