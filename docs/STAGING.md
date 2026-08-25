@@ -27,7 +27,7 @@ having to read the rest of this page.
 
 | Variable | What it is | Where it comes from |
 |---|---|---|
-| `TWO_STAGING_DATABASE_URL` | Postgres URL for the staging database | your secrets store |
+| `TWO_STAGING_DATABASE_URL` | Postgres URL for the staging database | the `two_bot_staging` database, already provisioned and migrated — see [The staging database](#the-staging-database) |
 | `DISCORD_STAGING_GUILD_ID` | id of the `TWO Staging` server | printed by `staging-provision.ts` and posted on TWO-25 — not secret |
 | `DISCORD_STAGING_BOT_TOKEN` | the `test-two` bot token | secrets store, bound to you and to me |
 
@@ -83,9 +83,32 @@ The exit code is the useful part:
 **A `3` is not your setup being broken.** It is the difference between "I typed
 something wrong" and "the founder has not bound the token yet", and until this
 script existed the only way to tell them apart was to run four scripts and read
-four different refusals one at a time. As of 2026-08-20 a clean checkout with no
-staging variables bound prints exactly three `WAITING` lines: the token, the
-server (which waits on the token), and the database (which waits on a host).
+four different refusals one at a time. As of **2026-08-25** a clean checkout with
+no staging variables bound prints **two** `WAITING` lines — the token, and the
+server, which waits on the token — plus one `FIX` for the database. The database
+moved out of `WAITING` because it now exists (TOG-45); setting the variable is
+your job, not a queue behind anyone.
+
+## The staging database
+
+`two_bot_staging`, on the same Postgres server as the rest of the estate — a
+second database, not a second server, so it costs nothing. Provisioned and
+migrated on 2026-08-25 under TOG-45.
+
+```bash
+export TWO_STAGING_DATABASE_URL="postgres://<user>:<pw>@<host>:5432/two_bot_staging"
+```
+
+Take the user, password and host from the `DATABASE_URL` already in your
+environment and swap the database name — that is the whole derivation. The name
+matters: `staging` in it is what satisfies guard 2, and the reset script wipes
+what it is given.
+
+All four migrations (`0001_initial` … `0004_presence_probe`) are applied. It is
+deliberately **left unseeded** — fixtures are written scoped to a guild id, and
+seeding it under a placeholder before the real `TWO Staging` guild exists would
+leave rows that no later reset deletes. See [One database, one
+guild](#one-database-one-guild) for why that matters more than it looks.
 
 ## Applying the schema to the staging database
 
@@ -158,6 +181,45 @@ The script exits `2` without touching anything if:
 Guards 1–4 are the same code the doctor runs (`src/staging/readiness.ts`), so
 the refusal you get here and the diagnosis you get there cannot drift apart.
 The refusal names the owner and the next step, same as the doctor does.
+
+### One database, one guild
+
+**Do not point two guild ids at the same staging database.** The asymmetry that
+makes this bite: the reset *deletes* scoped to `DISCORD_STAGING_GUILD_ID` (guard
+5), but the funnel counts it verifies against afterwards are **not** scoped —
+`EventStore.countByType` is `SELECT COUNT(*) FROM events WHERE event_type = ?`
+across the whole database (`src/store/eventStore.ts:239`).
+
+So fixtures seeded under guild A survive a reset run under guild B, and then
+inflate every count B checks. The failure is loud rather than silent — the reset
+exits non-zero with counts reading `member_join 20/10` — but the cause reads
+like a broken fixture set, and the rows the scoped delete will not touch are the
+last place anyone looks.
+
+This is why `two_bot_staging` was left unseeded rather than seeded under a
+placeholder id. If you do strand rows this way, the recovery is a scoped delete
+of the old id, not a `TRUNCATE` — the same three tables the reset itself clears
+(`src/staging/fixtures.ts:299`):
+
+```sql
+DELETE FROM events           WHERE guild_id = '<the-stale-id>';
+DELETE FROM members          WHERE guild_id = '<the-stale-id>';
+DELETE FROM invite_snapshots WHERE guild_id = '<the-stale-id>';
+```
+
+### What the reset does *not* clear
+
+Ten tables in the schema carry a `guild_id`; the reset clears three. The other
+seven — `guild_counters`, `member_ranks`, `rank_snapshots`, `scheduled_events`,
+`presence_probe`, `internal_discord_events`, `web_contract_meta` — belong to
+subsystems the fixtures do not seed, so on a freshly migrated database they are
+empty and "known state" is true.
+
+They stop being empty as soon as an integration suite exercises those
+subsystems. If your suite touches ranks, scheduled events or presence, the reset
+will not undo it and you must clear those tables yourself, scoped by guild id
+the same way. Nothing enforces this yet — it is tracked on TOG-45 rather than
+left as folklore.
 
 ---
 
@@ -339,7 +401,10 @@ across deliberately, one command, where you can see it.
 
 `node scripts/staging-doctor.ts` answers this from your own environment, which
 is more reliable than a page someone has to remember to edit. What follows is
-the state on 2026-08-20.
+the state on **2026-08-25**.
+
+**One thing is missing now, not two.** The database is done (see below). What
+remains is the token, and the guild that cannot be created without it.
 
 The first thing, from the founder, via TWO-21:
 
@@ -355,12 +420,13 @@ The first thing, from the founder, via TWO-21:
    different things, and from outside they look identical. Report absence; do
    not improvise around it.
 
-The second, also the founder, via TWO-11:
-
-2. A Postgres host. The staging database can be a second database on the same
-   server the bot's Postgres migration (TWO-18) lands on — no extra spend —
-   but there is no server yet. Settled on the founder's own OVH box at $0;
-   access credentials sit behind the Infrastructure Engineer hire (TWO-79).
+~~The second, also the founder, via TWO-11: a Postgres host.~~ **Done
+2026-08-25 (TOG-45).** The host was already reachable and already had an empty
+`two_bot_staging` database on it; nobody had ever applied a schema to it, so
+from the outside it looked identical to "no host yet". All four migrations are
+now applied and the full QA loop has been exercised against it end to end — see
+the note below. This no longer waits on the founder, on TWO-11, or on the
+Infrastructure Engineer hire.
 
 Nobody needs to send us a guild id — `staging-provision.ts` creates the server
 and prints the id itself, the first time it runs.
@@ -369,8 +435,28 @@ Until then: the fixtures, the reset script, the doctor, the verifier and the
 provisioning script all exist. Every *decision* any of them makes is covered by
 tests that need no token, no network and no Postgres —
 `test/unit.staging.test.ts`, `test/unit.provision.test.ts` and
-`test/unit.readiness.test.ts`, 65 tests between them. What cannot be exercised
-here is anything that actually talks to Discord, and the doctor's
-schema-and-fixture readout against a live Postgres connection: this environment
-has no Postgres at all, so the connecting is unproven even though every
-judgement it makes on the result is tested.
+`test/unit.readiness.test.ts`.
+
+### What has actually been run against Postgres, and what has not
+
+The database half is no longer theoretical. On 2026-08-25 the whole QA loop was
+exercised against a real PostgreSQL 17 server, in a throwaway database seeded
+and dropped in the same run:
+
+| Step | Result |
+|---|---|
+| `migrate.ts` on an empty database | 4 migrations applied, exit 0 |
+| `staging-reset.ts` | 34 events, 10 member rows; all 11 funnel counts correct |
+| Reseed on top of a fresh seed | inserted 0 — the idempotency claim, proven not asserted |
+| Second full reset | identical output — repeatable between suite runs |
+| Delete 7 `first_message` rows, then `staging-doctor.ts` | `FIX fixtures — 1 funnel count off: first_message 0/7` |
+| `staging-reset.ts` again | recovered to the known state, exit 0 |
+
+That is the drift-detect-and-recover cycle QA depends on, on the real engine,
+including the diagnosis being *specific* about which count moved.
+
+**Still unproven, and honestly so:** everything that talks to Discord. The
+provisioning script, the verifier, the role hierarchy check and the gateway
+listener have never run against a real guild, because no staging token has ever
+reached this environment. Their decisions are unit-tested; their network calls
+are not. Do not read the table above as covering them.
