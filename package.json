@@ -13,6 +13,7 @@
     "test": "node --test test/*.test.ts",
     "test:unit": "node --test test/unit.*.test.ts",
     "test:e2e": "node --test test/e2e.*.test.ts",
+    "test:postgres": "node scripts/require-suites.ts",
     "typecheck": "tsc --noEmit",
     "funnel": "node scripts/funnel.ts",
     "voice": "node scripts/voice-sessions.ts",
