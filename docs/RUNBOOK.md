@@ -345,6 +345,31 @@ failed rather than letting it pass quietly for six months.
 The dump runs in a single `REPEATABLE READ` transaction, so it is a snapshot of
 one instant. You do **not** need to stop the bot to take one.
 
+`TWO_BACKUP_KEEP` must be a positive whole number. Leave it unset for the
+default of 14; set it to anything that is not a number and the run aborts
+before it dumps, rather than pruning. This is deliberate and worth knowing why:
+`Number('')` is `0`, `Number('fourteen')` is `NaN`, and `Array.slice()` treats
+both as `0` — so a typo here used to mean *delete every backup on the box*,
+including the one written seconds earlier. It is pinned by
+`test/unit.backupretention.test.ts`.
+
+### Is a backup file any good?
+
+`--dry-run` reads a dump end to end and checks it against its own manifest —
+format version, table names, the end marker that a full disk would have cut
+off, and the row count. It writes nothing, runs no migrations and opens no
+transaction, and `TWO_RESTORE_URL` is optional, so you can point it at an
+off-box copy from wherever that copy landed:
+
+```bash
+node scripts/pg-restore.ts ./two-funnel-<stamp>.ndjson.gz --dry-run
+```
+
+`DRY RUN VERIFIED` and exit 0 means the file is internally consistent. It does
+**not** mean the restore will succeed — only a real restore into the scratch
+database proves that. Set `TWO_RESTORE_URL` as well to also see the row counts
+the restore would be overwriting.
+
 ### Restore
 
 ```bash
@@ -403,6 +428,17 @@ copy* into a scratch database. What was checked:
 > yet, so there is no production database to dump. The first real drill happens
 > when the bot is live on Postgres in staging — tracked on TOG-45. Until then,
 > the procedure is proven and the data it has been proven on is synthetic.
+
+**Re-verified 2026-08-25 (TOG-37, after review TOG-342).** Not a new drill —
+no off-box copy was involved — but the scripts changed, so the parts that could
+be re-run were. Against an ephemeral PostgreSQL 18.4: the full suite (284 tests)
+passed; `migrate-sqlite-to-postgres.ts` copied a 54-event / 40-member SQLite
+database and reported `MIGRATION VERIFIED` with the id sequence at 55; the same
+migration re-run over its own output with `--allow-nonempty` also verified,
+which it could not do before; and with the id sequence deliberately detached it
+reported `MIGRATION FAILED` and exited 1, where it previously reported `ok`.
+`pg-restore.ts --dry-run` verified a good dump and rejected both a truncated one
+and one naming a table the bot does not own.
 
 An earlier revision of this file recorded a drill on 2026-08-19 with different
 numbers (4,947 / 1,874 / 16). That drill was performed against a different

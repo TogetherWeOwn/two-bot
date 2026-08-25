@@ -104,7 +104,16 @@ Full operational detail is in `docs/RUNBOOK.md`; the design decisions are here.
   on one box. Worth revisiting when there is a bot *and* a dashboard *and* a
   worker.
 - **A managed Postgres** — worth it the day someone is woken up by this box.
-  Today it is on the same VM, backed up nightly and restorable in minutes.
+  The plan is the same VM, with a nightly dump copied off-box and a monthly
+  restore drill; `deploy/` carries the units and `docs/RUNBOOK.md` the
+  procedure. Note what is and is not true today: no box is running this build
+  yet, so nothing is being backed up on a schedule, and the restore has been
+  drilled against a synthetic database rather than production data. Treat "we
+  can restore in minutes" as a claim that becomes true when the bot is live on
+  Postgres in staging and the first real drill passes — tracked on TOG-45, and
+  recorded in the restore-drill section of the runbook. Revisit managed
+  Postgres the first time that drill is the thing standing between us and data
+  loss.
 
 ## Constraints this choice imposes
 

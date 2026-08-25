@@ -41,6 +41,25 @@ import type { Db } from './driver.ts';
 export const DUMP_TABLES = ['events', 'members', 'invite_snapshots'] as const;
 export type DumpTable = (typeof DUMP_TABLES)[number];
 
+/**
+ * The only table names a restore will ever interpolate into SQL.
+ *
+ * `restore()` reads table names out of the backup file, and a backup file is
+ * not a trusted input - it is bytes off a disk that someone else may have
+ * written. Without this gate a crafted dump naming `website_users` would be
+ * truncated-and-inserted like one of ours, which is exactly the boundary the
+ * module header above promises to hold. Checked at parse time so a bad file is
+ * refused before anything opens a transaction.
+ */
+function assertDumpTable(name: unknown, where: string): asserts name is DumpTable {
+  if (typeof name !== 'string' || !(DUMP_TABLES as readonly string[]).includes(name)) {
+    throw new Error(
+      `${where}: ${JSON.stringify(name)} is not a table this backup format owns ` +
+        `(expected one of ${DUMP_TABLES.join(', ')})`,
+    );
+  }
+}
+
 export const DUMP_VERSION = 1;
 
 export interface DumpTableInfo {
@@ -177,26 +196,29 @@ export interface RestoreReport {
   ok: boolean;
 }
 
-/**
- * Replace the contents of the bot-owned tables with a dump.
- *
- * Destructive by design: the tables are truncated first, so a restore produces
- * the database as it was, not a merge. It runs in one transaction, so a
- * failure part way through leaves the target exactly as it was rather than
- * half-wiped - which is the state you least want to discover during a
- * recovery.
- *
- * The caller is responsible for deciding that this database is a legitimate
- * target. See scripts/pg-restore.ts.
- */
-export async function restore(db: Db, inPath: string): Promise<RestoreReport> {
-  if (db.kind !== 'postgres') throw new Error('restore() is Postgres-only');
+export interface DumpContents {
+  manifest: DumpManifest;
+  /** Rows read off the file, keyed by table. */
+  buffers: Map<string, Record<string, unknown>[]>;
+  /** Total rows read, already checked against the file's own `end` marker. */
+  rows: number;
+}
 
+/**
+ * Read a dump and check that it is internally consistent, touching no database.
+ *
+ * Everything that can be known from the file alone is decided here: the format
+ * version, that the table names are ours, that the end marker is present, and
+ * that the row count matches what the writer declared. `restore()` calls this
+ * first, so a bad file is rejected before a transaction opens - and
+ * `pg-restore --dry-run` calls it *instead*, which is what makes the dry run a
+ * real check of the backup rather than a check that a URL parses.
+ */
+export async function inspect(inPath: string): Promise<DumpContents> {
   let manifest: DumpManifest | null = null;
   let sawEnd = false;
   let declaredRows = 0;
   const buffers = new Map<string, Record<string, unknown>[]>();
-  const droppedColumns: Record<string, string[]> = {};
 
   const rl = createInterface({
     input: createReadStream(inPath).pipe(createGunzip()),
@@ -210,8 +232,11 @@ export async function restore(db: Db, inPath: string): Promise<RestoreReport> {
       if (obj.version !== DUMP_VERSION) {
         throw new Error(`dump version ${obj.version}, this build reads ${DUMP_VERSION}`);
       }
+      if (!Array.isArray(obj.tables)) throw new Error('manifest has no table list');
+      for (const t of obj.tables) assertDumpTable(t?.name, 'manifest table');
       manifest = obj as DumpManifest;
     } else if (obj.kind === 'row') {
+      assertDumpTable(obj.table, 'row');
       let buf = buffers.get(obj.table);
       if (!buf) buffers.set(obj.table, (buf = []));
       buf.push(obj.data as Record<string, unknown>);
@@ -231,12 +256,37 @@ export async function restore(db: Db, inPath: string): Promise<RestoreReport> {
     throw new Error(`dump declares ${declaredRows} rows, file contains ${readRows}`);
   }
 
+  return { manifest, buffers, rows: readRows };
+}
+
+/**
+ * Replace the contents of the bot-owned tables with a dump.
+ *
+ * Destructive by design: the tables are truncated first, so a restore produces
+ * the database as it was, not a merge. It runs in one transaction, so a
+ * failure part way through leaves the target exactly as it was rather than
+ * half-wiped - which is the state you least want to discover during a
+ * recovery.
+ *
+ * The caller is responsible for deciding that this database is a legitimate
+ * target. See scripts/pg-restore.ts.
+ */
+export async function restore(db: Db, inPath: string): Promise<RestoreReport> {
+  if (db.kind !== 'postgres') throw new Error('restore() is Postgres-only');
+
+  const { manifest, buffers } = await inspect(inPath);
+  const droppedColumns: Record<string, string[]> = {};
+
   await db.transaction(async (tx) => {
     // RESTART IDENTITY so the sequence does not carry over from whatever was
     // in the target before; it is set explicitly below.
     await tx.exec(`TRUNCATE ${DUMP_TABLES.join(', ')} RESTART IDENTITY`);
 
     for (const t of manifest.tables) {
+      // Re-checked at the point of interpolation, not just at parse time: this
+      // is the line that builds SQL from file-supplied text, so the guarantee
+      // belongs where a future edit can see it.
+      assertDumpTable(t.name, 'manifest table');
       const rows = buffers.get(t.name) ?? [];
       if (rows.length === 0) continue;
 

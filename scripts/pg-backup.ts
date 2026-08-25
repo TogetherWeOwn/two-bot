@@ -4,7 +4,9 @@
  *   node scripts/pg-backup.ts
  *
  * Reads TWO_DATABASE_URL, writes `two-funnel-<stamp>.ndjson.gz` into
- * TWO_BACKUP_DIR (default ./backups), keeps TWO_BACKUP_KEEP (default 14), then
+ * TWO_BACKUP_DIR (default ./backups), keeps the newest TWO_BACKUP_KEEP files
+ * (default 14; must be a positive whole number, and the run aborts rather than
+ * guessing if it is set to anything else), then
  * runs TWO_BACKUP_UPLOAD_CMD with the file path appended as the last argument.
  * That argv shape is src/store/uploadCmd.ts - read it before writing the
  * variable, because tools whose last positional is the DESTINATION (rclone,
@@ -23,6 +25,7 @@ import { execFileSync } from 'node:child_process';
 import { openDb, isPostgresSpec } from '../src/store/db.ts';
 import { dump } from '../src/store/dump.ts';
 import { buildUploadArgv } from '../src/store/uploadCmd.ts';
+import { parseKeep, toPrune } from '../src/store/backupRetention.ts';
 
 const url = process.env.TWO_DATABASE_URL?.trim();
 if (!url || !isPostgresSpec(url)) {
@@ -31,8 +34,19 @@ if (!url || !isPostgresSpec(url)) {
 }
 
 const dest = process.env.TWO_BACKUP_DIR || './backups';
-const keep = Number(process.env.TWO_BACKUP_KEEP ?? 14);
 const uploadCmd = process.env.TWO_BACKUP_UPLOAD_CMD?.trim();
+
+// Checked before the dump, not before the prune: a setting that would delete
+// every backup should stop the run while it is still a no-op, rather than
+// after we have written a file for it to eat. See src/store/backupRetention.ts.
+let keep: number;
+try {
+  keep = parseKeep(process.env.TWO_BACKUP_KEEP);
+} catch (err) {
+  console.error(`backup: ${err instanceof Error ? err.message : String(err)}.`);
+  console.error('        Refusing to run: every reading of that value prunes all backups.');
+  process.exit(1);
+}
 
 mkdirSync(dest, { recursive: true });
 const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
@@ -63,7 +77,7 @@ const mine = readdirSync(dest)
   .filter((f) => /^two-funnel-.*\.ndjson\.gz$/.test(f))
   .map((f) => ({ f, t: statSync(join(dest, f)).mtimeMs }))
   .sort((a, b) => b.t - a.t);
-for (const old of mine.slice(keep)) {
+for (const old of toPrune(mine, keep)) {
   console.log(`backup: pruning ${old.f}`);
   unlinkSync(join(dest, old.f));
 }

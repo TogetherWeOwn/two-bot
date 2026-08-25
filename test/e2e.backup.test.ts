@@ -162,8 +162,97 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
 
     const before = await counts();
     await assert.rejects(() => restore(harness.db, cut), /truncated|rows/i);
-    // And the target is untouched: the transaction rolled back.
+    // Untouched - but note this file is rejected by the reader, before a
+    // transaction is ever opened. The rollback boundary itself is the next
+    // test; this one only proves a short file cannot get that far.
     assert.deepEqual(await counts(), before);
+  });
+
+  test('a failure inside the restore transaction rolls the TRUNCATE back', async () => {
+    await seed();
+    const file = join(dir, 'clash-source.ndjson.gz');
+    await dump(harness.db, file);
+
+    const objs = gunzipSync(readFileSync(file))
+      .toString('utf8')
+      .trimEnd()
+      .split('\n')
+      .map((l) => JSON.parse(l));
+
+    // Duplicate one event under a new id but the same idempotency_key, and
+    // adjust the manifest and end marker to match. The file is now internally
+    // consistent, so every pre-transaction check passes and the failure lands
+    // on the INSERT - after the TRUNCATE has already run. That is the only
+    // arrangement that actually exercises the rollback.
+    const sample = objs.find((o) => o.kind === 'row' && o.table === 'events');
+    assert.ok(sample, 'expected the dump to contain at least one event row');
+    const clash = {
+      kind: 'row',
+      table: 'events',
+      data: { ...sample.data, id: Number(sample.data.id) + 100_000 },
+    };
+
+    for (const o of objs) {
+      if (o.kind === 'manifest') {
+        o.tables = o.tables.map((t: { name: string; count: number }) =>
+          t.name === 'events' ? { ...t, count: t.count + 1 } : t,
+        );
+      } else if (o.kind === 'end') {
+        o.rows += 1;
+      }
+    }
+    objs.splice(
+      objs.findIndex((o) => o.kind === 'end'),
+      0,
+      clash,
+    );
+
+    const bad = join(dir, 'clash.ndjson.gz');
+    writeFileSync(bad, gzipSync(objs.map((o) => JSON.stringify(o)).join('\n') + '\n'));
+
+    const before = await counts();
+    assert.ok(before.events > 0, 'the rollback assertion is vacuous against an empty target');
+
+    // Confirmed to be the INSERT that fails, not an earlier check: the error is
+    // `duplicate key value violates unique constraint events_idempotency_key_key`.
+    await assert.rejects(() => restore(harness.db, bad), /duplicate|unique|idempotency/i);
+    assert.deepEqual(
+      await counts(),
+      before,
+      'the TRUNCATE must have rolled back with the failed INSERT',
+    );
+  });
+
+  test('a dump naming a table the bot does not own is refused', async () => {
+    await seed();
+    const file = join(dir, 'foreign-source.ndjson.gz');
+    await dump(harness.db, file);
+
+    const objs = gunzipSync(readFileSync(file))
+      .toString('utf8')
+      .trimEnd()
+      .split('\n')
+      .map((l) => JSON.parse(l));
+
+    // What a crafted backup looks like: a table that is not ours, carried in
+    // the manifest so the restore would truncate-and-insert it like one of the
+    // bot's own. DUMP_TABLES is the boundary; this proves it is enforced on the
+    // read path and not just on the write path.
+    const manifest = objs.find((o) => o.kind === 'manifest');
+    manifest.tables.push({ name: 'website_users', columns: ['id'], count: 1 });
+    objs.splice(
+      objs.findIndex((o) => o.kind === 'end'),
+      0,
+      { kind: 'row', table: 'website_users', data: { id: 1 } },
+    );
+    objs.find((o) => o.kind === 'end').rows += 1;
+
+    const bad = join(dir, 'foreign.ndjson.gz');
+    writeFileSync(bad, gzipSync(objs.map((o) => JSON.stringify(o)).join('\n') + '\n'));
+
+    const before = await counts();
+    await assert.rejects(() => restore(harness.db, bad), /website_users|does not own|not a table/i);
+    assert.deepEqual(await counts(), before, 'a refused dump must not have truncated anything');
   });
 
   test('an empty database dumps and restores without inventing rows', async () => {

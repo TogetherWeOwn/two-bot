@@ -177,9 +177,23 @@ try {
   console.log('\nverifying...');
   for (const t of TABLES) {
     const got = await targetCount(dst, t);
-    const want = srcCounts[t] + (allowNonempty ? before[t] : 0);
-    const ok = got === want;
-    console.log(`  ${t.padEnd(17)} source ${srcCounts[t]}  target ${got}  ${ok ? 'ok' : 'MISMATCH'}`);
+
+    // The copy uses ON CONFLICT DO NOTHING, so the target ends up holding the
+    // *union* of what it already had and what the source has. How large that
+    // union is depends on how much the two overlapped - and on the resume path
+    // that --allow-nonempty exists for, the overlap is exactly the rows a
+    // previous interrupted run already copied, which is not knowable from
+    // counts. Adding the two together and demanding equality could only ever
+    // hold when the overlap was empty, so a resumed migration could never
+    // report success. Assert the bounds a union must satisfy instead; the
+    // key-set comparison below is what actually proves nothing was lost.
+    const low = Math.max(before[t], srcCounts[t]);
+    const high = before[t] + srcCounts[t];
+    const ok = got >= low && got <= high;
+    const range = before[t] > 0 ? `  had ${before[t]}  expect ${low}..${high}` : '';
+    console.log(
+      `  ${t.padEnd(17)} source ${srcCounts[t]}  target ${got}${range}  ${ok ? 'ok' : 'MISMATCH'}`,
+    );
     if (!ok) failed = true;
   }
 
@@ -204,16 +218,48 @@ try {
     console.log(`  idempotency keys  ${srcKeys.size} present  ok`);
   }
 
-  const seq = await dst
-    .prepare(`SELECT last_value AS v FROM ${'events_id_seq'}`)
-    .get<{ v: number }>()
-    .catch(() => undefined);
+  // Ask Postgres for the sequence's real name rather than assuming
+  // `events_id_seq`, then read it. A check that cannot see the thing it is
+  // checking has to fail: reporting `ok` because the read threw is how you get
+  // told the migration is verified and then collide with an existing id on the
+  // first write. Both failure modes below are failures.
   const maxId = await dst.prepare(`SELECT COALESCE(MAX(id), 0) AS n FROM events`).get<{ n: number }>();
-  if (seq && Number(seq.v) < Number(maxId?.n ?? 0)) {
+  const seqName = await dst
+    .prepare(`SELECT pg_get_serial_sequence('events', 'id') AS s`)
+    .get<{ s: string | null }>()
+    .catch((err) => {
+      console.log(`  events id sequence  could not be resolved: ${String(err)}  FAILED`);
+      return undefined;
+    });
+
+  if (!seqName?.s) {
     failed = true;
-    console.log(`  events id sequence  at ${seq.v}, below max id ${maxId?.n}  MISMATCH`);
+    if (seqName) console.log('  events id sequence  events.id has no sequence attached  FAILED');
   } else {
-    console.log(`  events id sequence  ok`);
+    // seqName.s is Postgres's own identifier for the sequence, not user input.
+    const seq = await dst
+      .prepare(`SELECT last_value AS v, is_called AS called FROM ${seqName.s}`)
+      .get<{ v: number; called: boolean }>()
+      .catch((err) => {
+        console.log(`  events id sequence  could not be read: ${String(err)}  FAILED`);
+        return undefined;
+      });
+
+    if (!seq) {
+      failed = true;
+    } else {
+      // An uncalled sequence hands out last_value itself on the next nextval();
+      // a called one hands out last_value + 1. The id we must stay clear of is
+      // the highest one already in the table.
+      const next = Number(seq.v) + (seq.called ? 1 : 0);
+      const want = Number(maxId?.n ?? 0);
+      if (next <= want) {
+        failed = true;
+        console.log(`  events id sequence  next id ${next}, not past max id ${want}  MISMATCH`);
+      } else {
+        console.log(`  events id sequence  next id ${next}, past max id ${want}  ok`);
+      }
+    }
   }
 } catch (err) {
   failed = true;
