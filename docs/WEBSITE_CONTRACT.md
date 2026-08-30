@@ -1,8 +1,10 @@
 # The website data contract
 
-**Version: `v1.0` — live.** The `web_v1` schema and its nine views exist in
-Postgres, and the `two_web_ro` role can read them and nothing else. Build
-against this.
+**Version: `v1.0` — live.** (Doc revision `v1.0.2`, 2026-08-30 — prose only,
+the runtime contract is unchanged at `1.0`.) The `web_v1` schema and its nine
+views exist in Postgres, and the `two_web_ro` role can read them and nothing
+else. Both re-verified against a clean database on 2026-08-30: 35/35 role
+checks, 23/23 contract tests. Build against this.
 
 The website reads the bot's Postgres database directly. No sync job, no API in
 between, no second copy of the numbers that can drift from the first.
@@ -22,11 +24,13 @@ it.)
 > **What is real today, and what is null.** The views exist and the shapes are
 > final. Three of them have real data now — `members`, `member_milestones` and
 > the two `funnel_*` views read tables the bot has been filling since day one.
-> `live_counts` and `rank_counts` return **nulls**, and `next_event` returns
-> **zero rows**, until the collectors land (TOG-73, TOG-74). That is not a
-> failure state and it needs no special handling: it is exactly the degraded
-> path in §3, which you have to build anyway. Building against it now means the
-> empty states get exercised from the first day rather than the last.
+> The collector behind `live_counts` and `rank_counts` has **shipped** (TOG-73),
+> but it reads Discord, and the bot has no Discord token in this environment —
+> so on a database today those two views still return **nulls**, and
+> `next_event` returns **zero rows** until TOG-74. That is not a failure state
+> and it needs no special handling: it is exactly the degraded path in §3, which
+> you have to build anyway. Building against it now means the empty states get
+> exercised from the first day rather than the last. §6.2 has the detail.
 
 ---
 
@@ -126,19 +130,22 @@ The `member_count` column above is derived from the cumulative audit figures by
 subtraction, which is right only if the ranks are strictly nested. That is what
 the numbers look like, but the rank collector will compute it from actual role
 membership and confirm it. **Treat these five numbers as accurate to ±1 until
-TOG-73 runs** — and read them from the view, never from this table.
+the collector has actually run against a live guild** — and read them from the
+view, never from this table.
 
 ### `web_v1.members` — one row per member
 
 For member profiles. **Deliberately thin**, see §4 for what is not here. Bots
-are excluded entirely.
+are excluded entirely, and so are the raid accounts in `member_exclusions` —
+the same exclusion set the live counter and the rank ladder apply, so a profile
+page and the landing-page number can never disagree about who is a member.
 
 | Column | Type | Notes |
 |---|---|---|
 | `member_id` | text | Discord snowflake. The only identifier we hold. |
 | `joined_at` | text, nullable | First join. Null for members who predate our data. |
 | `tenure_days` | int, nullable | Whole days since `joined_at`. Precomputed so the website is not doing date maths, and so "tenure" means the same thing on every page. |
-| `rank_key` | text, nullable | Highest rank held, or null if they hold no rank role (33 of 84 humans today). Null for everyone until TOG-73 runs. |
+| `rank_key` | text, nullable | Highest rank held, or null if they hold no rank role. Null for everyone until the TOG-73 collector gets a Discord token and runs (§6.2), so treat null as the normal case for now. |
 | `is_current_member` | boolean | False for people who have left. They stay in the view — dropping them would quietly flatter our retention numbers. |
 
 **No usernames or avatars.** We do not store them (`docs/PRIVACY.md`), so a
@@ -298,37 +305,58 @@ show a visitor an error about our infrastructure.
 
 ## 6. Open items — read before building against this
 
-### 6.1 `online_count` is null in v1, and it needs a decision to change that
+### 6.1 `online_count` is null — decided, not pending
+
+**This is settled. Do not build a page that waits for it.** TOG-75 chose
+**option C — ship without an online count** on 2026-08-25, and the issue is
+`done`. Plan for `online_count` to be null indefinitely.
 
 The bot does not request the `GUILD_PRESENCES` gateway intent
 (`src/discord/client.ts` keeps the intent list minimal on purpose). Without it
 we cannot see who is online, so we cannot count humans online.
 
-The options, honestly stated:
+The options as they were weighed:
 
 | Option | Result |
 |---|---|
-| **A. Enable the presence intent** | A real humans-only online count. It is a privileged intent — a toggle in the Discord developer portal — and it means the bot receives presence updates for every member. We would store only the aggregate count, never per-member presence. This is a permissions change, so it is the CEO's call, not mine. |
-| **B. Use Discord's `approximate_presence_count`** | One REST call, no intent needed — but it counts the 23 bots along with the humans. At the audit it read **27**, and we have no way to say how many of those were humans. It would publish an inflated number on a page whose job is to be trustworthy. **Recommend against.** |
-| **C. Ship without it** | `online_count` stays null, the counter shows members only, and the degraded path gets exercised from day one. |
+| **A. Enable the presence intent** | A real humans-only online count. It is a privileged intent — a toggle in the Discord developer portal — and it means the bot receives presence updates for every member. We would store only the aggregate count, never per-member presence. |
+| **B. Use Discord's `approximate_presence_count`** | One REST call, no intent needed — but it counts the 23 bots along with the humans. At the audit it read **27**, and we have no way to say how many of those were humans. It would publish an inflated number on a page whose job is to be trustworthy. **Rejected.** |
+| **C. Ship without it — CHOSEN** | `online_count` stays null, the counter shows members only, and the degraded path gets exercised from day one. |
 
-**v1 ships as C** so nothing is blocked on a decision. Moving to A is a one-line
-intent change plus a counter-job update once approved, and it is **additive** —
-a null column starts returning a number. No version bump, no website change.
-Tracked as **TOG-75**, with the CEO as the unblock owner.
+The decision was the President & COO's, not the CEO's — an earlier revision of
+this document named the CEO as the owner, and that error is the single reason
+the question sat unanswered for six days. A doc that names the wrong owner is
+worse than one that names none.
 
-### 6.2 `live_counts`, `rank_counts` and the event views have no collector yet
+C carries an expiry condition rather than being a permanent no: TOG-469 landed
+an **internal-only** presence instrument (`presence_probe`, migration `0004`)
+so that reopening A is done on a measured series rather than on argument. That
+table is explicitly **not** in this contract and never will be without a
+version bump — see §4.
 
-The views are live and correctly shaped; nothing is filling the tables behind
-them. `live_counts` returns nulls, `rank_counts` returns five null rows,
-`next_event` returns nothing.
+If A is ever adopted, it is **additive**: a null column starts returning a
+number. No version bump, no website change.
 
-- **TOG-73** — counter cache + rank snapshot collector → `live_counts`,
-  `rank_counts`, `members.rank_key`
-- **TOG-74** — scheduled-events poller → `next_event`, `upcoming_events`
+### 6.2 The counter collector has shipped, but nothing is filling the tables yet
+
+The views are live and correctly shaped. **On a database today `live_counts`
+still returns nulls, `rank_counts` five null rows, and `next_event` nothing** —
+measured, not assumed (2026-08-30, migrations + `web:views` applied to a clean
+Postgres). Build for that.
+
+- **TOG-73 — shipped** (`src/jobs/communitySnapshots.ts`, migration `0005`).
+  60-second member cache, 10-minute rank snapshot, feeding `live_counts`,
+  `rank_counts` and `members.rank_key`. It reads the Discord REST API, and
+  **this company holds no Discord token for the TWO server**, so in this
+  environment the job's reads fail and — by design, §3 — it writes nothing.
+  The moment a token exists the numbers appear with no website change.
+- **TOG-74 — not started.** Scheduled-events poller → `next_event`,
+  `upcoming_events`.
 
 Flagged so nobody plans a launch date assuming the data is already sitting
-there. Neither is blocked by anything now.
+there. The distinction that matters to you: TOG-73 is no longer *code to be
+written*, it is *code waiting on a credential*, and the degraded path in §3 is
+what renders in the meantime either way.
 
 ### 6.3 Profiles have no display names
 
@@ -432,14 +460,28 @@ executes is how a runbook rots; this one is executed. Landed by TOG-465.
 
 | Piece | State |
 |---|---|
-| This document | Published, **`v1.0`** |
+| This document | Published, **`v1.0`** (doc revision `v1.0.2`) |
 | `web_v1` schema and its 9 views | **Live.** `sql/web_v1.sql`, applied by `npm run web:views` and at bot startup |
-| Tables behind them | **Live.** `migrations/0003_web_contract_tables.sql` |
-| `two_web_ro` role and grants | **Live.** `npm run web:role`, proven by `npm run verify:web-role` (35/35) |
-| Tests | `test/e2e.webcontract.test.ts` — 23 cases, Postgres only. **Run by CI** in the `postgres` job (TOG-465) |
-| Counter cache + rank snapshot collector | **Implemented by TOG-73.** 60s member cache, 10m rank snapshot; failed or ungrounded reads write nothing |
+| Tables behind them | **Live.** `migrations/0003_web_contract_tables.sql`, `0005_counter_snapshots.sql` |
+| `two_web_ro` role and grants | **Live.** `npm run web:role`, proven by `npm run verify:web-role` — **35/35 re-run against a clean Postgres on 2026-08-30** |
+| Tests | `test/e2e.webcontract.test.ts` — 23 cases, Postgres only. **23/23 re-run 2026-08-30**, and run by CI in the `postgres` job (TOG-465) |
+| Counter cache + rank snapshot collector | **Code shipped (TOG-73)**, 60s member cache / 10m rank snapshot — but **not yet producing data**: it needs a Discord token the company does not hold. See §6.2. |
 | Scheduled events poller | TOG-74, not started |
-| Presence intent decision | TOG-75, with the CEO |
+| Presence intent decision | TOG-75, `done` — see §6.1 |
+
+**What a website build sees today, measured rather than promised.** On
+2026-08-30 the full §7 sequence was run against a clean Postgres and every view
+queried as `two_web_ro`:
+
+| View | Today |
+|---|---|
+| `contract_meta` | one row, `1.0` |
+| `live_counts` | one row, all four columns null |
+| `rank_counts` | five rows, ladder order, counts null |
+| `members` / `member_milestones` / `funnel_*` | readable, empty on a fresh database |
+| `next_event` / `upcoming_events` | zero rows |
+
+Every one of those is the designed empty state in §3, not a fault.
 
 **Where the SQL lives, and why it is split.** Tables are in `migrations/`, which
 is immutable by rule. Views are in `sql/web_v1.sql`, applied with `CREATE OR
@@ -453,6 +495,7 @@ migration. See the note at the top of `sql/web_v1.sql`.
 
 | Version | Date | Change |
 |---|---|---|
+| `v1.0.2` | 2026-08-30 | **Documentation only; no view, column, type or `contract_meta` value changed, so nothing built against `v1.0` needs to move.** Removes status drift that had the document contradicting itself: §6.2 still said the counter collector did not exist while §8 said it had shipped. Both now say the same thing — TOG-73's code is merged (`c12654a`) but produces no data, because it reads Discord and the company holds no token for the TWO server, so `live_counts` and `rank_counts` still read null today. §6.1 records the TOG-75 outcome (**option C, decided, `done`**) instead of presenting a live A/B/C choice, and drops the incorrect claim that it was the CEO's call — this is the fix TOG-468 asks for. §2 `members` now states the raid exclusion the view has actually applied since TOG-73, and the stale "33 of 84 humans" / "until TOG-73 runs" notes are gone. §8 replaces promised numbers with measured ones: the full §7 deploy sequence, `verify:web-role` (35/35) and `test/e2e.webcontract.test.ts` (23/23) were re-run against a clean Postgres on 2026-08-30, and every view was queried as `two_web_ro` to record what a website build actually sees today. |
 | `v1.0.1` | 2026-08-25 | **Documentation correction only; runtime contract remains `1.0`.** `human_member_count` excludes the dynamically-derived raid set as well as bots, yielding 54 on the grounded 2026-08-19 snapshot rather than the raw 84 Discord human accounts. TOG-73 applies the same exclusion to rank counts and public member rows and writes nothing when any raid window is ungrounded. No view shape or `contract_meta` value changed. |
 | `v1.0` | 2026-08-25 | **Live.** Schema, nine views, the tables behind them and the `two_web_ro` role created and verified against Postgres — 32/32 role checks, 22 tests, whole suite green on both drivers. No shape the Lead asked for moved between `v0.1` and here. New in this version: the freshness ceilings live in the views rather than being a promise about the collector; the zero rule is a schema constraint as well as collector behaviour; `rank_changed` is pre-whitelisted in `member_milestones` so TOG-73 needs no contract change; an in-progress event stays as `next_event`. TWO-\* references renumbered to their TOG equivalents (TOG-73, TOG-74, TOG-75). |
 | `v0.1` | 2026-08-19 | First draft. Written against the Web Lead's field list on TOG-43 and `two-design/docs/CONTENT.md` / `COMPONENTS.md`. Not frozen. |
