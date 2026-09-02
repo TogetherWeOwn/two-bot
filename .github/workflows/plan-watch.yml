@@ -98,7 +98,7 @@ jobs:
   protection-available:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Probe, and speak up if branch protection is possible now
         env:
