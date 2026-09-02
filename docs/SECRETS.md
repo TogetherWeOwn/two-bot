@@ -79,28 +79,42 @@ Scoped to what the funnel actually needs. Not Administrator.
 
 **OAuth2 scopes:** `bot`
 
-**Permissions:** `View Channels`, `Manage Server`.
+**Permissions:** `View Channels`, `Manage Server`, `Manage Roles`,
+`Manage Events`, `Create Instant Invite`, `Send Messages`.
+
+**Permission integer: `8858373153`** (verified against `discord.js`'s own
+`PermissionFlagsBits` constants, not hand-computed). Apply/invite URL, using
+the live application id:
+
+```
+https://discord.com/api/oauth2/authorize?client_id=1539711683898118154&permissions=8858373153&scope=bot
+```
 
 `Manage Server` is the uncomfortable one, so to be explicit about why: it is the
 only permission that allows reading the server's invite list, and reading invite
 use-counts is the only way Discord lets anyone attribute a join to an invite.
 Without it every join is recorded as `unknown` and we cannot tell which growth
-efforts work. It does not grant kick, ban, or message-sending.
+efforts work.
+
+The other four (`Manage Roles`, `Manage Events`, `Create Instant Invite`,
+`Send Messages`) are not read-and-record permissions — they exist solely
+because the internal-actions endpoint (TOG-44) needs them: `role.assign`,
+`event.upsert`, `guild.add_member`, and `announcement.post` respectively. See
+`docs/INTERNAL_ACTIONS.md` §8 for the full mapping. `Send Messages` should be
+constrained to the announcement channel via a channel permission overwrite in
+the Discord UI, not left as an unrestricted guild-wide grant, even though the
+OAuth invite integer above necessarily requests it at the role level.
+
+**Server-config prerequisite, not a permission bit:** the bot's highest role
+must sit *above* any role `role.assign` grants. This is set in Discord's role
+order UI, not via the OAuth invite, and is the most common way role assignment
+breaks even when every bit above is correctly granted.
 
 ## Not needed, not requested
 
 The bot does not ask for and must not be given: Administrator, Kick Members,
-Ban Members, Manage Roles, Manage Channels, or Send Messages. It is a
-read-and-record service. When onboarding automation lands it will need
-`Send Messages` in specific channels only, and that is a separate conversation.
-
-> **This list goes out of date the moment TWO-24 ships.** The website's action
-> endpoint needs `Manage Roles`, `Manage Events`, `Send Messages` in one
-> channel, and `Create Instant Invite` — four bits that are explicitly refused
-> above, and none of which `Manage Server` implies. The full breakdown is in
-> `docs/INTERNAL_ACTIONS.md` §8. **TWO-42 must not narrow the live grant until
-> that reconciliation is agreed**, or one-click join (TWO-57) dies silently on
-> the day the permissions are tightened.
+Ban Members, or Manage Channels. It is a read-and-record service plus the four
+internal-actions bits above — nothing that lets it moderate the server.
 
 ## Checking it is right
 
@@ -136,9 +150,18 @@ of which blocks data collection:
 Both are Discord-portal changes owned by whoever administers the server, and
 both are tracked on TWO-11. **They are not equally safe to act on.** Turning
 Message Content Intent off is safe today and should happen. Dropping
-Administrator is **not** safe today: the routed welcome (TWO-69) needs
-`Send Messages` and `Manage Roles`, and one-click join (TWO-57) additionally
-needs `Manage Events` and `Create Instant Invite`. Administrator is covering all
-four by accident; `Manage Server` implies none of them. Narrow the grant only
-once TWO-42 has reconciled the real set — see §8 of `docs/INTERNAL_ACTIONS.md`. Everything before the token arrived was built and
+Administrator down to exactly `View Channels` + `Manage Server` is **not**
+safe: the routed welcome (TWO-69) needs `Send Messages` and `Manage Roles`,
+and one-click join (TWO-57) additionally needs `Manage Events` and
+`Create Instant Invite`. Administrator is covering all four by accident;
+`Manage Server` implies none of them.
+
+**TOG-64 reconciled this** (2026-09-02): the target grant is the six-bit set
+above, permission integer `8858373153`, not the two-bit set this section used
+to describe. `scripts/preflight.ts` now asserts all four internal-actions bits
+explicitly. Applying it — via the invite URL above, re-inviting the bot with
+the new permissions — is still a Discord-portal change gated on whoever
+administers the server; this repo cannot execute it. Re-run
+`scripts/preflight.ts` against the live token after applying it to confirm
+nothing was cut too far. Everything before the token arrived was built and
 verified against a local mock Discord (see `tools/mock-discord/`).

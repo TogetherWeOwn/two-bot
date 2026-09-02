@@ -99,14 +99,29 @@ for (const g of targets) {
   if (has(3n)) {
     // Administrator implies every other permission, so the checks below would
     // all pass regardless. Working, but far more access than we asked for.
-    warn('bot has Administrator', 'we only need View Channels + Manage Server - see docs/SECRETS.md');
+    warn('bot has Administrator', 'target is the six-bit grant in docs/SECRETS.md, not Administrator');
   }
   if (has(5n)) pass('Manage Server', 'invite attribution possible');
   else fail('missing Manage Server', 'every join will be attributed "unknown"');
   if (has(10n)) pass('View Channels');
   else fail('missing View Channels');
 
-  for (const [bit, name] of [[1n, 'Kick Members'], [2n, 'Ban Members'], [28n, 'Manage Roles'], [4n, 'Manage Channels']] as const) {
+  // These four are required by the internal-actions endpoint (TOG-44) even
+  // though Manage Server does not imply any of them - see
+  // docs/INTERNAL_ACTIONS.md §8. Assert them explicitly so a future trim
+  // (TOG-42/TOG-64) cannot silently drop one again the way the original
+  // "View Channels + Manage Server" target did.
+  for (const [bit, name, action] of [
+    [0n, 'Create Instant Invite', 'guild.add_member (one-click join, TWO-57)'],
+    [28n, 'Manage Roles', 'role.assign (routed welcome, TWO-69)'],
+    [33n, 'Manage Events', 'event.upsert'],
+    [11n, 'Send Messages', 'announcement.post'],
+  ] as const) {
+    if (has(bit)) pass(name, `${action} works`);
+    else fail(`missing ${name}`, `${action} will 403`);
+  }
+
+  for (const [bit, name] of [[1n, 'Kick Members'], [2n, 'Ban Members'], [4n, 'Manage Channels']] as const) {
     if (has(bit) && !has(3n)) warn(`bot has ${name}`, 'not needed by this bot');
   }
 

@@ -444,13 +444,15 @@ company is judged on, and an unattributed join is an argument nobody can win.
 
 ## 8. The permission bill
 
-**This allowlist costs Discord permissions the bot does not currently have on
-paper, and the numbers in `docs/SECRETS.md` are now short.**
-
-`docs/SECRETS.md` documents the target grant as **View Channels + Manage
-Server**. The bot in the live server currently holds Administrator, so
-everything here works today by accident. **TWO-42 narrows that grant** — and if
-it narrows to what SECRETS.md says, every action on this page breaks.
+**Reconciled by TOG-64 (2026-09-02).** `docs/SECRETS.md` now documents the
+target grant as the six-bit set (`View Channels`, `Manage Server`,
+`Manage Roles`, `Manage Events`, `Create Instant Invite`, `Send Messages`),
+permission integer `8858373153`, not the old two-bit `View Channels + Manage
+Server` target this section used to warn against. The bot in the live server
+currently holds Administrator; applying the narrower grant is a Discord-portal
+change still pending, gated on whoever administers the server.
+`scripts/preflight.ts` now asserts all four bits below explicitly, so a future
+trim cannot silently drop one again.
 
 Manage Server does **not** imply Manage Roles, Manage Events, or Create Instant
 Invite; they are separate bits.
@@ -462,14 +464,11 @@ Invite; they are separate bits.
 | `event.upsert` | Manage Events |
 | `guild.add_member` | **Create Instant Invite** |
 
-TOG-42 must not land until this list is reconciled, or one-click join dies
-silently on the day the permissions are tightened. Flagged on TOG-44.
-
-**`v0.3` adds two entries to this bill.** `announcement.post` needs View
+**`v0.3` added two entries to this bill.** `announcement.post` needs View
 Channel + Send Messages in whichever channel `TWO_INTERNAL_CHANNEL_KEYS` names,
 and `event.upsert` needs **Manage Events** — a separate bit that Manage Server
-does not imply. Both are live now, so the reconciliation TOG-42 owes this page
-covers four actions rather than two.
+does not imply. Both are live now, so the reconciliation covers four actions
+rather than two.
 
 ---
 
