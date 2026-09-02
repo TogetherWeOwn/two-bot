@@ -5,16 +5,21 @@ decided once rather than per repo.
 
 | | |
 |---|---|
-| Org | `TWO-Gaming` (id `318830450`, created 2026-08-20) |
+| Org | `TogetherWeOwn` (id `319943574`, created 2026-08-22) |
 | Repos | `two-bot` (this one), `two-web` (the Laravel site), `two-design` (tokens and brand) |
 | Visibility | **Private**, all three, until the launch hardening pass has cleared secrets and history |
 | Default branch | `main` |
 | Setup | [`scripts/setup-github.sh`](../scripts/setup-github.sh) — idempotent, re-runnable, `--dry-run` and `--verify` supported |
 
-Org logins are case-insensitive on GitHub, so `two-gaming` and `TWO-Gaming`
-resolve to the same org. The scripts, the CODEOWNERS files and the bot's systemd
-unit all use the lowercase form and **nothing needs renaming**. Set
-`TWO_GITHUB_ORG=TWO-Gaming` if you want the canonical casing in the git remotes.
+**`TWO-Gaming` (id `318830450`, created 2026-08-20) is dead.** All three repos
+were transferred out of it into `TogetherWeOwn`, and it has been empty ever
+since (`GET orgs/TWO-Gaming/repos` → `[]`, verified 2026-09-02). GitHub redirects
+`repos/TWO-Gaming/<repo>` to the new location, which makes the old org *look*
+live if you only check the repo — but `orgs/TWO-Gaming` itself never redirects
+and resolves to the real, empty org. Point every script and remote at
+`TogetherWeOwn`; do not rely on the repo redirect and do not "restore" the old
+org name. `TWO_GITHUB_ORG` still exists as an override for local testing, but
+its default below is now `TogetherWeOwn`.
 
 ## The credential
 
@@ -45,9 +50,8 @@ found on 2026-08-20 by doing exactly that.
 | Level | Permission | Why |
 |---|---|---|
 | Organization | `Administration: write` | create repos in the org |
-| Organization | `Members: write` | create the five teams |
 | Repository | `Metadata: read` | required by every other repo permission |
-| Repository | `Administration: write` | branch protection, merge settings, team access |
+| Repository | `Administration: write` | branch protection, merge settings, repo access |
 | Repository | `Contents: write` | push history |
 | Repository | `Workflows: write` | push `.github/workflows/` |
 | Repository | `Actions`, `Secrets`, `Environments`, `Pull requests`, `Issues`: write | CI, the production environment gate, and review routing |
@@ -55,6 +59,11 @@ found on 2026-08-20 by doing exactly that.
 The full spec is the `github-access` document on TWO-81. These are fine-grained
 permission *names* — they are not the classic-PAT scopes (`repo`, `admin:org`,
 `workflow`), and an older version of the setup script asked for the wrong thing.
+
+**`Members: write` is gone from this list.** It existed only to create the
+five-team roster below, which TOG-128 retired: `TogetherWeOwn` has one human
+member (`Rick7C2`) and zero teams, so a team would have been a group of one.
+`.github/CODEOWNERS` in every repo now names `@Rick7C2` directly instead.
 
 **Remotes are HTTPS, not SSH.** A PAT authenticates HTTPS; it does not
 authenticate `git@github.com`, and there is no SSH key on the machine that runs
@@ -67,151 +76,115 @@ into `.git/config`, where every `git remote -v` would print it.
 
 **Prove the token before using it.** `setup-github.sh --dry-run` reports whether
 it was handed a classic or fine-grained token, and then proves the org write by
-creating a throwaway team and deleting it again:
+creating a throwaway repo and deleting it again. If creation is refused, the
+probe prints GitHub's own error and names the exact permission to add. That is
+the whole point: a missing permission should surface in a dry run, not half way
+through a real run with some repos made and one not. `TWO_SKIP_TOKEN_PROBE=1`
+turns it off. Repo-level permissions cannot be probed before a repo exists; they
+are exercised on the real run, step by step, and each step reports its own
+failure.
 
-```
-== Token probe (dry run only - creates and deletes a throwaway team)
-   ok    can LIST teams (org Members: read)
-   ok    CAN create a team (org Members: write is sufficient) - created @two-gaming/zz-preflight-token-check-1234
-   ok    CAN delete a team - probe team removed, org is back as it was
-```
-
-If creation is refused, the probe prints GitHub's own error and names the exact
-permission to add. That is the whole point: a missing permission should surface
-in a dry run, not half way through team creation with three teams made and two
-not. `TWO_SKIP_TOKEN_PROBE=1` turns it off. Repo-level permissions cannot be
-probed before a repo exists; they are exercised on the real run, step by step,
-and each step reports its own failure.
+(This probe used to create and delete a throwaway *team*, back when the org had
+teams. It doesn't since TOG-128 — see [Reviewers](#reviewers), below.)
 
 ## The thing to know before you start
 
-**On GitHub Free, branch protection does nothing on a private repository.**
+**The plan is no longer the blocker. Nobody has written the rules yet.**
 
-Rulesets and classic branch protection are enforced on public repos on every
-plan, but on private repos only from **GitHub Team** upward.
+This section used to be about whether to pay for a plan that supports
+protection on private repos. That question is closed: the org converted to
+paid **GitHub Enterprise Cloud**, one billable human seat, on **2026-08-27**
+(TOG-382 → TOG-564, superseding the earlier Free-plan decision below). Verified
+live on 2026-09-02:
 
-*(An earlier version of this section said the API call succeeds and the rule is
-then silently not applied. That was wrong, and it was checked against the real
-org on 2026-08-20: the call returns 403 and nothing is stored. See
-[the decision](#the-decision-made-2026-08-20-two-81) for what that changes.)*
+```
+GET  repos/TogetherWeOwn/two-bot/rulesets     -> 200 []
+GET  repos/TogetherWeOwn/two-web/rulesets     -> 200 []
+GET  repos/TogetherWeOwn/two-design/rulesets  -> 200 []
+GET  repos/TogetherWeOwn/two-bot/branches/main -> "protected": false
+```
 
-That leaves three options and only one of them is good:
+That `200 []` is the tell that the plan gate is gone: on Free it was a flat
+`403`. On the current plan the endpoint is reachable and simply reports that no
+rule has been saved — because none has. `PUT`/`GET`
+`branches/main/protection` still 403, but with a *different* message than the
+old plan-gate one:
 
-| Option | Cost | Verdict |
+```
+{"message":"Resource not accessible by integration"}
+```
+
+That is a **token scope** refusal, not a plan refusal — this repo's GitHub App
+installation deliberately excludes `administration`/`repository_rules` (see
+[the credential section](#the-credential) and TOOLS.md), so no agent token can
+write protection even now that the plan allows it. Applying the rules is a
+human/admin-token step. **That is the open work item, tracked as TOG-111**
+(backlog, high priority) — this doc stops short of prescribing its content;
+read that issue for the exact ruleset payload and status-check list.
+
+### History
+
+| Plan | Since | Why |
 |---|---|---|
-| **GitHub Team** | $4 / committer / month (~$20–24/mo for this team) | **Recommended.** Private repos and enforced protection, which is what TWO-22's pipeline depends on. |
-| Make repos public now | free | **No.** History and secrets have not been cleared yet. Private → public is easy; the reverse is not. |
-| Stay free + private, protection advisory only | free | Works right up until the day somebody is in a hurry. This is the situation the issue was written to prevent. |
+| Free, private, protection advisory | 2026-08-20 (TWO-81) | Founder's words: *"C for now. Once we start making revenue I might pay for the team."* Recorded choice, not a shortcut. |
+| GitHub Enterprise, trial | 2026-08-25 | Set up ahead of a ~30-day expiry to unblock CI while the plan decision was pending. |
+| GitHub Enterprise Cloud, paid, 1 seat | 2026-08-27 (TOG-382/564) | Owner corrected the earlier "downgrade to Team" recommendation: one-seat Enterprise's included 50,000 Actions minutes/month priced out cheaper than Team plus overage for the observed workload. GitHub App identities (the bot accounts that open every PR) do not consume seats. |
 
-Only one of the three combinations fails, and it is the one that fails silently:
+On the Free plan, `PUT`/`GET .../protection` and `GET .../rulesets` returned a
+flat `403` with *"Upgrade to GitHub Pro or make this repository public to
+enable this feature"* — GitHub refused the setting outright and stored
+nothing, so there was never a silently-inert rule sitting on a settings page.
+That measurement (2026-08-20) is why this doc used to warn that moving to a
+paid plan later would **not** switch protection on by itself: there was nothing
+stored to start enforcing. That warning has now materialized exactly as
+predicted — the plan changed on 2026-08-27, and the 2026-09-02 probe above
+confirms nothing was waiting to activate. The rules still have to be written
+once, by TOG-111.
 
-| | private | public |
-|---|---|---|
-| **Free** | protection **not** enforced, silently | protection enforced |
-| **Team and up** | protection enforced | protection enforced |
+**Two other things that were true only on Free, and must be re-checked now that
+the plan has changed:** `CODEOWNERS` does not route reviews on Free at all —
+see [Reviewers](#reviewers) for why it is still advisory today, for an
+unrelated reason (protection isn't applied yet, so there's no "Require review
+from Code Owners" setting to turn on). And the `two-web` `production`
+environment has no required reviewers configured — that must be fixed *before*
+`FORGE_PRODUCTION_DEPLOY_HOOK` is ever set, or the release sign-off gate is
+decorative.
 
-This is a spend decision, so it is the CEO's, not mine. The setup script
-detects a free plan and warns rather than pretending it worked.
+### The watcher that was built for this day
 
-### The decision, made 2026-08-20 (TWO-81)
+[`plan-watch.yml`](../.github/workflows/plan-watch.yml) asks GitHub every
+Monday whether branch protection is still refusing, precisely so the plan
+changing would not go unnoticed. `./scripts/plan-watch.sh --runbook` prints the
+re-apply steps at any time. Full reasoning: TWO-85.
 
-**Free plan, private repos, protection advisory.** The founder's words: *"C for
-now. Once we start making revenue I might pay for the team."* That is a recorded
-choice, not a shortcut, and it is what the org runs on today:
-
-```bash
-TWO_REPO_VISIBILITY=private TWO_ACCEPT_UNPROTECTED_MAIN=1 ./scripts/setup-github.sh
-```
-
-`TWO_ACCEPT_PUBLIC_REPOS` is **not** set and must not be — the repos stay
-private. `TWO_ACCEPT_UNPROTECTED_MAIN=1` is the gate below being answered, which
-is exactly what it was built for.
-
-**This is reversible — but not for free, and not by itself.** Measured against
-the real org on 2026-08-20, after the repos existed:
-
-```
-PUT  repos/two-gaming/two-bot/branches/main/protection  -> 403
-GET  repos/two-gaming/two-bot/branches/main/protection  -> 403
-GET  repos/two-gaming/two-bot/rulesets                  -> 403
-"Upgrade to GitHub Pro or make this repository public to enable this feature."
-```
-
-That corrects something this document and TWO-40 both used to say. GitHub does
-**not** accept the rule and quietly ignore it. It refuses outright, and stores
-nothing. Two consequences, one in each direction:
-
-- **Better than feared.** There is no silent failure mode. A settings page
-  cannot show a green padlock that means nothing, because there is no saved
-  rule to show. What you see is the truth.
-- **Worse than hoped.** Moving to GitHub Team later does **not** switch
-  protection on by itself. There is nothing stored to start enforcing. The
-  rules have to be written again.
-
-The upgrade path is still short, because writing them again is one command:
-
-```bash
-./scripts/setup-github.sh          # idempotent; writes protection, skips the rest
-./scripts/setup-github.sh --verify # confirms, with TWO_ACCEPT_UNPROTECTED_MAIN unset
-```
-
-That is minutes, not a migration — but it is a step somebody has to remember,
-and the day the plan changes is exactly the day nobody is thinking about branch
-protection. So it is not left to memory:
-[`plan-watch.yml`](../.github/workflows/plan-watch.yml) asks GitHub every Monday
-whether it is still refusing. The week it stops refusing, the job fails and puts
-the whole re-apply runbook in its own run summary.
-`./scripts/plan-watch.sh --runbook` prints those steps at any time. Full
-reasoning: TWO-85.
-
-**The watcher is armed, on the default `GITHUB_TOKEN`, with no secret to set.**
-It used to need permissions a workflow token cannot be granted —
-`administration` is not even a valid `permissions:` key, and the org plan is
-only shown to an org admin — so it ran unarmed, reported that it could not see,
-and exited 0. `plan-watch.sh` now reconstructs the same verdict from
-`branches/{b}` (`.protected`) and `rulesets` (200 vs 403), which need only
-`contents: read` + `metadata: read`. The repository secret `PLAN_WATCH_TOKEN`
-is obsolete: delete it if it was ever created, and do not add one (TOG-383).
-
-The org-plan probe still comes back unknown and that is expected — it only
-corroborates. The branch-protection probe alone reaches a verdict.
+**It runs on the default `GITHUB_TOKEN`, with no secret to set.** It used to
+need permissions a workflow token cannot be granted — `administration` is not
+even a valid `permissions:` key — so it ran unarmed and exited 0 without
+reporting anything useful. It now reconstructs the same verdict from
+`branches/{b}` (`.protected`) and `rulesets` (200-with-rules vs
+200-empty-vs-403), which need only `contents: read` + `metadata: read`. The
+repository secret `PLAN_WATCH_TOKEN` is obsolete: delete it if it was ever
+created, do not add one (TOG-383).
 
 The remaining manual step is the one no script can check for itself — that
-GitHub, and not just the local hook, rejects a direct push:
+GitHub, and not just the local hook, rejects a direct push once protection is
+actually applied:
 
 ```bash
 git commit --allow-empty -m 'protection check'
 git push origin main    # must be REJECTED by GitHub
 ```
 
-Two other things start working silently on the day the plan changes, and both
-need checking then: `CODEOWNERS` does not route reviews at all on Free, and the
-`production` environment on `two-web` has no required reviewers — which must be
-fixed *before* `FORGE_PRODUCTION_DEPLOY_HOOK` is ever set, or the release
-sign-off gate is decorative.
+Until TOG-111 lands, the guard is [`main-guard.yml`](#plan-b-if-the-answer-is-no)
+in all three repos: it cannot refuse a direct push, but it turns one into a red
+X with a name on it within a minute.
 
-Until then the guard is [`main-guard.yml`](#plan-b-if-the-answer-is-no) in all
-three repos: it cannot refuse a direct push, but it turns one into a red X with
-a name on it within a minute.
-
-**If the answer is Free + public**, the script can act on it without a code
-change:
-
-```bash
-TWO_REPO_VISIBILITY=public TWO_ACCEPT_PUBLIC_REPOS=1 ./scripts/setup-github.sh
-```
-
-Both variables are required. Two of them for one decision is deliberate:
-publishing is the only step here that cannot be undone. Setting a repo back to
-private does not un-clone it, un-fork it, or remove it from anyone's search
-index — and TWO-35 has not yet cleared the history that would go out with it.
-With `TWO_REPO_VISIBILITY=public` set, the script stops treating a free plan as
-a problem, because on public repos protection genuinely is enforced.
-
-Verified again on 2026-08-19: GitHub's docs still scope both classic protected
-branches and rulesets to "public repositories with GitHub Free… public and
-private repositories with GitHub Pro, Team, and Enterprise Cloud." Push
-rulesets on private repos are Team and up. Nothing has changed in our favour.
+**If the org ever goes back to a plan that refuses protection on private
+repos**, the fallback is the same one this section used to lead with: make the
+repos public (`TWO_REPO_VISIBILITY=public TWO_ACCEPT_PUBLIC_REPOS=1
+./scripts/setup-github.sh`), where protection is free on every plan. That
+remains a one-way, owner-only call — TOG-35's history-clearing pass has to run
+first — and is not the live situation as of this writing.
 
 ## Plan B, if the answer is no
 
@@ -233,64 +206,76 @@ sets it on both working copies too.
 `--no-verify` walks past it. It stops the tired-Friday accident, which is the
 common case. It does not stop somebody who means it, and it does not stop a web
 UI commit. `main-guard` covers the gap by making any bypass visible within a
-minute — detection, not prevention. GitHub Team is still the answer; this is
-what we have until then.
+minute — detection, not prevention. Server-side protection (TOG-111) is still
+the answer; this is what we have until it is applied.
 
-On a free plan `setup-github.sh --verify` will not report success for an
-unguarded `main` unless you set `TWO_ACCEPT_UNPROTECTED_MAIN=1`. That is on
-purpose: the weaker posture should be something somebody chose, not something
-that happened because nobody made the call.
+Applying it does not require a plan change any more — the org is already on
+paid Enterprise (see [above](#the-thing-to-know-before-you-start)) — but until
+someone with an admin token runs `setup-github.sh` for real, `--verify` will
+not report success for an unguarded `main` unless you set
+`TWO_ACCEPT_UNPROTECTED_MAIN=1`. That is on purpose: the weaker posture should
+be something somebody chose, not something that happened because nobody made
+the call.
 
-## Teams
+## Reviewers
 
-`CODEOWNERS` points at teams, not people, so a review request never blocks on
-one account being asleep. `setup-github.sh` creates all five and grants their
-repo access; the org owner only has to **add the members**.
+**There are no teams. `CODEOWNERS` names one person.**
 
-| Team | Members | Reviews | Write on |
-|---|---|---|---|
-| `founding-engineer` | Founding Engineer | the bot, deploy, secrets, privacy | all three |
-| `web-lead` | Web Lead | Laravel backend, schema, policies | `two-bot`, `two-web` |
-| `frontend` | Frontend Engineer | Blade views, JS, CSS, design tokens | `two-web`, `two-design` |
-| `qa` | QA Engineer | tests and CI everywhere | all three |
-| `design` | Product Designer | tokens, brand assets, accessibility | `two-design` |
+This section used to describe a five-team roster (`founding-engineer`,
+`web-lead`, `frontend`, `qa`, `design`) that `setup-github.sh` would create,
+each mapped to a function. That model never matched `TogetherWeOwn`: the org
+has **one human member and zero teams** (`GET orgs/TogetherWeOwn/members` →
+`[]`; the only account with repo access is `Rick7C2`, `permission: admin`).
+Every `@two-gaming/<team>` rule in every repo's `CODEOWNERS` was silently
+dropped by GitHub — a rule naming a team that doesn't exist is not an error,
+the settings page looks fine, and reviews just stop being requested.
 
-Access follows the `CODEOWNERS` files, not preference. `frontend` gets no access
-to `two-bot` because `two-bot`'s `CODEOWNERS` never names it; it does get
-`two-design`, because `resources/css/two.css` in `two-web` is a copy of
-`two-design/tokens/two.css` and Frontend is who has to carry a token change
-across. Everyone gets **Write**, which is also the minimum that makes a team
-eligible to be a code owner. Nobody needs Admin for day-to-day work; org owner
-stays with the founder.
+**TOG-128 (done, 2026-08-24) fixed this by removing the team layer, not by
+recreating it.** Every repo's `.github/CODEOWNERS` now names `@Rick7C2`
+directly:
 
-`design` is a fifth committer and therefore about **$4/month more** on GitHub
-Team than the four-agent estimate in TWO-40. If the founder would rather not add
-a fifth seat, the fallback is to drop the `design` team and let
-`@two-gaming/frontend` own `two-design` — worse, because the person who wrote
-the tokens then cannot be required to review a change to them, but it is not
-broken. That is a spend call, not mine.
+```
+*                           @Rick7C2
+```
 
-**Three ways this breaks silently**, all of them checked by `--verify`:
+with the same path-sensitivity comments the old file had (tests/CI, the
+bot↔web event contract, secrets/privacy/deploy) kept as documentation even
+though every path resolves to the same one person today. The reasoning that
+picked individual handles over recreating five teams of one, from TOG-128:
+teams exist so a review request doesn't die because one account is asleep — a
+team containing exactly one person defeats that, while adding org-admin
+overhead (`Members: write`) to maintain. When the org grows a second
+committer with write access, that is the point to promote the genuinely
+multi-person functions back to real teams; the path split in the file's
+comments is already there waiting for it.
 
-1. **The team does not exist.** A `CODEOWNERS` rule naming a missing team is
-   not an error. GitHub drops the rule, the settings page looks fine, and
-   reviews stop being requested while everyone assumes routing works.
-2. **The team exists but has read, not write.** A team without write cannot own
-   a path. Same silence.
-3. **The team exists but is empty.** The review request is made and reaches
-   nobody. `--verify` warns; only the org owner can fix it.
+**`CODEOWNERS` is still advisory, but the reason changed.** It used to be
+advisory because the org was on Free, where "require review from Code Owners"
+does not exist on private repos. The org is now on paid Enterprise, where that
+setting *does* exist — but branch protection itself has not been applied yet
+(see [above](#the-thing-to-know-before-you-start), TOG-111). With no protection
+rule, there is no "require review from Code Owners" checkbox to turn on, so
+the file's only live effect today is auto-requesting `@Rick7C2` as a reviewer
+when a PR opens. It becomes an enforced gate the same day TOG-111 lands, not
+before.
 
-`--verify` reads the `CODEOWNERS` actually committed in each repo rather than a
-list kept here, so a handle added to the file later is checked too.
+**One thing that still breaks silently and is worth checking after any future
+membership change:** a `CODEOWNERS` rule naming an account without write
+access to that repo is dropped exactly like the old team rules were —
+`GET repos/{owner}/{repo}/codeowners/errors` is GitHub's own validator for
+this and currently returns `{"errors":[]}` on all three repos. Re-run it if a
+handle is ever added.
 
-One thing no amount of setup fixes: on **GitHub Free with private repos,
-`CODEOWNERS` does not route reviews at all**, and "require review from Code
-Owners" is unavailable. On Free the file is documentation. It becomes a gate on
-GitHub Team — the same plan decision as branch protection, above.
+`setup-github.sh --verify` reads the `CODEOWNERS` actually committed in each
+repo rather than a list kept here, so a handle added to the file later is
+checked too — see TOG-229 for bringing that script's org default and any
+remaining team-creation logic in line with the above.
 
 ## What protection is set to
 
-Applied to `main` in all three repos by the setup script:
+What the setup script writes to `main` in all three repos, once someone with
+an admin token runs it (TOG-111 — as of 2026-09-02 nothing has been applied
+yet; see [above](#the-thing-to-know-before-you-start)):
 
 - No direct pushes — everything arrives by pull request.
 - **Zero required approvals — deliberately.** See below.
@@ -500,7 +485,7 @@ The org went live on this date. These are measurements, not expectations.
 | `gitleaks` is not a paid dependency | ran the pinned binary in CI | **success** on `main` in both repos |
 | `two-bot` history is free of credentials | gitleaks 8.30.1 over all 47 commits | no leaks |
 | `two-design` history is free of credentials | gitleaks 8.30.1 over all 4 commits | no leaks |
-| Branch protection is unavailable, not silent | `PUT`/`GET` protection, `GET` rulesets | 403, nothing stored |
+| Branch protection was unavailable on Free, not silently inert | `PUT`/`GET` protection, `GET` rulesets | 403, nothing stored |
 | `two-web` history pushed intact, not flattened | pushed the Web Lead's own clone; counted commits on the remote | 22 on `main`, oldest scaffold commit present |
 | `two-web` history is free of credentials | gitleaks 8.30.1 over all commits, before the push | no leaks |
 | A fresh clone reaches a running bot | cloned `two-bot` from the org into an empty dir, followed the README only | `npm ci` 1.5s, 247/247 tests in 23s, bot ran against the mock and recorded a full funnel |
@@ -517,10 +502,11 @@ which was deleted immediately afterwards. Proving a guard by tripping it is the
 only proof worth having, and doing it in a real repo would have meant a red mark
 on `main` that nobody could explain later.
 
-**The negative case is the one that matters here.** On the Free plan nothing
-refuses a bad push, so the only question worth answering is whether anything
-notices. It does, within a minute, with the pusher's name in a GitHub error
-annotation.
+**The negative case is the one that matters here.** With no branch-protection
+rule saved (still true today — see [above](#the-thing-to-know-before-you-start),
+TOG-111, whatever the plan is at the time), nothing refuses a bad push, so the
+only question worth answering is whether anything notices. It does, within a
+minute, with the pusher's name in a GitHub error annotation.
 
 ### Re-running the check
 
@@ -541,5 +527,7 @@ git commit --allow-empty -m "protection check"
 git push origin main     # must be REJECTED
 ```
 
-If that push succeeds, protection is not working — most likely the free-plan
-problem above. A protection setting nobody has tried to violate is a guess.
+If that push succeeds, protection is not working. As of this writing that push
+**will** succeed on all three repos — no rule has been applied yet (TOG-111),
+not because of the plan. A protection setting nobody has tried to violate is a
+guess.
