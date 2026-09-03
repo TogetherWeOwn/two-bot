@@ -96,6 +96,12 @@ export class EventStore {
         await set('left_at', null);
         await set('inactive_flagged_at', null);
         break;
+      case 'gate_cleared':
+        // Earliest wins. A rejoin re-screens the member and the live listener
+        // would happily write a second, later clearing; the first one is the
+        // one the conversion number is about.
+        await set('gate_cleared_at', e.occurredAt, true);
+        break;
       case 'first_message':
         await set('first_message_at', e.occurredAt, true);
         await set('last_active_at', e.occurredAt);

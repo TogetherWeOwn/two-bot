@@ -15,7 +15,13 @@
  *  - Every chart has the numbers written next to it, so the page degrades to a
  *    plain table if the CSS never loads.
  */
-import type { CohortRow, DashboardData, RetentionCell, WeekRow } from './dashboard.ts';
+import type {
+  CohortRow,
+  DashboardData,
+  GateConversion,
+  RetentionCell,
+  WeekRow,
+} from './dashboard.ts';
 
 export function renderHtml(d: DashboardData): string {
   return `<!doctype html>
@@ -167,13 +173,19 @@ function sourceChart(d: DashboardData): string {
 
 function retention(d: DashboardData): string {
   const o = d.retentionOverall;
+  // Gate conversion sits first and in the same row as D1/D7/D30 on purpose.
+  // It is the step BEFORE any of them: a member who never accepted the rules
+  // cannot post, so they are a guaranteed zero in every retention column to
+  // the right of this tile. Reading D7 without reading this one is how three
+  // months of intake converted at under 10% for a year unnoticed (TOG-76).
   const overall = `
   <h3>All time — every member who ever joined</h3>
   <div class="tiles secondary">
+    ${gateTile(d.gateOverall)}
     ${retentionTile('D1', o.d1)}
     ${retentionTile('D7', o.d7)}
     ${retentionTile('D30', o.d30)}
-  </div>`;
+  </div>${gateNote(d.gateOverall)}`;
 
   const withPeople = d.cohorts.filter((c) => c.size > 0);
   const table =
@@ -182,6 +194,7 @@ function retention(d: DashboardData): string {
       : `<table class="chart">
       <thead><tr>
         <th scope="col">Joined week of</th><th scope="col">People</th>
+        <th scope="col">Got in</th>
         <th scope="col">D1</th><th scope="col">D7</th><th scope="col">D30</th>
       </tr></thead>
       <tbody>${withPeople.map(cohortRow).join('\n')}</tbody>
@@ -190,7 +203,10 @@ function retention(d: DashboardData): string {
   return `${overall}
   <h3>By join cohort</h3>
   ${table}
-  <p class="note"><strong>Stayed</strong> is exact — a leave is logged for every member.
+  <p class="note"><strong>Got in</strong> is how many of that week's joins accepted the
+  server rules. Everyone else is stuck behind the membership screen and structurally
+  cannot appear in any column to the right of it.
+  <strong>Stayed</strong> is exact — a leave is logged for every member.
   <strong>Active</strong> means they posted or entered voice on or after that day, which is
   the number that actually matters and the one we under-count for old cohorts.
   A dash means that cohort has not aged that far yet, which is not the same as zero.</p>`;
@@ -200,8 +216,73 @@ function cohortRow(c: CohortRow): string {
   return `<tr>
     <th scope="row">${esc(fmtWeek(c.weekStart))}</th>
     <td class="num">${c.size}</td>
+    ${gateCell(c.gate)}
     ${cell(c.d1)}${cell(c.d7)}${cell(c.d30)}
   </tr>`;
+}
+
+/**
+ * The gate tile. Tone is deliberately loud below 50%: a cohort where half the
+ * arrivals never got through the door is not a soft signal, and the whole
+ * reason this number exists is that it went unnoticed for a year.
+ */
+function gateTile(g: GateConversion | null): string {
+  if (!g) {
+    return tile(
+      'Cleared the rules gate',
+      '—',
+      'not measured yet — run npm run backfill',
+      'warning',
+    );
+  }
+  const rate = g.cleared / g.observed;
+  const tone = rate >= 0.9 ? 'good' : rate >= 0.5 ? 'warning' : 'critical';
+  const stuck = g.stuck > 0 ? `, ${g.stuck} still stuck` : '';
+  return tile(
+    'Cleared the rules gate',
+    pct(g.cleared, g.observed),
+    `${g.cleared} of ${g.observed} got in${stuck}`,
+    tone,
+  );
+}
+
+function gateNote(g: GateConversion | null): string {
+  if (!g) {
+    return `<p class="note">This server has Discord's membership screening on, so joining
+    and being able to post are two different events. Nothing has recorded a gate clearing
+    yet, so the retention numbers below cannot tell "never got in" apart from "got in and
+    said nothing".</p>`;
+  }
+  const parts = [`<strong>${g.cleared}</strong> accepted the rules`];
+  if (g.stuck > 0) {
+    parts.push(
+      // Singular and plural both read badly under one wording ("1 are", or
+      // "1 is ... and never have"), and this line is the one a human acts on.
+      `<strong>${g.stuck}</strong> ${
+        g.stuck === 1
+          ? 'is in the server right now and never has'
+          : 'are in the server right now and never have'
+      } — they cannot post, react, or use the onboarding picker`,
+    );
+  }
+  if (g.leftAtTheGate > 0) {
+    parts.push(`<strong>${g.leftAtTheGate}</strong> joined and left without ever getting in`);
+  }
+  const unknown =
+    g.unknowable > 0
+      ? ` <strong>${g.unknowable}</strong> more joined and left before we watched the gate;
+        Discord keeps no history of it, so they are left out of the percentage rather than
+        counted against it.`
+      : '';
+  return `<p class="note">${parts.join('; ')}.${unknown}</p>`;
+}
+
+function gateCell(g: GateConversion | null): string {
+  if (!g) return `<td class="num dim" title="gate state not observed for this cohort">—</td>`;
+  return `<td class="num">
+    <span class="stayed">${pct(g.cleared, g.observed)}</span>
+    <span class="sub">${g.cleared}/${g.observed} got in${g.stuck > 0 ? ` · ${g.stuck} stuck` : ''}</span>
+  </td>`;
 }
 
 function cell(r: RetentionCell | null): string {

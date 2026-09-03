@@ -21,6 +21,21 @@ export interface JoinInput {
   inviterId?: string | null;
 }
 
+export interface GateClearedInput {
+  guildId: string;
+  memberId: string;
+  isBot: boolean;
+  /**
+   * When they cleared it. The gateway gives us no timestamp for the transition,
+   * so the live path leaves this unset and it becomes "now" - which is accurate
+   * to the second because we are watching it happen. A backfill MUST NOT do the
+   * same: see docs/EVENTS.md, known limit 6.
+   */
+  occurredAt?: string;
+  /** Defaults to `gateway`. The backfill passes `backfill:member_list`. */
+  source?: string;
+}
+
 export interface MessageInput {
   guildId: string;
   memberId: string;
@@ -63,6 +78,33 @@ export class FunnelHandlers {
     };
     const r = await this.store.record(e);
     log.info('member_join', { memberId: i.memberId, source: i.source, inserted: r.inserted });
+    return e;
+  }
+
+  /**
+   * A member cleared the rules gate (TOG-76).
+   *
+   * This lives here, next to `onJoin`, rather than in the onboarding recorder,
+   * for one blunt reason: `registerOnboarding` is skipped entirely when no
+   * landing channel is configured (see src/index.ts), and gate conversion is a
+   * membership number, not an onboarding one. It has to be recorded on every
+   * deployment, including one that posts no welcome at all.
+   *
+   * Once per member by idempotency key, so a `GuildMemberUpdate` burst - which
+   * Discord sends for a nickname change, a role change, a timeout, anything -
+   * cannot inflate it.
+   */
+  async onGateCleared(i: GateClearedInput): Promise<FunnelEvent | null> {
+    if (i.isBot) return null;
+    const e: FunnelEvent = {
+      guildId: i.guildId,
+      memberId: i.memberId,
+      eventType: 'gate_cleared',
+      occurredAt: i.occurredAt ?? nowIso(),
+      source: i.source ?? 'gateway',
+    };
+    const r = await this.store.record(e);
+    if (r.inserted) log.info('gate_cleared', { memberId: i.memberId, source: e.source });
     return e;
   }
 
