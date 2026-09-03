@@ -50,8 +50,23 @@ beforeEach(async () => {
 });
 
 const base = () => `http://127.0.0.1:${server.port}`;
-const get = (path: string, init?: RequestInit) =>
-  fetch(`${base()}${path}`, { redirect: 'manual', ...init });
+
+/**
+ * A request, plus a wait for the click write it started.
+ *
+ * The server redirects first and records after - deliberately, so nobody waits
+ * on a database to reach Discord - which means the 302 arrives while the insert
+ * is still in flight. Reading the row straight back is therefore a race that
+ * SQLite hides (the write lands in the same tick) and Postgres does not (it is
+ * a round trip). `drain()` closes that window here without weakening the
+ * property being tested: the assertions below still check what was recorded,
+ * they just wait until recording is over first.
+ */
+const get = async (path: string, init?: RequestInit) => {
+  const res = await fetch(`${base()}${path}`, { redirect: 'manual', ...init });
+  await server.drain();
+  return res;
+};
 
 async function addCampaign(slug: string, code = CODE, label = 'a place we post') {
   await campaigns.add({ slug, inviteCode: code, label, createdAt: NOW });

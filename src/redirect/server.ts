@@ -59,6 +59,21 @@ export interface RedirectServer {
   port: number;
   url: string;
   close(): Promise<void>;
+  /**
+   * Resolves when every click write started so far has finished.
+   *
+   * "Redirect first, record after" means the 302 reaches the caller while the
+   * insert is still in flight, so there is a window where the response has
+   * arrived and the row does not exist yet. That is correct in production - the
+   * person is not made to wait on a database - but it makes "click, then read
+   * the row back" a race for anything driving this over real HTTP. On SQLite
+   * the write lands within the same tick and the race is invisible; against
+   * Postgres it is a round trip and the read loses.
+   *
+   * `close()` awaits this too, so a SIGTERM does not drop clicks that were
+   * already redirected.
+   */
+  drain(): Promise<void>;
 }
 
 /**
@@ -75,8 +90,21 @@ export async function startRedirectServer(opts: RedirectServerOptions): Promise<
   const buckets = new TokenBuckets({ now: opts.now });
   const bucket = opts.bucket ?? CLICK_BUCKET;
 
+  // Click writes outlive the response they belong to (see `drain`). Held so
+  // shutdown - and tests - can wait for them instead of guessing.
+  const inFlight = new Set<Promise<void>>();
+  const track = (p: Promise<void>): void => {
+    inFlight.add(p);
+    void p.finally(() => inFlight.delete(p));
+  };
+  const drain = async (): Promise<void> => {
+    // A settling write cannot start another, but it can still be added between
+    // the snapshot and the await, so loop until the set is genuinely empty.
+    while (inFlight.size > 0) await Promise.allSettled([...inFlight]);
+  };
+
   const server: Server = createServer((req, res) => {
-    void handle(req, res, opts, buckets, bucket);
+    track(handle(req, res, opts, buckets, bucket));
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -98,11 +126,16 @@ export async function startRedirectServer(opts: RedirectServerOptions): Promise<
   return {
     port: addr.port,
     url: `http://${opts.host}:${addr.port}/`,
-    close: () =>
-      new Promise<void>((resolve) => {
+    drain,
+    close: async () => {
+      await new Promise<void>((resolve) => {
         server.close(() => resolve());
         server.closeAllConnections?.();
-      }),
+      });
+      // After the socket is shut, not before: a click already redirected still
+      // deserves to be counted.
+      await drain();
+    },
   };
 }
 

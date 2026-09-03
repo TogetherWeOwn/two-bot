@@ -74,6 +74,10 @@ export const BOT_TABLES = [
   'presence_probe',
   'counter_snapshots',
   'member_exclusions',
+  // 0006 — the tracked invite links behind go.two.gg (TOG-116). Nothing
+  // member-level, but it names every place we advertise the server, which is
+  // marketing posture rather than anything a visitor's browser should see.
+  'invite_campaigns',
 ];
 
 function ident(schema: string, name: string): string {
