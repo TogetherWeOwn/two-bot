@@ -44,9 +44,24 @@ const leavesSetAside = leavesAll - leaves;
 
 const pct = (a: number, b: number) => (b === 0 ? '  n/a' : `${((a / b) * 100).toFixed(0).padStart(4)}%`);
 
+// Clicks only exist for invites posted as a go.two.gg link (TOG-116). A raw
+// discord.gg link is clicked off-platform where nothing can observe it, so it
+// produces joins with no clicks in front of them. Which case a zero is matters:
+// "no tracked link exists" and "the link is live and nobody clicked" are
+// opposite problems with opposite fixes.
+const trackedLinks = await one(`SELECT COUNT(*) AS n FROM invite_campaigns`).catch(() => 0);
+
 console.log(`\nTWO funnel - last ${days} days (since ${since.slice(0, 10)})\n`);
-console.log(`  invite clicks        ${String(clicks).padStart(6)}   (0 until the tracking link is live)`);
+console.log(
+  `  invite clicks        ${String(clicks).padStart(6)}` +
+    (trackedLinks === 0 ? '   (no tracked links yet - see npm run campaigns)' : ''),
+);
 console.log(`  joins                ${String(joins).padStart(6)}   ${pct(joins, clicks)} of clicks`);
+if (clicks > 0 && joins > clicks) {
+  // Over 100% is expected while some invites are tracked and some are raw.
+  // Stated, because otherwise it reads as a bug in the report.
+  console.log(`                                 (>100%: some invites are posted as raw discord.gg links)`);
+}
 if (joinsSetAside > 0) {
   console.log(`   +${String(joinsSetAside).padStart(5)} set aside as a one-off event, see below`);
 }
@@ -67,6 +82,59 @@ const bySource = await db
   .all<{ source: string; n: number }>(since, ...joinExcl.params);
 if (bySource.length === 0) console.log('    (no joins yet)');
 for (const r of bySource) console.log(`    ${String(r.n).padStart(5)}  ${r.source}`);
+
+// Clicks per tracked link, next to the joins that link's invite code produced.
+// This is the per-place breakdown TOG-116 exists for: it is what separates "a
+// listing nobody reads" from "a listing plenty of people read and bounce off".
+if (trackedLinks > 0) {
+  console.log(`\n  Tracked links (clicks -> joins on the same invite code):`);
+  const perCampaign = await db
+    .prepare(
+      `SELECT c.slug, c.label, c.invite_code, c.disabled_at,
+              (SELECT COUNT(*) FROM events e
+                 WHERE e.event_type='invite_click' AND e.occurred_at >= ?
+                   AND e.source = 'invite:' || c.invite_code) AS clicks,
+              (SELECT COUNT(*) FROM events e
+                 WHERE e.event_type='member_join' AND e.occurred_at >= ?
+                   AND e.source = 'invite:' || c.invite_code) AS joins
+         FROM invite_campaigns c
+        ORDER BY clicks DESC, c.slug`,
+    )
+    .all<{
+      slug: string;
+      label: string;
+      invite_code: string;
+      disabled_at: string | null;
+      clicks: number;
+      joins: number;
+    }>(since, since);
+  const w = Math.max(...perCampaign.map((c) => c.slug.length), 4);
+  for (const c of perCampaign) {
+    const n = Number(c.clicks);
+    const j = Number(c.joins);
+    console.log(
+      `    ${c.slug.padEnd(w)}  ${String(n).padStart(5)} clicks  ${String(j).padStart(4)} joins  ` +
+        `${pct(j, n)}  ${c.label}${c.disabled_at ? '  (retired)' : ''}`,
+    );
+  }
+  // Two campaigns on one invite code cannot be told apart by joins - a join
+  // only ever carries the code. Say so rather than print the same join count
+  // on two lines as if each had earned it.
+  const shared = new Map<string, string[]>();
+  for (const c of perCampaign) {
+    const arr = shared.get(c.invite_code);
+    if (arr) arr.push(c.slug);
+    else shared.set(c.invite_code, [c.slug]);
+  }
+  for (const [code, slugs] of shared) {
+    if (slugs.length > 1) {
+      console.log(
+        `    note: ${slugs.join(', ')} share invite code ${code}, so the join counts above ` +
+          `repeat one number. Give each its own code to split them.`,
+      );
+    }
+  }
+}
 
 // Retention: of members who joined N days ago, how many were still active later?
 // The same windows are excluded here. 1,015 raid accounts that never posted

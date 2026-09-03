@@ -136,9 +136,10 @@ for (const e of kept) {
 
 // --- clicks ------------------------------------------------------------------
 
-// invite_click is only ever emitted by the live bot (src/core/handlers.ts), so
-// this is zero until TWO-11 lands a host. Kept in the query rather than
-// hardcoded to 0 so the column starts working the day it does.
+// invite_click is emitted by the redirect service (src/redirect/), not the bot,
+// so a code shows clicks only once a campaign points at it and the link has
+// been posted somewhere. A code with joins and no clicks is being shared as a
+// raw discord.gg link - see docs/INVITE_TRACKING.md.
 const clickRows = await db
   .prepare(
     `SELECT source, COUNT(*) AS n FROM events
@@ -146,6 +147,14 @@ const clickRows = await db
   )
   .all<{ source: string; n: number }>(since);
 const clicksBySource = new Map(clickRows.map((r) => [r.source, Number(r.n)]));
+
+// Which zero this is matters. "No tracked link exists" and "the link is live and
+// nobody clicked it" are opposite problems with opposite fixes.
+const trackedLinks = await db
+  .prepare(`SELECT COUNT(*) AS n FROM invite_campaigns`)
+  .get<{ n: number }>()
+  .then((r) => Number(r?.n ?? 0))
+  .catch(() => 0);
 
 // --- every live code, including the ones producing nothing -------------------
 
@@ -346,14 +355,25 @@ const overlapping = ANOMALIES.filter((a) => a.eventTypes.includes('member_join')
 for (const a of overlapping) {
   console.log(`    ${a.start}  set aside: ${a.label}${a.status === 'unconfirmed' ? ' (cause NOT confirmed by a human)' : ''}`);
 }
-if (report.totals.clicks === 0) {
+if (report.totals.clicks === 0 && trackedLinks === 0) {
   console.log(
-    `    clicks are 0 for every code and will stay 0: invite_click is emitted by the`,
+    `    clicks are 0 for every code because no tracked link exists yet. A raw`,
   );
   console.log(
-    `      live bot only (TWO-11, no host yet), and a raw discord.gg link is clicked`,
+    `      discord.gg link is clicked off-platform where we cannot see it; only a`,
   );
-  console.log(`      off-platform where we cannot see it. It needs a redirect we control.`);
+  console.log(
+    `      go.two.gg/<campaign> link is counted. npm run campaigns -- --add <slug>`,
+  );
+  console.log(`      <code> "<where>" to make one. See docs/INVITE_TRACKING.md.`);
+} else if (report.totals.clicks === 0) {
+  console.log(
+    `    clicks are 0 despite ${trackedLinks} tracked link(s). Either the links have not`,
+  );
+  console.log(
+    `      been posted anywhere yet, or the redirect is not reachable - check that`,
+  );
+  console.log(`      go.two.gg resolves and npm run redirect is up.`);
 }
 if (report.totals.joinsInexact > 0) {
   const marked = report.rows.filter(soft);

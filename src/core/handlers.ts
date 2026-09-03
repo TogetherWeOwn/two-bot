@@ -188,16 +188,32 @@ export class FunnelHandlers {
    * visible to us as a use-count delta at join time. This entry point exists so
    * a tracking redirect (a short link we control) can post clicks in, which is
    * the only honest way to measure the top of the funnel.
+   *
+   * Called by the go.two.gg redirect service (src/redirect/, TOG-116). The
+   * source is `invite:<code>` - the same string joins are attributed to - so
+   * clicks and joins for one code line up with no special case downstream.
+   *
+   * `campaign` records WHERE the link was posted, which is the question this
+   * exists to answer: two campaigns can point at one invite code, and only the
+   * campaign tells reddit apart from the Twitch panel. It is a slug we chose,
+   * never anything about the person clicking. See docs/PRIVACY.md.
    */
-  async onInviteClick(guildId: string, code: string, occurredAt?: string): Promise<FunnelEvent> {
+  async onInviteClick(
+    guildId: string,
+    code: string,
+    opts: { occurredAt?: string; campaign?: string; dedupeToken?: string } = {},
+  ): Promise<FunnelEvent> {
     const e: FunnelEvent = {
       guildId,
       memberId: null,
       eventType: 'invite_click',
-      occurredAt: occurredAt ?? nowIso(),
+      occurredAt: opts.occurredAt ?? nowIso(),
       source: `invite:${code}`,
+      metadata: opts.campaign ? { campaign: opts.campaign } : undefined,
+      dedupeToken: opts.dedupeToken,
     };
     await this.store.record(e);
+    log.info('invite_click', { code, campaign: opts.campaign ?? null });
     return e;
   }
 }

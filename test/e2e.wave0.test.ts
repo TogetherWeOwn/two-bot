@@ -130,12 +130,25 @@ const auditRoles = [
  * #voice-log entries in the shape src/backfill/parse.ts already understands:
  * a titled embed with `ID: <snowflake>` in the footer. Spread across three
  * weeks so the weekly buckets have something to separate.
+ *
+ * Timestamps are anchored to a Monday, not to `now`. The exporter buckets by
+ * ISO week (Monday-anchored), so "3, 4 and 5 days ago" lands in one bucket or
+ * two depending on what weekday the suite happens to run - it produced three
+ * buckets on a Monday and four on a Thursday, and this test failed every week
+ * from Tuesday onward regardless of any change to the code under test. Offsets
+ * from a Monday mean the buckets are the same on every day of the week.
  */
 function voiceMessages() {
-  const now = Date.now();
-  const mk = (id: string, daysAgo: number, i: number) => ({
+  // Monday of last week, midday UTC: comfortably in the past whatever day it
+  // is now, and comfortably inside the 90-day window at its oldest offset.
+  const d = new Date();
+  const monday = new Date(
+    Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 12) -
+      (((d.getUTCDay() + 6) % 7) + 7) * 86_400_000,
+  );
+  const mk = (id: string, dayOffset: number, i: number) => ({
     id: String(1_000_000n + BigInt(i)),
-    timestamp: new Date(now - daysAgo * 86_400_000).toISOString(),
+    timestamp: new Date(monday.getTime() + dayOffset * 86_400_000).toISOString(),
     author: { id: '111', bot: true },
     embeds: [
       {
@@ -146,11 +159,11 @@ function voiceMessages() {
     ],
   });
   return [
-    mk('900000000000000001', 3, 0),
-    mk('900000000000000002', 4, 1),
-    mk('900000000000000001', 5, 2), // same person twice in one week
-    mk('900000000000000003', 11, 3),
-    mk('900000000000000004', 25, 4),
+    mk('900000000000000001', 0, 0),
+    mk('900000000000000002', 1, 1),
+    mk('900000000000000001', 2, 2), // same person twice in one week
+    mk('900000000000000003', -7, 3),
+    mk('900000000000000004', -21, 4),
   ];
 }
 
