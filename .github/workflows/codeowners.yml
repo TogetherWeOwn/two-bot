@@ -1,0 +1,68 @@
+name: codeowners
+
+# Does every owner named in .github/CODEOWNERS still resolve to somebody GitHub
+# will actually ask for a review?
+#
+# A rule naming an account or team without write access is dropped silently. The
+# rule stays in the file looking correct and stops requesting anyone. That is how
+# this org's CODEOWNERS files rotted for months behind dead @two-gaming/* teams
+# (TOG-128), and correcting the contents does not stop the next drift — the day
+# somebody's access is removed, the rules naming them go quiet the same way.
+#
+# The reasoning about *how* this is checked — in particular why it does not use
+# the collaborator endpoint the ticket suggested, which is measurably vacuous
+# with the token CI holds — is in ci/verify-codeowners.sh. Read that before
+# changing this file.
+#
+# Runs on pull requests so a bad rule is caught before it lands, on pushes to
+# main so a direct push cannot slip past, and on a weekly schedule because the
+# thing this guards against is not a code change at all: revoking somebody's
+# access breaks these files without touching the repo, so a check that only runs
+# on commits would never see it.
+
+on:
+  pull_request:
+    paths:
+      - '.github/CODEOWNERS'
+      - '.github/workflows/codeowners.yml'
+      - 'ci/verify-codeowners.sh'
+      - 'ci/verify-codeowners-selftest.sh'
+  push:
+    branches: [main]
+    paths:
+      - '.github/CODEOWNERS'
+      - '.github/workflows/codeowners.yml'
+      - 'ci/verify-codeowners.sh'
+      - 'ci/verify-codeowners-selftest.sh'
+  schedule:
+    # Mondays, 07:23 UTC. Off the hour on purpose: GitHub drops scheduled runs
+    # under load at popular times, and a gate that silently does not run is the
+    # failure mode this whole workflow is about.
+    - cron: '23 7 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  owners-resolve:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # The checker's own ability to fail, re-proved before it is trusted.
+      # Offline, no credential: every case is a saved response. A check nobody
+      # has watched fail is a check nobody knows works, and this one guards a
+      # file that changes rarely — the longest possible time for a broken check
+      # to go unnoticed.
+      - name: Self-test the checker
+        run: ./ci/verify-codeowners-selftest.sh
+
+      - name: Every CODEOWNERS owner resolves
+        env:
+          # The default GITHUB_TOKEN, scoped by `permissions:` above to
+          # contents:read — which is all `codeowners/errors` accepts. No
+          # members:read, no administration, no PAT, nothing org-wide.
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: ./ci/verify-codeowners.sh
