@@ -62,6 +62,20 @@ export interface FunnelEvent {
   source: string;
   /** Anything extra. Kept small on purpose - see docs/PRIVACY.md. */
   metadata?: Record<string, unknown>;
+  /**
+   * Distinguishes two genuinely separate events that share every other field.
+   *
+   * Only the invite-click redirect sets this, and it is the reason clicks can
+   * be counted at all: an anonymous event has no member id to tell two of them
+   * apart, so without this, two people clicking within the same millisecond
+   * produce one identical key and the second is discarded as a duplicate. That
+   * under-counts the denominator of click-to-join and makes conversion look
+   * better than it is - see idempotencyKey() below.
+   *
+   * It is NOT a member identifier and must never become one: the redirect
+   * generates random bytes per request and stores nothing about who clicked.
+   */
+  dedupeToken?: string;
 }
 
 /** Stable key used to make event writes idempotent. */
@@ -89,7 +103,13 @@ export function idempotencyKey(e: FunnelEvent): string {
     'voice_session_end',
   ];
   if (repeatable.includes(e.eventType)) {
-    return `${e.guildId}:${e.memberId ?? 'anon'}:${e.eventType}:${e.occurredAt}`;
+    // A repeatable event is told apart from the last one by member and time.
+    // That works because every one of these has a member id - except
+    // invite_click, which by definition does not, so two clicks in the same
+    // millisecond collapse into one row. `dedupeToken` is what makes them two.
+    // See FunnelEvent.dedupeToken; nothing else sets it.
+    const token = e.dedupeToken ? `:${e.dedupeToken}` : '';
+    return `${e.guildId}:${e.memberId ?? 'anon'}:${e.eventType}:${e.occurredAt}${token}`;
   }
   return `${e.guildId}:${e.memberId}:${e.eventType}`;
 }

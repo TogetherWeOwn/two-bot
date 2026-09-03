@@ -90,12 +90,15 @@ away would hide it.
 
 ## Known limits, stated up front
 
-1. **`invite_click` is not populated yet.** Discord does not report invite
-   clicks. We only ever see a use-count delta at join time. Measuring the true
-   top of the funnel needs a short link we control that redirects to the invite
-   and logs the click. `FunnelHandlers.onInviteClick` is the entry point, ready
-   for it. Until then click-to-join conversion is unknown, and the report says
-   so rather than showing a fake number.
+1. **`invite_click` only covers invites posted as a tracked link.** Discord
+   reports invite clicks to nobody, so the only clicks we can ever see are the
+   ones that pass through our own redirect: `go.two.gg/<campaign>` logs the
+   click and 302s to the invite (`src/redirect/`, `docs/INVITE_TRACKING.md`).
+   An invite pasted as a raw `discord.gg` link is clicked somewhere we have no
+   presence, and produces a join with no click in front of it — which is why
+   click-to-join can read over 100%. `npm run funnel` says so on its own line
+   rather than hiding it. Adding a tracked link for a new place is
+   `npm run campaigns -- --add`, not a deploy.
 
 2. **Invite attribution is a diff, not a fact.** Discord gives no direct signal.
    We snapshot every invite's use count and, on a join, look for the one that

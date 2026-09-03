@@ -1,0 +1,66 @@
+# The tracked invite redirect: go.two.gg/<campaign> -> log a click -> 302 to the
+# Discord invite.
+#
+#   sudo cp deploy/two-redirect.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now two-redirect
+#   curl -s localhost:8088/healthz          # smoke test on the box
+#   curl -sI localhost:8088/<a-live-slug>   # should be 302 to discord.gg
+#
+# A SEPARATE PROCESS FROM THE BOT, deliberately. It holds no Discord token and
+# never calls the Discord API - it reads one table and writes one event. So
+# restarting it never touches the gateway connection, and a crawler hammering a
+# link cannot destabilise the bot.
+#
+# Unlike two-dashboard and /internal/actions, this one is MEANT to be public: it
+# is a link we hand to strangers. It still binds 127.0.0.1 and goes behind the
+# host's reverse proxy, which terminates TLS for go.two.gg. The proxy needs NO
+# authentication in front of it - that is the difference from the dashboard.
+#
+# DNS: go.two.gg needs an A/AAAA record at this box before any of this counts
+# anything. See docs/INVITE_TRACKING.md.
+
+[Unit]
+Description=TWO tracked invite redirect
+Documentation=https://github.com/TogetherWeOwn/two-bot/blob/main/docs/INVITE_TRACKING.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=twobot
+Group=twobot
+WorkingDirectory=/opt/two-bot
+EnvironmentFile=/etc/two-bot/two-bot.env
+ExecStart=/usr/bin/node scripts/redirect.ts
+
+# Restart always: every second this is down is a dead link in a Reddit comment
+# we cannot edit, and a member we never hear about.
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=two-redirect
+
+# Hardening. It listens, reads invite_campaigns, and appends to events. It has
+# no business anywhere else on the disk.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=192M
+
+[Install]
+WantedBy=multi-user.target

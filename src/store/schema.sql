@@ -61,6 +61,25 @@ CREATE TABLE IF NOT EXISTS invite_snapshots (
 );
 
 -- ---------------------------------------------------------------------------
+-- invite_campaigns: the tracked short links behind go.two.gg (TOG-116).
+--
+-- Equivalent to migrations/0006_invite_campaigns.sql, which is the Postgres
+-- side and carries the full commentary. Duplicated rather than shared for the
+-- same reason as the tables below. The slug-shape CHECK is Postgres-only there
+-- (it uses `~`); in both cases the authority is isValidSlug() in
+-- src/redirect/campaigns.ts, which every writer goes through.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS invite_campaigns (
+  slug         TEXT PRIMARY KEY,
+  invite_code  TEXT NOT NULL,
+  label        TEXT NOT NULL,
+  disabled_at  TEXT,
+  created_at   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_invite_campaigns_code ON invite_campaigns (invite_code);
+
+-- ---------------------------------------------------------------------------
 -- The durable state behind POST /internal/actions (TOG-44).
 --
 -- Kept byte-for-byte equivalent to migrations/0002_internal_actions.sql, which

@@ -20,12 +20,14 @@ without the numbers first.
 - Flags members who have gone quiet, and can list everyone who joined and never
   posted. It produces lists; it does not message anyone.
 - Prints a funnel report on demand.
+- Counts invite clicks, via a redirect we own: `go.two.gg/<campaign>` logs the
+  click and 302s to the invite, so we can tell which places actually send
+  people. A campaign and a timestamp, nothing about the visitor.
+  See `docs/INVITE_TRACKING.md`.
 
 ## What it does not do yet
 
 - No dashboard. `scripts/funnel.ts` is the stopgap and reads the same data.
-- No `invite_click` tracking. Discord cannot report clicks; that needs a
-  redirect link we control. The event type and code path exist and are unused.
 - No onboarding flow, role self-assignment, or go-live alerts.
 
 ## Quick start
