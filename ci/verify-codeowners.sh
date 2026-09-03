@@ -93,6 +93,37 @@ esac
 
 command -v jq >/dev/null || undetermined "jq is not installed, so nothing here can read the response."
 
+# --- which ref gets checked --------------------------------------------------
+#
+# This is load-bearing, and it is the one thing about this script that was wrong
+# in review. `codeowners/errors` with no `?ref` resolves against the repository's
+# **default branch**, not against whatever is checked out. On a pull request that
+# means the job reads `main`, finds it healthy, and reports success — while the
+# broken CODEOWNERS sitting in the PR is never looked at. The check would have
+# passed every bad rule forever and looked green doing it.
+#
+# Caught by a deliberate red control: a branch adding `/tools/probe/ @phanan`
+# (not a collaborator) went **green** in CI until this block existed. The
+# endpoint answered `errors=0` for no-ref and `errors=1` for `?ref=<branch>` on
+# the same commit, which is the whole bug in two numbers.
+#
+# So the ref is always explicit. On a pull request that must be the PR head, not
+# GITHUB_SHA — for a `pull_request` event GITHUB_SHA is the ephemeral merge
+# commit, which is not a ref the API will resolve.
+if [ -z "$SAVED" ] && [ -z "$REF" ]; then
+  if [ -n "${GITHUB_HEAD_REF:-}" ]; then
+    REF="$GITHUB_HEAD_REF"          # pull_request: the branch being proposed
+  elif [ -n "${GITHUB_SHA:-}" ]; then
+    REF="$GITHUB_SHA"               # push: the commit that just landed
+  else
+    # Local run. Ask about the checked-out commit rather than silently
+    # reporting on main from inside a feature branch.
+    REF="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)"
+    [ -n "$REF" ] || undetermined \
+      "cannot determine which ref to check: not a git checkout and no --ref given."
+  fi
+fi
+
 # --- the handles this repo believes in ---------------------------------------
 #
 # Parsed from the file rather than hand-listed, so there is no second place for
@@ -136,9 +167,16 @@ else
   : "${GH_REPO:="${GITHUB_REPOSITORY:-}"}"
   [ -n "${GH_REPO:-}" ] || undetermined "GH_REPO/GITHUB_REPOSITORY is unset, so there is no repo to ask about."
 
-  ENDPOINT="repos/$GH_REPO/codeowners/errors"
-  [ -n "$REF" ] && ENDPOINT="$ENDPOINT?ref=$REF"
+  # Never reachable via the block above, which always sets a ref. Kept because
+  # the failure it guards against is invisible: a no-ref request succeeds, reads
+  # the default branch, and reports green. If a future edit drops the ref, this
+  # stops the run instead of quietly checking the wrong commit.
+  [ -n "$REF" ] || undetermined \
+    "refusing to ask without an explicit ref — a no-ref query silently reports on the default branch."
+
+  ENDPOINT="repos/$GH_REPO/codeowners/errors?ref=$REF"
   log "Asking GitHub: GET $ENDPOINT"
+  printf '    ref: %s\n' "$REF"
 
   err="$(mktemp)"
   if ! gh api "$ENDPOINT" > "$RESPONSE" 2>"$err"; then

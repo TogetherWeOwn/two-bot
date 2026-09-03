@@ -176,6 +176,39 @@ else
   rc=1
 fi
 
+# --- the ref must always be explicit -----------------------------------------
+#
+# Regression guard for the bug the red control caught. `codeowners/errors` with
+# no `?ref` reports on the *default branch*, so a PR job that omits it reads
+# `main`, passes, and never looks at the broken file in the PR. It went green on
+# a branch that really did name a non-collaborator.
+#
+# Asserted by reading the source, because the failure is a missing query
+# parameter on a network call this offline suite cannot make. Both halves matter:
+# the ref must be built into the URL, and GITHUB_HEAD_REF must be preferred on a
+# pull request (GITHUB_SHA there is the ephemeral merge commit, which the API
+# will not resolve).
+n=$((n + 1))
+if grep -q 'codeowners/errors?ref=' "$SCRIPT" \
+   && grep -q 'GITHUB_HEAD_REF' "$SCRIPT" \
+   && grep -q 'refusing to ask without an explicit ref' "$SCRIPT"; then
+  pass "ref-is-always-explicit"
+else
+  fail "ref-is-always-explicit: the script must pin ?ref=, prefer GITHUB_HEAD_REF, and refuse a no-ref query"
+  rc=1
+fi
+
+# And the workflow must not defeat it by checking out the merge commit without
+# the branch context the script needs.
+n=$((n + 1))
+WF="$REPO_ROOT/.github/workflows/codeowners.yml"
+if [ -f "$WF" ] && grep -q 'GH_REPO' "$WF" && grep -q 'contents: read' "$WF"; then
+  pass "workflow-passes-repo-and-least-privilege"
+else
+  fail "workflow-passes-repo-and-least-privilege: .github/workflows/codeowners.yml must set GH_REPO and contents: read"
+  rc=1
+fi
+
 printf '\n%s case(s)\n' "$n"
 if [ "$rc" -eq 0 ]; then
   printf '\033[32mall good\033[0m\n'
