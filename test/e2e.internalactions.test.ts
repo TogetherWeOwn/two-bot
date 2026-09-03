@@ -26,6 +26,7 @@ import {
 } from '../src/internal/discordActions.ts';
 import { AUTH_FAILURE_MESSAGE } from '../src/internal/errors.ts';
 import { InternalActionStore } from '../src/internal/store.ts';
+import { ExpectedJoins } from '../src/core/expectedJoins.ts';
 import { openTestDb, type TestDb } from './helpers/testDb.ts';
 
 const KEY_ID = 'web-prod';
@@ -303,6 +304,35 @@ test('guild.add_member: 201 is added, 204 is already_member', async () => {
   const second = await call(srv, { body: { ...addMember('oauth-tok-2'), discord_id: existing } });
   assert.equal(second.status, 200);
   assert.equal(second.body.result?.outcome, 'already_member', 'already in is a success, not an error');
+});
+
+test('guild.add_member notes the expected join before calling Discord (§7)', async () => {
+  // The order is the point: the gateway can deliver guildMemberAdd before the
+  // REST response returns, so a note taken after the call would miss exactly
+  // the joins it exists to attribute.
+  const expectedJoins = new ExpectedJoins();
+  const newcomer = '900000000000004444';
+  let noteAtCallTime: string | null = null;
+  const { client } = recordingDiscord({
+    async addMember(g, u, _t): Promise<AddMemberOutcome> {
+      noteAtCallTime = expectedJoins.consume(g, u);
+      return 'added';
+    },
+  });
+  const srv = await start({ discord: client, expectedJoins });
+
+  const res = await call(srv, { body: { ...addMember('oauth-tok'), discord_id: newcomer } });
+  assert.equal(res.status, 200);
+  assert.equal(noteAtCallTime, 'web:one_click', 'the note was down before the Discord call');
+});
+
+test('guild.add_member leaves no note when the request is rejected before the action', async () => {
+  const expectedJoins = new ExpectedJoins();
+  const srv = await start({ enabled: new Set(['role.assign']), expectedJoins });
+
+  const res = await call(srv, { body: addMember('oauth-tok') });
+  assert.equal(res.status, 403);
+  assert.equal(expectedJoins.size, 0, 'a refused action must not pre-attribute a join');
 });
 
 test('guild.add_member is refused until it is switched on', async () => {

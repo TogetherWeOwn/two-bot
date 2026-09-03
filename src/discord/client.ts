@@ -2,6 +2,7 @@ import { Client, GatewayIntentBits, Events, type Guild } from 'discord.js';
 import { nowIso } from '../core/events.ts';
 import type { FunnelHandlers } from '../core/handlers.ts';
 import type { InviteTracker, InviteState } from '../core/inviteTracker.ts';
+import type { ExpectedJoins } from '../core/expectedJoins.ts';
 import type { RaidWatch } from '../analytics/raidWatch.ts';
 import type { RaidAnnouncer } from './raidAlert.ts';
 import { log } from '../core/log.ts';
@@ -35,6 +36,13 @@ export interface BotDeps {
    * recorded exactly as before, which is what every existing test does.
    */
   raid?: { watch: RaidWatch; announce: RaidAnnouncer };
+  /**
+   * One-click join attribution (docs/INTERNAL_ACTIONS.md §7). The same
+   * instance guild.add_member writes its "expect this member" note into.
+   * Optional: leave it out and every join is attributed by invite diff alone,
+   * which is what every existing test does.
+   */
+  expectedJoins?: ExpectedJoins;
 }
 
 export function createClient(): Client {
@@ -66,7 +74,7 @@ async function snapshotInvites(guild: Guild, invites: InviteTracker): Promise<st
 
 /** Wire gateway events to the framework-free handlers. */
 export function registerHandlers(client: Client, deps: BotDeps): void {
-  const { handlers, invites, raid } = deps;
+  const { handlers, invites, raid, expectedJoins } = deps;
 
   client.once(Events.ClientReady, async (c) => {
     log.info('ready', { user: c.user.tag, guilds: c.guilds.cache.size });
@@ -76,9 +84,18 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
   });
 
   client.on(Events.GuildMemberAdd, async (member) => {
+    // Snapshot regardless of how this member arrived, so the counters stay
+    // current for the next organic join. A one-click join consumes no invite,
+    // so for it the diff legitimately shows nothing grew.
     const grew = await snapshotInvites(member.guild, invites);
-    const source = invites.attribute(grew, !!member.guild.vanityURLCode);
-    const inviterId = grew.length === 1 ? await invites.inviterFor(member.guild.id, grew[0]) : null;
+
+    // A join guild.add_member announced seconds ago (§7). The note beats the
+    // invite diff: this member provably came through the web path, and any
+    // code that grew in the same window belongs to some other join's event.
+    const expected = expectedJoins?.consume(member.guild.id, member.id) ?? null;
+    const source = expected ?? invites.attribute(grew, !!member.guild.vanityURLCode);
+    const inviterId =
+      !expected && grew.length === 1 ? await invites.inviterFor(member.guild.id, grew[0]) : null;
     await handlers.onJoin({
       guildId: member.guild.id,
       memberId: member.id,

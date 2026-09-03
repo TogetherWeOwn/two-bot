@@ -79,6 +79,7 @@ rather than a number measured from whenever the process happened to start.
 | `ambiguous:a+b` | Two invites grew at once and we genuinely cannot tell. |
 | `vanity` | No invite grew and the server has a vanity URL, so probably that. |
 | `unknown` | No invite grew and there is no vanity URL. Discovery, or a code created while the bot was offline. |
+| `web:one_click` | The website's one-click join (`guild.add_member`). No invite is consumed on this path; the bot announced the join to itself before making the add call (`docs/INTERNAL_ACTIONS.md` §7). |
 | `channel:12345` | The channel the event happened in. |
 | `job:inactivity` | Produced by a scheduled job, not a member action. |
 | `gateway` | Discord told us, with no further attribution. |
