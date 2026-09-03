@@ -111,6 +111,14 @@ export const EXPECTED_FUNNEL: Readonly<Record<EventType, number>> = {
   game_roles_selected: 2,
   channel_routed: 2,
   first_message: 7,
+  // The message ladder (TWO-95). Only `chatter` posts three times, so exactly
+  // one member is AM7 on the exact 3+ bar and the rest of the posters sit on
+  // the first_message proxy - which is the split the attribution report has to
+  // keep telling apart. A fixture set where everyone had a third message would
+  // never exercise the residual, and one where nobody did would never exercise
+  // the exact path.
+  second_message: 1,
+  third_message: 1,
   first_voice_session: 1,
   // Zero on purpose. The staging fixtures seed the funnel by writing events
   // directly, and nothing in them opens a voice session yet; these rows only
@@ -178,11 +186,15 @@ export function fixtureEvents(opts: SeedOptions): FunnelEvent[] {
     // blame on disinterest.
     ev(M.lurker, 'member_join', -7 * DAY, A),
 
-    // --- chatter: prompted, posted two hours later ------------------------
+    // --- chatter: prompted, then posted three times the same evening -------
+    // The only fixture that clears AM7's text bar exactly rather than by the
+    // proxy: three messages, all inside the 7-day window.
     ev(M.chatter, 'member_join', -6 * DAY, A),
     ev(M.chatter, 'gate_cleared', -6 * DAY + 4 * SEC, 'gateway'),
     ev(M.chatter, 'onboarding_prompted', -6 * DAY + 10 * SEC, 'channel:welcome'),
     ev(M.chatter, 'first_message', -6 * DAY + 2 * 60 * MIN, 'channel:general'),
+    ev(M.chatter, 'second_message', -6 * DAY + 3 * 60 * MIN, 'channel:general'),
+    ev(M.chatter, 'third_message', -6 * DAY + 4 * 60 * MIN, 'channel:general'),
 
     // --- voicer: the complete path, ending in real voice ------------------
     ev(M.voicer, 'member_join', -5 * DAY, B),

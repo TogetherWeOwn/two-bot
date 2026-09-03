@@ -150,7 +150,12 @@ Two things it cannot do, and no amount of running fixes either:
 - somebody who joins **and leaves** inside one window is invisible to this and
   to the member list. Shorter windows shrink the hole; only a connected bot
   closes it;
-- `first_message` and `first_voice_session` need the gateway. Not attempted.
+- `first_voice_session` needs the gateway. Not attempted here, and not
+  recoverable afterwards either - Discord will not serve voice history over
+  REST. The message milestones are the one exception to "no amount of running
+  fixes it": this script does not attempt them, but `npm run backfill:messages`
+  reads them back out of the channels, which is what makes AM7's text half
+  exact instead of an upper bound.
 
 Once the service is live this stops being necessary — the bot does the same
 diff per join, at full precision. Leaving it on a cron afterwards is harmless

@@ -40,6 +40,14 @@ CREATE TABLE IF NOT EXISTS members (
   -- member who predates the listener has neither. See migrations/0007.
   gate_cleared_at      TEXT,
   first_message_at     TEXT,
+  -- When this member's THIRD message landed. AM7's text half asks "3+ messages
+  -- within 7 days", which is a question about a moment, not a total, so this is
+  -- a timestamp and not a counter. NULL means no third message is on file, and
+  -- the attribution report falls back to the looser first_message proxy and
+  -- says so. Projected from the `third_message` event (src/core/events.ts).
+  -- Existing databases get this column from ensureColumn() in sqliteDriver.ts;
+  -- Postgres gets it from migrations/0008_members_third_message_at.sql.
+  third_message_at     TEXT,
   first_voice_at       TEXT,
   last_active_at       TEXT,
   left_at              TEXT,

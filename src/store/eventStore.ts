@@ -1,5 +1,11 @@
 import type { Db } from './driver.ts';
-import { idempotencyKey, type EventType, type FunnelEvent } from '../core/events.ts';
+import {
+  idempotencyKey,
+  MESSAGE_RUNGS,
+  type EventType,
+  type FunnelEvent,
+  type MessageRung,
+} from '../core/events.ts';
 
 export interface RecordResult {
   /** false when this exact event was already on file - not an error. */
@@ -89,6 +95,18 @@ export class EventStore {
         .run(val, e.guildId, e.memberId);
     };
 
+    // Recency must never move backwards. `set` above is an unconditional
+    // assignment, which is fine for a column written once, but the message
+    // rungs are also written by the backfill with timestamps that are older
+    // than anything the live bot has seen.
+    const advance = (col: string, val: string) =>
+      db
+        .prepare(
+          `UPDATE members SET ${col} = ? WHERE guild_id = ? AND member_id = ?
+            AND (${col} IS NULL OR ${col} < ?)`,
+        )
+        .run(val, e.guildId, e.memberId, val);
+
     switch (e.eventType) {
       case 'member_join':
         await set('joined_at', e.occurredAt);
@@ -105,6 +123,16 @@ export class EventStore {
       case 'first_message':
         await set('first_message_at', e.occurredAt, true);
         await set('last_active_at', e.occurredAt);
+        break;
+      // The middle rung of the message ladder. It has no column and nothing
+      // reports on it - it exists so the third message is identifiable. See
+      // MESSAGE_RUNGS in src/core/events.ts.
+      case 'second_message':
+        await advance('last_active_at', e.occurredAt);
+        break;
+      case 'third_message':
+        await set('third_message_at', e.occurredAt, true);
+        await advance('last_active_at', e.occurredAt);
         break;
       case 'first_voice_session':
         await set('first_voice_at', e.occurredAt, true);
@@ -158,9 +186,13 @@ export class EventStore {
       const col =
         e.eventType === 'first_message'
           ? 'first_message_at'
-          : e.eventType === 'first_voice_session'
-            ? 'first_voice_at'
-            : null;
+          : e.eventType === 'third_message'
+            ? 'third_message_at'
+            : e.eventType === 'first_voice_session'
+              ? 'first_voice_at'
+              : null;
+      // second_message has no column by design - it is a rung marker in the
+      // log, nothing more - so there is nothing to pull backwards here.
       if (col) {
         await tx
           .prepare(
@@ -192,6 +224,53 @@ export class EventStore {
            WHERE members.last_active_at IS NULL OR members.last_active_at < excluded.last_active_at`,
       )
       .run(guildId, memberId, atIso);
+  }
+
+  /**
+   * Which message milestone a message arriving at `atIso` would fill, or null
+   * if it fills none.
+   *
+   * The ladder lives in the event log rather than in a counter column: a
+   * member's rung is "the lowest of first/second/third_message they do not have
+   * yet". That keeps `members` a projection of `events` - the schema's rule -
+   * and it means the number that matters, WHEN the third message landed, is
+   * recorded rather than inferred from a total. A running count could never
+   * answer AM7's question: 40 messages today says nothing about day 7.
+   *
+   * Null once all three are on file, which is the common case for a talkative
+   * member and costs one indexed read per message. There is no fourth rung; we
+   * stop counting at the bar.
+   */
+  async nextMessageRung(
+    guildId: string,
+    memberId: string,
+    atIso: string,
+  ): Promise<MessageRung | null> {
+    const rows = await this.db
+      .prepare(
+        `SELECT event_type, occurred_at FROM events
+          WHERE guild_id = ? AND member_id = ? AND event_type IN (?, ?, ?)`,
+      )
+      .all<{ event_type: string; occurred_at: string }>(guildId, memberId, ...MESSAGE_RUNGS);
+    const filled = new Map(rows.map((r) => [r.event_type, r.occurred_at]));
+
+    let below: string | null = null;
+    for (const rung of MESSAGE_RUNGS) {
+      const at = filled.get(rung);
+      if (at === undefined) {
+        // Strictly after the rung below. A gateway resume can redeliver a
+        // message we have already counted, and a redelivery carries the
+        // original timestamp - so "same instant as the rung below" is treated
+        // as the same message, not a new one. Two genuinely distinct messages
+        // in the same millisecond are lost to this, which costs a member their
+        // text activation in a case we have never seen; counting a redelivery
+        // twice would inflate AM7, and inflating AM7 is the failure this whole
+        // change exists to end.
+        return below !== null && atIso <= below ? null : rung;
+      }
+      below = at;
+    }
+    return null;
   }
 
   async hasEvent(guildId: string, memberId: string, type: EventType): Promise<boolean> {

@@ -18,7 +18,8 @@ import {
   parseVoiceMessage,
   snowflakeToDate,
 } from '../src/backfill/parse.ts';
-import type { RawMessage } from '../src/discord/rest.ts';
+import { findEarlyMessages } from '../src/backfill/messages.ts';
+import type { DiscordRest, RawMessage } from '../src/discord/rest.ts';
 
 const at = '2026-08-19T19:32:15.762000+00:00';
 
@@ -196,4 +197,96 @@ test('a real snowflake decodes to a plausible creation time', () => {
   // The bot's own account, created 2026-08-19.
   const d = snowflakeToDate('1539711683898118154');
   assert.equal(d.toISOString().slice(0, 4), '2026');
+});
+
+// --- the message ladder scan (TWO-95) ---------------------------------------
+
+/**
+ * A Discord REST stand-in. `scanChannel` pages newest-first and stops on a
+ * short batch, so one page per channel in descending time is a complete scan.
+ */
+function fakeRest(pages: Record<string, RawMessage[]>): DiscordRest {
+  const get = async (path: string): Promise<unknown> => {
+    if (path === '/guilds/g/channels') {
+      return Object.keys(pages).map((id) => ({ id, type: 0, name: `chan-${id}` }));
+    }
+    if (path.startsWith('/guilds/g/threads/active')) return { threads: [] };
+    const id = path.match(/^\/channels\/([^/]+)\/messages/)?.[1] ?? '';
+    // Newest first, which is the order Discord returns.
+    return [...(pages[id] ?? [])].sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
+  };
+  return { get, requests: 0 } as unknown as DiscordRest;
+}
+
+const post = (id: string, authorId: string, timestamp: string, bot = false): RawMessage => ({
+  id,
+  timestamp,
+  author: { id: authorId, bot },
+});
+
+test('the scan keeps a member\'s earliest three posts, across channels and out of order', async () => {
+  const { early } = await findEarlyMessages(
+    fakeRest({
+      // Deliberately interleaved: the earliest three are split across both
+      // channels, and neither channel alone holds them in order.
+      c1: [
+        post('5', 'alice', '2026-03-05T00:00:00.000Z'),
+        post('1', 'alice', '2026-03-01T00:00:00.000Z'),
+        post('4', 'alice', '2026-03-04T00:00:00.000Z'),
+      ],
+      c2: [
+        post('3', 'alice', '2026-03-03T00:00:00.000Z'),
+        post('2', 'alice', '2026-03-02T00:00:00.000Z'),
+      ],
+    }),
+    { guildId: 'g', maxPagesPerChannel: 10 },
+  );
+  assert.deepEqual(
+    early.get('alice')?.rungs.map((r) => r.at),
+    ['2026-03-01T00:00:00.000Z', '2026-03-02T00:00:00.000Z', '2026-03-03T00:00:00.000Z'],
+  );
+});
+
+test('two posts is two rungs - no third message is invented', async () => {
+  const { early, summary } = await findEarlyMessages(
+    fakeRest({
+      c1: [
+        post('1', 'bob', '2026-03-01T00:00:00.000Z'),
+        post('2', 'bob', '2026-03-02T00:00:00.000Z'),
+      ],
+    }),
+    { guildId: 'g', maxPagesPerChannel: 10 },
+  );
+  assert.equal(early.get('bob')?.rungs.length, 2);
+  assert.equal(summary.authorsSeen, 1);
+  // The number the report leans on: nobody here clears the AM7 text bar.
+  assert.equal(summary.authorsWithFullLadder, 0);
+});
+
+test('one message seen twice is one rung, not two', async () => {
+  // The same post reachable through two targets (a forum post is both a thread
+  // and a channel to this API). Counting it twice would fabricate a ladder.
+  const dupe = post('1', 'carol', '2026-03-01T00:00:00.000Z');
+  const { early } = await findEarlyMessages(
+    fakeRest({ c1: [dupe], c2: [dupe, post('2', 'carol', '2026-03-02T00:00:00.000Z')] }),
+    { guildId: 'g', maxPagesPerChannel: 10 },
+  );
+  assert.deepEqual(
+    early.get('carol')?.rungs.map((r) => r.id),
+    ['1', '2'],
+  );
+});
+
+test('bot posts never reach the ladder', async () => {
+  const { early } = await findEarlyMessages(
+    fakeRest({
+      c1: [
+        post('1', 'botly', '2026-03-01T00:00:00.000Z', true),
+        post('2', 'botly', '2026-03-02T00:00:00.000Z', true),
+        post('3', 'botly', '2026-03-03T00:00:00.000Z', true),
+      ],
+    }),
+    { guildId: 'g', maxPagesPerChannel: 10 },
+  );
+  assert.equal(early.size, 0);
 });
