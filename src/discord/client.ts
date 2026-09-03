@@ -105,6 +105,19 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
       occurredAt: member.joinedAt?.toISOString(),
     });
 
+    // Someone who arrives with the gate already cleared - they accepted the
+    // rules on the invite screen before the join landed - converted instantly.
+    // Recording it here as well as on the update keeps the denominator honest:
+    // otherwise the fastest members are the ones missing from the numerator.
+    if (!member.pending) {
+      await handlers.onGateCleared({
+        guildId: member.guild.id,
+        memberId: member.id,
+        isBot: !!member.user?.bot,
+        occurredAt: member.joinedAt?.toISOString(),
+      });
+    }
+
     // Burst check last, and never at the expense of the join record: an alert
     // that throws must not lose the event it was alerting about.
     if (raid && !member.user?.bot) {
@@ -119,6 +132,23 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
         log.error('raid_watch_failed', { guildId: member.guild.id, err: String(err) });
       }
     }
+  });
+
+  // The rules gate (TOG-76). `pending` flips true -> false the moment a member
+  // accepts the screening rules, and that transition is the only signal Discord
+  // ever gives that somebody actually got into the server.
+  //
+  // Deliberately here and not in src/discord/onboarding.ts, which already
+  // watches the same transition to post its welcome: that file is not
+  // registered at all when no landing channel is configured, and the funnel
+  // number must not depend on whether we happen to be greeting people.
+  client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
+    if (!oldMember.pending || newMember.pending) return;
+    await handlers.onGateCleared({
+      guildId: newMember.guild.id,
+      memberId: newMember.id,
+      isBot: !!newMember.user?.bot,
+    });
   });
 
   client.on(Events.GuildMemberRemove, async (member) => {

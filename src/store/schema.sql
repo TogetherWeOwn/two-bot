@@ -34,6 +34,11 @@ CREATE TABLE IF NOT EXISTS members (
   member_id            TEXT NOT NULL,
   joined_at            TEXT,
   join_source          TEXT,
+  -- When they accepted the server rules and could first interact (TOG-76).
+  -- NULL is two very different states and `events` tells them apart: a member
+  -- with a member_join but no gate_cleared row is still stuck at the gate; a
+  -- member who predates the listener has neither. See migrations/0007.
+  gate_cleared_at      TEXT,
   first_message_at     TEXT,
   first_voice_at       TEXT,
   last_active_at       TEXT,
@@ -45,6 +50,7 @@ CREATE TABLE IF NOT EXISTS members (
 
 CREATE INDEX IF NOT EXISTS idx_members_joined   ON members (guild_id, joined_at);
 CREATE INDEX IF NOT EXISTS idx_members_lastact  ON members (guild_id, last_active_at);
+CREATE INDEX IF NOT EXISTS idx_members_gate     ON members (guild_id, gate_cleared_at);
 
 -- ---------------------------------------------------------------------------
 -- invite_snapshots: use counts per invite code, polled so we can attribute a

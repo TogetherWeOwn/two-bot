@@ -18,6 +18,7 @@ import {
   buildDashboard,
   channelState,
   countBySource,
+  gateConversion,
   labelSource,
   recentWeeks,
   retentionAt,
@@ -105,6 +106,7 @@ test('a cohort that has not aged that far is null, not zero', () => {
       member_id: '1',
       joined_at: '2026-03-01T00:00:00.000Z', // 1.5 days before NOW
       join_source: null,
+      gate_cleared_at: null,
       first_message_at: null,
       first_voice_at: null,
       last_active_at: null,
@@ -119,6 +121,7 @@ test('a cohort that has not aged that far is null, not zero', () => {
 test('stayed and active are different numbers, and both are counted honestly', () => {
   const base = {
     join_source: null,
+    gate_cleared_at: null,
     first_message_at: null,
     first_voice_at: null,
   };
@@ -134,6 +137,67 @@ test('stayed and active are different numbers, and both are counted honestly', (
   ];
   assert.deepEqual(retentionAt(members, 1, NOW), { eligible: 4, stayed: 4, active: 2 });
   assert.deepEqual(retentionAt(members, 7, NOW), { eligible: 4, stayed: 2, active: 1 });
+});
+
+// --- the rules gate --------------------------------------------------------
+//
+// The trap this guards is a confident 0%. Every one of these members has a null
+// gate_cleared_at, and what that null MEANS is entirely decided by whether
+// anybody was watching - which is the difference between "nobody is getting in"
+// and "we are not measuring".
+
+const gateMember = (o: Partial<MemberRow> & { member_id: string }): MemberRow => ({
+  joined_at: '2026-01-01T00:00:00.000Z',
+  join_source: null,
+  gate_cleared_at: null,
+  first_message_at: null,
+  first_voice_at: null,
+  last_active_at: null,
+  left_at: null,
+  ...o,
+});
+
+test('gate conversion is null when nobody ever watched the gate', () => {
+  const members = [gateMember({ member_id: 'a' }), gateMember({ member_id: 'b' })];
+  assert.equal(
+    gateConversion(members, null, null),
+    null,
+    'no clearing observed and no roster read is not 0% conversion',
+  );
+});
+
+test('a roster read makes a missing clearing mean "stuck", for everyone still here', () => {
+  const members = [
+    gateMember({ member_id: 'in', gate_cleared_at: '2026-01-01T00:05:00.000Z' }),
+    gateMember({ member_id: 'stuck' }),
+    // joined long before anything was watching, and left. Unknowable, because
+    // the roster read can only see people who are still on it.
+    gateMember({ member_id: 'gone', left_at: '2026-01-09T00:00:00.000Z' }),
+  ];
+  assert.deepEqual(gateConversion(members, null, '2026-08-19T00:00:00.000Z'), {
+    observed: 2,
+    cleared: 1,
+    stuck: 1,
+    leftAtTheGate: 0,
+    unknowable: 1,
+  });
+});
+
+test('somebody who joined while we were watching and left without clearing is counted, not lost', () => {
+  const since = '2026-02-01T00:00:00.000Z';
+  const members = [
+    gateMember({ member_id: 'before', joined_at: '2026-01-01T00:00:00.000Z', left_at: '2026-01-10T00:00:00.000Z' }),
+    gateMember({ member_id: 'after', joined_at: '2026-02-10T00:00:00.000Z', left_at: '2026-02-12T00:00:00.000Z' }),
+  ];
+  const g = gateConversion(members, since, null)!;
+  assert.equal(g.leftAtTheGate, 1, 'the one whose whole tenure we saw');
+  assert.equal(g.unknowable, 1, 'the one who predates the listener');
+  assert.equal(g.observed, 1, 'and only the measured one is in the denominator');
+});
+
+test('members with no join date at all are not a gate conversion of 0%', () => {
+  const members = [gateMember({ member_id: 'x', joined_at: null })];
+  assert.equal(gateConversion(members, '2026-01-01T00:00:00.000Z', null), null);
 });
 
 test('channel state needs a human, not just a funnel event', () => {
@@ -160,15 +224,16 @@ async function join(memberId: string, at: string, source: string) {
 async function member(m: Partial<MemberRow> & { member_id: string }, isBot = 0) {
   await t.db
     .prepare(
-      `INSERT INTO members (guild_id, member_id, joined_at, join_source, first_message_at,
-                            first_voice_at, last_active_at, left_at, is_bot)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO members (guild_id, member_id, joined_at, join_source, gate_cleared_at,
+                            first_message_at, first_voice_at, last_active_at, left_at, is_bot)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       GUILD,
       m.member_id,
       m.joined_at ?? null,
       m.join_source ?? null,
+      m.gate_cleared_at ?? null,
       m.first_message_at ?? null,
       m.first_voice_at ?? null,
       m.last_active_at ?? null,
@@ -206,6 +271,52 @@ test('a raid never reaches the headline numbers, and is never deleted either', a
   // Nothing was deleted.
   const total = await t.db.prepare(`SELECT COUNT(*) AS n FROM events`).get<{ n: number }>();
   assert.equal(Number(total!.n), 53);
+});
+
+async function gateCleared(memberId: string, at: string, source = 'gateway') {
+  await t.db
+    .prepare(
+      `INSERT INTO events (event_type, member_id, guild_id, occurred_at, recorded_at, source, idempotency_key)
+       VALUES ('gate_cleared', ?, ?, ?, ?, ?, ?)`,
+    )
+    .run(memberId, GUILD, at, at, source, `k${seq++}`);
+}
+
+test('the gate number reaches the page, and a backfilled row does not fake a start date', async () => {
+  // Two members joined the same week. One cleared, one is still at the door.
+  // Both predate the live listener, so only the backfill's roster read makes
+  // the second one's missing clearing mean anything.
+  for (const [id, cleared] of [
+    ['in', true],
+    ['stuck', false],
+  ] as const) {
+    const at = '2026-02-24T10:00:00.000Z';
+    await join(id, at, 'invite:good');
+    await member({
+      member_id: id,
+      joined_at: at,
+      gate_cleared_at: cleared ? at : null,
+      last_active_at: '2026-03-01T00:00:00.000Z',
+    });
+    if (cleared) await gateCleared(id, at, 'backfill:member_list');
+  }
+
+  const d = await buildDashboard(t.db, { now: NOW, weeks: 4, anomalies: TEST_ANOMALIES });
+  assert.deepEqual(d.gateOverall, {
+    observed: 2,
+    cleared: 1,
+    stuck: 1,
+    leftAtTheGate: 0,
+    unknowable: 0,
+  });
+  assert.ok(
+    d.caveats.some((c) => c.includes('are in the server right now')),
+    'the stuck member is named as an action, not just a percentage',
+  );
+
+  const html = renderHtml(d);
+  assert.ok(html.includes('Got in'), 'the cohort table carries the gate column');
+  assert.ok(html.includes('50%'), 'and the headline conversion is on the page');
 });
 
 test('bots are not members, and never land in a cohort', async () => {

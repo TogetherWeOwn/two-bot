@@ -174,6 +174,28 @@ test(
         .get(),
     ) as { n: number } | null;
     assert.equal(Number(prompted?.n ?? 0), 0);
+
+    // They joined, and they are not in (TOG-76). The whole point of the gate
+    // event is that these are two different facts, so the join must be on file
+    // and the clearing must not.
+    const joined = await waitFor(
+      () =>
+        queryDb(reader, (db) =>
+          db
+            .prepare(`SELECT 1 AS x FROM events WHERE event_type='member_join' AND member_id=?`)
+            .get(NEWBIE),
+        ),
+      `member_join recorded.\n${botLog.join('')}`,
+    );
+    assert.ok(joined);
+    const gate = await queryDb(reader, (db) =>
+      db.prepare(`SELECT COUNT(*) AS n FROM events WHERE event_type='gate_cleared'`).get(),
+    ) as { n: number } | null;
+    assert.equal(
+      Number(gate?.n ?? 0),
+      0,
+      `recorded a gate clearing for a member still behind the gate.\n${botLog.join('')}`,
+    );
   },
 );
 
@@ -206,6 +228,29 @@ test(
         ),
       'onboarding_prompted recorded',
     );
+
+    // The gate clearing is its own funnel step (TOG-76), recorded off the
+    // pending -> not-pending transition and independently of onboarding - the
+    // conversion number must not depend on whether a landing channel happens
+    // to be configured. The members projection carries it too.
+    const gate = await waitFor(
+      () =>
+        queryDb(reader, (db) =>
+          db
+            .prepare(
+              `SELECT source FROM events WHERE event_type='gate_cleared' AND member_id=?`,
+            )
+            .get<{ source: string }>(NEWBIE),
+        ),
+      `gate_cleared recorded.\n${botLog.join('')}`,
+    );
+    assert.equal(gate.source, 'gateway', 'a live clearing is a real measurement, not a backfill');
+    const projected = await queryDb(reader, (db) =>
+      db
+        .prepare(`SELECT gate_cleared_at FROM members WHERE member_id=?`)
+        .get<{ gate_cleared_at: string | null }>(NEWBIE),
+    );
+    assert.ok(projected?.gate_cleared_at, 'members.gate_cleared_at must be set');
 
     // 3. They pick Shooters.
     mock.selectGames(NEWBIE, 'newbie', ['shooters']);

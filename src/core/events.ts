@@ -8,6 +8,16 @@
 export const EVENT_TYPES = [
   'invite_click',
   'member_join',
+  // --- the rules gate (TOG-76) --------------------------------------------
+  // TWO runs Discord's membership screening, so `member_join` is not arrival -
+  // it is arrival at a locked door. A member behind it cannot type, react or
+  // click anything, and 31 of the 84 humans on the server have been stuck
+  // there since the day they joined. Without this event those 31 are
+  // indistinguishable from members who joined and simply said nothing, which
+  // is how three whole months of intake converted at under 10% for a year
+  // without anybody noticing.
+  'gate_cleared', // they accepted the rules and can now actually do things
+  // ------------------------------------------------------------------------
   // --- onboarding (TWO-7) -------------------------------------------------
   // These three sit between member_join and first_message. They exist so we
   // can answer "of the people who joined, how many actually got routed
@@ -87,6 +97,12 @@ export function idempotencyKey(e: FunnelEvent): string {
   // back to the picker and change what they play. Counting reach still works -
   // use COUNT(DISTINCT member_id). onboarding_prompted stays once-per-member so
   // a re-post can never inflate the top of the onboarding funnel.
+  //
+  // gate_cleared stays once-per-member. A member who leaves and rejoins is
+  // re-screened by Discord and clears the gate again, so a second one is a real
+  // event - but conversion is "of the people who joined, how many got in", and
+  // counting one person's two clearings as two would push it over 100%. The
+  // first clearing is the one that answers the question.
   //
   // voice_session_start / voice_session_end are repeatable BY DESIGN and that
   // is the whole point of them - a member who turns up every week must produce

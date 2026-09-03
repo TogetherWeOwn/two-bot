@@ -102,6 +102,11 @@ export interface SeedOptions {
 export const EXPECTED_FUNNEL: Readonly<Record<EventType, number>> = {
   invite_click: 5,
   member_join: 10, // 9 distinct members; the rejoiner joins twice
+  // 8 of the 9 humans. The lurker is the one still behind the rules gate, so
+  // QA has a member in every state the dashboard distinguishes: cleared, stuck,
+  // and (via the leaver) cleared-then-gone. The rejoiner is re-screened on
+  // their second join and still counts once, which is the once-per-member rule.
+  gate_cleared: 8,
   onboarding_prompted: 4,
   game_roles_selected: 2,
   channel_routed: 2,
@@ -124,6 +129,7 @@ export const EXPECTED_DISTINCT: Readonly<Partial<Record<EventType, number>>> = {
   member_join: 9,
   member_leave: 2,
   first_message: 7,
+  gate_cleared: 8,
 };
 
 /** Members with a join and no message and no voice and no leave. */
@@ -166,15 +172,21 @@ export function fixtureEvents(opts: SeedOptions): FunnelEvent[] {
     ev(null, 'invite_click', -5 * DAY, 'vanity'),
 
     // --- lurker: joined, silent -------------------------------------------
+    // NO gate_cleared, on purpose. This is the member who never accepted the
+    // rules and physically cannot post - the state TOG-76 exists to make
+    // visible, and the one every "joined but never posted" number used to
+    // blame on disinterest.
     ev(M.lurker, 'member_join', -7 * DAY, A),
 
     // --- chatter: prompted, posted two hours later ------------------------
     ev(M.chatter, 'member_join', -6 * DAY, A),
+    ev(M.chatter, 'gate_cleared', -6 * DAY + 4 * SEC, 'gateway'),
     ev(M.chatter, 'onboarding_prompted', -6 * DAY + 10 * SEC, 'channel:welcome'),
     ev(M.chatter, 'first_message', -6 * DAY + 2 * 60 * MIN, 'channel:general'),
 
     // --- voicer: the complete path, ending in real voice ------------------
     ev(M.voicer, 'member_join', -5 * DAY, B),
+    ev(M.voicer, 'gate_cleared', -5 * DAY + 3 * SEC, 'gateway'),
     ev(M.voicer, 'onboarding_prompted', -5 * DAY + 8 * SEC, 'channel:welcome'),
     ev(M.voicer, 'game_roles_selected', -5 * DAY + 22 * SEC, 'channel:welcome', {
       picks: ['test'],
@@ -185,6 +197,7 @@ export function fixtureEvents(opts: SeedOptions): FunnelEvent[] {
 
     // --- fast: join to first message in 40 seconds ------------------------
     ev(M.fast, 'member_join', -4 * DAY, A),
+    ev(M.fast, 'gate_cleared', -4 * DAY + 2 * SEC, 'gateway'),
     ev(M.fast, 'onboarding_prompted', -4 * DAY + 5 * SEC, 'channel:welcome'),
     ev(M.fast, 'game_roles_selected', -4 * DAY + 20 * SEC, 'channel:welcome', { picks: ['test'] }),
     ev(M.fast, 'channel_routed', -4 * DAY + 25 * SEC, 'channel:general'),
@@ -192,26 +205,41 @@ export function fixtureEvents(opts: SeedOptions): FunnelEvent[] {
 
     // --- stalled: prompted, then nothing ----------------------------------
     ev(M.stalled, 'member_join', -3 * DAY, B),
+    ev(M.stalled, 'gate_cleared', -3 * DAY + 6 * SEC, 'gateway'),
     ev(M.stalled, 'onboarding_prompted', -3 * DAY + 12 * SEC, 'channel:welcome'),
 
     // --- inactive: quiet for 40 days and already flagged yesterday --------
+    // Predates the gate listener, so their clearing comes off a roster read
+    // and carries the join time as a placeholder. This is the fixture that
+    // keeps the backfill's source label exercised.
     ev(M.inactive, 'member_join', -60 * DAY, A),
+    ev(M.inactive, 'gate_cleared', -60 * DAY, 'backfill:member_list', {
+      backfill: true,
+      timestampIsJoinTime: true,
+    }),
     ev(M.inactive, 'first_message', -59 * DAY, 'channel:general'),
     ev(M.inactive, 'member_inactive', -1 * DAY, 'job:inactivity', { thresholdDays: 14 }),
 
     // --- leaver: joined, posted, gone -------------------------------------
     ev(M.leaver, 'member_join', -20 * DAY, B),
+    ev(M.leaver, 'gate_cleared', -20 * DAY + 30 * SEC, 'gateway'),
     ev(M.leaver, 'first_message', -19 * DAY, 'channel:general'),
     ev(M.leaver, 'member_leave', -2 * DAY, 'gateway'),
 
     // --- rejoiner: left and came back. left_at must end up NULL -----------
+    // Discord re-screens a rejoin, so in life this member clears the gate
+    // twice. Only the first appears here: the idempotency key would drop the
+    // second, and this list is asserted to insert one row per entry. That the
+    // key really does drop it is covered in test/unit.store.test.ts.
     ev(M.rejoiner, 'member_join', -30 * DAY, A),
+    ev(M.rejoiner, 'gate_cleared', -30 * DAY + 15 * SEC, 'gateway'),
     ev(M.rejoiner, 'member_leave', -25 * DAY, 'gateway'),
     ev(M.rejoiner, 'member_join', -10 * DAY, B),
     ev(M.rejoiner, 'first_message', -9 * DAY, 'channel:general'),
 
     // --- quiet: 30 days silent, never flagged -----------------------------
     ev(M.quiet, 'member_join', -50 * DAY, A),
+    ev(M.quiet, 'gate_cleared', -50 * DAY + 20 * SEC, 'gateway'),
     ev(M.quiet, 'first_message', -45 * DAY, 'channel:general'),
   ];
 }
