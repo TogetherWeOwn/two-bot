@@ -130,6 +130,21 @@ Members Intent off, no Manage Server, invite list unreadable) and warns on
 access we hold but did not ask for. Run it before a deploy and any time joins
 start recording as `unknown`. It never prints the token.
 
+**Preflight is not the acceptance test for the permission cut.** It asks
+"is this bit present?", so it cannot fail on access we hold but did not ask
+for — Administrator answers yes to every one of its checks. A bot re-invited
+with the new integer but still carrying its old Administrator role passes
+preflight with a WARN and exit 0. Use `verify-grant.ts` for that question:
+
+```bash
+DISCORD_TOKEN=... DISCORD_GUILD_ID=... npm run verify:grant
+```
+
+It exits non-zero on any missing bit, any extra bit, and on Administrator
+specifically, so exit 0 means the live grant is bit-for-bit `8858373153` and
+nothing more. `npm run verify:grant:selftest` runs its six cases offline with
+no token and no network; CI runs it on every PR.
+
 ## Current state
 
 The live token was issued on 2026-08-19 and verified against the real
@@ -161,7 +176,8 @@ above, permission integer `8858373153`, not the two-bit set this section used
 to describe. `scripts/preflight.ts` now asserts all four internal-actions bits
 explicitly. Applying it — via the invite URL above, re-inviting the bot with
 the new permissions — is still a Discord-portal change gated on whoever
-administers the server; this repo cannot execute it. Re-run
-`scripts/preflight.ts` against the live token after applying it to confirm
-nothing was cut too far. Everything before the token arrived was built and
-verified against a local mock Discord (see `tools/mock-discord/`).
+administers the server; this repo cannot execute it. After applying it, run
+`npm run verify:grant` — **not** preflight — against the live token: it is the
+only check that fails if Administrator is still attached, which is how this
+change most plausibly gets half-done. Everything before the token arrived was
+built and verified against a local mock Discord (see `tools/mock-discord/`).

@@ -30,6 +30,8 @@
     "backfill:messages": "node scripts/backfill-messages.ts",
     "reconcile": "node scripts/reconcile.ts",
     "preflight": "node scripts/preflight.ts",
+    "verify:grant": "node scripts/verify-grant.ts",
+    "verify:grant:selftest": "node scripts/verify-grant.ts --selftest",
     "backup": "bash scripts/backup.sh",
     "verify:catalog": "node scripts/verify-catalog.ts",
     "staging:doctor": "node scripts/staging-doctor.ts",

@@ -25,6 +25,12 @@ jobs:
 
       - run: npm test
 
+      # The TOG-64 grant check ships its own six cases and needs neither a token
+      # nor the network, so there is no reason for it to rot untested. It is the
+      # only check that fails on a half-applied grant; if its bit arithmetic
+      # breaks, the de-escalation silently stops being verifiable.
+      - run: npm run verify:grant:selftest
+
   # The same suite against a real Postgres, plus the website's grants.
   #
   # This job exists because the `check` job above cannot see any of it. Every
