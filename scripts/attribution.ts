@@ -97,12 +97,14 @@ const { kept, collapsed } = collapseCrossSourceDuplicates(
 // under two thousand rows.
 const memberRows = await db
   .prepare(
-    `SELECT member_id, first_message_at, first_voice_at, last_active_at, left_at, is_bot
+    `SELECT member_id, first_message_at, third_message_at, first_voice_at, last_active_at,
+            left_at, is_bot
        FROM members`,
   )
   .all<{
     member_id: string;
     first_message_at: string | null;
+    third_message_at: string | null;
     first_voice_at: string | null;
     last_active_at: string | null;
     left_at: string | null;
@@ -124,10 +126,12 @@ for (const e of kept) {
     source: e.source,
     firstVoiceAt: m?.first_voice_at ?? null,
     firstMessageAt: m?.first_message_at ?? null,
-    // We do not record per-member message counts yet, so the AM7 text branch
-    // falls back to first_message_at. src/analytics/attribution.ts explains
-    // exactly what that costs, and the report prints it below.
-    thirdMessageAt: null,
+    // Non-null once we have seen this member's third message, which makes the
+    // AM7 text branch exact for them (TWO-95). Still null for a member whose
+    // history predates the message backfill and has not been re-scanned, and
+    // for anyone who has genuinely posted once or twice - the two are different
+    // and the report below separates them rather than averaging them.
+    thirdMessageAt: m?.third_message_at ?? null,
     lastActiveAt: m?.last_active_at ?? null,
     leftAt: m?.left_at ?? null,
     attributionExact: e.attributionExact,
@@ -224,7 +228,7 @@ await db.close();
 
 if (csv) {
   console.log(
-    'source,clicks,joins,joins_inexact,am7,am7_eligible,am7_voice,am7_message_proxy,am30,am30_eligible,am30_proven_in_window,am30_proven_later',
+    'source,clicks,joins,joins_inexact,am7,am7_eligible,am7_voice,am7_messages,am7_message_proxy,am30,am30_eligible,am30_proven_in_window,am30_proven_later',
   );
   const line = (r: AttributionRow) =>
     [
@@ -235,6 +239,7 @@ if (csv) {
       r.am7,
       r.am7Eligible,
       r.am7Voice,
+      r.am7Messages,
       r.am7MessageProxy,
       r.am30,
       r.am30Eligible,
@@ -407,18 +412,39 @@ if (report.totals.joinsInexact > 0) {
   );
   console.log(`      end to end. Running capture more often is the only lever (TWO-11).`);
 }
+// The text half of AM7 is exact for anyone with a third_message on file
+// (TWO-95). Anyone without one is still admitted by the looser "posted at all"
+// proxy, so the total is an upper bound by exactly that many members - and
+// unlike before, that residual is fixable rather than structural.
 if (report.usedMessageProxy) {
+  const exact = report.totals.am7Voice + report.totals.am7Messages;
   console.log(
-    `    AM7 is an UPPER BOUND. We do not store per-member message counts, so the`,
+    `    AM7 IS AN UPPER BOUND BY ${report.totals.am7MessageProxy}. ${report.totals.am7MessageProxy} of the ${report.totals.am7} AM7 members have no third message`,
   );
   console.log(
-    `      text half of AM7 currently admits anyone who posted at all, not 3+.`,
+    `      on file, so they are admitted by the looser "posted at all" proxy rather`,
   );
   console.log(
-    `      ${report.totals.am7Voice} of the ${report.totals.am7} AM7 members qualified on voice alone - that number is exact.`,
+    `      than the agreed 3+ bar. The true AM7 is between ${exact} and ${report.totals.am7}.`,
   );
   console.log(
-    `      ${report.totals.am7MessageProxy} rest on the proxy, so the true AM7 is between ${report.totals.am7Voice} and ${report.totals.am7}.`,
+    `      Exact so far: ${report.totals.am7Voice} on voice, ${report.totals.am7Messages} on a third message we have recorded.`,
+  );
+  console.log(
+    `      THIS IS FIXABLE, AND IT IS ONE COMMAND: npm run backfill:messages reads the`,
+  );
+  console.log(
+    `      channels and records each member's first three posts. Run it, then re-run`,
+  );
+  console.log(`      this report, and the residual above drops to what is genuinely 1-2 posts.`);
+} else if (report.totals.am7 > 0) {
+  // Worth saying out loud rather than leaving as an absent warning: the number
+  // above changed status, and whoever quotes it should know it is quotable.
+  console.log(
+    `    AM7 is EXACT - no member was admitted by the old "posted at all" proxy.`,
+  );
+  console.log(
+    `      ${report.totals.am7Voice} qualified on voice, ${report.totals.am7Messages} on 3+ messages inside their first 7 days.`,
   );
 }
 if (report.totals.am30 > 0) {

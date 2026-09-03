@@ -29,6 +29,20 @@ export const EVENT_TYPES = [
   'channel_routed', // we handed them links to channels they can now see
   // ------------------------------------------------------------------------
   'first_message',
+  // --- the message ladder (TWO-95) ----------------------------------------
+  // AM7's text half is "3 or more messages within 7 days", which is a question
+  // about WHEN the third message landed, not how many there are in total. A
+  // count cannot answer it: 40 messages tells you nothing about day 7.
+  //
+  // So we record the rungs instead. `second_message` carries no meaning of its
+  // own and nothing reports on it - it exists because you cannot identify the
+  // third message without having identified the second. Keeping it in the log
+  // rather than in a column is what lets `members` stay a pure projection: the
+  // ladder position is derivable from `events` alone, so the cache can still be
+  // rebuilt from the log, which is the rule the schema header sets out.
+  'second_message',
+  'third_message',
+  // ------------------------------------------------------------------------
   'first_voice_session',
   // --- repeatable voice sessions (TOG-99) ---------------------------------
   // first_voice_session fires once per member and members.last_active_at is a
@@ -47,6 +61,20 @@ export const EVENT_TYPES = [
 ] as const;
 
 export type EventType = (typeof EVENT_TYPES)[number];
+
+/**
+ * The message milestones in ladder order.
+ *
+ * A member's Nth message is the Nth rung. The order is the definition - the
+ * store fills the lowest rung that is still empty - so this array is the one
+ * place that decides what "third message" means. AM7_MESSAGE_THRESHOLD in
+ * src/analytics/attribution.ts is the same 3, and the two are asserted equal in
+ * test/unit.store.test.ts so that raising the bar cannot quietly leave the
+ * ladder one rung short.
+ */
+export const MESSAGE_RUNGS = ['first_message', 'second_message', 'third_message'] as const;
+
+export type MessageRung = (typeof MESSAGE_RUNGS)[number];
 
 /**
  * Where an event came from. `source` answers "what should we credit for this?"

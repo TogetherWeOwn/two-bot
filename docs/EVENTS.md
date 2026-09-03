@@ -22,6 +22,8 @@ down, and keeping both is the only way to tell those apart later.
 
 ## The event types
 
+`EVENT_TYPES` in `src/core/events.ts` is the authority; this table follows it.
+
 | Type | Fires when | Repeats? |
 |---|---|---|
 | `invite_click` | Someone clicks a tracked invite link. | Yes |
@@ -31,6 +33,8 @@ down, and keeping both is the only way to tell those apart later.
 | `game_roles_selected` | They picked at least one game and we granted it. | Yes (they can change what they play) |
 | `channel_routed` | We handed them links to channels they can now see. | Yes |
 | `first_message` | A member's first ever message. | No - once per member |
+| `second_message` | Their second. | No - once per member |
+| `third_message` | Their third - the AM7 text bar. | No - once per member |
 | `first_voice_session` | A member's first time joining a voice channel. | No - once per member |
 | `voice_session_start` | A member entered a voice channel. | **Yes - one per visit** |
 | `voice_session_end` | A member left a voice channel. | **Yes - one per visit** |
@@ -97,6 +101,25 @@ rather than a number measured from whenever the process happened to start.
 > (`src/core/voiceSessions.ts`) because Discord serves no voice history over
 > REST - there is nowhere else the start could come from.
 
+### Why there is a `second_message`
+
+AM7 counts a member as activated if they had a voice session **or posted three
+or more messages**, within 7 days of joining. That is a question about *when the
+third message landed*, not about a total - a member with 40 messages today tells
+you nothing about where they stood on day 7. So we record the moment, in
+`members.third_message_at`, and `second_message` exists only because you cannot
+identify the third message without having identified the second. Nothing reports
+on `second_message` directly.
+
+Keeping the ladder in the log rather than in a counter column is what lets
+`members` stay a pure projection: the rung a member is on is derivable from
+`events` alone, so the cache can still be rebuilt from the log. We stop at three
+because three is the bar - there is no fourth rung, and a member past it costs
+one indexed read per message and no writes.
+
+Before this existed the text half of AM7 admitted anyone who had posted *at
+all*, which made the whole metric an upper bound (TWO-95).
+
 ## `source`: what gets the credit
 
 | Value | Meaning |
@@ -136,10 +159,20 @@ away would hide it.
    member still gets counted - Discord replays `GUILD_MEMBER_ADD`-equivalent
    state on reconnect - but the invite delta is lost.
 
-4. **`first_message` only counts messages sent after the bot was deployed.**
-   We are not backfilling history. Anyone already in the server appears as
-   "joined, never posted" until they post again. Worth remembering when reading
-   the first few weeks of numbers.
+4. **The message milestones come from the live bot OR from a history scan.**
+   `npm run backfill:messages` pages the conversation channels and records each
+   member's earliest three posts, so text activation does not depend on the bot
+   having been deployed at the time. Voice has no equivalent - Discord will not
+   serve voice history over REST - which is why a voice gap can never be
+   recovered and a text gap can.
+
+   A capped scan is safe in one direction only, and that is deliberate: it sees
+   a subset of a member's posts, so the milestone it records is at or **later**
+   than the true one, never earlier. AM7 can therefore miss a member, but it
+   cannot wrongly admit one, and because the writer only ever moves a milestone
+   earlier, a deeper re-run can only improve the numbers. Anyone whose history
+   has not been scanned since TWO-95 has a null `third_message_at` and falls
+   back to the looser proxy - the attribution report prints how many.
 
 5. **`voice_session_start` / `voice_session_end` produce zero rows until a bot
    with the gateway listener is actually running.** They cannot be backfilled:
