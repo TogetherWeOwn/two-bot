@@ -64,7 +64,7 @@ const gateEverObserved = await one(
 const stuckAtGate = gateEverObserved
   ? await one(
       `SELECT COUNT(*) AS n FROM members
-        WHERE is_bot = 0 AND left_at IS NULL AND joined_at IS NOT NULL
+        WHERE NOT is_bot AND left_at IS NULL AND joined_at IS NOT NULL
           AND gate_cleared_at IS NULL`,
     )
   : 0;
@@ -194,24 +194,24 @@ const cohortExcl = excludeClause('member_join').sql.replaceAll('occurred_at', 'j
 const cohortParams = excludeClause('member_join').params;
 console.log(`\n  Retention (of members who joined in the window):`);
 // "Still around d days after joining". SQLite counts days with julianday();
-// Postgres has no such function, so cast the ISO strings and subtract.
+// Postgres subtracts the timestamps directly (real timestamptz since 0009).
 const daysAlive =
   db.kind === 'postgres'
-    ? `EXTRACT(EPOCH FROM (last_active_at::timestamptz - joined_at::timestamptz)) / 86400`
+    ? `EXTRACT(EPOCH FROM (last_active_at - joined_at)) / 86400`
     : `julianday(last_active_at) - julianday(joined_at)`;
 
 for (const d of [1, 7, 30]) {
   const until = new Date(Date.now() - d * 86_400_000).toISOString();
   const cohort = await one(
     `SELECT COUNT(*) AS n FROM members
-      WHERE joined_at >= ? AND joined_at <= ? AND is_bot = 0${cohortExcl}`,
+      WHERE joined_at >= ? AND joined_at <= ? AND NOT is_bot${cohortExcl}`,
     since,
     until,
     ...cohortParams,
   );
   const retained = await one(
     `SELECT COUNT(*) AS n FROM members
-      WHERE joined_at >= ? AND joined_at <= ? AND is_bot = 0${cohortExcl}
+      WHERE joined_at >= ? AND joined_at <= ? AND NOT is_bot${cohortExcl}
         AND last_active_at IS NOT NULL
         AND ${daysAlive} >= ?`,
     since,
@@ -227,14 +227,14 @@ for (const d of [1, 7, 30]) {
 const never = await one(
   `SELECT COUNT(*) AS n FROM members
     WHERE joined_at IS NOT NULL AND first_message_at IS NULL AND first_voice_at IS NULL
-      AND left_at IS NULL AND is_bot = 0${cohortExcl}`,
+      AND left_at IS NULL AND NOT is_bot${cohortExcl}`,
   ...cohortParams,
 );
 // Raid accounts that were never cleaned up still count towards the member
 // total Discord shows, so they are named rather than quietly dropped.
 const strandedRaid = await one(
   `SELECT COUNT(*) AS n FROM members
-    WHERE is_bot = 0 AND left_at IS NULL AND first_message_at IS NULL
+    WHERE NOT is_bot AND left_at IS NULL AND first_message_at IS NULL
       AND first_voice_at IS NULL AND NOT (1=1${cohortExcl})`,
   ...cohortParams,
 );

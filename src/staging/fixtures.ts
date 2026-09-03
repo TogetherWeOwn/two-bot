@@ -297,8 +297,8 @@ export async function seedFixtures(db: Db, opts: SeedOptions): Promise<SeedResul
     if (r.inserted) inserted++;
   }
 
-  // The bot exists in `members` with is_bot = 1 but no join event. Any query
-  // that forgets `is_bot = 0` will pick it up - that is what it is for.
+  // The bot exists in `members` with is_bot set but no join event. Any query
+  // that forgets `NOT is_bot` will pick it up - that is what it is for.
   await store.markBot(opts.guildId, FIXTURE_MEMBER_IDS.bot);
   for (const t of fixtureTouches(opts)) {
     await store.touchActivity(opts.guildId, t.memberId, t.atIso);

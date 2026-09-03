@@ -23,6 +23,23 @@ import { log } from '../core/log.ts';
  */
 pg.types.setTypeParser(pg.types.builtins.INT8, (v: string) => Number(v));
 
+/**
+ * Return timestamptz as the ISO-8601 UTC string the columns held before
+ * migration 0009, not as a Date.
+ *
+ * Every reader in this codebase - the lexicographic compares, slice(0, 10),
+ * Date.parse() - was written against `new Date().toISOString()` strings, and
+ * node-postgres's default (a Date in server-local time) would break all of
+ * them at once. Rendering back to exactly that format makes the column type
+ * invisible above this line: scripts/funnel.ts is byte-identical either side
+ * of 0009, which is the acceptance test on TOG-67.
+ *
+ * toISOString() loses nothing here because no stored value carries
+ * sub-millisecond precision: the writers are toISOString() and the
+ * date_trunc('milliseconds', now()) default that 0009 installs.
+ */
+pg.types.setTypeParser(pg.types.builtins.TIMESTAMPTZ, (v: string) => new Date(v).toISOString());
+
 /** Postgres error code for unique_violation. */
 export const UNIQUE_VIOLATION = '23505';
 

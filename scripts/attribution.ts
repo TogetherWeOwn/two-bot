@@ -208,7 +208,7 @@ const realMembers = Number(
     await db
       .prepare(
         `SELECT COUNT(*) AS n FROM members
-          WHERE is_bot = 0 AND left_at IS NULL${memberExcl.sql}`,
+          WHERE NOT is_bot AND left_at IS NULL${memberExcl.sql}`,
       )
       .get<{ n: number }>(...memberExcl.params)
   )?.n ?? 0,
@@ -216,7 +216,7 @@ const realMembers = Number(
 const discordMembers = Number(
   (
     await db
-      .prepare(`SELECT COUNT(*) AS n FROM members WHERE is_bot = 0 AND left_at IS NULL`)
+      .prepare(`SELECT COUNT(*) AS n FROM members WHERE NOT is_bot AND left_at IS NULL`)
       .get<{ n: number }>()
   )?.n ?? 0,
 );
