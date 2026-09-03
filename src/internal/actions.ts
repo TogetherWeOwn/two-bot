@@ -15,6 +15,7 @@
 import { ActionError } from './errors.ts';
 import type { ActionDiscord, ScheduledEventInput } from './discordActions.ts';
 import type { InternalActionStore } from './store.ts';
+import { WEB_ONE_CLICK_SOURCE, type ExpectedJoins } from '../core/expectedJoins.ts';
 import { ALL_PICKS } from '../onboarding/catalog.ts';
 
 export const IMPLEMENTED_ACTIONS = [
@@ -64,6 +65,13 @@ export interface ActionContext {
   enabled: Set<string>;
   /** Durable state. Required by every action in NEEDS_IDEMPOTENCY_KEY. */
   store: InternalActionStore | null;
+  /**
+   * Join attribution for guild.add_member (§7). The same instance the gateway
+   * guildMemberAdd handler reads, which is why it is passed in rather than
+   * constructed here. Optional: without it joins still land, filed `unknown`,
+   * exactly as they did before this existed.
+   */
+  expectedJoins?: ExpectedJoins | null;
 }
 
 export interface ActionOutcome {
@@ -207,6 +215,12 @@ async function roleAssign(body: Record<string, unknown>, ctx: ActionContext): Pr
 async function guildAddMember(body: Record<string, unknown>, ctx: ActionContext): Promise<ActionOutcome> {
   const discordId = requireSnowflake(body, 'discord_id');
   const accessToken = requireString(body, 'access_token');
+
+  // The note goes down BEFORE the Discord call: the gateway can deliver
+  // guildMemberAdd before the REST response returns, and a note taken after
+  // would miss exactly the joins it exists to attribute (§7). If the call
+  // fails, nobody joins and the note expires unread.
+  ctx.expectedJoins?.expect(ctx.guildId, discordId, WEB_ONE_CLICK_SOURCE);
 
   const outcome = await ctx.discord.addMember(ctx.guildId, discordId, accessToken);
   return { result: { outcome }, outcome };

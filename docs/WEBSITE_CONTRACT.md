@@ -203,9 +203,10 @@ bots excluded. A day with no activity produces no row.
 `funnel_daily`: `day`, `joins`, `leaves`, `first_messages`, `first_voice_sessions`, `net_change`.
 `funnel_by_source`: `day`, `source`, `joins`.
 
-`source` values (`invite:aB3xY9`, `ambiguous:a+b`, `vanity`, `unknown`) are
-documented in `docs/EVENTS.md`. Show `unknown` as itself; never fold it into a
-real invite code.
+`source` values (`invite:aB3xY9`, `ambiguous:a+b`, `vanity`, `unknown`,
+`web:one_click`) are documented in `docs/EVENTS.md`. Show `unknown` as itself;
+never fold it into a real invite code. `web:one_click` is the website's own
+one-click join (`guild.add_member`) — the web→Discord conversion number.
 
 ⚠️ **Audience: authenticated staff pages.** These are exposed so the website can
 render the growth dashboard, not so the public site can render momentum.
@@ -495,6 +496,7 @@ migration. See the note at the top of `sql/web_v1.sql`.
 
 | Version | Date | Change |
 |---|---|---|
+| `v1.0.3` | 2026-09-03 | **Additive value only; no view, column or type changed, runtime contract remains `1.0`.** TOG-464: `funnel_by_source.source` gains one new value, `web:one_click`, stamped on joins the bot itself performed via `guild.add_member` (docs/INTERNAL_ACTIONS.md §7). Rows with this value appear only once that action is switched on; nothing built against `v1.0` needs to move. |
 | `v1.0.2` | 2026-08-30 | **Documentation only; no view, column, type or `contract_meta` value changed, so nothing built against `v1.0` needs to move.** Removes status drift that had the document contradicting itself: §6.2 still said the counter collector did not exist while §8 said it had shipped. Both now say the same thing — TOG-73's code is merged (`c12654a`) but produces no data, because it reads Discord and the company holds no token for the TWO server, so `live_counts` and `rank_counts` still read null today. §6.1 records the TOG-75 outcome (**option C, decided, `done`**) instead of presenting a live A/B/C choice, and drops the incorrect claim that it was the CEO's call — this is the fix TOG-468 asks for. §2 `members` now states the raid exclusion the view has actually applied since TOG-73, and the stale "33 of 84 humans" / "until TOG-73 runs" notes are gone. §8 replaces promised numbers with measured ones: the full §7 deploy sequence, `verify:web-role` (35/35) and `test/e2e.webcontract.test.ts` (23/23) were re-run against a clean Postgres on 2026-08-30, and every view was queried as `two_web_ro` to record what a website build actually sees today. |
 | `v1.0.1` | 2026-08-25 | **Documentation correction only; runtime contract remains `1.0`.** `human_member_count` excludes the dynamically-derived raid set as well as bots, yielding 54 on the grounded 2026-08-19 snapshot rather than the raw 84 Discord human accounts. TOG-73 applies the same exclusion to rank counts and public member rows and writes nothing when any raid window is ungrounded. No view shape or `contract_meta` value changed. |
 | `v1.0` | 2026-08-25 | **Live.** Schema, nine views, the tables behind them and the `two_web_ro` role created and verified against Postgres — 32/32 role checks, 22 tests, whole suite green on both drivers. No shape the Lead asked for moved between `v0.1` and here. New in this version: the freshness ceilings live in the views rather than being a promise about the collector; the zero rule is a schema constraint as well as collector behaviour; `rank_changed` is pre-whitelisted in `member_milestones` so TOG-73 needs no contract change; an in-progress event stays as `next_event`. TWO-\* references renumbered to their TOG equivalents (TOG-73, TOG-74, TOG-75). |

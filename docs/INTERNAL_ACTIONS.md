@@ -1,7 +1,8 @@
 # The internal actions endpoint
 
-**Status: `v0.3` — the endpoint is complete and tested (TOG-44). Nothing on
-this page is specification any more.**
+**Status: `v0.4` — the endpoint is complete and tested (TOG-44), and join
+attribution for one-click joins is built (TOG-464). Nothing on this page is
+specification any more.**
 
 All four allowlisted actions are built. Three are live by default —
 `role.assign`, `announcement.post`, `event.upsert` — and `guild.add_member`
@@ -14,8 +15,8 @@ that is a table rather than a process's memory. **The restart-reopens-a-replay-
 window limit described in earlier revisions of this document no longer
 applies.**
 
-Still not built, and tracked separately: join attribution for one-click joins
-(§7).
+Join attribution for one-click joins (§7) landed with TOG-464 — every part of
+this page is now built.
 
 The wire format below is what is implemented. If something here is wrong for
 the caller, say so on TOG-44.
@@ -403,7 +404,7 @@ this section used to list as blocked.
 | Durable `idempotency_key → result` | **built** — `internal_idempotency` |
 | Durable audit trail | **built** — `internal_action_log` |
 | Nonce replay guard surviving a restart | **built** — `internal_nonces` |
-| Join attribution for one-click joins (§7) | **not built** |
+| Join attribution for one-click joins (§7) | **built** — TOG-464, `src/core/expectedJoins.ts` |
 
 **The honest limit that remains, and it is not the old one.** Idempotency is
 at-most-once inside a living process. If the bot dies *between* claiming a key
@@ -421,21 +422,34 @@ Nonces are a table.
 
 ## 7. One-click joins have to be countable
 
-A one-click join arrives through `PUT /guilds/.../members/...`, so **no invite
-code is consumed**. The invite tracker will see a join it cannot attribute and
-file it as `unknown` (`docs/EVENTS.md`). We would ship TWO's best conversion
-path and have no way to tell whether it converts anybody.
+**Built (TOG-464).** A one-click join arrives through
+`PUT /guilds/.../members/...`, so **no invite code is consumed**. Without this
+piece the invite tracker would see a join it cannot attribute and file it as
+`unknown` (`docs/EVENTS.md`) — we would ship TWO's best conversion path and
+have no way to tell whether it converts anybody.
 
-Fix, and it costs the website nothing: at the moment the bot makes the add
+The fix, and it costs the website nothing: at the moment the bot makes the add
 call, it notes "expect a join for this member id within 30s, source
-`web:one_click`". The gateway `guildMemberAdd` handler consumes that note and
-stamps the source. No token involved, no extra request, no new field from the
-caller.
+`web:one_click`" (`src/core/expectedJoins.ts`). The gateway `guildMemberAdd`
+handler consumes that note and stamps the source. No token involved, no extra
+request, no new field from the caller.
 
-That adds one value to the `source` column, which is an additive change to
-`web_v1.funnel_by_source` — a minor contract bump under
-`docs/WEBSITE_CONTRACT.md` §1, no warning required. It needs the EventStore,
-so it ships with the Postgres slice.
+Three details of the implementation worth knowing:
+
+- **The note is taken before the Discord call**, because the gateway can
+  deliver the join before the REST response returns. A note for a call that
+  then fails is harmless — nobody joins, and it expires after 30 seconds.
+- **The note beats the invite diff.** A member the bot itself just added
+  provably came through the web path; any invite code that grew in the same
+  window belongs to some other join. The invite snapshot is still taken on
+  every join, so the counters stay correct for the next organic one.
+- **It is in-memory, deliberately.** The add call and the gateway event are
+  seconds apart inside one process. If the bot dies between them the join is
+  filed `unknown`, the same honest fallback as a join during downtime.
+
+`web:one_click` is one new value in the `source` column — an additive change to
+`web_v1.funnel_by_source`, no view shape moved, runtime contract still `1.0`
+(`docs/WEBSITE_CONTRACT.md` §1).
 
 This matters more than it looks. "New members joining" is the number the whole
 company is judged on, and an unattributed join is an argument nobody can win.
@@ -574,4 +588,5 @@ takeover, the sweep — everything with a clock in it), and
 |---|---|---|
 | `v0.1` | 2026-08-19 | First specification. Three approved actions from TWO-24, plus `guild.add_member` proposed on TWO-57 and awaiting CEO sign-off. |
 | `v0.2` | 2026-08-19 | TWO-59: the pre-Postgres slice implemented — listener, HMAC, skew, replay, rate limits, error envelope, request logging, `role.assign` live and `guild.add_member` built but switched off. No wire-format change. |
+| `v0.4` | 2026-09-03 | TOG-464: join attribution for one-click joins (§7) built — the last unbuilt piece of this page. No wire-format change: the caller sends nothing new, and the only observable difference is that a `guild.add_member` join lands in the funnel as `web:one_click` instead of `unknown`. |
 | `v0.3` | 2026-08-25 | TOG-44: the endpoint completed on top of Postgres (TOG-37). `announcement.post` and `event.upsert` built and live; durable idempotency store, durable audit trail, table-backed replay guard. **The allowlist did not widen** — both new actions were approved in the original scope. Additive wire changes only: one new error code `in_progress` (409, retryable), one new response header `Idempotent-Replay`, and `event.upsert` now takes `location` as the alternative to `channel_key`. |
