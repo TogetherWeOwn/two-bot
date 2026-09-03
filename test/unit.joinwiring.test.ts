@@ -15,16 +15,24 @@ import { EventEmitter } from 'node:events';
 import { Events, type Client } from 'discord.js';
 import { registerHandlers } from '../src/discord/client.ts';
 import { ExpectedJoins, WEB_ONE_CLICK_SOURCE } from '../src/core/expectedJoins.ts';
-import type { FunnelHandlers, JoinInput } from '../src/core/handlers.ts';
+import type { FunnelHandlers, GateClearedInput, JoinInput } from '../src/core/handlers.ts';
 import type { InviteTracker } from '../src/core/inviteTracker.ts';
 
 const GUILD = '326474832151838730';
 
 function fakeDeps(over: { grew?: string[]; inviterId?: string | null } = {}) {
   const joins: JoinInput[] = [];
+  // The join path also records the rules gate (TOG-76) for a member who
+  // arrives already through it, so a fixture without `onGateCleared` fails
+  // every join here on a missing function rather than on anything about §7.
+  const gates: GateClearedInput[] = [];
   const handlers = {
     onJoin: async (i: JoinInput) => {
       joins.push(i);
+      return null;
+    },
+    onGateCleared: async (i: GateClearedInput) => {
+      gates.push(i);
       return null;
     },
     onLeave: async () => ({}),
@@ -37,7 +45,7 @@ function fakeDeps(over: { grew?: string[]; inviterId?: string | null } = {}) {
     attribute: (g: string[]) => (g.length === 1 ? `invite:${g[0]}` : 'unknown'),
     inviterFor: async () => over.inviterId ?? null,
   } as unknown as InviteTracker;
-  return { joins, handlers, invites };
+  return { joins, gates, handlers, invites };
 }
 
 function member(id: string) {
