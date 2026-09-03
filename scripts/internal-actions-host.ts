@@ -81,8 +81,36 @@ console.log(
     schema: SCHEMA,
     channelKey: CHANNEL_KEY,
     keyId: KEY_ID,
+    discord: 'mock',
   }),
 );
+
+/**
+ * Step 4 asks for "exactly one message in the channel", and steps 5 and 6 assert
+ * a NEGATIVE - that a forged or replayed request reached Discord not at all. The
+ * same `message_id` twice is necessary but not sufficient for either: it does not
+ * prove the bot sent one request rather than two. The traffic the bot actually
+ * emitted lives in THIS process, not the harness's, so expose it read-only on a
+ * separate loopback port. Mock runs only; against a real Discord the count has to
+ * come from the channel itself.
+ */
+const INTROSPECT_PORT = Number(process.env.TWO_HOST_INTROSPECT_PORT ?? '0');
+if (INTROSPECT_PORT > 0) {
+  const { createServer } = await import('node:http');
+  createServer((_req, res) => {
+    const posts = mock.captured.filter((c) => c.method === 'POST' && c.url.endsWith('/messages'));
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(
+      JSON.stringify({
+        messagePosts: posts.length,
+        urls: posts.map((p) => p.url),
+        // GETs are not captured by the mock, so every entry here is a write.
+        totalCaptured: mock.captured.length,
+        allCalls: mock.captured.map((c) => `${c.method} ${c.url}`),
+      }),
+    );
+  }).listen(INTROSPECT_PORT, '127.0.0.1');
+}
 
 async function shutdown(): Promise<void> {
   await srv.close();

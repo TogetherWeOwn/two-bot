@@ -16,6 +16,7 @@
  *   TWO_ACCEPT_ROLE_KEY=rocketleague \
  *   TWO_ACCEPT_DISCORD_ID=900000000000009999 \
  *   TWO_ACCEPT_DB=./data/two.db \
+ *   TWO_ACCEPT_SCHEMA=qa_tog463        # Postgres only; must match TWO_HOST_SCHEMA
  *   node scripts/internal-actions-acceptance.ts
  *
  * Exit codes: 0 every check passed - 1 a check failed - 2 misconfigured.
@@ -44,6 +45,12 @@ const CHANNEL_KEY = env('TWO_ACCEPT_CHANNEL_KEY');
 const ROLE_KEY = env('TWO_ACCEPT_ROLE_KEY');
 const DISCORD_ID = env('TWO_ACCEPT_DISCORD_ID');
 const DB_SPEC = process.env.TWO_ACCEPT_DB ?? '';
+// Step 7 must read the schema the ENDPOINT writes to, not whatever `search_path`
+// happens to resolve to. `internal-actions-host.ts` isolates its tables under
+// TWO_HOST_SCHEMA (default `qa_tog463`), so reading the default `public` finds a
+// table that exists, is empty, and reports 0/7 - a FAIL that blames the endpoint
+// for a mismatch in this reader. Ignored for SQLite, which has no schemas.
+const DB_SCHEMA = process.env.TWO_ACCEPT_SCHEMA ?? process.env.TWO_HOST_SCHEMA ?? '';
 
 /** Every request this run made, so step 7 can look for exactly these rows. */
 const requestIds: { step: string; requestId: string; status: number }[] = [];
@@ -233,7 +240,8 @@ if (!DB_SPEC) {
   failures.push('step 7: not run (TWO_ACCEPT_DB unset)');
 } else {
   const { openDb } = await import('../src/store/db.ts');
-  const db = await openDb(DB_SPEC);
+  const db = await openDb(DB_SPEC, DB_SCHEMA ? { schema: DB_SCHEMA } : {});
+  console.log(`  reading internal_action_log from schema ${DB_SCHEMA || '(driver default)'}`);
   // `?` is the house placeholder style; the Postgres driver rewrites it, so
   // this same statement works against staging's Postgres unchanged.
   const lookup = db.prepare('SELECT status, outcome FROM internal_action_log WHERE request_id = ?');
