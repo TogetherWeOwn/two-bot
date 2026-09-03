@@ -283,7 +283,9 @@ sudo editor /etc/two-bot/two-bot.env     # see .env.example for the keys
 
 # Backup credentials: separate file, so the backup timer does not need the Discord token.
 sudo install -o twobot -g twobot -m 600 /dev/null /etc/two-bot/backup.env
-sudo editor /etc/two-bot/backup.env      # TWO_DATABASE_URL, TWO_RESTORE_URL, TWO_BACKUP_UPLOAD_CMD
+sudo editor /etc/two-bot/backup.env      # TWO_DATABASE_URL, TWO_RESTORE_URL, TWO_BACKUP_UPLOAD_CMD,
+                                         # and the TWO_BACKUP_S3_* destination — see "Off-box destination"
+sudo install -m 755 deploy/two-backup-upload /usr/local/bin/two-backup-upload
 
 sudo cp deploy/two-bot.service deploy/two-bot-backup.service deploy/two-bot-backup.timer \
         deploy/two-bot-restore-drill.service deploy/two-bot-restore-drill.timer \
@@ -544,6 +546,24 @@ reported `MIGRATION FAILED` and exited 1, where it previously reported `ok`.
 `pg-restore.ts --dry-run` verified a good dump and rejected both a truncated one
 and one naming a table the bot does not own.
 
+**Drilled 2026-09-03 (TOG-69), through the real off-box upload path.** Against
+an ephemeral PostgreSQL 18.4: 60 events / 40 members / 1 invite snapshot written
+through `EventStore`, dumped by `scripts/pg-backup.ts` with
+`TWO_BACKUP_UPLOAD_CMD` set to `deploy/two-backup-upload`, uploaded as a signed
+S3 `PUT` to a bucket named `paperclip-backups`, and then — with **the local dump
+deleted first**, so nothing but the uploaded object remained — restored into a
+scratch database. Counts matched per table, 60/40/1. The receiving store
+re-derived the SigV4 signature itself and refused to store anything it could not
+verify, so the object arriving is evidence the signature was right rather than
+evidence the receiver was lenient. As a control, flipping one byte of the
+uploaded object made the same drill fail at the dry run and restore 0 rows.
+
+This ran against a local S3-speaking store, not R2 itself: the credentials are
+host-side by design and are not reachable from a build container. What it proves
+is the path — dump, sign, upload, lose the local copy, restore from the remote
+one. What it does not prove is that the R2 bucket accepts our key, which the
+first real `systemctl start two-bot-backup` on the host will show.
+
 An earlier revision of this file recorded a drill on 2026-08-19 with different
 numbers (4,947 / 1,874 / 16). That drill was performed against a different
 deployment of this codebase and the scripts it describes were never committed
@@ -562,8 +582,8 @@ the dump path as the **last** argument. Two consequences, and they bite:
 2. **No argument can contain a space**, because the split has no notion of
    quoting.
 
-So use a wrapper. `deploy/two-backup-upload` is one — edit the destination line
-in it, then:
+So use a wrapper. `deploy/two-backup-upload` is the one we ship, and it is
+already pointed at the destination below — install it as-is:
 
 ```bash
 sudo install -m 755 deploy/two-backup-upload /usr/local/bin/two-backup-upload
@@ -589,10 +609,49 @@ If it is unset the backup still runs, and warns that it is sitting on the same
 disk as the database — which protects against corruption and mistakes but not
 against losing the machine.
 
-> **Not yet configured.** Object storage costs money, so the destination and its
-> credentials are a CEO decision. Tracked on TOG-69 — which is blocked on this
-> branch landing, because `pg-backup.ts` and the upload hook do not exist on
-> `main`.
+#### Where it goes: Cloudflare R2, bucket `paperclip-backups`
+
+Chosen and provisioned by the owner on 2026-09-02 (TOG-69, account and bucket
+details on TOG-782). The wrapper `exec`s `scripts/backup-upload-s3.ts`, which
+does one signed S3 `PUT` per dump in plain Node — `src/store/s3Sign.ts` is the
+SigV4 signing, `node:crypto` is the only dependency.
+
+**Why not `rclone` or the `aws` CLI.** Neither is installed and
+`scripts/bootstrap-host.sh` does not install them — it installs `git`, `rsync`,
+`curl` and `nodejs`. Either would fail at 04:17 with `ENOENT`, which is the same
+objection this file already raises against `pg_dump` further down: a backup
+procedure that only works on a machine we do not have is not a backup procedure.
+The repo also carries no AWS SDK, and one signed PUT does not justify adding one.
+
+Nothing about the destination is baked into the wrapper. It all comes from
+`/etc/two-bot/backup.env` (root-owned, `0600`), so moving buckets is an env edit:
+
+| variable | required | meaning |
+| --- | --- | --- |
+| `TWO_BACKUP_S3_ENDPOINT` | yes | R2 S3 endpoint, `https://<account>.r2.cloudflarestorage.com`. Must be `https` unless it is localhost. |
+| `TWO_BACKUP_S3_BUCKET` | yes | `paperclip-backups` |
+| `TWO_BACKUP_S3_ACCESS_KEY_ID` | yes | R2 access key id |
+| `TWO_BACKUP_S3_SECRET_ACCESS_KEY` | yes | R2 secret access key |
+| `TWO_BACKUP_S3_REGION` | no | defaults to `auto`, which is what R2 wants |
+| `TWO_BACKUP_S3_PREFIX` | no | key prefix, e.g. `two-bot`. Unset means the dump sits at the bucket root. |
+
+The four required ones are refused **by name** when missing or blank, before any
+network call — a misconfigured destination fails the backup loudly rather than
+writing the night's dump somewhere nobody looks.
+
+Never put the two credential values anywhere but that file: not in a ticket, not
+in a comment, not in a log line. The uploader prints the bucket, the key and the
+byte count, and never the credential.
+
+Check it landed:
+
+```bash
+sudo systemctl start two-bot-backup
+journalctl -u two-bot-backup -n 20     # look for `backup-upload-s3: stored ...`
+```
+
+A failed upload exits non-zero, and `pg-backup.ts` treats that as a failed
+backup, so systemd surfaces it rather than the night passing quietly.
 
 ### Why not `pg_dump`
 

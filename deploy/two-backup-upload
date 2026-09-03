@@ -13,7 +13,20 @@
 # Exit non-zero on failure: pg-backup.ts treats that as a failed backup and lets
 # systemd surface it. Do not swallow errors here.
 #
-# EDIT THE DESTINATION BELOW before installing. It is not chosen yet — see TOG-69.
+# DESTINATION: Cloudflare R2, bucket `paperclip-backups` — decided by the owner
+# and provisioned 2026-09-02 (TOG-69, recorded on TOG-782).
+#
+# Nothing about the destination is baked into this file. Endpoint, bucket,
+# prefix and credentials all come from /etc/two-bot/backup.env (root, 0600), so
+# changing where backups go is an env edit, never a reinstall of this wrapper.
+#
+# The upload itself is scripts/backup-upload-s3.ts — plain Node and node:crypto,
+# no rclone and no `aws` CLI. Neither is installed on the host and
+# scripts/bootstrap-host.sh does not install them (it installs git, rsync, curl
+# and nodejs), so either would fail at 04:17 with ENOENT. That is the same
+# objection docs/RUNBOOK.md already raises against pg_dump: a backup procedure
+# that only works on a machine we do not have is not a backup procedure. The
+# signing is src/store/s3Sign.ts.
 set -eu
 
 if [ $# -ne 1 ]; then
@@ -24,8 +37,14 @@ fi
 dump=$1
 [ -f "$dump" ] || { echo "two-backup-upload: no such file: $dump" >&2; exit 2; }
 
-exec /usr/bin/rclone copy --config /etc/two-bot/rclone.conf "$dump" backup:two-funnel
+# Where the checkout lives on the host. Overridable only so the test suite can
+# exercise this exact file from a working tree, rather than a copy of it that
+# could drift from what actually gets installed.
+root=${TWO_BOT_ROOT:-/opt/two-bot}
 
-# Alternatives, same shape — the dump is the SOURCE, the remote is the DESTINATION:
-#   exec /usr/bin/aws s3 cp "$dump" s3://two-funnel-backups/
+exec /usr/bin/env node "$root/scripts/backup-upload-s3.ts" "$dump"
+
+# If you ever point this at a tool whose last positional is the DESTINATION,
+# keep the "$dump" placement in mind — that is the whole reason this file exists:
+#   exec /usr/bin/aws s3 cp "$dump" s3://paperclip-backups/
 #   exec /usr/bin/scp -i /etc/two-bot/backup_id_ed25519 "$dump" backup@host:/srv/two-funnel/
