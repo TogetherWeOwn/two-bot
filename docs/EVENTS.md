@@ -12,7 +12,7 @@ Every event has the same five fields, plus optional extras.
 | `event_type` | text | One of the types below. `src/core/events.ts` is the authority. |
 | `member_id` | text | Discord snowflake. `NULL` only for `invite_click`, where we do not know who it is yet. |
 | `guild_id` | text | Discord snowflake of the server. |
-| `occurred_at` | text | ISO-8601 UTC. **When it happened**, taken from Discord where possible. |
+| `occurred_at` | timestamptz | **When it happened**, taken from Discord where possible. A real timestamp since migration 0009 (TOG-67); the driver reads it back as the ISO-8601 UTC string it always was, so application code still sees `2026-08-19T20:19:24.719Z`. |
 | `source` | text | Attribution. See below. |
 | `metadata` | JSON text | Optional, kept deliberately small. |
 

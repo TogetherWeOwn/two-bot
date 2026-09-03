@@ -38,7 +38,7 @@ const rows = await db
   .prepare(
     `SELECT member_id, joined_at, join_source, first_message_at, first_voice_at, left_at
        FROM members
-      WHERE guild_id = ? AND joined_at IS NOT NULL AND joined_at >= ? AND is_bot = 0
+      WHERE guild_id = ? AND joined_at IS NOT NULL AND joined_at >= ? AND NOT is_bot
       ORDER BY joined_at DESC`,
   )
   .all<Row>(guildId, since);

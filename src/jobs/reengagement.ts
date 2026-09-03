@@ -184,7 +184,7 @@ export async function buildList(
   const select = `SELECT member_id, joined_at, join_source, first_message_at, first_voice_at,
                          last_active_at, inactive_flagged_at
                     FROM members
-                   WHERE guild_id = ? AND left_at IS NULL AND is_bot = 0`;
+                   WHERE guild_id = ? AND left_at IS NULL AND NOT is_bot`;
 
   const rows = await db.prepare(`${select}${raid.sql}`).all<Row>(guildId, ...raid.params);
 
@@ -197,7 +197,7 @@ export async function buildList(
           await db
             .prepare(
               `SELECT COUNT(*) AS n FROM members
-                WHERE guild_id = ? AND left_at IS NULL AND is_bot = 0
+                WHERE guild_id = ? AND left_at IS NULL AND NOT is_bot
                   AND last_active_at IS NULL AND NOT (1=1${raid.sql})`,
             )
             .get<{ n: number }>(guildId, ...raid.params)

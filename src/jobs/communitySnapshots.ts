@@ -78,7 +78,7 @@ async function readRaidWindows(db: Db, guildId: string): Promise<RaidWindow[] | 
       .prepare(
         `SELECT member_id, first_message_at, first_voice_at, left_at
            FROM members
-          WHERE guild_id = ? AND joined_at >= ? AND joined_at < ? AND is_bot = 0`,
+          WHERE guild_id = ? AND joined_at >= ? AND joined_at < ? AND NOT is_bot`,
       )
       .all<{ member_id: string; first_message_at: string | null; first_voice_at: string | null; left_at: string | null }>(guildId, from, to);
     if (rows.length === 0) return null;

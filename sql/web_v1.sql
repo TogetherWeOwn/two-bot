@@ -53,6 +53,17 @@ EXCEPTION WHEN others THEN
 END;
 $fn$;
 
+-- The reverse direction, for the columns migration 0009 converted to real
+-- timestamptz: render them back as exactly the ISO-8601 UTC string the
+-- contract has always published. The website reads v1 columns as text and the
+-- guarantee that they never retype outlives the storage improving underneath.
+-- 'MS' always prints three digits, matching toISOString(), which wrote every
+-- value the TEXT columns ever held.
+CREATE OR REPLACE FUNCTION web_v1._iso(t timestamptz) RETURNS text
+  LANGUAGE sql IMMUTABLE STRICT AS $fn$
+  SELECT to_char(t AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+$fn$;
+
 -- Same idea for the JSON metadata blob.
 CREATE OR REPLACE FUNCTION web_v1._json(t text) RETURNS jsonb
   LANGUAGE plpgsql IMMUTABLE STRICT AS $fn$
@@ -147,14 +158,14 @@ ORDER BY l.rank_order;
 CREATE OR REPLACE VIEW web_v1.members AS
 SELECT
   m.member_id,
-  m.joined_at,
+  web_v1._iso(m.joined_at) AS joined_at,
   -- Precomputed so the website is not doing date maths, and so "tenure" means
   -- the same thing on every page.
-  CASE WHEN web_v1._ts(m.joined_at) IS NOT NULL
+  CASE WHEN m.joined_at IS NOT NULL
        THEN GREATEST(
               0,
               (now() AT TIME ZONE 'UTC')::date
-                - (web_v1._ts(m.joined_at) AT TIME ZONE 'UTC')::date
+                - (m.joined_at AT TIME ZONE 'UTC')::date
             )
        END AS tenure_days,
   mr.rank_key,
@@ -162,7 +173,7 @@ SELECT
 FROM members m
 LEFT JOIN member_ranks mr
        ON mr.guild_id = m.guild_id AND mr.member_id = m.member_id
-WHERE m.is_bot = 0
+WHERE NOT m.is_bot
   AND NOT EXISTS (
     SELECT 1
       FROM member_exclusions me
@@ -190,13 +201,13 @@ SELECT
     WHEN 'member_leave' THEN 'left'
     ELSE 'rank_changed'
   END AS milestone,
-  e.occurred_at,
+  web_v1._iso(e.occurred_at) AS occurred_at,
   CASE WHEN e.event_type = 'rank_changed'
        THEN web_v1._json(e.metadata) ->> 'rank_key' END AS detail
 FROM events e
 JOIN members m ON m.guild_id = e.guild_id AND m.member_id = e.member_id
 WHERE e.member_id IS NOT NULL
-  AND m.is_bot = 0
+  AND NOT m.is_bot
   AND e.event_type IN ('member_join', 'member_leave', 'rank_changed');
 
 -- ---------------------------------------------------------------------------
@@ -237,7 +248,8 @@ SELECT ue.* FROM web_v1.upcoming_events ue ORDER BY ue.starts_at LIMIT 1;
 -- Aggregate and guild-level. No member ids leave through here.
 CREATE OR REPLACE VIEW web_v1.funnel_daily AS
 SELECT
-  substr(e.occurred_at, 1, 10) AS day,
+  -- The same UTC day substr() cut off the ISO string before 0009.
+  to_char(e.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
   count(*) FILTER (WHERE e.event_type = 'member_join')          AS joins,
   count(*) FILTER (WHERE e.event_type = 'member_leave')         AS leaves,
   count(*) FILTER (WHERE e.event_type = 'first_message')        AS first_messages,
@@ -246,18 +258,18 @@ SELECT
     - count(*) FILTER (WHERE e.event_type = 'member_leave')     AS net_change
 FROM events e
 LEFT JOIN members m ON m.guild_id = e.guild_id AND m.member_id = e.member_id
-WHERE COALESCE(m.is_bot, 0) = 0
-GROUP BY substr(e.occurred_at, 1, 10);
+WHERE NOT COALESCE(m.is_bot, FALSE)
+GROUP BY to_char(e.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD');
 
 -- `source` values are documented in docs/EVENTS.md. Render 'unknown' as itself;
 -- never fold it into a real invite code.
 CREATE OR REPLACE VIEW web_v1.funnel_by_source AS
 SELECT
-  substr(e.occurred_at, 1, 10) AS day,
+  to_char(e.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
   e.source,
   count(*) AS joins
 FROM events e
 LEFT JOIN members m ON m.guild_id = e.guild_id AND m.member_id = e.member_id
 WHERE e.event_type = 'member_join'
-  AND COALESCE(m.is_bot, 0) = 0
-GROUP BY substr(e.occurred_at, 1, 10), e.source;
+  AND NOT COALESCE(m.is_bot, FALSE)
+GROUP BY to_char(e.occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD'), e.source;
