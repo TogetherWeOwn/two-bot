@@ -63,7 +63,17 @@ export function renderHtml(d: DashboardData): string {
 // Sections
 // ---------------------------------------------------------------------------
 
+/**
+ * Appends the as-of date to any tile fed by the dated snapshot rather than the
+ * live funnel, so a number that is a photograph never reads as a feed.
+ */
+function memberNote(d: DashboardData, base: string): string {
+  if (d.memberCountSource !== 'snapshot' || !d.memberCountAsOf) return base;
+  return `${base} · snapshot ${d.memberCountAsOf.slice(0, 10)}, not live`;
+}
+
 function headline(d: DashboardData): string {
+  const snap = d.memberCountSource === 'snapshot';
   const delta = d.thisWeek.joins - d.lastWeek.joins;
   const joinTone = d.thisWeek.joins > 0 ? 'good' : 'critical';
   const joinNote =
@@ -86,20 +96,24 @@ function headline(d: DashboardData): string {
     )}
     ${tile(
       'Still here and active',
-      String(d.active7d),
-      `posted or spoke in the last 7 days, out of ${d.realHumans} real members`,
-      d.active7d > 0 ? 'good' : 'critical',
+      snap ? '—' : String(d.active7d),
+      snap
+        ? 'needs the bot running; the snapshot cannot say who was active'
+        : `posted or spoke in the last 7 days, out of ${d.realHumans} real members`,
+      snap ? 'warning' : d.active7d > 0 ? 'good' : 'critical',
     )}
   </div>
   <div class="tiles secondary">
-    ${tile('Members Discord shows', String(d.humansInServer), 'humans, excluding bots', 'plain')}
+    ${tile('Members Discord shows', String(d.humansInServer), memberNote(d, 'humans, excluding bots'), 'plain')}
     ${tile(
-      'Of those, raid accounts',
+      snap ? 'Of those, stuck at the rules screen' : 'Of those, raid accounts',
       String(d.raidAccountsStillCounted),
-      'never posted, never left, still counted',
+      snap
+        ? 'never cleared screening, cannot see or post anywhere'
+        : 'never posted, never left, still counted',
       d.raidAccountsStillCounted > 0 ? 'warning' : 'plain',
     )}
-    ${tile('Real members', String(d.realHumans), 'the number worth growing', 'plain')}
+    ${tile('Real members', String(d.realHumans), memberNote(d, 'the number worth growing'), 'plain')}
     ${tile(
       'Joined but never spoke',
       String(d.joinedNeverSpoke),
