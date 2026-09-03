@@ -411,7 +411,7 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
       `SELECT member_id, joined_at, join_source, gate_cleared_at, first_message_at,
               first_voice_at, last_active_at, left_at
          FROM members
-        WHERE is_bot = 0`,
+        WHERE NOT is_bot`,
     )
     .all<MemberRow>();
 

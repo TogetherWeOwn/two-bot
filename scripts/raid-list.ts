@@ -61,7 +61,7 @@ for (const raid of raids) {
     .prepare(
       `SELECT member_id, joined_at, first_message_at, first_voice_at, left_at
          FROM members
-        WHERE joined_at >= ? AND joined_at < ? AND is_bot = 0
+        WHERE joined_at >= ? AND joined_at < ? AND NOT is_bot
         ORDER BY joined_at ASC`,
     )
     .all<Row>(from, to);
@@ -104,7 +104,7 @@ raids.forEach((raid, i) => {
 
 const humansStillHere = (
   await db
-    .prepare(`SELECT COUNT(*) AS n FROM members WHERE left_at IS NULL AND is_bot = 0`)
+    .prepare(`SELECT COUNT(*) AS n FROM members WHERE left_at IS NULL AND NOT is_bot`)
     .all<{ n: number }>()
 )[0].n;
 

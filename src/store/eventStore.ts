@@ -209,8 +209,8 @@ export class EventStore {
   async markBot(guildId: string, memberId: string): Promise<void> {
     await this.db
       .prepare(
-        `INSERT INTO members (guild_id, member_id, is_bot) VALUES (?, ?, 1)
-         ON CONFLICT (guild_id, member_id) DO UPDATE SET is_bot = 1`,
+        `INSERT INTO members (guild_id, member_id, is_bot) VALUES (?, ?, TRUE)
+         ON CONFLICT (guild_id, member_id) DO UPDATE SET is_bot = TRUE`,
       )
       .run(guildId, memberId);
   }

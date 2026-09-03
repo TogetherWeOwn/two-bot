@@ -15,7 +15,7 @@ export async function flagInactive(db: Db, store: EventStore, days: number): Pro
     .prepare(
       `SELECT guild_id, member_id FROM members
         WHERE left_at IS NULL
-          AND is_bot = 0
+          AND NOT is_bot
           AND COALESCE(last_active_at, joined_at) < ?
           AND (inactive_flagged_at IS NULL OR inactive_flagged_at < ?)`,
     )
@@ -44,7 +44,7 @@ export async function joinedNeverPosted(db: Db, guildId: string): Promise<string
         `SELECT member_id FROM members
           WHERE guild_id = ? AND joined_at IS NOT NULL
             AND first_message_at IS NULL AND first_voice_at IS NULL
-            AND left_at IS NULL AND is_bot = 0
+            AND left_at IS NULL AND NOT is_bot
           ORDER BY joined_at DESC`,
       )
       .all<{ member_id: string }>(guildId)

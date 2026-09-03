@@ -60,9 +60,11 @@ Every change gets a line in the changelog at the bottom of this file.
 
 ## 2. The views
 
-Every timestamp is **ISO-8601 UTC text** (`2026-08-19T20:19:24.719Z`), matching
-how the bot stores them. Cast on the way out if you want a real timestamp:
-`counts_updated_at::timestamptz`.
+Every timestamp is **ISO-8601 UTC text** (`2026-08-19T20:19:24.719Z`). Cast on
+the way out if you want a real timestamp: `counts_updated_at::timestamptz`.
+(Since migration 0009 the bot stores its funnel columns as timestamptz, but the
+views render them back to this exact text format — the contract's column types
+never change within v1.)
 
 Every count column is **nullable, and null means "we do not know"**. See §3.
 
