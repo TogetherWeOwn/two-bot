@@ -4,6 +4,7 @@ import { openDb, isPostgresSpec } from './store/db.ts';
 import { applyWebContract } from './store/webContract.ts';
 import { EventStore } from './store/eventStore.ts';
 import { InviteTracker } from './core/inviteTracker.ts';
+import { ExpectedJoins } from './core/expectedJoins.ts';
 import { FunnelHandlers } from './core/handlers.ts';
 import { createClient, registerHandlers } from './discord/client.ts';
 import { registerOnboarding } from './discord/onboarding.ts';
@@ -60,6 +61,9 @@ if (db.kind === 'postgres') {
 
 const store = new EventStore(db);
 const invites = new InviteTracker(db);
+// One instance, two ends: guild.add_member writes the "expect this member"
+// note, the gateway join handler consumes it. docs/INTERNAL_ACTIONS.md §7.
+const expectedJoins = new ExpectedJoins();
 const handlers = new FunnelHandlers(store);
 
 const client = createClient();
@@ -87,7 +91,7 @@ log.info('raid_watch_enabled', {
   alertTarget: cfg.staffAlertChannelId ?? 'log only (DISCORD_STAFF_ALERT_CHANNEL_ID unset)',
 });
 
-registerHandlers(client, { handlers, invites, raid });
+registerHandlers(client, { handlers, invites, raid, expectedJoins });
 
 // Onboarding (TWO-7). Skipped entirely if no landing channel is configured -
 // better to run the funnel with onboarding off than to post into a guessed
@@ -131,6 +135,7 @@ if (internalCfg) {
     // The durable nonce, idempotency and audit tables (TOG-44). The same
     // database as everything else, so it is covered by the same backups.
     store: new InternalActionStore(db),
+    expectedJoins,
   });
 }
 

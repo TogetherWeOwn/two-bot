@@ -37,6 +37,7 @@ import {
   type ActionOutcome,
 } from './actions.ts';
 import type { ActionDiscord } from './discordActions.ts';
+import type { ExpectedJoins } from '../core/expectedJoins.ts';
 import { requestHash, type InternalActionStore } from './store.ts';
 
 /** Anything larger than this is a bug on the caller, not a request. */
@@ -70,6 +71,13 @@ export interface InternalServerOptions {
    * at all rather than run unprotected.
    */
   store?: InternalActionStore | null;
+  /**
+   * Join attribution for guild.add_member - docs/INTERNAL_ACTIONS.md §7. The
+   * same instance the gateway handler consumes from; src/index.ts shares it
+   * between the two. Optional, and without it one-click joins are filed
+   * `unknown`, exactly as before.
+   */
+  expectedJoins?: ExpectedJoins | null;
   skewSeconds?: number;
   nonceTtlSeconds?: number;
   maxBodyBytes?: number;
@@ -294,6 +302,7 @@ async function authoriseAndRun(
     discord: opts.discord,
     roleKeys: opts.roleKeys,
     channelKeys: opts.channelKeys ?? new Map(),
+    expectedJoins: opts.expectedJoins ?? null,
     enabled: opts.enabled,
     store,
   };
