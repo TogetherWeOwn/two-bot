@@ -53,6 +53,37 @@ ambiguous, and a join through the vanity URL or Discovery shows no delta at all
 Members who posted a message or joined a voice channel in the last 7 days and
 have not left. This is the closest thing we have to "is the community alive".
 
+Until the bot is deployed this tile reads **—**, not 0. A dated server snapshot
+can count who is in the server; it cannot know who spoke last week. Zero would
+claim a dead community, which is a different statement from "not measured yet".
+
+### Members Discord shows / Real members
+
+Two numbers, and the gap between them is the point.
+
+**Members Discord shows** is the number in the member list. **Real members**
+subtracts the accounts that are in that list but are not participants — raid
+accounts, and members who never cleared the rules screen. Someone stuck at
+screening cannot see or post in a single channel, so counting them as community
+size inflates the only number worth growing.
+
+These come from one of two sources, and the page always says which:
+
+| Source | When | How it reads |
+|---|---|---|
+| **Funnel** | The bot is deployed and writing to `members` | Live and exact |
+| **Snapshot** | Before deployment — the newest `data/server-audit-*.json` | Tagged `snapshot YYYY-MM-DD, not live` on every affected tile |
+
+**The live funnel always wins.** The snapshot is used only when the members
+table is completely empty, and the two are never blended — averaging a live
+count with a dated one produces a number that is true of no moment at all.
+
+As of the 2026-08-19 snapshot: 84 humans, 31 of them stuck at the rules screen,
+so **53 real members**. That is the honest number, and it is roughly a third
+smaller than the 84 the member list advertises. Before this fallback existed the
+page showed `Real members 0`, which was not caution — it was wrong, and it was
+the kind of wrong that looks like a dead server.
+
 ### D1 / D7 / D30 retention
 
 Two columns, because we can measure two different things and only one of them is

@@ -396,6 +396,63 @@ test('the rendered page carries the real numbers, not just a template', async ()
   assert.ok(html.includes('general'));
 });
 
+test('with an empty funnel the member count falls back to the snapshot census, labelled', async () => {
+  // The state before the bot is deployed: nothing in the members table, but a
+  // real audit on disk. Reporting 0 real members would be false, not cautious.
+  const d = await buildDashboard(t.db, {
+    now: NOW,
+    weeks: 4,
+    anomalies: TEST_ANOMALIES,
+    channelSnapshot: {
+      collected_at: '2026-08-19T20:19:24.719Z',
+      channels: [],
+      members: { human_members: 84, bot_members: 23, stuck_at_rules_screening: 31 },
+    },
+  });
+
+  assert.equal(d.memberCountSource, 'snapshot');
+  assert.equal(d.humansInServer, 84);
+  assert.equal(d.raidAccountsStillCounted, 31);
+  assert.equal(d.realHumans, 53, '84 humans minus 31 stuck at screening');
+  assert.equal(d.memberCountAsOf, '2026-08-19T20:19:24.719Z');
+
+  // A dated number must never be presented as a live one.
+  const html = renderHtml(d);
+  assert.ok(html.includes('53'));
+  assert.ok(html.includes('snapshot 2026-08-19, not live'));
+  assert.ok(
+    d.caveats.some((c) => c.includes('not from the bot')),
+    'the page states where the number came from',
+  );
+});
+
+test('a live funnel always beats the snapshot, however stale the snapshot is', async () => {
+  await join('a', '2026-02-24T10:00:00.000Z', 'invite:promoAAA');
+  await member({ member_id: 'a', joined_at: '2026-02-24T10:00:00.000Z', last_active_at: '2026-03-01T00:00:00.000Z' });
+
+  const d = await buildDashboard(t.db, {
+    now: NOW,
+    weeks: 4,
+    anomalies: TEST_ANOMALIES,
+    channelSnapshot: {
+      collected_at: '2026-08-19T20:19:24.719Z',
+      channels: [],
+      members: { human_members: 84, stuck_at_rules_screening: 31 },
+    },
+  });
+
+  assert.equal(d.memberCountSource, 'funnel');
+  assert.equal(d.humansInServer, 1, 'the live table wins; 84 is not blended in');
+  assert.equal(d.memberCountAsOf, null);
+});
+
+test('no funnel and no census reports nothing rather than inventing a number', async () => {
+  const d = await buildDashboard(t.db, { now: NOW, weeks: 4, anomalies: TEST_ANOMALIES });
+  assert.equal(d.memberCountSource, 'none');
+  assert.equal(d.realHumans, 0);
+  assert.equal(d.memberCountAsOf, null);
+});
+
 test('html escaping: a channel name cannot inject markup', async () => {
   const d = await buildDashboard(t.db, {
     now: NOW,
