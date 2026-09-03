@@ -70,7 +70,10 @@ async function loadChannelSnapshot(): Promise<ChannelSnapshot | null> {
         days_silent: a.days_silent,
       };
     });
-    return { collected_at: String(raw.collected_at ?? ''), channels };
+    // The same file also carries the member census, which is the only real
+    // member count that exists until the bot is deployed.
+    const members = raw?.summary?.members ?? null;
+    return { collected_at: String(raw.collected_at ?? ''), channels, members };
   } catch (err) {
     console.warn(`could not read channel snapshot ${newest}: ${String(err)}`);
     return null;

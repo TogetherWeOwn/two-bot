@@ -139,6 +139,22 @@ export interface DashboardData {
   raidAccountsStillCounted: number;
   /** humansInServer - raidAccountsStillCounted. */
   realHumans: number;
+  /**
+   * Where the three numbers above came from.
+   *
+   * `funnel` - the bot's own members table, exact and live.
+   * `snapshot` - the dated server audit, used only when the funnel table is
+   *   empty (bot not deployed yet). A real count from a fixed point in time is
+   *   more honest than a zero that looks like a dead server, but it is a
+   *   photograph, not a feed - so the page must say so and does.
+   * `none` - neither source has anything.
+   *
+   * The two are never blended: mixing a live count with a dated one produces a
+   * number that is true of no moment at all.
+   */
+  memberCountSource: 'funnel' | 'snapshot' | 'none';
+  /** Set when memberCountSource is 'snapshot' - when that census was taken. */
+  memberCountAsOf: string | null;
   /** Joined, never posted, never spoke, still here. */
   joinedNeverSpoke: number;
   weeks: WeekRow[];
@@ -169,9 +185,22 @@ export interface ChannelSnapshotEntry {
   days_silent?: number | null;
 }
 
+/**
+ * The member census the audit collector records alongside the channel counts.
+ * Present in `summary.members` of every `server-audit-*.json`. Optional, because
+ * an older snapshot may predate these fields.
+ */
+export interface MemberCensus {
+  human_members?: number | null;
+  bot_members?: number | null;
+  /** Joined but never cleared the rules screen, so they cannot see or post anywhere. */
+  stuck_at_rules_screening?: number | null;
+}
+
 export interface ChannelSnapshot {
   collected_at: string;
   channels: ChannelSnapshotEntry[];
+  members?: MemberCensus | null;
 }
 
 export interface BuildOptions {
@@ -625,6 +654,46 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
     );
   }
 
+  // -- member headline ------------------------------------------------------
+  //
+  // The funnel table is the live source and always wins when it has anyone in
+  // it. Before the bot is deployed that table is empty, and rendering "Real
+  // members 0" would state something we know to be false - the audit snapshot
+  // sitting in data/ counted the server for real. Fall back to it, and label it.
+  const census = snapshot?.members ?? null;
+  const censusHumans = numOrNull(census?.human_members);
+  const censusStuck = numOrNull(census?.stuck_at_rules_screening) ?? 0;
+
+  let humansInServer = stillHere.length;
+  let raidAccountsStillCounted = raidStillHere;
+  let realHumans = stillHere.length - raidStillHere;
+  let memberCountSource: 'funnel' | 'snapshot' | 'none' = 'funnel';
+  let memberCountAsOf: string | null = null;
+
+  if (members.length === 0) {
+    if (censusHumans !== null && snapshot) {
+      // Someone stuck at the rules screen cannot read or post in a single
+      // channel, so counting them as a member overstates the community the same
+      // way raid accounts do. Same subtraction, different reason.
+      humansInServer = censusHumans;
+      raidAccountsStillCounted = censusStuck;
+      realHumans = censusHumans - censusStuck;
+      memberCountSource = 'snapshot';
+      memberCountAsOf = snapshot.collected_at;
+      caveats.push(
+        `Member counts come from the server snapshot taken ` +
+          `${snapshot.collected_at.slice(0, 10)}, not from the bot - the bot is not ` +
+          `deployed yet, so there is no live member feed. Of ${censusHumans.toLocaleString()} ` +
+          `humans Discord reports, ${censusStuck.toLocaleString()} never cleared the rules ` +
+          `screen and cannot see or post in any channel, leaving ` +
+          `${(censusHumans - censusStuck).toLocaleString()} real members. Joins, leaves, ` +
+          `retention and activity below stay at zero until the bot runs.`,
+      );
+    } else {
+      memberCountSource = 'none';
+    }
+  }
+
   const everActive = members.filter((m) => m.first_message_at || m.first_voice_at).length;
   caveats.push(
     `Activity history is partial: of ${members.length.toLocaleString()} members on record, ` +
@@ -640,9 +709,11 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
     lastWeek: slim(lastWeekRow),
     active7d,
     active30d,
-    humansInServer: stillHere.length,
-    raidAccountsStillCounted: raidStillHere,
-    realHumans: stillHere.length - raidStillHere,
+    humansInServer,
+    raidAccountsStillCounted,
+    realHumans,
+    memberCountSource,
+    memberCountAsOf,
     joinedNeverSpoke,
     weeks,
     cohorts,
