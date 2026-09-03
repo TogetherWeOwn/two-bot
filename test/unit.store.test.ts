@@ -62,6 +62,30 @@ test('first_message fires once, later messages only move recency', async () => {
   assert.equal(m.last_active_at, '2026-08-05T00:00:00.000Z');
 });
 
+test('clearing the rules gate is its own event, once per member', async () => {
+  const { h, store, db } = fixture();
+  await h.onJoin({ guildId: G, memberId: 'm1', isBot: false, source: 'invite:x', occurredAt: '2026-08-01T00:00:00.000Z' });
+
+  // Joined is not in. Until they accept the rules there is no clearing on file.
+  assert.equal(await store.countByType('gate_cleared'), 0);
+
+  await h.onGateCleared({ guildId: G, memberId: 'm1', isBot: false, occurredAt: '2026-08-01T00:05:00.000Z' });
+  // A rejoin is genuinely re-screened, so the listener fires again. It must not
+  // count twice: conversion is people, not clearings, and a second one pushes
+  // the rate over 100%.
+  await h.onGateCleared({ guildId: G, memberId: 'm1', isBot: false, occurredAt: '2026-09-01T00:00:00.000Z' });
+
+  assert.equal(await store.countByType('gate_cleared'), 1);
+  const m = (await db.prepare(`SELECT * FROM members WHERE member_id='m1'`).get()) as any;
+  assert.equal(m.gate_cleared_at, '2026-08-01T00:05:00.000Z', 'the earliest clearing wins');
+});
+
+test('bots do not clear the gate', async () => {
+  const { h, store } = fixture();
+  await h.onGateCleared({ guildId: G, memberId: 'bot1', isBot: true });
+  assert.equal(await store.countByType('gate_cleared'), 0);
+});
+
 test('invite attribution: one code grew', async () => {
   const { db } = fixture();
   const t = new InviteTracker(db);

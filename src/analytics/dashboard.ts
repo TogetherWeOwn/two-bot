@@ -36,6 +36,8 @@ export interface MemberRow {
   member_id: string;
   joined_at: string | null;
   join_source: string | null;
+  /** When they accepted the server rules. Null means no clearing on file. */
+  gate_cleared_at: string | null;
   first_message_at: string | null;
   first_voice_at: string | null;
   last_active_at: string | null;
@@ -77,6 +79,25 @@ export interface RetentionCell {
   active: number;
 }
 
+/**
+ * How many of the people who joined actually got through the rules gate.
+ *
+ * The denominator is `observed`, not everyone who joined, because for some
+ * members the question has no answer at all - see `gateConversion`.
+ */
+export interface GateConversion {
+  /** Members whose gate state we can know. cleared + stuck + leftAtTheGate. */
+  observed: number;
+  /** Accepted the rules. They can post, react and click. */
+  cleared: number;
+  /** Never cleared, still in the server. Standing at the door right now. */
+  stuck: number;
+  /** Never cleared, and gone. They joined and left without ever getting in. */
+  leftAtTheGate: number;
+  /** Joined before we were watching the gate. Not a failure - an unknown. */
+  unknowable: number;
+}
+
 export interface CohortRow {
   weekStart: string;
   /** Non-bot, non-anomaly joins in this week. */
@@ -84,6 +105,7 @@ export interface CohortRow {
   d1: RetentionCell | null;
   d7: RetentionCell | null;
   d30: RetentionCell | null;
+  gate: GateConversion | null;
 }
 
 export interface ChannelRow {
@@ -123,6 +145,11 @@ export interface DashboardData {
   cohorts: CohortRow[];
   /** All-time roll-up of the cohort table, for the headline retention numbers. */
   retentionOverall: { d1: RetentionCell | null; d7: RetentionCell | null; d30: RetentionCell | null };
+  /**
+   * All-time rules-gate conversion, reported next to retention. Null when we
+   * have never observed the gate, which is not the same as 0%.
+   */
+  gateOverall: GateConversion | null;
   sourcesAllTime: SourceCount[];
   channels: ChannelRow[];
   channelSnapshotAt: string | null;
@@ -265,6 +292,69 @@ export function retentionAt(members: MemberRow[], dayN: number, now: Date): Rete
   return { eligible: eligible.length, stayed, active };
 }
 
+/**
+ * Rules-gate conversion: of the people who joined, how many actually got in.
+ *
+ * TWO runs Discord's membership screening, so joining and being able to do
+ * anything are two different events with a gap between them that some members
+ * never cross. This is the number that makes that gap visible.
+ *
+ * Four buckets, and the split exists because "no clearing on file" means three
+ * different things:
+ *
+ *   cleared        - a `gate_cleared` event. They are in.
+ *   stuck          - no clearing, still in the server. Standing at the door
+ *                    right now, and reachable: this is an action list.
+ *   leftAtTheGate  - no clearing, gone, and they joined after we started
+ *                    watching. We saw their whole tenure and they never got
+ *                    in. This is the one that used to be invisible.
+ *   unknowable     - no clearing, gone, joined before we were watching. Not a
+ *                    failure. We simply cannot know, and saying so is the
+ *                    point.
+ *
+ * Two things decide whether a missing clearing is a fact or a gap, and both
+ * come from the event log rather than from configuration:
+ *
+ *   `since`           the first clearing we ever observed live. From then on,
+ *                     watching someone join and never clear is a measurement.
+ *   `rosterCheckedAt` set when a backfill has read `pending` for every current
+ *                     member (scripts/backfill.ts). That makes an absent
+ *                     clearing meaningful for anyone still in the server,
+ *                     however long ago they joined.
+ *
+ * With neither, the whole question returns null rather than reading as 0%
+ * conversion. Nobody clearing and nobody watching are opposite facts and the
+ * page must not print the same number for both.
+ */
+export function gateConversion(
+  members: MemberRow[],
+  since: string | null,
+  rosterCheckedAt: string | null = null,
+): GateConversion | null {
+  const joined = members.filter((m) => m.joined_at);
+  if (joined.length === 0) return null;
+
+  const watchedFromJoin = (m: MemberRow) => !!since && m.joined_at! >= since;
+
+  let cleared = 0;
+  let stuck = 0;
+  let leftAtTheGate = 0;
+  let unknowable = 0;
+  for (const m of joined) {
+    if (m.gate_cleared_at) cleared++;
+    else if (!m.left_at) {
+      // Still in the server, so their gate state is readable from Discord
+      // right now - but only if somebody actually read it.
+      if (rosterCheckedAt || watchedFromJoin(m)) stuck++;
+      else unknowable++;
+    } else if (watchedFromJoin(m)) leftAtTheGate++;
+    else unknowable++;
+  }
+  const observed = cleared + stuck + leftAtTheGate;
+  if (observed === 0) return null;
+  return { observed, cleared, stuck, leftAtTheGate, unknowable };
+}
+
 /** alive: talked this month. quiet: talked this quarter. silent: neither. */
 export function channelState(row: {
   humanMsgs30d: number | null;
@@ -289,8 +379,8 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
   // One scan of each table. See rule 1 at the top of the file.
   const members = await db
     .prepare(
-      `SELECT member_id, joined_at, join_source, first_message_at, first_voice_at,
-              last_active_at, left_at
+      `SELECT member_id, joined_at, join_source, gate_cleared_at, first_message_at,
+              first_voice_at, last_active_at, left_at
          FROM members
         WHERE is_bot = 0`,
     )
@@ -312,6 +402,29 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
         WHERE source LIKE 'channel:%' AND occurred_at >= ?`,
     )
     .all<{ source: string; occurred_at: string }>(iso(now.getTime() - 30 * DAY_MS));
+
+  // What we know about the rules gate, and from when. Two different things:
+  // the first clearing we watched happen live (after which a member who never
+  // clears is a measurement), and the last time a backfill read `pending` off
+  // the whole roster (which makes an absent clearing meaningful for anyone
+  // still in the server, however old). `recorded_at` is when WE wrote the row,
+  // which for a backfill is exactly when the roster was read.
+  const gateEvents = await db
+    .prepare(
+      `SELECT source, occurred_at, recorded_at FROM events WHERE event_type = 'gate_cleared'`,
+    )
+    .all<{ source: string; occurred_at: string; recorded_at: string }>();
+  const liveGate = gateEvents.filter((e) => !e.source.startsWith('backfill:'));
+  const gateWatchedSince = liveGate.length
+    ? liveGate.reduce((a, e) => (e.occurred_at < a ? e.occurred_at : a), liveGate[0].occurred_at)
+    : null;
+  const backfilledGate = gateEvents.filter((e) => e.source.startsWith('backfill:'));
+  const rosterCheckedAt = backfilledGate.length
+    ? backfilledGate.reduce(
+        (a, e) => (e.recorded_at > a ? e.recorded_at : a),
+        backfilledGate[0].recorded_at,
+      )
+    : null;
 
   const guildRow = await db
     .prepare(`SELECT guild_id FROM events ORDER BY id DESC LIMIT 1`)
@@ -385,6 +498,7 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
       d1: retentionAt(group, 1, now),
       d7: retentionAt(group, 7, now),
       d30: retentionAt(group, 30, now),
+      gate: gateConversion(group, gateWatchedSince, rosterCheckedAt),
     };
   });
 
@@ -393,6 +507,7 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
     d7: retentionAt(cohortMembers, 7, now),
     d30: retentionAt(cohortMembers, 30, now),
   };
+  const gateOverall = gateConversion(cohortMembers, gateWatchedSince, rosterCheckedAt);
 
   // -- membership state -----------------------------------------------------
   const stillHere = members.filter((m) => !m.left_at);
@@ -482,6 +597,34 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
       );
     }
   }
+  if (!gateOverall) {
+    caveats.push(
+      'Rules-gate conversion is not being measured yet. The server has membership ' +
+        'screening on, so joining and being able to post are two different things — ' +
+        'but no gate clearing has been recorded, which means the bot has not been ' +
+        'running long enough to watch one and no roster check has been run. Until ' +
+        'then a member who joined and never got in is indistinguishable from one who ' +
+        'got in and said nothing. Run `npm run backfill` to read the current state.',
+    );
+  } else if (gateOverall.unknowable > 0) {
+    caveats.push(
+      `Rules-gate conversion covers ${gateOverall.observed.toLocaleString()} of the ` +
+        `${(gateOverall.observed + gateOverall.unknowable).toLocaleString()} members on ` +
+        `record. The other ${gateOverall.unknowable.toLocaleString()} joined and left ` +
+        'before we started watching the gate, and Discord keeps no history of it, so ' +
+        'whether they ever got in is unknowable rather than a failure. They are left ' +
+        'out of the percentage instead of being counted against it.',
+    );
+  }
+  if (gateOverall && gateOverall.stuck > 0) {
+    caveats.push(
+      `${gateOverall.stuck.toLocaleString()} members are in the server right now and ` +
+        'have never accepted the rules. They cannot post, react or click anything, ' +
+        'including the onboarding picker — so nothing we build reaches them until ' +
+        'they clear the gate. `npm run gate` lists them by join month.',
+    );
+  }
+
   const everActive = members.filter((m) => m.first_message_at || m.first_voice_at).length;
   caveats.push(
     `Activity history is partial: of ${members.length.toLocaleString()} members on record, ` +
@@ -504,6 +647,7 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
     weeks,
     cohorts,
     retentionOverall,
+    gateOverall,
     sourcesAllTime: countBySource(humanJoins.map((e) => e.source)),
     channels,
     channelSnapshotAt: snapshot?.collected_at ?? null,

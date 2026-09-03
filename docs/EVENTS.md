@@ -26,6 +26,7 @@ down, and keeping both is the only way to tell those apart later.
 |---|---|---|
 | `invite_click` | Someone clicks a tracked invite link. | Yes |
 | `member_join` | A member joins the server. | Yes (rejoins are real) |
+| `gate_cleared` | They accept the rules and Discord's membership screen lets them in. | No - once per member |
 | `onboarding_prompted` | The welcome + game picker was posted for them. | No - once per member |
 | `game_roles_selected` | They picked at least one game and we granted it. | Yes (they can change what they play) |
 | `channel_routed` | We handed them links to channels they can now see. | Yes |
@@ -43,6 +44,31 @@ inflate the funnel.
 For a repeatable type the key includes `occurred_at`, so counting *people*
 rather than *occurrences* means `COUNT(DISTINCT member_id)` - the same rule
 that already applies to `member_join`.
+
+### The rules gate
+
+TWO runs Discord's membership screening, so `member_join` is not arrival - it is
+arrival at a locked door. A member behind it carries `pending: true` and cannot
+type, react or click anything. `gate_cleared` is the moment that flips.
+
+Splitting the two apart is the whole point: without it, somebody who joined and
+never got in is indistinguishable from somebody who joined and simply said
+nothing, and those have opposite fixes. On the 2026-08-19 roster 31 of 84 humans
+had never cleared it, concentrated in three months that converted at 8%, 0% and
+6% while every quiet month converted at 100%.
+
+`gate_cleared` is **once per member on purpose**, even though a rejoin is
+genuinely re-screened. Conversion is "of the people who joined, how many got
+in", and counting one person's two clearings twice pushes it over 100% for no
+interesting reason. The earliest clearing wins in the `members` projection.
+
+Two emitters, so the denominator stays honest:
+
+* `GuildMemberUpdate` where `pending` went true → false. This is the real
+  measurement, accurate to the second.
+* `GuildMemberAdd` for a member who arrives already un-pending - screening off,
+  or a bypass role. There is no gate for them to clear, and leaving them out
+  would read as a permanent conversion shortfall.
 
 ### Voice sessions
 
@@ -121,6 +147,20 @@ away would hide it.
    number" and "the first row exists" is permanent, which is the argument for
    the listener running sooner rather than for a cleverer query later. Until
    then the only instrument is the manual attendance log (TWO-66).
+
+6. **A backfilled `gate_cleared` says *that*, never *when*.** Discord reports
+   `pending` present-tense and keeps no record of when it changed, so for
+   everybody who joined before the listener existed we can learn the binary and
+   nothing else. `scripts/backfill.ts` writes those rows with
+   `source = 'backfill:member_list'` and `occurred_at` set to the member's
+   **join time** - a placeholder, not a measurement, flagged in the row itself
+   as `metadata.timestampIsJoinTime`.
+
+   So: **no time-to-clear arithmetic may use a `backfill:` row.** Counting them
+   is fine and is exactly what the conversion number needs. The dashboard makes
+   the distinction structurally - `gateWatchedSince` is derived from live rows
+   only, and backfilled rows are used solely to establish that the roster was
+   read at all (`src/analytics/dashboard.ts`).
 
 ## Rebuilding
 

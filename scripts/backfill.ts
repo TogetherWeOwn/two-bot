@@ -19,9 +19,15 @@
  *      from the member list, and omitting them would flatter every retention
  *      number we print.
  *
+ *   3. Discord's member list also carries `pending`, the membership-screening
+ *      flag, so the rules gate can be reconstructed as a binary for every
+ *      current member (TOG-76).
+ *
  * What is genuinely NOT recoverable, and so is not attempted here: which
  * invite a past join came from (Discord keeps no per-member invite record),
- * and first-message timing. Those need the bot online.
+ * first-message timing, and WHEN a past member cleared the rules gate -
+ * Discord reports `pending` present-tense and keeps no history of the flip.
+ * Those need the bot online.
  *
  * Read-only against Discord. Safe to re-run: every write is idempotent.
  */
@@ -106,8 +112,10 @@ if (members.length === 0) {
 
 const botIds = new Set<string>();
 const memberListJoins: FunnelEvent[] = [];
+const gateClearings: FunnelEvent[] = [];
 let humans = 0;
 let missingJoinedAt = 0;
+let stuckAtGate = 0;
 
 for (const m of members) {
   const id = m.user?.id;
@@ -130,11 +138,52 @@ for (const m of members) {
     source: 'backfill:member_list',
     metadata: { backfill: true },
   });
+
+  /**
+   * The rules gate (TOG-76).
+   *
+   * `pending` is Discord's live answer to "are they still behind the
+   * membership screen". It is the ONLY way to learn the gate state of somebody
+   * who joined before the listener existed - which on TWO is almost everybody.
+   *
+   * Read the timestamp honestly. `occurred_at` here is the JOIN time, not a
+   * clearing time, because Discord keeps no history of the transition and we
+   * are guessing at nothing. That makes it a placeholder: `source` says
+   * `backfill:member_list`, labelSource() marks anything `backfill:` as
+   * unattributable, and no time-to-clear arithmetic may use these rows. What
+   * the row DOES establish, truthfully, is the binary: this member is through.
+   *
+   * `pending === undefined` means screening is off for the guild, in which
+   * case there is no gate and everybody is trivially through it. Only an
+   * explicit `true` is a member who is stuck.
+   */
+  if (m.pending === true) {
+    stuckAtGate++;
+  } else {
+    gateClearings.push({
+      memberId: id,
+      guildId,
+      eventType: 'gate_cleared',
+      occurredAt: new Date(m.joined_at).toISOString(),
+      source: 'backfill:member_list',
+      metadata: {
+        backfill: true,
+        // Loud, in the row itself, because this timestamp will otherwise be
+        // read as a real clearing time by the next person to touch it.
+        timestampIsJoinTime: true,
+        screeningEnabled: m.pending !== undefined,
+      },
+    });
+  }
 }
 
 console.log(
   `  member list          ${String(members.length).padStart(5)} members  ` +
     `(${humans} human, ${botIds.size} bots${missingJoinedAt ? `, ${missingJoinedAt} with no joined_at` : ''})`,
+);
+console.log(
+  `  rules gate           ${String(gateClearings.length).padStart(5)} through  ` +
+    `(${stuckAtGate} still behind it and unable to interact)`,
 );
 
 // --- 2. the server's own log channels ---------------------------------------
@@ -285,13 +334,21 @@ const keptMemberListJoins = memberListJoins.filter((e) => {
  * looking present, or vice versa. Sorting ascending makes the projection land
  * on the same state it would have reached live.
  */
-const all = [...dedupedJoins, ...dedupedLeaves, ...keptMemberListJoins, ...voiceEvents].sort((a, b) =>
-  a.occurredAt < b.occurredAt ? -1 : a.occurredAt > b.occurredAt ? 1 : 0,
-);
+const all = [
+  ...dedupedJoins,
+  ...dedupedLeaves,
+  ...keptMemberListJoins,
+  // Every clearing we found, not just the ones whose join survived the dedupe
+  // above. A member whose join came from a log channel still cleared the gate,
+  // and the gate row is keyed on the member, not on which source told us they
+  // arrived.
+  ...gateClearings,
+  ...voiceEvents,
+].sort((a, b) => (a.occurredAt < b.occurredAt ? -1 : a.occurredAt > b.occurredAt ? 1 : 0));
 
 // --- 4. write ----------------------------------------------------------------
 
-const inserted = { member_join: 0, member_leave: 0, first_voice_session: 0 };
+const inserted = { member_join: 0, member_leave: 0, gate_cleared: 0, first_voice_session: 0 };
 let alreadyOnFile = 0;
 
 if (!dryRun) {
@@ -364,14 +421,17 @@ console.log(`  recovered events     ${String(all.length).padStart(5)}   spanning
 console.log(`    joins              ${String(dedupedJoins.length + keptMemberListJoins.length).padStart(5)}   ` +
   `(${dedupedJoins.length} from logs, ${keptMemberListJoins.length} from the member list)`);
 console.log(`    leaves             ${String(dedupedLeaves.length).padStart(5)}`);
+console.log(`    gate clearings     ${String(gateClearings.length).padStart(5)}   ` +
+  `(binary only - occurred_at is the join time, see migrations/0007)`);
 console.log(`    de-duplicated      ${String(joinDedupe.collapsed + leaveDedupe.collapsed + supersededByLog).padStart(5)}   ` +
   `(${joinDedupe.collapsed} joins and ${leaveDedupe.collapsed} leaves logged twice by different bots, ` +
   `${supersededByLog} member-list joins already in a log)`);
 console.log(`    voice sessions     ${String(voiceEvents.length).padStart(5)}`);
 if (!dryRun) {
   console.log(
-    `\n  written              ${String(inserted.member_join + inserted.member_leave + inserted.first_voice_session).padStart(5)} new ` +
-      `(${inserted.member_join} joins, ${inserted.member_leave} leaves, ${inserted.first_voice_session} voice)`,
+    `\n  written              ${String(inserted.member_join + inserted.member_leave + inserted.gate_cleared + inserted.first_voice_session).padStart(5)} new ` +
+      `(${inserted.member_join} joins, ${inserted.member_leave} leaves, ` +
+      `${inserted.gate_cleared} gate clearings, ${inserted.first_voice_session} voice)`,
   );
   console.log(`  already on file      ${String(alreadyOnFile).padStart(5)}   (re-run is a no-op, as intended)`);
 }

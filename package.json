@@ -16,6 +16,7 @@
     "test:postgres": "node scripts/require-suites.ts",
     "typecheck": "tsc --noEmit",
     "funnel": "node scripts/funnel.ts",
+    "gate": "node scripts/gate-report.ts",
     "redirect": "node scripts/redirect.ts",
     "campaigns": "node scripts/campaigns.ts",
     "voice": "node scripts/voice-sessions.ts",

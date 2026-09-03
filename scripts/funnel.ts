@@ -31,6 +31,43 @@ const joins = await one(
 );
 const joinsSetAside = joinsAll - joins;
 const clicks = await one(`SELECT COUNT(*) AS n FROM events WHERE event_type='invite_click' AND occurred_at >= ?`, since);
+// Counted over the same window as joins, and by DISTINCT member because a
+// rejoin is re-screened and clears the gate again - which would otherwise push
+// conversion over 100% for no interesting reason.
+const gateCleared = await one(
+  `SELECT COUNT(DISTINCT member_id) AS n FROM events
+    WHERE event_type='gate_cleared' AND occurred_at >= ?`,
+  since,
+);
+// PEOPLE on both sides of this one. Every other rate on this report divides by
+// `joins`, which counts join *events* - a rejoiner is in it twice. That is
+// harmless for lines that only ever drift downwards, but here it silently
+// understates the headline: 8 of 9 people is 89%, and dividing by 10 events
+// prints 80%. The gate question is "of the people who arrived, how many got
+// in", so both sides count people.
+const joiners = await one(
+  `SELECT COUNT(DISTINCT member_id) AS n FROM events
+    WHERE event_type='member_join' AND occurred_at >= ?${joinExcl.sql}`,
+  since,
+  ...joinExcl.params,
+);
+// All-time, not windowed: these people are standing at the door right now
+// regardless of when they arrived, which is what makes it an action list.
+//
+// Guarded on having observed the gate at all. Before the first clearing is
+// recorded, EVERY member has a null gate_cleared_at and this query would
+// report the whole server as stuck - a confident number that is pure absence
+// of data, which is worse than no line.
+const gateEverObserved = await one(
+  `SELECT COUNT(*) AS n FROM events WHERE event_type='gate_cleared'`,
+);
+const stuckAtGate = gateEverObserved
+  ? await one(
+      `SELECT COUNT(*) AS n FROM members
+        WHERE is_bot = 0 AND left_at IS NULL AND joined_at IS NOT NULL
+          AND gate_cleared_at IS NULL`,
+    )
+  : 0;
 const firstMsg = await one(`SELECT COUNT(*) AS n FROM events WHERE event_type='first_message' AND occurred_at >= ?`, since);
 const firstVoice = await one(`SELECT COUNT(*) AS n FROM events WHERE event_type='first_voice_session' AND occurred_at >= ?`, since);
 const leavesAll = await one(`SELECT COUNT(*) AS n FROM events WHERE event_type='member_leave' AND occurred_at >= ?`, since);
@@ -64,6 +101,20 @@ if (clicks > 0 && joins > clicks) {
 }
 if (joinsSetAside > 0) {
   console.log(`   +${String(joinsSetAside).padStart(5)} set aside as a one-off event, see below`);
+}
+// The rules gate sits between joining and doing anything at all (TOG-76), so
+// it goes here, directly under joins and above every stage it gates. A member
+// who never cleared it is a guaranteed zero on every line below this one.
+console.log(
+  `  cleared rules gate   ${String(gateCleared).padStart(6)}   ${pct(gateCleared, joiners)} of joiners` +
+    (gateCleared === 0 && joiners > 0
+      ? '   (no clearing recorded - run npm run backfill)'
+      : ''),
+);
+if (stuckAtGate > 0) {
+  console.log(
+    `   ${String(stuckAtGate).padStart(5)} in the server right now, never accepted the rules`,
+  );
 }
 console.log(`  posted first message ${String(firstMsg).padStart(6)}   ${pct(firstMsg, joins)} of joins`);
 console.log(`  first voice session  ${String(firstVoice).padStart(6)}   ${pct(firstVoice, joins)} of joins`);

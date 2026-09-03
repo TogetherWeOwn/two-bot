@@ -17,7 +17,7 @@ import { EventEmitter } from 'node:events';
 import { Events, type Client } from 'discord.js';
 import { registerHandlers } from '../src/discord/client.ts';
 import { RaidWatch, type RaidAlert } from '../src/analytics/raidWatch.ts';
-import type { FunnelHandlers, JoinInput } from '../src/core/handlers.ts';
+import type { FunnelHandlers, GateClearedInput, JoinInput } from '../src/core/handlers.ts';
 import type { InviteTracker } from '../src/core/inviteTracker.ts';
 
 const GUILD = '326474832151838730';
@@ -25,9 +25,14 @@ const GUILD = '326474832151838730';
 /** Records joins instead of writing them. */
 function fakeDeps() {
   const joins: JoinInput[] = [];
+  const gates: GateClearedInput[] = [];
   const handlers = {
     onJoin: async (i: JoinInput) => {
       joins.push(i);
+      return null;
+    },
+    onGateCleared: async (i: GateClearedInput) => {
+      gates.push(i);
       return null;
     },
     onLeave: async () => ({}),
@@ -39,13 +44,14 @@ function fakeDeps() {
     attribute: () => 'unknown',
     inviterFor: async () => null,
   } as unknown as InviteTracker;
-  return { joins, handlers, invites };
+  return { joins, gates, handlers, invites };
 }
 
-function member(id: string, atIso: string) {
+function member(id: string, atIso: string, pending = false) {
   return {
     id,
     user: { bot: false },
+    pending,
     joinedAt: new Date(atIso),
     guild: { id: GUILD, invites: { fetch: async () => [] }, vanityURLCode: null },
   };
@@ -100,6 +106,51 @@ test('a broken alert path never costs us the join record', async () => {
   }
 
   assert.equal(joins.length, 6);
+});
+
+/*
+ * The same argument for the rules gate (TOG-76). A gate handler that is never
+ * called looks exactly like conversion of 0%, which is the number the whole
+ * card exists to stop us printing wrong.
+ */
+test('accepting the rules is recorded, and only on the transition', async () => {
+  const { gates, handlers, invites } = fakeDeps();
+  const bus = new EventEmitter();
+  registerHandlers(bus as unknown as Client, { handlers, invites });
+
+  const before = member('m1', '2026-02-01T20:00:00Z', true);
+  const after = member('m1', '2026-02-01T20:00:00Z', false);
+
+  // A nickname change, a role grant - any other member update - must not read
+  // as somebody getting in.
+  bus.emit(Events.GuildMemberUpdate, after, after);
+  await settle();
+  assert.equal(gates.length, 0, 'an update that is not the gate flipping is not a clearing');
+
+  bus.emit(Events.GuildMemberUpdate, before, after);
+  await settle();
+  assert.equal(gates.length, 1);
+  assert.equal(gates[0].memberId, 'm1');
+  assert.equal(gates[0].guildId, GUILD);
+});
+
+test('a member who arrives already through the gate is counted too', async () => {
+  const { joins, gates, handlers, invites } = fakeDeps();
+  const bus = new EventEmitter();
+  registerHandlers(bus as unknown as Client, { handlers, invites });
+
+  // Screening off, or a bypass role: there is never a transition to watch, and
+  // leaving them out would read as a permanent conversion shortfall.
+  bus.emit(Events.GuildMemberAdd, member('m1', '2026-02-01T20:00:00Z', false));
+  await settle();
+  assert.equal(joins.length, 1);
+  assert.equal(gates.length, 1, 'no gate to clear means they are through it');
+
+  // Whereas someone who lands behind the gate has not got in yet.
+  bus.emit(Events.GuildMemberAdd, member('m2', '2026-02-01T21:00:00Z', true));
+  await settle();
+  assert.equal(joins.length, 2);
+  assert.equal(gates.length, 1, 'a pending arrival is a join and nothing more');
 });
 
 test('ordinary joins minutes apart alert nobody', async () => {

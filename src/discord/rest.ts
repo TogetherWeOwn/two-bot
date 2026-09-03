@@ -87,6 +87,15 @@ export class DiscordRest {
 export interface RawMember {
   user?: { id: string; bot?: boolean };
   joined_at?: string | null;
+  /**
+   * Discord's membership-screening flag. true = still behind the rules gate and
+   * unable to interact with anything (TOG-76).
+   *
+   * Present-tense only. Discord reports the CURRENT state and keeps no record
+   * of when it changed, so a backfill can learn that somebody got in and never
+   * when. Absent on a member object from a guild with screening off.
+   */
+  pending?: boolean;
   /** Discord role snowflakes. Callers keep only the aggregate or highest rank. */
   roles?: string[];
 }
