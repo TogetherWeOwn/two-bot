@@ -335,6 +335,18 @@ so that reopening A is done on a measured series rather than on argument. That
 table is explicitly **not** in this contract and never will be without a
 version bump — see §4.
 
+**The trigger, stated so you do not have to open the tracker.** Reopen A when
+**both** hold:
+
+- `web_v1` is live, **and**
+- `approximate_presence_count` sustains peaks **≥ 45** against the ~23 bot
+  floor — roughly 20+ humans online at once.
+
+Those words have numbers in them, so they are not the authority: `evaluateTrigger()`
+in `src/analytics/presence.ts` is, and it also fixes how long a peak must hold
+and over what window. `docs/PRESENCE_PROBE.md` documents the constants. Nothing
+here fires automatically — the trigger reopens a *decision*, not a deployment.
+
 If A is ever adopted, it is **additive**: a null column starts returning a
 number. No version bump, no website change.
 
@@ -496,6 +508,7 @@ migration. See the note at the top of `sql/web_v1.sql`.
 
 | Version | Date | Change |
 |---|---|---|
+| `v1.0.4` | 2026-09-03 | **Documentation only; no view, column, type or `contract_meta` value changed.** TOG-468: §6.1 now states the condition that would reopen option A — `web_v1` live **and** `approximate_presence_count` sustaining peaks ≥ 45 against the ~23 bot floor — instead of only asserting that a condition exists. The previous revision pointed at TOG-469 for the trigger, which meant a reader had to open the issue tracker to learn what would change a contract field; that is the one thing §6.1 was supposed to stop. The prose defers to `evaluateTrigger()` in `src/analytics/presence.ts` (`REOPEN_PEAK_THRESHOLD = 45`, plus the hold and window constants) so the numbers are not re-improvised per reader, and records that the trigger reopens a decision rather than firing anything. The rest of what TOG-468 asked for had already landed in `v1.0.2`; verified against `main` this revision rather than assumed. |
 | `v1.0.3` | 2026-09-03 | **Additive value only; no view, column or type changed, runtime contract remains `1.0`.** TOG-464: `funnel_by_source.source` gains one new value, `web:one_click`, stamped on joins the bot itself performed via `guild.add_member` (docs/INTERNAL_ACTIONS.md §7). Rows with this value appear only once that action is switched on; nothing built against `v1.0` needs to move. |
 | `v1.0.2` | 2026-08-30 | **Documentation only; no view, column, type or `contract_meta` value changed, so nothing built against `v1.0` needs to move.** Removes status drift that had the document contradicting itself: §6.2 still said the counter collector did not exist while §8 said it had shipped. Both now say the same thing — TOG-73's code is merged (`c12654a`) but produces no data, because it reads Discord and the company holds no token for the TWO server, so `live_counts` and `rank_counts` still read null today. §6.1 records the TOG-75 outcome (**option C, decided, `done`**) instead of presenting a live A/B/C choice, and drops the incorrect claim that it was the CEO's call — this is the fix TOG-468 asks for. §2 `members` now states the raid exclusion the view has actually applied since TOG-73, and the stale "33 of 84 humans" / "until TOG-73 runs" notes are gone. §8 replaces promised numbers with measured ones: the full §7 deploy sequence, `verify:web-role` (35/35) and `test/e2e.webcontract.test.ts` (23/23) were re-run against a clean Postgres on 2026-08-30, and every view was queried as `two_web_ro` to record what a website build actually sees today. |
 | `v1.0.1` | 2026-08-25 | **Documentation correction only; runtime contract remains `1.0`.** `human_member_count` excludes the dynamically-derived raid set as well as bots, yielding 54 on the grounded 2026-08-19 snapshot rather than the raw 84 Discord human accounts. TOG-73 applies the same exclusion to rank counts and public member rows and writes nothing when any raid window is ungrounded. No view shape or `contract_meta` value changed. |
