@@ -38,12 +38,27 @@
 
 set -euo pipefail
 
-# The org was created as `TWO-Gaming`. GitHub org logins are case-insensitive
-# and both forms resolve to the same org id (318830450), so the lowercase
-# default here matches the bot's systemd unit and the CODEOWNERS files without
-# anything needing renaming. Set TWO_GITHUB_ORG=TWO-Gaming if you want the
-# canonical casing to appear in the git remotes.
-ORG="${TWO_GITHUB_ORG:-two-gaming}"
+# The org was created as `TWO-Gaming` (id 318830450) but all three repos were
+# transferred out of it into `TogetherWeOwn` (id 319943574) on 2026-08-22.
+# These are two DIFFERENT orgs, not two spellings of one - the old comment here
+# claimed they were the same id, and that was simply wrong.
+#
+# `two-gaming` is not a harmless stale default, because the redirect is partial
+# in exactly the way that hides the problem (all measured 2026-09-03):
+#
+#   repos/two-gaming/two-bot            -> 301, and `gh api` DOES follow it
+#   orgs/two-gaming                     -> no redirect; resolves to the real,
+#                                          EMPTY old org (0 repos)
+#   PUT repos/two-gaming/.../protection -> 307, and `gh api --method PUT
+#                                          --input -` does NOT follow it
+#
+# So with the old default every read looked healthy while the one write this
+# script exists to perform silently failed to land. The plan probe
+# (`gh api orgs/$ORG`) read the wrong org's plan, and the team/repo creation
+# calls are org-scoped and would have targeted the dead org.
+#
+# Point this at the live org. Do not "use the redirect". See docs/GITHUB.md.
+ORG="${TWO_GITHUB_ORG:-TogetherWeOwn}"
 BOT_REPO="two-bot"
 WEB_REPO="two-web"
 DESIGN_REPO="two-design"
@@ -96,46 +111,37 @@ DESIGN_FILES=(.github/CODEOWNERS CONTRIBUTING.md README.md .gitignore)
 
 # Teams.
 #
-# CODEOWNERS in both repos addresses `@two-gaming/<slug>`, never an individual,
-# so a review request never dies because one account is asleep. That only works
-# if the team is really there.
+# EMPTY ON PURPOSE - TOG-128 retired the five-team model, and this script was
+# never updated to match. `TogetherWeOwn` has one human, and all three
+# CODEOWNERS files now name `@Rick7C2` directly; measured 2026-09-03, not one
+# `@org/team` handle remains in any of them.
 #
-# The failure mode is the quiet one: a CODEOWNERS rule naming a team that does
-# not exist is NOT an error. GitHub drops the rule, the settings page shows
-# nothing wrong, and reviews simply stop being requested while everybody assumes
-# the routing works. Same outcome if the team exists but has no write access to
-# the repo, or has no members. All three are checked in Verify.
+# This used to list founding-engineer, web-lead, frontend, qa and design. That
+# was not merely stale: on a non-verify run the script would have CREATED five
+# teams nobody uses in the live org, and `--verify` FAILED on all five ("team
+# does not exist"), so the operator running the TOG-111 runbook would have seen
+# a red verify caused entirely by teams the company deliberately abandoned -
+# and would reasonably have read it as branch protection being broken.
+#
+# The quiet failure mode the old comment described is still real and still
+# checked: a CODEOWNERS rule naming a team that does not exist is NOT an error.
+# GitHub drops the rule, the settings page shows nothing wrong, and reviews stop
+# being requested while everybody assumes routing works. `verify_codeowners`
+# reads the committed files rather than this table, so if a team handle is ever
+# reintroduced it is still caught - repopulate these two arrays if that day
+# comes.
 #
 # slug|display name|description
-TEAMS=(
-  "founding-engineer|Founding Engineer|Bot, deploy, secrets and privacy posture"
-  "web-lead|Web Lead|Laravel application: backend, schema, policies, routes"
-  "frontend|Frontend|Blade views, JS, CSS, asset build"
-  "qa|QA|Tests and CI across all three repos"
-  "design|Design|Design tokens, brand assets, accessibility"
-)
+TEAMS=()
 
 # Which team gets write on which repo. Write is also what makes a team eligible
 # to be a code owner there - a team with read cannot own a path.
 #
-# Derived from the three CODEOWNERS files, not invented here. `frontend` is
-# absent from two-bot's CODEOWNERS, so it gets no access to two-bot. Verify
-# reads the committed files and will fail if this table has drifted from them.
+# Empty for the same reason as TEAMS above. Derived from the three CODEOWNERS
+# files, not invented here.
 #
 # slug|repo
-TEAM_REPOS=(
-  "founding-engineer|$BOT_REPO"
-  "qa|$BOT_REPO"
-  "web-lead|$BOT_REPO"
-  "founding-engineer|$WEB_REPO"
-  "web-lead|$WEB_REPO"
-  "frontend|$WEB_REPO"
-  "qa|$WEB_REPO"
-  "design|$DESIGN_REPO"
-  "frontend|$DESIGN_REPO"
-  "qa|$DESIGN_REPO"
-  "founding-engineer|$DESIGN_REPO"
-)
+TEAM_REPOS=()
 
 # Where each repo's working copy is. Override if yours are elsewhere.
 BOT_PATH="${TWO_BOT_PATH:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -768,12 +774,16 @@ deploy_environment() {
 # ---------------------------------------------------------------------------
 if [ "$VERIFY_ONLY" = 0 ]; then
   say "Teams"
-  for _entry in "${TEAMS[@]}"; do
-    IFS='|' read -r _slug _tname _tdesc <<< "$_entry"
-    create_team "$_slug" "$_tname" "$_tdesc"
-  done
-  warn "Members are added by the org owner in Settings -> Teams. An empty team"
-  warn "routes reviews to nobody, which looks exactly like routing working."
+  if [ "${#TEAMS[@]}" -eq 0 ]; then
+    skip "no teams by design (TOG-128) - CODEOWNERS names one person directly"
+  else
+    for _entry in "${TEAMS[@]}"; do
+      IFS='|' read -r _slug _tname _tdesc <<< "$_entry"
+      create_team "$_slug" "$_tname" "$_tdesc"
+    done
+    warn "Members are added by the org owner in Settings -> Teams. An empty team"
+    warn "routes reviews to nobody, which looks exactly like routing working."
+  fi
 
   say "Repositories"
   create_repo "$BOT_REPO"
@@ -781,10 +791,14 @@ if [ "$VERIFY_ONLY" = 0 ]; then
   create_repo "$DESIGN_REPO"
 
   say "Repository access"
-  for _entry in "${TEAM_REPOS[@]}"; do
-    IFS='|' read -r _slug _rname <<< "$_entry"
-    grant_team_repo "$_slug" "$_rname"
-  done
+  if [ "${#TEAM_REPOS[@]}" -eq 0 ]; then
+    skip "no team grants by design (TOG-128) - the one human owner has org access"
+  else
+    for _entry in "${TEAM_REPOS[@]}"; do
+      IFS='|' read -r _slug _rname <<< "$_entry"
+      grant_team_repo "$_slug" "$_rname"
+    done
+  fi
 
   say "History"
   push_history "$BOT_PATH" "$BOT_REPO"
@@ -820,8 +834,17 @@ fi
 say "Verify"
 
 # Teams exist and have somebody in them.
+#
+# With TEAMS empty (TOG-128) this is a no-op by design. It is deliberately NOT
+# a failure: `verify_codeowners` is the check that matters, and it reads the
+# committed CODEOWNERS rather than this table, so a team handle reintroduced in
+# a repo is still caught even with no teams declared here.
 verify_teams() {
   local entry slug n
+  if [ "${#TEAMS[@]}" -eq 0 ]; then
+    skip "no teams declared (TOG-128) - CODEOWNERS is checked per-repo below"
+    return 0
+  fi
   for entry in "${TEAMS[@]}"; do
     slug="${entry%%|*}"
     if ! gh api "orgs/$ORG/teams/$slug" >/dev/null 2>&1; then
