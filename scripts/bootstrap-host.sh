@@ -32,6 +32,9 @@ APP_USER="${TWO_APP_USER:-twobot}"
 APP_DIR="${TWO_APP_DIR:-/opt/two-bot}"
 ENV_DIR="${TWO_ENV_DIR:-/etc/two-bot}"
 BACKUP_DIR="${TWO_BACKUP_DIR:-/var/backups/two-bot}"
+# Where deploy/two-backup-upload lands. This is the value TWO_BACKUP_UPLOAD_CMD
+# takes in backup.env; the two must agree, so both are named from here.
+UPLOAD_CMD="${TWO_UPLOAD_CMD:-/usr/local/bin/two-backup-upload}"
 NODE_MAJOR=24
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -270,6 +273,50 @@ if [ "$new_secrets" -eq 1 ]; then
 EOF
   exit 3
 fi
+
+# An off-box copy is the only part of this deploy whose absence is invisible.
+# scripts/pg-backup.ts warns and exits 0 when TWO_BACKUP_UPLOAD_CMD is unset, so
+# the timer goes green every night while every dump stays on the disk it is meant
+# to survive. Say so here, once, while someone is watching - but do not refuse:
+# a box with local-only backups is worse than one with off-box backups and better
+# than one with none, and this script also has to bring up hosts before the
+# destination exists.
+if grep -Eq '^[[:space:]]*(export[[:space:]]+)?TWO_BACKUP_UPLOAD_CMD[[:space:]]*=[[:space:]]*[^[:space:]]' \
+     "$ENV_DIR/backup.env" 2>/dev/null; then
+  echo "backup.env sets TWO_BACKUP_UPLOAD_CMD - nightly dumps go off-box"
+else
+  cat >&2 <<EOF
+
+  WARNING: TWO_BACKUP_UPLOAD_CMD is not set in $ENV_DIR/backup.env.
+
+  Nightly backups will be written to $BACKUP_DIR and go nowhere else. That
+  survives corruption and mistakes, not the loss of this machine - and it fails
+  silently, because the timer still succeeds. To send them off-box:
+
+      sudo editor $ENV_DIR/backup.env
+        TWO_BACKUP_UPLOAD_CMD=$UPLOAD_CMD
+        TWO_BACKUP_S3_ENDPOINT, TWO_BACKUP_S3_BUCKET,
+        TWO_BACKUP_S3_ACCESS_KEY_ID, TWO_BACKUP_S3_SECRET_ACCESS_KEY
+
+  docs/RUNBOOK.md, "Off-box destination", has the full list.
+
+EOF
+fi
+
+# --- Upload wrapper --------------------------------------------------------
+# TWO_BACKUP_UPLOAD_CMD must be a single bare word (src/store/uploadCmd.ts splits
+# on whitespace and appends the dump path last), so it points at this wrapper
+# rather than at a command line. Installing it here is the point: it used to be a
+# `sudo install` a person typed from the runbook, which meant a host could come up
+# with the timer enabled, backup.env filled in, and no /usr/local/bin/two-backup-upload
+# for it to run - a backup that fails on the first night nobody is watching.
+say "upload wrapper"
+# /usr/local/bin exists on a stock Debian/Ubuntu image, but TWO_UPLOAD_CMD can
+# point anywhere, and under `set -e` a missing parent would abort the deploy here
+# rather than say what was wrong.
+install -d -o root -g root -m 755 "$(dirname "$UPLOAD_CMD")"
+install -m 755 "$SRC/deploy/two-backup-upload" "$UPLOAD_CMD"
+echo "$UPLOAD_CMD installed"
 
 # --- Units -----------------------------------------------------------------
 say "systemd units"
