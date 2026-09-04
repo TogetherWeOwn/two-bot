@@ -3,13 +3,10 @@
  *
  * WHY THIS IS A SEPARATE FILE FROM rest.ts
  *
- * `DiscordRest` exposes exactly one verb, `get()`, and two scripts state that
- * as a guarantee rather than a habit — scripts/audit-collect.ts:11 and
- * scripts/wave0-export.ts:14 both say, in as many words, that there is "no
- * post/patch/delete sibling to reach for". That is a property those scripts are
- * audited on. Bolting a `delete()` onto `DiscordRest` would silently falsify
- * both comments and would put a destructive verb one autocomplete away from
- * every read-only script in the repo.
+ * `DiscordRest` exposes exactly one verb, `get()`, and read/report scripts rely
+ * on that as a guarantee rather than a habit. Bolting a `delete()` onto
+ * `DiscordRest` would put a destructive verb one autocomplete away from every
+ * read-only script in the repo.
  *
  * So the destructive verb lives here, alone, in a class that does one thing and
  * has to be imported by name. `git grep DiscordKicker` returns every file in

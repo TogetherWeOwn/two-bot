@@ -61,11 +61,15 @@ In rough order of cost to real members:
 2. **Alerts, so nobody finds out five months late.** This is our part. See
    below.
 3. **Verification level 4 (phone).** Would stop a farm dead, and would also cost
-   real 18+ gamers who do not want to hand Discord a phone number. On a server
-   taking ~2 real joins a month, that is a real cost to weigh, not a free win.
-4. **Auto-removing accounts that never clear the rules gate after N days.** A
-   clean, self-maintaining fix — and a standing moderation action taken by a
-   bot, which needs explicit sign-off before it is built, not after.
+   real 18+ gamers who do not want to hand Discord a phone number. TWO retained
+   roughly **5 real joins in the measured year** — the earlier 24/year figure
+   counted 19 surviving raid accounts as people — so taxing every genuine
+   arrival is a real cost, not a free win.
+4. **Remove accounts still behind the rules gate after 14 days.** Adopted on
+   TOG-412 and implemented by `scripts/rules-gate-timeout.ts` (TOG-479). It is a
+   deterministic Discord flag plus Discord's own join timestamp, not the burst
+   detector's heuristic. It ships report-only for its first 30 days; execution
+   still requires `--execute --expect <n>` and can only kick, never ban.
 
 Note what is *not* on the list: AutoMod. TWO's three AutoMod rules cover flagged
 words, spam content and mention spam. `mention_raid_protection_enabled` is on,
@@ -107,9 +111,11 @@ Set `DISCORD_STAFF_ALERT_CHANNEL_ID` to a **staff-only** channel — the alert
 lists member IDs and must not be readable by members. The bot needs View Channel
 and Send Messages there, and nothing else.
 
-Left empty, the detector still runs and the alert goes to the process log only.
-That is the current state, and it is weak: nobody reads a journal at 21:16 on a
-Monday. The channel is a CEO choice, so it stays unset until they name one.
+The chosen route is `🔧〢updates-and-changes`, channel
+`1138590808715571300`: it is staff-only and already Discord's
+`safety_alerts_channel_id`. `.env.example` carries that value for deploys to
+copy. Left empty, the detector still runs but the alert goes to the process log
+only, which nobody reads at 21:16 on a Monday.
 
 The detector goes live with the bot itself (TWO-11). Until the bot is deployed,
 nothing is watching in real time.
@@ -171,6 +177,43 @@ is flagged as containing something that evidence does not explain.
 Execution itself is TOG-411, and it is blocked: the Discord credentials for this
 server are not held by this company (TOG-432). `--execute` without a token says
 so and exits rather than sending anyone looking for one.
+
+## Rules-gate timeout
+
+`scripts/rules-gate-timeout.ts` is the self-maintaining half of the TOG-412 gate
+decision. It reads the complete live roster and selects only human members for
+which Discord reports both:
+
+- `pending: true`; and
+- `joined_at` at least `RULES_GATE_TIMEOUT_DAYS` ago. The named constant is 14
+  days, chosen because it spans two weekends while preserving the measured raid
+  precision: all 30 confirmed raid accounts were still pending after 8–13
+  months; exactly one real person was pending in the 2026-08-19 audit.
+
+```
+node scripts/rules-gate-timeout.ts                         # report only
+node scripts/rules-gate-timeout.ts --execute --expect 30  # only after report-only sign-off
+```
+
+Report-only is the default for the first 30 days. The deploy installs
+`two-bot-rules-gate-timeout.timer`, which runs the report daily at 04:43 UTC. It
+reads Discord, names every target in the journal, and appends one `would_kick`
+audit line per account to `data/rules-gate-timeout-audit.jsonl`; it constructs
+no kicker and sends no DELETE. The file is gitignored because it contains
+member IDs. Enabling removal later is a deliberate unit change: add
+`--execute --expect <the reviewed count>` to the service's `ExecStart`, then
+`systemctl daemon-reload`; there is no environment switch that can turn it on
+accidentally.
+
+Execution is deliberately double-gated. `--execute` alone refuses to start, and
+`--expect <n>` must match the fresh live report. The action reuses
+`src/discord/kick.ts`, so it is a kick only: a removed person can rejoin through
+the same invite and sees the rules gate first. There is no ban path.
+
+The report cannot be run against the live guild from this company today because
+the Discord credential is absent. That does not block building or testing the
+rule against fixtures; it does block starting the 30-day live observation
+period. TOG-13 owns that separate deploy credential dependency.
 
 ## If an alert fires
 
