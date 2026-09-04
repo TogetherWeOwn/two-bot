@@ -17,6 +17,10 @@ import {
   startCommunitySnapshots,
   type CommunitySnapshotHandle,
 } from './jobs/communitySnapshots.ts';
+import {
+  startScheduledEventsPoller,
+  type ScheduledEventsHandle,
+} from './jobs/scheduledEvents.ts';
 import { DiscordRest } from './discord/rest.ts';
 import { loadInternalActionsConfig } from './internal/config.ts';
 import { startInternalActions, type InternalServer } from './internal/server.ts';
@@ -186,6 +190,26 @@ if (!cfg.guildId) {
   });
 }
 
+// The website's event feed (TOG-74). A successful Discord read replaces the
+// guild's mirror atomically, including replacing it with zero rows. A failed or
+// malformed read leaves the last good snapshot in place rather than publishing
+// "no events" as a transport error.
+let scheduledEvents: ScheduledEventsHandle | null = null;
+if (!cfg.guildId) {
+  log.info('scheduled_events_disabled', { reason: 'DISCORD_GUILD_ID is unset' });
+} else if (db.kind !== 'postgres') {
+  log.info('scheduled_events_disabled', { reason: 'needs Postgres (migration 0003)' });
+} else {
+  scheduledEvents = startScheduledEventsPoller({
+    db,
+    rest: new DiscordRest({
+      token: cfg.discordToken,
+      base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+    }),
+    guildId: cfg.guildId,
+  });
+}
+
 // Inactivity sweep once an hour. Cheap query; no outbound messages.
 const sweep = setInterval(
   () => {
@@ -202,6 +226,7 @@ async function shutdown(signal: string) {
   clearInterval(sweep);
   presenceProbe?.stop();
   communitySnapshots?.stop();
+  scheduledEvents?.stop();
   if (internal) await internal.close();
   try {
     await client.destroy();
