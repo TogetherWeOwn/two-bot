@@ -285,6 +285,8 @@ sudo editor /etc/two-bot/two-bot.env     # see .env.example for the keys
 sudo install -o twobot -g twobot -m 600 /dev/null /etc/two-bot/backup.env
 sudo editor /etc/two-bot/backup.env      # TWO_DATABASE_URL, TWO_RESTORE_URL, TWO_BACKUP_UPLOAD_CMD,
                                          # and the TWO_BACKUP_S3_* destination — see "Off-box destination"
+# The upload wrapper TWO_BACKUP_UPLOAD_CMD points at. Only needed on this manual
+# path — scripts/bootstrap-host.sh installs it for you.
 sudo install -m 755 deploy/two-backup-upload /usr/local/bin/two-backup-upload
 
 sudo cp deploy/two-bot.service deploy/two-bot-backup.service deploy/two-bot-backup.timer \
@@ -583,7 +585,9 @@ the dump path as the **last** argument. Two consequences, and they bite:
    quoting.
 
 So use a wrapper. `deploy/two-backup-upload` is the one we ship, and it is
-already pointed at the destination below — install it as-is:
+already pointed at the destination below. `scripts/bootstrap-host.sh` installs it
+on every run, so on a bootstrapped host there is nothing to do here. Installing
+it by hand is only for the manual path above:
 
 ```bash
 sudo install -m 755 deploy/two-backup-upload /usr/local/bin/two-backup-upload
