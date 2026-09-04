@@ -57,11 +57,14 @@ describe('buildUploadArgv', () => {
 });
 
 describe('the shipped wrapper', () => {
-  test('takes the dump as $1 and puts it first, ahead of the destination', () => {
+  test('takes the dump as $1 and hands it on as the only argument', () => {
     const dir = mkdtempSync(join(tmpdir(), 'two-upload-'));
     try {
-      // deploy/two-backup-upload with the real tool swapped for a recorder, so
-      // this asserts the wrapper's argument handling without needing rclone.
+      // deploy/two-backup-upload with the real uploader swapped for a recorder,
+      // so this asserts the wrapper's argument handling without a network or a
+      // bucket. The destination is now Cloudflare R2 via
+      // scripts/backup-upload-s3.ts (TOG-69) rather than the rclone line this
+      // test used to patch; the full path is test/e2e.backupupload.test.ts.
       const recorder = join(dir, 'recorder');
       const seen = join(dir, 'argv');
       writeFileSync(recorder, `#!/bin/sh\nprintf '%s\\n' "$@" > ${seen}\n`);
@@ -71,10 +74,10 @@ describe('the shipped wrapper', () => {
       const body = readFileSync(
         join(import.meta.dirname, '..', 'deploy', 'two-backup-upload'),
         'utf8',
-      ).replace(
-        /^exec \/usr\/bin\/rclone .*$/m,
-        `exec ${recorder} copy --config /etc/two-bot/rclone.conf "$dump" backup:two-funnel`,
-      );
+      ).replace(/^exec \/usr\/bin\/env node .*$/m, `exec ${recorder} "$dump"`);
+      // If the exec line ever moves, the replace above silently does nothing
+      // and this test would pass by running the real uploader.
+      assert.match(body, /^exec .*\/recorder "\$dump"$/m, 'the exec line was not substituted');
       writeFileSync(wrapper, body);
       chmodSync(wrapper, 0o755);
 
@@ -85,16 +88,9 @@ describe('the shipped wrapper', () => {
       const { cmd, args } = buildUploadArgv(wrapper, dump)!;
       execFileSync(cmd, args, { stdio: 'inherit' });
 
-      const argv = readFileSync(seen, 'utf8').trimEnd().split('\n');
-      assert.deepEqual(argv, [
-        'copy',
-        '--config',
-        '/etc/two-bot/rclone.conf',
-        dump,
-        'backup:two-funnel',
-      ]);
-      // The point of the whole exercise: destination last, dump not last.
-      assert.equal(argv.at(-1), 'backup:two-funnel');
+      // The uploader's contract is one argument, the dump path. The wrapper
+      // exists so that stays true no matter what the destination tool wants.
+      assert.deepEqual(readFileSync(seen, 'utf8').trimEnd().split('\n'), [dump]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
