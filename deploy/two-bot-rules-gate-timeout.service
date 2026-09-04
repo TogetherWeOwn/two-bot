@@ -1,0 +1,49 @@
+# Daily report of members pending at the rules gate for 14 days.
+# Report-only until the separately approved 30-day observation period completes.
+
+[Unit]
+Description=Report TWO members timed out at the Discord rules gate
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=twobot
+Group=twobot
+WorkingDirectory=/opt/two-bot
+LoadCredential=discord_token:/etc/two-bot/credentials/discord_token
+EnvironmentFile=/etc/two-bot/two-bot.env
+ExecStart=/usr/bin/node /opt/two-bot/scripts/rules-gate-timeout.ts
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=two-bot-rules-gate-timeout
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/two-bot/data
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+UMask=0077
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectProc=invisible
+ProcSubset=pid
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+SystemCallArchitectures=native
+MemoryMax=256M
+CPUQuota=50%
+TasksMax=32

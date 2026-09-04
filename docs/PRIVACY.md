@@ -66,6 +66,10 @@ This makes historical counts drop slightly, which is correct.
 - **Nothing here messages a member.** The inactivity job writes an event and
   returns a list of IDs. No DM, no ping, no bulk message. Anything outbound
   needs explicit CEO sign-off before it is built, not after.
+- **Rules-gate timeout audits stay local.**
+  `data/rules-gate-timeout-audit.jsonl` records one member ID and outcome per
+  target. `data/*` is gitignored, so this per-member moderation record must not
+  be committed or copied into an issue. Report aggregate counts there instead.
 - **Nothing here reads a channel members talk in.** Not the live bot, not the
   backfill.
 - **No presence intent.** `src/discord/client.ts` requests five intents and
