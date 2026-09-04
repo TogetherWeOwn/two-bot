@@ -324,6 +324,8 @@ install -m 644 \
   "$SRC/deploy/two-bot.service" \
   "$SRC/deploy/two-bot-backup.service" \
   "$SRC/deploy/two-bot-backup.timer" \
+  "$SRC/deploy/two-bot-rules-gate-timeout.service" \
+  "$SRC/deploy/two-bot-rules-gate-timeout.timer" \
   "$SRC/deploy/two-bot-restore-drill.service" \
   "$SRC/deploy/two-bot-restore-drill.timer" \
   /etc/systemd/system/
@@ -348,7 +350,7 @@ set -e
 
 # --- Start -----------------------------------------------------------------
 say "Start"
-systemctl enable --now two-bot two-bot-backup.timer two-bot-restore-drill.timer
+systemctl enable --now two-bot two-bot-backup.timer two-bot-rules-gate-timeout.timer two-bot-restore-drill.timer
 systemctl restart two-bot          # re-runs land the new code
 sleep 5
 

@@ -148,6 +148,8 @@ test('the staff text names IDs and claims no action was taken', () => {
   assert.match(text, /`111`/);
   assert.match(text, /and 13 more/);
   assert.match(text, /kicked, banned and messaged nobody/);
+  assert.match(text, /1\. Run `node scripts\/roster\.ts 1`/);
+  assert.match(text, /2\. If it is a raid, Server Settings -> Safety Setup -> pause invites/);
   // No pings, ever - not even by accident in the template.
   assert.doesNotMatch(text, /@everyone|@here|<@/);
 });

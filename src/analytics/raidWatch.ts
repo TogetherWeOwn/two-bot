@@ -48,9 +48,10 @@ const DEFAULTS = {
   /**
    * Five joins in a minute.
    *
-   * TWO takes roughly two real joins a month, and the biggest genuine day in
-   * nine years of history is well under this. Both small raids put 15 accounts
-   * in under 11 seconds and the big one ran at ~18 a minute for an hour, so
+   * TWO retained roughly five real joins in the measured year, and the biggest
+   * genuine day in nine years of history is well under this. Both small raids
+   * put 15 accounts in under 11 seconds and the big one ran at ~18 a minute for
+   * an hour, so
    * every raid on record trips this several times over while an ordinary week
    * never comes close. Verified against the recorded history by
    * `node scripts/raid-list.ts --scan`.
@@ -176,7 +177,7 @@ export function formatRaidAlert(a: RaidAlert): string {
     `IDs: ${ids}${more}`,
     '',
     'This is an alert only - the bot has kicked, banned and messaged nobody.',
-    'If this is a raid: Server Settings -> Safety Setup -> pause invites, then remove the accounts.',
-    'If this is a real surge (a stream drop, a post that landed), it is worth knowing which invite sent them: `node scripts/roster.ts 1`.',
+    'Next: 1. Run `node scripts/roster.ts 1` to see which invite sent them.',
+    '2. If it is a raid, Server Settings -> Safety Setup -> pause invites.',
   ].join('\n');
 }
