@@ -43,6 +43,15 @@ export interface MockInvite {
   inviterId: string;
 }
 
+export interface MockScheduledEvent {
+  id: string;
+  name: string;
+  scheduled_start_time: string;
+  channel_id: string | null;
+  description: string | null;
+  status: number;
+}
+
 export interface MockDiscord {
   port: number;
   apiBase: string;
@@ -51,6 +60,8 @@ export interface MockDiscord {
   voiceChannelId: string;
   /** Mutable - bump `uses` before firing a join to test attribution. */
   invites: MockInvite[];
+  /** Mutable Discord REST snapshot returned by the scheduled-events GET. */
+  scheduledEvents: MockScheduledEvent[];
   /** Resolves once a client has completed IDENTIFY and been sent READY. */
   waitForReady(timeoutMs?: number): Promise<void>;
   dispatch(type: string, data: unknown): void;
@@ -278,6 +289,7 @@ export async function startMockDiscord(
   opts: { lighting?: Lighting } = {},
 ): Promise<MockDiscord> {
   const invites: MockInvite[] = [{ code: 'twodev01', uses: 5, inviterId: '900000000000000099' }];
+  const scheduledEvents: MockScheduledEvent[] = [];
   const captured: CapturedRequest[] = [];
   const lighting: Lighting = opts.lighting ?? 'dark';
   /** Roles the bot has granted per member, so PATCH member can echo them back. */
@@ -327,12 +339,30 @@ export async function startMockDiscord(
     m = /\/api\/v10\/guilds\/\d+\/scheduled-events$/.exec(url);
     if (m && method === 'POST') {
       const b = (body ?? {}) as Record<string, unknown>;
-      return json({ ...b, id: snowflake(), guild_id: GUILD_ID, status: 1 });
+      const event: MockScheduledEvent = {
+        id: snowflake(),
+        name: typeof b.name === 'string' ? b.name : '',
+        scheduled_start_time:
+          typeof b.scheduled_start_time === 'string' ? b.scheduled_start_time : new Date().toISOString(),
+        channel_id: typeof b.channel_id === 'string' ? b.channel_id : null,
+        description: typeof b.description === 'string' ? b.description : null,
+        status: 1,
+      };
+      scheduledEvents.push(event);
+      return json({ ...b, ...event, guild_id: GUILD_ID });
     }
     m = /\/api\/v10\/guilds\/\d+\/scheduled-events\/(\d+)$/.exec(url);
     if (m && method === 'PATCH') {
       const b = (body ?? {}) as Record<string, unknown>;
-      return json({ ...b, id: m[1], guild_id: GUILD_ID, status: 1 });
+      const existing = scheduledEvents.find((event) => event.id === m?.[1]);
+      if (existing) {
+        if (typeof b.name === 'string') existing.name = b.name;
+        if (typeof b.scheduled_start_time === 'string') existing.scheduled_start_time = b.scheduled_start_time;
+        if (typeof b.channel_id === 'string' || b.channel_id === null) existing.channel_id = b.channel_id;
+        if (typeof b.description === 'string' || b.description === null) existing.description = b.description;
+        if (typeof b.status === 'number') existing.status = b.status;
+      }
+      return json({ ...b, ...(existing ?? {}), id: m[1], guild_id: GUILD_ID, status: existing?.status ?? 1 });
     }
 
     // Interaction ack (deferReply) and the follow-up edit.
@@ -492,6 +522,10 @@ export async function startMockDiscord(
       );
     }
 
+    if (/\/api\/v10\/guilds\/\d+\/scheduled-events$/.test(url)) {
+      return json(scheduledEvents);
+    }
+
     // Anything else the client happens to ask for: an empty, valid-looking answer.
     return json({});
   });
@@ -559,6 +593,7 @@ export async function startMockDiscord(
     textChannelId: TEXT_CHANNEL,
     voiceChannelId: VOICE_CHANNEL,
     invites,
+    scheduledEvents,
     waitForReady: (timeoutMs = 15_000) =>
       Promise.race([
         readyPromise,
