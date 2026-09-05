@@ -90,8 +90,15 @@ if (dbCheck.status === 'ok') {
       if (!pending.length) {
         const store = new EventStore(db);
         counts = {};
+        // Scoped to the staging guild when we know it. The staging DB holds a
+        // fixture set per guild id it has been seeded with, so an unscoped
+        // count sums them and reports drift on a correct database. Undefined
+        // when the guild id is not set yet - in that case the env check above
+        // is already the headline, and an all-guild count is the best
+        // available answer rather than a wrong one.
+        const guildId = process.env.DISCORD_STAGING_GUILD_ID || undefined;
         for (const type of Object.keys(EXPECTED_FUNNEL)) {
-          counts[type] = await store.countByType(type as EventType);
+          counts[type] = await store.countByType(type as EventType, guildId);
         }
       }
 
