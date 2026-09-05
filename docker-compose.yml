@@ -1,0 +1,106 @@
+# Coolify deployment for the TWO bot (TOG-13).
+#
+# Coolify's "Docker Compose" application type builds and runs this file. Every
+# value below that could differ between environments is an environment variable
+# with NO default, so a missing one is a loud startup failure rather than a bot
+# that silently runs against the wrong guild or writes the funnel log into the
+# wrong database. docs/DEPLOY.md is the variable-by-variable contract.
+#
+# Postgres is deliberately NOT defined here. The database is a separate,
+# backed-up, longer-lived thing than the bot, and the owner's VPS already runs
+# one; declaring it in this file would tie its lifecycle to the bot's and invite
+# a `compose down -v` to take the funnel log with it. TWO_DATABASE_URL points at
+# it. See docs/STACK.md.
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+
+    environment:
+      # --- Required. No defaults on purpose. -------------------------------
+      # The bot token. In Coolify, mark this variable as a secret so it is
+      # write-only in the UI and masked in build logs.
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:?set DISCORD_BOT_TOKEN}
+      # Restricts the bot to the live TWO server. Required here even though the
+      # code treats it as optional: an unset guild id on a container that can be
+      # invited anywhere is not a default worth having.
+      DISCORD_GUILD_ID: ${DISCORD_GUILD_ID:?set DISCORD_GUILD_ID}
+      # Postgres. Note the name - NOT DATABASE_URL, which hosts inject.
+      TWO_DATABASE_URL: ${TWO_DATABASE_URL:?set TWO_DATABASE_URL}
+
+      # --- Behaviour. Safe, explicit defaults. -----------------------------
+      # Staff-only channel for join-burst alerts; it posts member ids. Settled
+      # on TOG-412. Empty means alerts reach the log only, which nobody reads.
+      DISCORD_STAFF_ALERT_CHANNEL_ID: ${DISCORD_STAFF_ALERT_CHANNEL_ID:-}
+      # Onboarding does not run at all while this is empty - the bot will never
+      # guess a channel to post into on a live server. See docs/ROUTING.md.
+      DISCORD_LANDING_CHANNEL_IDS: ${DISCORD_LANDING_CHANNEL_IDS:-}
+      # 1 = onboarding observes and records but grants no roles. Recommended for
+      # the first deploy against the live server.
+      TWO_ONBOARDING_DRY_RUN: ${TWO_ONBOARDING_DRY_RUN:-1}
+      TWO_RAID_JOIN_THRESHOLD: ${TWO_RAID_JOIN_THRESHOLD:-5}
+      TWO_RAID_WINDOW_SECONDS: ${TWO_RAID_WINDOW_SECONDS:-60}
+      TWO_INACTIVITY_DAYS: ${TWO_INACTIVITY_DAYS:-14}
+      TWO_DB_POOL_MAX: ${TWO_DB_POOL_MAX:-5}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+
+      # --- Health. Read by Coolify's deploy gate. --------------------------
+      TWO_HEALTH_PORT: 8080
+
+      # --- Internal actions endpoint. Off by default. ----------------------
+      # Turning this on opens a remote control for the Discord server. It binds
+      # loopback INSIDE this container, which means nothing outside the
+      # container can reach it - including the website. If the website needs it,
+      # that is a shared network and a bind-host change, not a public port.
+      # See docs/INTERNAL_ACTIONS.md §1.
+      TWO_INTERNAL_ACTIONS: ${TWO_INTERNAL_ACTIONS:-0}
+      TWO_INTERNAL_BIND_HOST: ${TWO_INTERNAL_BIND_HOST:-127.0.0.1}
+      TWO_INTERNAL_KEYS: ${TWO_INTERNAL_KEYS:-}
+      TWO_INTERNAL_CHANNEL_KEYS: ${TWO_INTERNAL_CHANNEL_KEYS:-}
+      TWO_INTERNAL_ROLE_KEYS: ${TWO_INTERNAL_ROLE_KEYS:-}
+
+    # No `ports:` mapping. The bot makes outbound connections to Discord and
+    # Postgres and needs nothing inbound from the internet; Coolify reaches the
+    # health endpoint on the container network. Publishing 8080 would put an
+    # unauthenticated endpoint on the host, and 8787 would be far worse.
+    expose:
+      - '8080'
+
+    healthcheck:
+      # /readyz here, not /healthz: this is what Coolify waits on before it
+      # considers a deploy good, and "good" must mean the gateway is connected
+      # and the database answers - not merely that a process exists. The
+      # Dockerfile's HEALTHCHECK uses /healthz for the opposite reason.
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8080/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      # Generous: a cold start connects to the gateway and runs migrations
+      # before it can be ready, and being killed mid-connect is how a crash loop
+      # against Discord's identify budget begins.
+      start_period: 60s
+      retries: 3
+
+    # The funnel log lives in Postgres. This is only the SQLite fallback path
+    # and the wave0/audit exports, which are written by scripts run by hand.
+    # Named rather than bind-mounted so it survives a redeploy without depending
+    # on a host path that has to exist first.
+    volumes:
+      - two-bot-data:/app/data
+
+    logging:
+      driver: json-file
+      options:
+        # The bot logs one JSON object per line and is otherwise quiet. Without
+        # a cap this fills the owner's disk, which is shared with the website.
+        max-size: '10m'
+        max-file: '5'
+
+volumes:
+  two-bot-data:

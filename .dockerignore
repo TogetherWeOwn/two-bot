@@ -1,0 +1,27 @@
+# Keep the build context small, and keep secrets and local state out of the image.
+#
+# The first two entries are the ones that matter. A .env in the context would be
+# copied by `COPY src/`-adjacent globs and baked into a layer, where deleting it
+# later does not remove it; data/ holds the local SQLite funnel log, which is
+# member data that has no business in an image. See docs/SECRETS.md.
+.env
+.env.*
+!.env.example
+data/
+backups/
+
+.git/
+.github/
+.githooks/
+node_modules/
+npm-debug.log*
+
+# Not needed at runtime: the image runs src/ and scripts/ only.
+test/
+tools/
+docs/
+audit/
+ops/
+ci/
+deploy/
+*.md
