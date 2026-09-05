@@ -32,6 +32,7 @@
 import {
   STAGING_BOT_APPLICATION_ID,
   STAGING_BOT_APPLICATION_NAME,
+  STAGING_INVITE_PERMISSIONS,
   STAGING_PERMISSIONS,
   STAGING_SERVER_NAME,
   STAGING_TEXT_CHANNELS,
@@ -39,6 +40,7 @@ import {
   checkStagingToken,
   describePermissions,
   stagingGuildId,
+  stagingInviteUrl,
 } from '../src/staging/spec.ts';
 import { evaluateHierarchy, type PartialRole } from '../src/staging/provision.ts';
 
@@ -191,7 +193,13 @@ if (weOwnIt) {
   }
   const { held: have, missing } = describePermissions(mask);
   if (missing.length) {
-    fail(`missing permissions: ${missing.join(', ')}`, `expected the scoped set ${STAGING_PERMISSIONS}`);
+    // Re-inviting is the fix, not a settings tweak: an invited bot cannot
+    // grant itself a bit its invite did not carry.
+    fail(
+      `missing permissions: ${missing.join(', ')}`,
+      `expected the invite set ${STAGING_INVITE_PERMISSIONS}; re-authorize with ` +
+        stagingInviteUrl(),
+    );
   } else {
     pass('scoped permissions held', have.join(', '));
   }
