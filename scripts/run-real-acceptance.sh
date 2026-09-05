@@ -30,7 +30,7 @@ TWO_HOST_DB="$QA_DB" \
 TWO_HOST_SECRET="$SECRET" \
 TWO_HOST_PORT="$PORT" \
 TWO_HOST_CHANNEL_KEYS="qa-throwaway:$CHANNEL_ID" \
-TWO_HOST_ROLE_KEYS="$ROLE_KEY:$ROLE_ID" \
+TWO_INTERNAL_ROLE_KEYS="$ROLE_KEY:$ROLE_ID" \
 TWO_HOST_SCHEMA="$SCHEMA" \
 node scripts/internal-actions-host-real.ts >"$OUT/host-boot.log" 2>&1 &
 HOST_PID=$!

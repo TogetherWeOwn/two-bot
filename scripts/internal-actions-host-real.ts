@@ -66,8 +66,14 @@ const CHANNEL_SPEC = env('TWO_HOST_CHANNEL_KEYS');
  * staging guild those ids do not resolve, and `role.assign` answers
  * `discord_404` - indistinguishable, from the harness, from a permission
  * denial. So the staging run must name its own role, and this is the knob.
+ *
+ * The variable is `TWO_INTERNAL_ROLE_KEYS`, the same name the real bot reads at
+ * src/internal/config.ts:61 - not a `TWO_HOST_`-prefixed alias. Same wiring as
+ * production, or the run measures the harness instead of the bot. (Credit to
+ * QA's PR #58, which reached this file's diagnosis independently and picked the
+ * better name; #59 landed first with the wrong one.)
  */
-const ROLE_SPEC = process.env.TWO_HOST_ROLE_KEYS ?? '';
+const ROLE_SPEC = process.env.TWO_INTERNAL_ROLE_KEYS ?? '';
 
 const SCHEMA = process.env.TWO_HOST_SCHEMA ?? 'qa_tog463_real';
 
