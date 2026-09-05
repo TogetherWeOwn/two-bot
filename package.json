@@ -26,6 +26,7 @@
     "roster": "node scripts/roster.ts",
     "audit:collect": "node scripts/audit-collect.ts",
     "wave0": "node scripts/wave0-export.ts",
+    "wave6:hierarchy": "node scripts/wave6-hierarchy-check.ts",
     "reengage": "node scripts/reengagement.ts",
     "backfill": "node scripts/backfill.ts",
     "capture": "node scripts/capture.ts",
