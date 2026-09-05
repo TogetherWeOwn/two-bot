@@ -51,7 +51,7 @@ TWO_ACCEPT_ROLE_KEY="$ROLE_KEY" \
 TWO_ACCEPT_DISCORD_ID="$TARGET" \
 TWO_ACCEPT_DB="$QA_DB" \
 TWO_ACCEPT_SCHEMA="$SCHEMA" \
-node scripts/internal-actions-acceptance-qa.ts 2>&1 | tee "$OUT/acceptance.log"
+node scripts/internal-actions-acceptance.ts 2>&1 | tee "$OUT/acceptance.log"
 RC=${PIPESTATUS[0]}
 
 echo
