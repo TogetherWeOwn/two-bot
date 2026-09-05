@@ -149,8 +149,49 @@ export const STAGING_ROLES = ['Moderator', 'Member', 'Game: Test'] as const;
 /**
  * The scoped permission integer the bot is invited with. Not Administrator -
  * staging is where we prove the live bot needs no more than this.
+ *
+ * `268435456 | 268520512`-style arithmetic is deliberately NOT inlined here:
+ * the value is built from named bits below so that adding an action to
+ * `docs/INTERNAL_ACTIONS.md` §8 and forgetting the invite is a test failure
+ * rather than a 403 a human discovers by hand, an hour into a staging run.
+ *
+ * ⚠️ Changing this number invalidates any invite link already sent. An invited
+ * bot holds exactly what its invite carried and cannot grant itself more, so a
+ * server created from an older link has to be re-authorized with a new one.
  */
-export const STAGING_PERMISSIONS = 268520512;
+export const STAGING_PERMISSIONS =
+  (1 << 6) | // Add Reactions
+  (1 << 10) | // View Channels
+  (1 << 11) | // Send Messages
+  (1 << 14) | // Embed Links
+  (1 << 16) | // Read Message History
+  (1 << 28); // Manage Roles
+
+/**
+ * Bits the invite must carry that do NOT fit in a 32-bit int. `1 << 33` in
+ * JavaScript is `2`, not 2^33 - the shift operand wraps mod 32 - so these are
+ * BigInt and combined separately. Getting this wrong is silent: you produce a
+ * plausible-looking permission integer that grants the wrong things.
+ */
+const HIGH_BITS = (1n << 33n) | (1n << 44n); // Manage Events, Create Events
+
+/**
+ * What the invite link actually asks for.
+ *
+ * `STAGING_PERMISSIONS` covers onboarding. It does NOT cover `event.upsert`,
+ * which calls `POST /guilds/{id}/scheduled-events` and needs Manage Events -
+ * a bit Manage Server does not imply (`docs/INTERNAL_ACTIONS.md` §8). TOG-463
+ * measured that gap against a real guild on 2026-09-05: `role.assign` and
+ * `event.upsert` returned `422 discord_rejected` wrapping Discord's own 403,
+ * with effective mask `2112134023859777`. The endpoint was correct; the
+ * invite was short.
+ *
+ * Since an invited bot can never exceed its invite, shipping the narrow set
+ * guarantees a second round-trip to a human to fix a permission we already
+ * know is needed. So the invite carries the events bits too.
+ */
+export const STAGING_INVITE_PERMISSIONS: bigint =
+  BigInt(STAGING_PERMISSIONS) | HIGH_BITS;
 
 /** Decoded, so a mismatch reads as English instead of arithmetic. */
 export const PERMISSION_BITS: ReadonlyArray<{ name: string; bit: bigint }> = [
@@ -160,6 +201,8 @@ export const PERMISSION_BITS: ReadonlyArray<{ name: string; bit: bigint }> = [
   { name: 'Embed Links', bit: 1n << 14n },
   { name: 'Read Message History', bit: 1n << 16n },
   { name: 'Manage Roles', bit: 1n << 28n },
+  { name: 'Manage Events', bit: 1n << 33n },
+  { name: 'Create Events', bit: 1n << 44n },
 ];
 
 export function describePermissions(mask: bigint): { held: string[]; missing: string[] } {
@@ -180,14 +223,15 @@ export function describePermissions(mask: bigint): { held: string[]; missing: st
  * wrong for this application, so the invite path is not a fallback: it is the
  * path.
  *
- * `STAGING_PERMISSIONS` rather than Administrator, deliberately - staging is
- * where we prove the live bot needs no more than the scoped set.
+ * `STAGING_INVITE_PERMISSIONS` rather than Administrator, deliberately -
+ * staging is where we prove the live bot needs no more than the scoped set
+ * plus the two events bits `event.upsert` cannot work without.
  */
 export function stagingInviteUrl(applicationId: string = STAGING_BOT_APPLICATION_ID): string {
   return (
     'https://discord.com/api/oauth2/authorize' +
     `?client_id=${applicationId}` +
-    `&permissions=${STAGING_PERMISSIONS}` +
+    `&permissions=${STAGING_INVITE_PERMISSIONS}` +
     '&scope=bot%20applications.commands'
   );
 }

@@ -30,8 +30,12 @@ import {
   LIVE_BOT_APPLICATION_ID,
   LIVE_GUILD_ID,
   STAGING_BOT_APPLICATION_ID,
+  STAGING_INVITE_PERMISSIONS,
+  STAGING_PERMISSIONS,
   applicationIdFromToken,
   checkStagingToken,
+  describePermissions,
+  stagingInviteUrl,
 } from '../src/staging/spec.ts';
 import type { EventType } from '../src/core/events.ts';
 
@@ -257,4 +261,114 @@ test('an unrecognised or unparseable token is allowed through to Discord, not ha
   // later: we warn, we do not block a setup that may be correct.
   assert.equal(checkStagingToken(tokenFor('123456789012345678')).ok, true);
   assert.equal(checkStagingToken('garbage').ok, true);
+});
+
+/**
+ * The invite permission integer, pinned bit by bit.
+ *
+ * TOG-463 ran the three internal actions against a real guild on 2026-09-05.
+ * `announcement.post` passed; `role.assign` and `event.upsert` came back
+ * `422 discord_rejected` wrapping Discord's own 403. The endpoint was right -
+ * it asked, Discord said no - but the run cost a day and ended in a request
+ * for a human to click through Discord settings.
+ *
+ * An invited bot holds exactly what its invite carried and cannot grant itself
+ * more, so an invite that is short by one bit is not a small problem: it is
+ * another round-trip to a person. These tests exist so that gap is a red test
+ * on a laptop instead of a 403 an hour into a staging run.
+ */
+
+test('the invite carries every permission the internal actions need', () => {
+  // Straight from docs/INTERNAL_ACTIONS.md section 8, "the permission bill".
+  const REQUIRED: ReadonlyArray<{ action: string; name: string; bit: bigint }> = [
+    { action: 'role.assign', name: 'Manage Roles', bit: 1n << 28n },
+    { action: 'announcement.post', name: 'View Channel', bit: 1n << 10n },
+    { action: 'announcement.post', name: 'Send Messages', bit: 1n << 11n },
+    { action: 'event.upsert', name: 'Manage Events', bit: 1n << 33n },
+  ];
+  const missing = REQUIRED.filter((p) => !(STAGING_INVITE_PERMISSIONS & p.bit)).map(
+    (p) => `${p.action} needs ${p.name}`,
+  );
+  assert.deepEqual(
+    missing,
+    [],
+    'the staging invite would 403 on these actions; an invited bot cannot grant itself the difference',
+  );
+});
+
+test('the events bits survive the 32-bit shift trap', () => {
+  // `1 << 33` is 2 in JavaScript - the shift operand wraps mod 32 - so the
+  // high bits MUST be BigInt. The failure is silent: you get a plausible
+  // permission integer that grants Kick Members instead of Manage Events.
+  assert.equal(1 << 33, 2, 'if this ever changes, the guard below can be simplified');
+  assert.equal(STAGING_INVITE_PERMISSIONS & (1n << 33n), 1n << 33n, 'Manage Events');
+  assert.equal(STAGING_INVITE_PERMISSIONS & (1n << 44n), 1n << 44n, 'Create Events');
+  // What the buggy number-arithmetic version would produce: the shifts wrap to
+  // bits 1 and 12, so you get Kick Members and Send TTS Messages instead.
+  const WRAPPED = BigInt(STAGING_PERMISSIONS | (1 << 33) | (1 << 44));
+  assert.notEqual(STAGING_INVITE_PERMISSIONS, WRAPPED);
+  assert.ok(
+    STAGING_INVITE_PERMISSIONS >= 1n << 44n,
+    'Create Events is bit 44; a value below 2^44 cannot contain it',
+  );
+});
+
+test('the invite never asks for Administrator', () => {
+  // Staging is where we prove the LIVE bot needs no more than a scoped set.
+  // An Administrator invite would make every staging run pass and prove
+  // nothing about production.
+  assert.equal(STAGING_INVITE_PERMISSIONS & (1n << 3n), 0n, 'Administrator');
+  // Nor the destructive bits - a staging server is disposable, our habits are not.
+  assert.equal(STAGING_INVITE_PERMISSIONS & (1n << 2n), 0n, 'Ban Members');
+  assert.equal(STAGING_INVITE_PERMISSIONS & (1n << 1n), 0n, 'Kick Members');
+  assert.equal(STAGING_INVITE_PERMISSIONS & (1n << 5n), 0n, 'Manage Server');
+});
+
+test('the invite is the onboarding set plus exactly the two events bits', () => {
+  // Pins the relationship rather than the number, so widening the invite is a
+  // deliberate edit here and not a silently larger grant.
+  assert.equal(
+    STAGING_INVITE_PERMISSIONS,
+    BigInt(STAGING_PERMISSIONS) | (1n << 33n) | (1n << 44n),
+  );
+  assert.equal(STAGING_PERMISSIONS, 268520512, 'the onboarding set is unchanged');
+  assert.equal(STAGING_INVITE_PERMISSIONS, 17601044499520n);
+});
+
+test('the invite url carries the wider set, not the onboarding one', () => {
+  // The regression that shipped: spec.ts interpolated STAGING_PERMISSIONS
+  // here, so the link a human opened was short by both events bits.
+  const url = stagingInviteUrl();
+  assert.match(url, new RegExp(`permissions=${STAGING_INVITE_PERMISSIONS}(&|$)`));
+  assert.ok(
+    !url.includes(`permissions=${STAGING_PERMISSIONS}&`),
+    'the invite url must not use the narrow onboarding set',
+  );
+  assert.match(url, new RegExp(`client_id=${STAGING_BOT_APPLICATION_ID}`));
+  assert.ok(!url.includes(LIVE_BOT_APPLICATION_ID), 'never invite the live bot to staging');
+});
+
+test('describePermissions reports the events bits as missing when they are', () => {
+  // staging-verify.ts fails the run on `missing`. Before this change the
+  // events bits were absent from PERMISSION_BITS entirely, so a guild that
+  // could not run event.upsert verified GREEN - a verifier certifying a
+  // configuration we had already measured as broken.
+  const onboardingOnly = BigInt(STAGING_PERMISSIONS);
+  const { missing } = describePermissions(onboardingOnly);
+  assert.deepEqual(missing, ['Manage Events', 'Create Events']);
+
+  const everything = describePermissions(STAGING_INVITE_PERMISSIONS);
+  assert.deepEqual(everything.missing, []);
+  assert.ok(everything.held.includes('Manage Events'));
+});
+
+test('the real 2026-09-05 failing mask is diagnosed, not waved through', () => {
+  // The effective mask measured on the live guild that day. Reproduced here
+  // so the verifier is known to reject the exact configuration that failed.
+  const MEASURED = 2112134023859777n;
+  const { held, missing } = describePermissions(MEASURED);
+  assert.ok(held.includes('View Channels'), 'announcement.post passed that day');
+  assert.ok(held.includes('Send Messages'), 'announcement.post passed that day');
+  assert.ok(missing.includes('Manage Roles'), 'role.assign returned 403 that day');
+  assert.ok(missing.includes('Manage Events'), 'event.upsert returned 403 that day');
 });
