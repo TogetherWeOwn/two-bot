@@ -28,13 +28,19 @@ export const LIVE_GUILD_ID = '326474832151838730';
 export const STAGING_SERVER_NAME = 'TWO Staging';
 
 /**
- * The staging application's real name. The 2026-08-19 spec called it
+ * The staging application's real name. This has moved twice, so the history
+ * matters more than the current value: the 2026-08-19 spec called it
  * `Owen Staging` and had the founder creating it; TWO-21 established that it
- * already existed as `test-two`, made on 14 Aug, five days before the live
- * `Owen`. Nothing is being renamed - the id below is the identity, the name is
- * only what a human reads in the developer portal.
+ * already existed as `test-two`, made on 14 Aug. On 2026-09-05 the operator
+ * bound a token for a *third* application, `Owen QA Test`, and stated on
+ * TOG-45 that it - not `test-two` - is the staging bot. That statement is the
+ * only reason this changed: `staging-doctor.ts` asked for exactly that
+ * confirmation before it would treat the token as identified.
+ *
+ * Nothing is being renamed - the id below is the identity, the name is only
+ * what a human reads in the developer portal.
  */
-export const STAGING_BOT_APPLICATION_NAME = 'test-two';
+export const STAGING_BOT_APPLICATION_NAME = 'Owen QA Test';
 
 /**
  * Discord application ids. These are public identifiers, not secrets - they
@@ -42,7 +48,14 @@ export const STAGING_BOT_APPLICATION_NAME = 'test-two';
  * token for" is otherwise unanswerable without pasting the token somewhere.
  */
 export const LIVE_BOT_APPLICATION_ID = '1539711683898118154';
-export const STAGING_BOT_APPLICATION_ID = '1537629682449649724';
+export const STAGING_BOT_APPLICATION_ID = '1469137636663758888';
+
+/**
+ * The application that held the staging role until 2026-09-05. Kept so that a
+ * token left over in someone's shell is diagnosed as "the superseded staging
+ * bot" rather than the far more alarming "unidentified bot".
+ */
+export const FORMER_STAGING_BOT_APPLICATION_ID = '1537629682449649724';
 
 /**
  * A bot token's first dot-separated segment is the base64 of the application
@@ -91,6 +104,18 @@ export function checkStagingToken(token: string): { ok: boolean; message: string
   }
   if (appId === STAGING_BOT_APPLICATION_ID) {
     return { ok: true, message: `token is ${STAGING_BOT_APPLICATION_NAME} (${appId})` };
+  }
+  if (appId === FORMER_STAGING_BOT_APPLICATION_ID) {
+    return {
+      ok: false,
+      message:
+        `This token belongs to \`test-two\` (${FORMER_STAGING_BOT_APPLICATION_ID}), which was the ` +
+        `staging bot until 2026-09-05. Staging is now ${STAGING_BOT_APPLICATION_NAME} ` +
+        `(${STAGING_BOT_APPLICATION_ID}).\n` +
+        '  Refusing to run: the two bots are in different guilds, so a run against the old one ' +
+        'would silently do nothing useful.\n' +
+        '  Re-read DISCORD_STAGING_BOT_TOKEN from the secrets store - your shell has a stale value.',
+    };
   }
   if (appId === null) {
     return { ok: true, message: 'token shape not recognised - continuing, Discord will judge it' };

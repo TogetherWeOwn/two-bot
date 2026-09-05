@@ -3,13 +3,34 @@
 This is written for QA. You should never need to ask an engineer to reset
 staging, and you should never point a test at the live TWO server.
 
-**Status: the code is ready, the environment is not.** Two things are
-outstanding, both with the founder: the `test-two` bot token (TWO-21) and a
-Postgres host for the staging database (TWO-11). The server itself no longer
-needs a human — the bot creates it, see "Building the staging server" below.
-Everything else works today; the steps that need the token are marked, and
-`scripts/staging-doctor.ts` will tell you where things stand without you
-having to read the rest of this page.
+**Status (2026-09-05): the database half is live, the Discord half is not.**
+
+The token landed and the database is real, so four of the five readiness
+checks are green:
+
+| Check | State |
+|---|---|
+| staging bot token | **ok** — `Owen QA Test` (`1469137636663758888`) |
+| staging database | **ok** — `two_bot_staging` |
+| schema | **ok** — 9 migrations applied |
+| fixtures | **ok** — the known state |
+| staging Discord server | **blocked** — see below |
+
+**The one blocker: the staging bot is a member of the live TWO server.**
+`Owen QA Test` is in `TogetherWeOwn` (`326474832151838730`) and nothing else.
+`staging-provision.ts` therefore aborts before any network write — a bot
+sitting in production receives production gateway events and can act there
+with whatever permissions its invite carried, which is the exact outcome this
+whole document exists to prevent. It is not a bug and it must not be edited
+around.
+
+**To unblock it, a human with Manage Server on the live TWO guild must remove
+`Owen QA Test` from it.** Nothing else is outstanding; re-run
+`staging-provision.ts --apply` afterwards and the bot builds its own server.
+
+Everything that does not need Discord works today, including the full reset
+loop QA runs between test runs. `scripts/staging-doctor.ts` will tell you
+where things stand without you having to read the rest of this page.
 
 ---
 
@@ -29,7 +50,7 @@ having to read the rest of this page.
 |---|---|---|
 | `TWO_STAGING_DATABASE_URL` | Postgres URL for the staging database | the `two_bot_staging` database, already provisioned and migrated — see [The staging database](#the-staging-database) |
 | `DISCORD_STAGING_GUILD_ID` | id of the `TWO Staging` server | printed by `staging-provision.ts` and posted on TWO-25 — not secret |
-| `DISCORD_STAGING_BOT_TOKEN` | the `test-two` bot token | secrets store, bound to you and to me |
+| `DISCORD_STAGING_BOT_TOKEN` | the `Owen QA Test` bot token | secrets store as `discord_staging_bot_token`, bound to you and to me |
 
 Note what is **not** here: `TWO_DATABASE_URL`, `DISCORD_GUILD_ID` and
 `DISCORD_BOT_TOKEN` are the live ones. The staging names are different on
@@ -38,14 +59,20 @@ into the real funnel.
 
 ### Which bot is which
 
-Two applications, and they are easy to confuse because one of them has two
-names. Application ids are public — they are in every invite URL — so they are
-written down in `src/staging/spec.ts` and checked at startup:
+Three applications now, and they are easy to confuse. Application ids are
+public — they are in every invite URL — so they are written down in
+`src/staging/spec.ts` and checked at startup:
 
 | Application | id | Use |
 |---|---|---|
 | `Owen` | `1539711683898118154` | **live.** Never in a staging variable. |
-| `test-two` (created 14 Aug, five days before `Owen`) | `1537629682449649724` | staging |
+| `Owen QA Test` | `1469137636663758888` | **staging** — bound 2026-09-05 |
+| `test-two` (created 14 Aug) | `1537629682449649724` | **superseded.** Was staging until 2026-09-05 |
+
+`test-two` is still a real bot with a working token, so a stale shell would
+keep running happily against the wrong guild. `checkStagingToken` therefore
+**refuses** it by id rather than treating it as an unknown third app. If you
+hit that refusal, re-read the secret — do not edit the spec.
 
 `staging-provision.ts` and `staging-verify.ts` both decode the application id
 out of the token you gave them (it is the first dot-separated segment, base64)
@@ -368,7 +395,7 @@ not a crash, which is why it can survive for days. The fix is one drag in
 | Text channels | `#welcome` `#general` `#events` `#bot-log` |
 | Voice | `Voice 1` — a real one, because `first_voice_session` cannot be asserted without it |
 | Roles | `Moderator` `Member` `Game: Test` |
-| Bot application | `test-two` (`1537629682449649724`) — Server Members Intent **on** (already), Presence **off**, Message Content **off**. Public Bot should be **off**; as of 2026-08-20 it is still **on**, which is hygiene rather than a blocker — the provisioning script now detects the consequences itself |
+| Bot application | `Owen QA Test` (`1469137636663758888`) — Server Members Intent **on**, Presence **off**, Message Content **off**. Public Bot should be **off** — verify this on the new application; the provisioning script detects the consequences either way. **Must not be a member of the live TWO guild** (`326474832151838730`); as of 2026-09-05 it is, and that is the open blocker |
 | Permissions | owner — implicit. `268520512` remains the scoped set the **live** bot is invited with |
 
 The permission integer decodes to: Add Reactions, View Channels, Send
@@ -403,22 +430,22 @@ across deliberately, one command, where you can see it.
 is more reliable than a page someone has to remember to edit. What follows is
 the state on **2026-08-25**.
 
-**One thing is missing now, not two.** The database is done (see below). What
-remains is the token, and the guild that cannot be created without it.
+**Resolved 2026-09-05.** `discord_staging_bot_token` is bound to QA and to me
+as `DISCORD_STAGING_BOT_TOKEN`, and it is live — `GET /users/@me` returns
+`Owen QA Test` (`1469137636663758888`). The database is done too (see below).
 
-The first thing, from the founder, via TWO-21:
+What remains is **not** a credential: the staging bot is a member of the live
+TWO guild, so `staging-provision.ts` refuses to build the staging server. That
+needs a human with Manage Server on `326474832151838730` to kick
+`Owen QA Test`. See the status block at the top of this file.
 
-1. `discord_staging_bot_token` — the `test-two` bot token in the secrets
-   store, bound to QA and to me. The application already exists
-   (`1537629682449649724`); the token needs to reach our environments.
-
-   **Checked again 2026-08-20: still absent here.** What was present instead
-   was the *live* bot's token under the generic name `DISCORD_BOT_TOKEN` —
-   which is correct for the production bot and useless for staging. The value
-   itself was never missing: it had been bound to the **Web Lead**, who does
-   not need it. "In the store" and "bound to the agent that needs it" are
-   different things, and from outside they look identical. Report absence; do
-   not improvise around it.
+Kept because the lesson outlived the blocker: through 2026-08-20 the token
+looked absent, and what was present instead was the *live* bot's token under
+the generic name `DISCORD_BOT_TOKEN` — correct for production, useless and
+dangerous for staging. The value was never missing; it had been bound to the
+**Web Lead**, who does not need it. "In the store" and "bound to the agent
+that needs it" are different things, and from outside they look identical.
+Report absence; do not improvise around it.
 
 ~~The second, also the founder, via TWO-11: a Postgres host.~~ **Done
 2026-08-25 (TOG-45).** The host was already reachable and already had an empty
