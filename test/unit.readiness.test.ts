@@ -82,19 +82,30 @@ test('a token from some third application blocks on a named owner', () => {
   assert.match(c.owner ?? '', /founder/i);
 });
 
-test('a missing guild is a chore when the token works', () => {
-  const c = get({ ...GOOD, DISCORD_STAGING_GUILD_ID: undefined }, 'guild');
-  assert.equal(c.status, 'fix');
-  assert.match(c.action ?? '', /staging-provision\.ts --apply/);
+// These two used to assert that a missing guild was a `fix` when the token
+// worked and `blocked` when it did not - i.e. that the token decided the
+// answer, because the bot was going to build the server itself. Measured on
+// 2026-09-05 it cannot: POST /guilds returns code 20001 to any bot token. A
+// perfect token no longer helps, so the honest status is `blocked` on a human
+// either way. Calling it a `fix` sent QA to re-run a command that could never
+// succeed - the exact failure this module exists to prevent.
+test('a missing guild is blocked on a human whether or not the token works', () => {
+  for (const token of [GOOD.DISCORD_STAGING_BOT_TOKEN, undefined]) {
+    const c = get(
+      { ...GOOD, DISCORD_STAGING_GUILD_ID: undefined, DISCORD_STAGING_BOT_TOKEN: token },
+      'guild',
+    );
+    assert.equal(c.status, 'blocked', `token present: ${Boolean(token)}`);
+    assert.ok(c.owner, 'a blocked check must name who unblocks it');
+    // Never point at the create path again - that is the regression.
+    assert.doesNotMatch(c.action ?? '', /--apply/);
+  }
 });
 
-test('a missing guild is a wait when the token does not', () => {
-  const c = get(
-    { ...GOOD, DISCORD_STAGING_GUILD_ID: undefined, DISCORD_STAGING_BOT_TOKEN: undefined },
-    'guild',
-  );
-  assert.equal(c.status, 'blocked');
-  assert.match(c.owner ?? '', /founder/i);
+test('the missing-guild action tells a human how to make the server themselves', () => {
+  const c = get({ ...GOOD, DISCORD_STAGING_GUILD_ID: undefined }, 'guild');
+  assert.match(c.detail, /20001/, 'say why no script can do this');
+  assert.match(c.action ?? '', /DISCORD_STAGING_GUILD_ID/);
 });
 
 test('the live guild id in the staging variable is a fix, not a wait', () => {

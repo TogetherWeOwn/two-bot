@@ -7,15 +7,20 @@
  *
  * Two things in here are worth reading before you trust the script:
  *
- * 1. THE TEN-GUILD CLIFF. Discord lets a bot create a guild only while it is
- *    in fewer than ten. A re-run that creates a second `TWO Staging` is not
- *    just untidy - ten of them and the bot can never create a guild again, and
- *    a bot cannot hand ownership to a person, so there is no clean way back.
- *    `chooseGuild` therefore refuses to create whenever it is not certain, and
- *    keeps two guilds of headroom. It also never fails quietly: any guild the
- *    staging bot is in that we did not put it in comes back as a warning from
- *    `inspectGuildList`, because the only way that happens is somebody else
- *    inviting it - which the Public Bot setting allows.
+ * 1. THIS BOT CANNOT CREATE A GUILD AT ALL. Discord documents `POST /guilds`
+ *    as available to a bot in fewer than ten guilds, and this module was built
+ *    on that. It is not true for us: measured 2026-09-05 against the real
+ *    token, at zero guilds, the endpoint returns HTTP 400 `code 20001`,
+ *    "Bots cannot use this endpoint" - on a bare payload and on v9 too. So
+ *    `chooseGuild` never returns `create`; it adopts a guild a human made and
+ *    otherwise stops with the invite instructions in
+ *    `guildCreateIsUnavailable`. The ten-guild refusals below are kept because
+ *    a bot at the limit has a different problem worth naming, and because
+ *    nothing here should quietly assume the endpoint stays shut forever.
+ *    It also never fails quietly: any guild the staging bot is in that we did
+ *    not put it in comes back as a warning from `inspectGuildList`, because
+ *    the only way that happens is somebody else inviting it - which the Public
+ *    Bot setting allows.
  *
  * 2. OWNERSHIP CHANGES THE ROLE-HIERARCHY QUESTION. The usual staging failure
  *    is that the bot's role sits below a role it must grant, Discord answers
@@ -23,9 +28,17 @@
  *    not to pick a game". That is real, and it is why `staging-verify.ts`
  *    checks position first. But a guild OWNER bypasses permission and
  *    hierarchy checks entirely, and a bot that creates a guild is its owner.
- *    So on a bot-created staging server the check must not fire; on a
- *    founder-created one, where the bot was invited like any other bot, it
- *    must. `evaluateHierarchy` is the one place that distinction is made.
+ *    `evaluateHierarchy` is the one place that distinction is made.
+ *
+ *    Read (1) before relying on the owner branch: now that the bot cannot
+ *    create a guild, every real staging server is human-created and the bot is
+ *    an ordinary invited member of it. The `ownerBypass` path is therefore
+ *    effectively dead in production, and the hierarchy check DOES fire. Anyone
+ *    who was expecting role assignment to "just work because the bot owns the
+ *    guild" should expect the opposite: the bot's role must be dragged above
+ *    Moderator/Member/Game: Test, or `evaluateHierarchy` will say so and
+ *    `staging-verify.ts` will fail. The branch is kept because it is correct
+ *    for any guild the bot does own, and because it costs nothing.
  */
 import {
   LIVE_GUILD_ID,
@@ -35,6 +48,7 @@ import {
   STAGING_SERVER_NAME,
   STAGING_TEXT_CHANNELS,
   STAGING_VOICE_CHANNELS,
+  stagingInviteUrl,
 } from './spec.ts';
 
 export const CHANNEL_TYPE_TEXT = 0;
@@ -56,8 +70,14 @@ export type PartialRole = {
 };
 export type PartialChannel = { id: string; name: string; type: number };
 
+/**
+ * There is no `create` variant. There used to be, and dropping it is the point
+ * rather than tidying: with only `reconcile` and `abort` left, the compiler
+ * guarantees no caller can be written that assumes a guild will be created,
+ * which is how `scripts/staging-provision.ts` was shown to still have a dead
+ * create branch. See `guildCreateIsUnavailable`.
+ */
 export type GuildChoice = (
-  | { action: 'create'; reason: string }
   | { action: 'reconcile'; guildId: string; reason: string }
   | { action: 'abort'; reason: string }
 ) & {
@@ -131,12 +151,55 @@ export function inspectGuildList(opts: {
 }
 
 /**
- * Create a new staging guild, adopt an existing one, or stop and ask a human.
+ * Why this code no longer creates a guild, and what to do instead.
  *
- * `explicitGuildId` is DISCORD_STAGING_GUILD_ID. When it is set the founder
- * has already made the server by hand and we never create anything - we only
- * fill in the inside. That is the branch the TWO-25 thread asks us to check
- * for before running.
+ * On 2026-09-05, with the staging bot in zero guilds and every guard passing,
+ * `POST /guilds` was run for real against `Owen QA Test`
+ * (1469137636663758888). Discord answered:
+ *
+ *     HTTP 400  {"message":"Bots cannot use this endpoint","code":20001}
+ *
+ * Retried with a bare `{"name":"TWO Staging"}` body and on API v9: same error
+ * both times. So it is the endpoint refusing bots, not our payload and not our
+ * API version. Discord's documented "bots in fewer than ten guilds may create
+ * one" no longer holds for this application, and no permission, intent or
+ * portal setting changes it - a bot token simply cannot reach that endpoint.
+ *
+ * This is deliberately a function returning the message rather than a comment,
+ * so the explanation reaches the person running the script instead of only the
+ * person reading the source. It names the measurement, because the next person
+ * to hit this will otherwise assume the token is wrong and go hunting for a
+ * credential that is already correct.
+ */
+export function guildCreateIsUnavailable(guildCount: number): string {
+  return (
+    `No "${STAGING_SERVER_NAME}" found and the bot is in ${guildCount} guild(s), but this bot ` +
+    'cannot create one: Discord answers POST /guilds with HTTP 400 ' +
+    '{"message":"Bots cannot use this endpoint","code":20001}, measured 2026-09-05 with a bare ' +
+    'payload and on API v9 as well. It is the endpoint, not the payload, and not a permission ' +
+    'you can grant.\n' +
+    '  A human must make the server instead - about a minute of clicking:\n' +
+    `    1. In Discord, Add a Server > Create My Own, and name it "${STAGING_SERVER_NAME}".\n` +
+    `    2. Open this link and pick that server:\n       ${stagingInviteUrl()}\n` +
+    '    3. Right-click the server > Copy Server ID (needs Developer Mode on), and set\n' +
+    '       DISCORD_STAGING_GUILD_ID to it. The id is not a secret.\n' +
+    '    4. Re-run this script. It will adopt that server and fill in every channel and role.\n' +
+    '  WHO can do step 2: this application has Public Bot OFF, so the invite link works only\n' +
+    "  for the application's own owner in the developer portal. Anyone else opening it gets a\n" +
+    '  Discord error, not a server picker. Either the portal owner does steps 1-2, or they turn\n' +
+    '  Public Bot on first.\n' +
+    '  Nothing was changed.'
+  );
+}
+
+/**
+ * Adopt an existing staging guild, or stop and tell a human exactly what to do.
+ *
+ * `explicitGuildId` is DISCORD_STAGING_GUILD_ID. When it is set a human has
+ * already made the server by hand and invited the bot, and we only fill in the
+ * inside. Since 2026-09-05 that is the ONLY route to a staging server: this
+ * function never returns `create` any more, because the endpoint it depended
+ * on refuses bots outright. See `guildCreateIsUnavailable`.
  */
 export function chooseGuild(opts: {
   guilds: PartialGuild[];
@@ -218,10 +281,14 @@ export function chooseGuild(opts: {
     };
   }
 
-  // From here we would be about to POST /guilds. Discord refuses that call
-  // outright at ten guilds; we stop earlier, at the headroom, because the
-  // tenth is unrecoverable. Both messages name the count and the limit so the
-  // failure reads as an explanation rather than an HTTP error deep in a QA run.
+  // From here the old code returned `create` and the script called POST
+  // /guilds. That call does not work for this bot - see
+  // `guildCreateIsUnavailable` - so the only honest answer is to stop and hand
+  // a human the invite link. The two guild-count refusals below are kept
+  // because they are still true and still more specific than the generic one:
+  // a bot at the limit has a different problem to fix (strays eating slots)
+  // than a bot at zero, and telling someone "invite me" when their real
+  // problem is nine stray guilds would waste the round trip.
   if (guilds.length >= GUILD_CREATE_LIMIT) {
     return {
       action: 'abort',
@@ -250,21 +317,28 @@ export function chooseGuild(opts: {
     };
   }
   return {
-    action: 'create',
+    action: 'abort',
     warnings,
-    reason: `No "${STAGING_SERVER_NAME}" found and the bot is in ${guilds.length} guilds. Safe to create one.`,
+    reason: guildCreateIsUnavailable(guilds.length),
   };
 }
 
 /**
  * The POST /guilds body.
  *
+ * NOTHING CALLS THIS ANY MORE. `POST /guilds` returns `code 20001`, "Bots
+ * cannot use this endpoint", for our bot - see `guildCreateIsUnavailable`. It
+ * is kept, and kept tested, for one reason: if Discord ever reopens the
+ * endpoint, or a future staging bot is a user-authorised app that can reach
+ * it, this is the payload we had already worked out. Deleting it would throw
+ * that away to save nine lines.
+ *
  * Channels are declared here so Discord does not invent its own `general` /
  * `General` pair alongside ours. Roles are deliberately NOT declared: the
  * create payload requires the first entry to be a hand-written `@everyone`
  * with a permission integer we would be guessing at, and creating the three
  * roles afterwards runs the exact same code path as reconciling a
- * founder-made server. One path, tested once.
+ * human-made server. One path, tested once.
  */
 export function guildCreatePayload(): {
   name: string;

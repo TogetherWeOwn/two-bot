@@ -145,7 +145,7 @@ function tokenCheck(env: Env): ReadinessCheck {
   };
 }
 
-function guildCheck(env: Env, tokenOk: boolean): ReadinessCheck {
+function guildCheck(env: Env): ReadinessCheck {
   const id = env.DISCORD_STAGING_GUILD_ID?.trim();
   const base = { id: 'guild' as const, title: 'staging Discord server' };
 
@@ -160,24 +160,26 @@ function guildCheck(env: Env, tokenOk: boolean): ReadinessCheck {
   if (id) {
     return { ...base, status: 'ok', detail: `guild ${id}.` };
   }
-  // No id yet. Whether that is a chore or a wait depends entirely on the token,
-  // because the bot builds the server itself and cannot do so without one.
-  if (!tokenOk) {
-    return {
-      ...base,
-      status: 'blocked',
-      detail: 'no staging server exists yet, and it cannot be created without the token above.',
-      owner: 'founder (TWO-21), via the token',
-      action: 'nothing to do here until the token lands',
-    };
-  }
+  // No id yet, and no script can produce one. This used to say "the bot creates
+  // its own" and send QA to `staging-provision --apply`. That was measured on
+  // 2026-09-05 and it is false: Discord answers POST /guilds with `code 20001`,
+  // "Bots cannot use this endpoint". So this is `blocked` with a named human
+  // owner, not a `fix` for whoever is at the keyboard. Calling it a `fix` is
+  // exactly how QA loses an afternoon re-running a command that cannot succeed.
+  //
+  // The token no longer changes this answer: a bot holding a perfect token
+  // still cannot make a server, so there is nothing for `tokenOk` to decide.
   return {
     ...base,
-    status: 'fix',
-    detail: 'no staging server yet - the bot creates its own.',
+    status: 'blocked',
+    detail: 'no staging server exists, and no bot can create one (POST /guilds -> code 20001).',
+    owner:
+      "the owner of Discord application 1469137636663758888 - Public Bot is OFF, so only they " +
+      'can use the invite link. About a minute of clicking',
     action:
-      'node scripts/staging-provision.ts --apply, then put the guild id it prints in ' +
-      'DISCORD_STAGING_GUILD_ID (it is not a secret)',
+      'create a server named "TWO Staging" in the Discord client, invite the bot with the link ' +
+      '`node scripts/staging-provision.ts` prints, then set DISCORD_STAGING_GUILD_ID to its id ' +
+      '(not a secret) and re-run that script to fill in the channels and roles',
   };
 }
 
@@ -251,7 +253,7 @@ function databaseCheck(env: Env): ReadinessCheck {
  */
 export function stagingEnvChecks(env: Env): ReadinessCheck[] {
   const token = tokenCheck(env);
-  return [token, guildCheck(env, token.status === 'ok'), databaseCheck(env)];
+  return [token, guildCheck(env), databaseCheck(env)];
 }
 
 /**

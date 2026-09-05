@@ -6,14 +6,24 @@
  *   node scripts/staging-provision.ts --apply --invite            # + an invite link for a human
  *   node scripts/staging-provision.ts --apply --grant-admin <id>  # + make that user an admin
  *
- * WHY THIS EXISTS
+ * WHAT THIS DOES, AND WHAT IT NO LONGER DOES
  *
- * Discord lets any bot in fewer than ten guilds create one with POST /guilds,
- * and a brand-new staging bot is in zero. So the staging server does not need
- * a human to sit and click: the bot makes it, owns it, and fills it in. The
- * founder's remaining job is one token.
+ * It fills in a staging server that a human has already created and invited
+ * the bot to. It does NOT create the server.
  *
- * WHAT IT CREATES
+ * It used to. Discord documents POST /guilds as available to any bot in fewer
+ * than ten guilds, and this script was built on that. Run for real on
+ * 2026-09-05 with the staging bot in zero guilds, Discord answered HTTP 400
+ * {"message":"Bots cannot use this endpoint","code":20001} - same on a bare
+ * payload and on API v9, so it is the endpoint, not us. There is no setting,
+ * intent or permission that reopens it.
+ *
+ * So the one-minute human step is unavoidable. Run this with no
+ * DISCORD_STAGING_GUILD_ID set and it prints exactly what to do, including the
+ * invite link. Then set the id and re-run, and everything below happens
+ * automatically.
+ *
+ * WHAT IT CREATES INSIDE THAT SERVER
  *
  *   text   #welcome #general #events #bot-log
  *   voice  Voice 1
@@ -22,20 +32,24 @@
  * exactly as named in src/staging/spec.ts, because the integration suite
  * asserts on those names.
  *
- * WHY IT IS DRY RUN BY DEFAULT
+ * WHY IT IS STILL DRY RUN BY DEFAULT
  *
- * Creating a guild is close to irreversible in the ways that matter. The bot
- * becomes owner, and Discord does not allow a bot to transfer ownership to a
- * person - so a `TWO Staging` created by mistake can be deleted but never
- * handed over. Worse, a bot may only create guilds while it is in fewer than
- * ten; a loop that made ten of them would permanently remove the ability to
- * make an eleventh. Print first, then --apply.
+ * It writes channels and roles into a real server. That is far less dangerous
+ * than creating one, but it is still someone else's Discord, and printing the
+ * plan first costs nothing. Print, then --apply.
  *
- * IF THE FOUNDER ALREADY MADE THE SERVER BY HAND
+ * HOW THE SERVER GETS MADE
  *
- * Set DISCORD_STAGING_GUILD_ID and the script never creates anything - it
- * adopts that guild and only fills in the missing channels and roles. Invite
- * the bot to it first.
+ * A human makes it and invites the bot - there is no longer any other way, see
+ * above. Set DISCORD_STAGING_GUILD_ID to it and this script adopts that guild
+ * and fills in the missing channels and roles. Run with the variable unset for
+ * the full instructions and the invite link.
+ *
+ * ONE CONSEQUENCE WORTH KNOWING. On a human-made server the bot is an ordinary
+ * invited member, not the owner, so it does NOT bypass role hierarchy. Its own
+ * role must sit above Moderator, Member and Game: Test or role assignment
+ * fails with a silent 403. This script pushes those roles down automatically
+ * when it can, and tells you to drag the bot up when it cannot.
  *
  * WHAT IT NEVER DOES
  *
@@ -51,7 +65,6 @@ import {
   ROLE_PERMISSIONS,
   chooseGuild,
   evaluateHierarchy,
-  guildCreatePayload,
   planChannels,
   planRoles,
   type PartialChannel,
@@ -175,33 +188,11 @@ if (choice.action === 'abort') {
   process.exit(1);
 }
 
-let guildId: string;
-if (choice.action === 'create') {
-  const payload = guildCreatePayload();
-  console.log('creating the guild');
-  const created = await write<{ id: string; name: string }>(
-    `POST /guilds  name="${payload.name}" with ${payload.channels.length} channels`,
-    'POST',
-    '/guilds',
-    payload,
-  );
-  if (!created) {
-    if (!APPLY) {
-      console.log(
-        '\n  Dry run stops here: everything after this point depends on the new guild id.\n' +
-          '  Re-run with --apply to create it, and the same command will go on to fill it in.\n',
-      );
-      process.exit(0);
-    }
-    console.error('\nGuild creation failed. Nothing else attempted.\n');
-    process.exit(1);
-  }
-  guildId = created.id;
-  console.log(`\n  >>> STAGING GUILD ID: ${guildId}    <<<`);
-  console.log('  Put this in DISCORD_STAGING_GUILD_ID and post it on TWO-25.\n');
-} else {
-  guildId = choice.guildId;
-}
+// `chooseGuild` only ever returns `reconcile` or `abort` now, and `abort`
+// exited above. There is no create branch because there is no create: the
+// endpoint refuses bots outright (see `guildCreateIsUnavailable`). This script
+// now only ever fills in a server a human already made.
+const guildId: string = choice.guildId;
 
 // --- what is in it now ------------------------------------------------------
 const guild = await api<{ id: string; name: string; owner_id: string }>('GET', `/guilds/${guildId}`);
