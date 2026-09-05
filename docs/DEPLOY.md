@@ -130,6 +130,22 @@ the Discord developer portal first. Invite attribution and first-message timing
 are lost for good for any gap in coverage; join dates are not (see
 docs/RUNBOOK.md, "Recover the history").
 
+Preflight also resolves whether the bot can actually post in
+`DISCORD_STAFF_ALERT_CHANNEL_ID`, because a raid alert that cannot be delivered
+is not an error — `makeRaidAnnouncer()` logs `raid_alert_undeliverable` and
+carries on, so the first sign of trouble is a join burst nobody was told about.
+
+**Known warning, live server, 2026-09-05.** `#🔧〢updates-and-changes` denies
+`View Channel` to `@everyone` and allows it back to `Staff`. The bot's roles are
+`Prospect` and `Owen`, neither of which is `Staff`, so the only reason alerts are
+deliverable today is that `Owen` still carries **Administrator**. When TOG-64
+trims that bit, `View` goes false while `Send` stays true — the channel keeps
+looking healthy to anything that checks `Send` alone, and alerts silently stop.
+Before the trim lands, add a channel overwrite allowing `View Channel` to the
+`Owen` role (`1539718644953514087`). Preflight reports this as a `WARN`, not a
+`FAIL`, because it is correct today; `src/discord/channelAccess.ts` does the
+overwrite arithmetic and `test/unit.channelaccess.test.ts` pins the live shape.
+
 ## 6. Deploy, and what to check
 
 Press **Deploy**. Then, in order:

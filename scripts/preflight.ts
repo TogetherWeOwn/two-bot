@@ -16,6 +16,11 @@
  * The token is never printed. See docs/SECRETS.md.
  */
 import { readSecret } from '../src/core/credentials.ts';
+import {
+  resolveChannelAccess,
+  type ChannelAccess,
+  type Overwrite,
+} from '../src/discord/channelAccess.ts';
 
 const API = 'https://discord.com/api/v10';
 
@@ -31,6 +36,34 @@ if (!token) {
   process.exit(2);
 }
 const guildFilter = process.env.DISCORD_GUILD_ID || null;
+const alertChannelId = process.env.DISCORD_STAFF_ALERT_CHANNEL_ID || null;
+
+interface ChannelShape {
+  name: string;
+  type: number;
+  guild_id: string;
+  permission_overwrites?: Overwrite[];
+}
+
+async function effectivePerms(
+  guildId: string,
+  botId: string,
+  ch: ChannelShape,
+): Promise<ChannelAccess | null> {
+  const [member, roles] = await Promise.all([
+    api(`/guilds/${guildId}/members/${botId}`),
+    api(`/guilds/${guildId}/roles`),
+  ]);
+  if (member.status !== 200 || roles.status !== 200) return null;
+
+  return resolveChannelAccess({
+    guildId,
+    botId,
+    botRoleIds: (member.body as { roles: string[] }).roles,
+    guildRoles: roles.body as { id: string; permissions: string }[],
+    overwrites: ch.permission_overwrites ?? [],
+  });
+}
 
 let fails = 0;
 let warns = 0;
@@ -133,6 +166,44 @@ for (const g of targets) {
     pass(`invite list readable`, `${inv.body.length} invites, ${used} with uses on the clock`);
   } else {
     fail('cannot read invite list', `HTTP ${inv.status} - joins will all be "unknown"`);
+  }
+
+  // 5. Can the alert actually be delivered? makeRaidAnnouncer degrades to
+  //    log-only when the bot cannot post (raidAlert.ts, 'raid_alert_undeliverable'),
+  //    so a misconfigured channel is not a crash - it is a raid nobody hears
+  //    about. Resolve the effective overwrites the way Discord does rather than
+  //    trusting the guild-level bits above: the six-bit grant is guild-wide and
+  //    says nothing about one channel's @everyone deny.
+  if (alertChannelId) {
+    const ch = await api(`/channels/${alertChannelId}`);
+    const c = ch.body as ChannelShape;
+    if (ch.status !== 200) {
+      fail('staff alert channel unreadable', `HTTP ${ch.status} - raid alerts will only reach the log`);
+    } else if (c.guild_id !== g.id) {
+      fail('staff alert channel is in another guild', `channel guild ${c.guild_id} != ${g.id}`);
+    } else if (c.type !== 0 && c.type !== 5) {
+      fail('staff alert channel is not a text channel', `type ${c.type} - botCanPost() rejects it`);
+    } else {
+      const eff = await effectivePerms(g.id, bot.id, c);
+      if (eff === null) {
+        warn('could not resolve alert channel permissions', 'check it by hand before relying on alerts');
+      } else if (eff.admin) {
+        // True today and the reason this currently works. TOG-64 removes it.
+        warn(
+          `alert channel #${c.name} posts only via Administrator`,
+          'the @everyone deny below applies the moment Administrator is trimmed (TOG-64) - give the bot a Staff-side allow first',
+        );
+      } else if (!eff.view || !eff.send) {
+        fail(
+          `cannot post in alert channel #${c.name}`,
+          `${!eff.view ? 'View denied' : 'Send denied'} - raid alerts silently degrade to log-only`,
+        );
+      } else {
+        pass(`alert channel #${c.name} writable`, 'raid alerts will be delivered');
+      }
+    }
+  } else {
+    warn('DISCORD_STAFF_ALERT_CHANNEL_ID unset', 'raid alerts reach the process log only');
   }
 }
 
