@@ -381,9 +381,9 @@ Share the invite link directly, not in a public channel.
 
 ⚠️ **Both of these flags were written for a server the bot owned, and expect to
 fail on a human-made one.** `--invite` needs Create Instant Invite (bit 0) and
-`--grant-admin` creates an Administrator role; the scoped invite permission set
-`268520512` grants neither, and an invited bot cannot exceed what its invite
-carried. Expect `HTTP 403` from both. Neither is needed for QA — the person who
+`--grant-admin` creates an Administrator role; the invite permission set
+`17601044499520` grants neither, and an invited bot cannot exceed what its
+invite carried. Expect `HTTP 403` from both. Neither is needed for QA — the person who
 made the server is already in it and can invite anyone else from the Discord
 client in two clicks. Untested against a real human-made guild as of
 2026-09-05.
@@ -399,9 +399,14 @@ That reverses both consequences:
 1. **The role-position failure described below CAN happen, and is the one to
    expect.** The bot's role must sit above `Moderator`, `Member` and
    `Game: Test`. `staging-verify.ts` checks this first.
-2. **The scoped permission set `268520512` is provable on staging again** — an
-   invited bot holds exactly what its invite carried, so a green staging run is
-   real evidence about what the live bot needs.
+2. **The invite permission set is provable on staging again** — an invited bot
+   holds exactly what its invite carried, so a green staging run is real
+   evidence about what the live bot needs.
+3. **The invite must carry Manage Events and Create Events**, which the
+   onboarding set `268520512` does not. `event.upsert` posts to
+   `/guilds/{id}/scheduled-events`; TOG-463 measured the `403` on a real guild.
+   `STAGING_INVITE_PERMISSIONS` (`17601044499520`) is what `stagingInviteUrl()`
+   emits, and `test/unit.staging.test.ts` fails if an action's bit goes missing.
 
 The owner-bypass branch still exists in `evaluateHierarchy` and is still
 correct for any guild the bot does happen to own; it is simply not the path any
@@ -439,19 +444,29 @@ human-made server, not its owner.)
 
 | | |
 |---|---|
-| Server | `TWO Staging` — private, created and owned by the staging bot |
+| Server | `TWO Staging` — private, created by a human and owned by them. The bot is an ordinary invited member; it cannot create a server (`code 20001`) |
 | Text channels | `#welcome` `#general` `#events` `#bot-log` |
 | Voice | `Voice 1` — a real one, because `first_voice_session` cannot be asserted without it |
 | Roles | `Moderator` `Member` `Game: Test` |
 | Bot application | `Owen QA Test` (`1469137636663758888`) — Server Members Intent **on**, Presence **off**, Message Content **off**. Public Bot should be **off** — verify this on the new application; the provisioning script detects the consequences either way. **Must not be a member of the live TWO guild** (`326474832151838730`); as of 2026-09-05 it is, and that is the open blocker |
-| Permissions | owner — implicit. `268520512` remains the scoped set the **live** bot is invited with |
+| Permissions | `17601044499520` — the invite set (`STAGING_INVITE_PERMISSIONS`). `268520512` remains the narrower onboarding set the **live** bot is invited with |
 
-The permission integer decodes to: Add Reactions, View Channels, Send
-Messages, Embed Links, Read Message History, Manage Roles. We used to say
-staging is where we prove the live bot needs nothing more than that. Since the
-bot now owns the staging guild, it holds everything there regardless, so that
-proof has to happen against the live invite instead. Do not read a green
-staging run as evidence about live permissions.
+The invite integer decodes to: Add Reactions, View Channels, Send Messages,
+Embed Links, Read Message History, Manage Roles, **Manage Events**, **Create
+Events**. The first six are `STAGING_PERMISSIONS`, the onboarding set. The two
+events bits are there because `event.upsert` calls
+`POST /guilds/{id}/scheduled-events`, which Manage Server does not imply —
+TOG-463 measured that as a real `403` against a real guild on 2026-09-05, and
+an invited bot can never exceed what its invite carried. Inviting with the
+narrow set therefore guarantees a second trip to a human.
+
+Staging is where we prove the live bot needs no more than this. That proof is
+real again now that the bot is an invited member rather than the guild owner —
+an owner bypasses the mask entirely and would make every run pass.
+
+⚠️ **Changing the invite integer invalidates links already sent.** A server
+made from an older link has to be re-authorized with a new one; the bot cannot
+top itself up.
 
 ---
 
