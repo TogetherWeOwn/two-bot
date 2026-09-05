@@ -97,7 +97,10 @@ try {
   let mismatched = 0;
   console.log('funnel state');
   for (const [type, expected] of Object.entries(EXPECTED_FUNNEL)) {
-    const actual = await store.countByType(type as EventType);
+    // Scoped to this guild. The staging DB keeps a fixture set per guild id it
+    // has ever been seeded with, so an unscoped count sums them and reports
+    // every row as doubled on a database that is actually correct.
+    const actual = await store.countByType(type as EventType, guildId);
     const ok = actual === expected;
     if (!ok) mismatched++;
     console.log(`  ${ok ? 'ok  ' : 'BAD '} ${type.padEnd(22)} ${actual}${ok ? '' : ` (expected ${expected})`}`);

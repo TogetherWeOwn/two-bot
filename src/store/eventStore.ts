@@ -321,10 +321,29 @@ export class EventStore {
     return Number(row?.n ?? 0);
   }
 
-  async countByType(type: EventType): Promise<number> {
-    const row = await this.db
-      .prepare(`SELECT COUNT(*) AS n FROM events WHERE event_type = ?`)
-      .get<{ n: number }>(type);
+  /**
+   * Count events of one type, optionally within a single guild.
+   *
+   * `guildId` is optional because the live bot serves one guild and every
+   * caller there means "all of them". The staging database does NOT have that
+   * property: it accumulates a fixture set per guild id it has ever been
+   * seeded with, and the unscoped count then sums them. Measured 2026-09-05 -
+   * `staging-reset.ts` seeded correctly under the real guild
+   * `1545644954272137297` while an older synthetic set under
+   * `999999999999999001` was still present, and the verification step reported
+   * every count as exactly doubled and exited 1 on a database that was in fact
+   * correct. Seeding and clearing were already guild-scoped; only the counting
+   * was not.
+   */
+  async countByType(type: EventType, guildId?: string): Promise<number> {
+    const row =
+      guildId === undefined
+        ? await this.db
+            .prepare(`SELECT COUNT(*) AS n FROM events WHERE event_type = ?`)
+            .get<{ n: number }>(type)
+        : await this.db
+            .prepare(`SELECT COUNT(*) AS n FROM events WHERE event_type = ? AND guild_id = ?`)
+            .get<{ n: number }>(type, guildId);
     return Number(row?.n ?? 0);
   }
 

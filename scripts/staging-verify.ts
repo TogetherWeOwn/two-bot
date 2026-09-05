@@ -185,14 +185,31 @@ if (weOwnIt) {
     }
   }
   const ADMIN = 1n << 3n;
+  const { held: have, missing } = describePermissions(mask);
   if (mask & ADMIN) {
+    // Administrator IMPLIES every other permission, so the literal bit test
+    // below is meaningless here: a role carrying exactly `8` has none of the
+    // scoped bits set and can still do all of it. Measured on the real staging
+    // guild 2026-09-05 - the bot's only role was permissions `8`,
+    // `describePermissions` reported Manage Roles and Manage Events missing,
+    // and `POST /guilds/{id}/scheduled-events` returned 200 anyway.
+    //
+    // Reporting that as a FAIL sent the reader off to re-authorize an invite
+    // that would not have changed anything. It is still a WARN, because an
+    // Administrator staging bot proves nothing about the live scoped grant -
+    // but it is not a missing permission.
     warn(
       'staging bot holds Administrator',
       'the spec is the scoped set - staging is where we prove the live bot needs no more',
     );
-  }
-  const { held: have, missing } = describePermissions(mask);
-  if (missing.length) {
+    console.log(
+      `        Administrator implies the rest, so the scoped set ${STAGING_INVITE_PERMISSIONS} cannot be\n` +
+        '        proved on this server. That proof belongs on the live invite, not here.' +
+        (missing.length
+          ? `\n        (Not held as explicit bits: ${missing.join(', ')} - implied, not missing.)`
+          : ''),
+    );
+  } else if (missing.length) {
     // Re-inviting is the fix, not a settings tweak: an invited bot cannot
     // grant itself a bit its invite did not carry.
     fail(
