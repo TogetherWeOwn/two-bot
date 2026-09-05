@@ -1,0 +1,67 @@
+{
+  "_README": [
+    "Agent-hours and cash per channel per week, for `npm run review`.",
+    "",
+    "Hand-kept, because nothing in the system records an agent-hour and the",
+    "effort-allocation check (TOG-92 step 5, roadmap-30d §9) is the half of the",
+    "review that catches a month spent on listings because listings are easy.",
+    "",
+    "Copy this to data/growth-effort.json and edit it every Friday. An ABSENT",
+    "field is not zero: a channel with no agentHours recorded is reported as",
+    "unmeasured and can never be killed, because the kill rule needs sustained",
+    "effort AND 0 AM30, and dropping the first half lets neglect masquerade as a",
+    "negative result. Write 0 when a channel genuinely got no time - that is a",
+    "measurement and it is allowed to count.",
+    "",
+    "channelId  a slot from REGISTERED_CHANNELS in src/growth/portfolio.ts.",
+    "weekStart  the UTC Monday, YYYY-MM-DD.",
+    "cashPence  pence, not pounds. £0 is the registered plan while EXP-008 is locked.",
+    "",
+    "The per-experiment fields below are the facts the funnel cannot carry. The",
+    "most recent recorded value of each is what the rules read.",
+    "  bumpsExpected/bumpsDone   listings. Under 50% compliance INVALIDATES the",
+    "                            week rather than counting against the channel",
+    "                            (EXP-001) - it measures our bump discipline.",
+    "  outputProduced            EXP-005. Were clips actually made and posted?",
+    "                            Checked at 4 weeks; AM30 waits until 8.",
+    "  referralLinkCreators      EXP-003. How many of the 5 asked members made a",
+    "                            link. Referral is killed on the ask, never on AM30.",
+    "  partnerNights             EXP-004. Nights with the CURRENT partner.",
+    "  partnersWithZeroAm30      EXP-004. Partners exhausted so far. The channel",
+    "                            dies only after three have each produced 0 AM30.",
+    "  weeksLive                 EXP-005. Weeks since the channel started."
+  ],
+  "weeks": [
+    {
+      "channelId": "LIST-DISBOARD-A",
+      "weekStart": "2026-09-07",
+      "agentHours": 0.5,
+      "cashPence": 0,
+      "bumpsExpected": 14,
+      "bumpsDone": 12
+    },
+    {
+      "channelId": "REF",
+      "weekStart": "2026-09-07",
+      "agentHours": 1.5,
+      "cashPence": 0,
+      "referralLinkCreators": 4
+    },
+    {
+      "channelId": "PART",
+      "weekStart": "2026-09-07",
+      "agentHours": 2,
+      "cashPence": 0,
+      "partnerNights": 1,
+      "partnersWithZeroAm30": 0
+    },
+    {
+      "channelId": "CONT-YTSHORTS",
+      "weekStart": "2026-09-07",
+      "agentHours": 3,
+      "cashPence": 0,
+      "outputProduced": true,
+      "weeksLive": 1
+    }
+  ]
+}
