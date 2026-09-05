@@ -22,6 +22,14 @@
  * Wick, not in Discord, and the API does not expose another application's
  * private settings (TOG-1166). Section 3 prints what the API *can* show about
  * Wick and then says plainly that the whitelist is unverified.
+ *
+ * Correction, measured 2026-09-05 (TOG-1166): this file used to tell the reader
+ * that raising our own role was "guild owner only -- a bot cannot move a role to
+ * or above its own top role". That is FALSE. Discord constrains the role being
+ * WRITTEN against the actor's highest role; a bot's own managed integration role
+ * is not above it, so an Administrator bot may raise it. One real PATCH returned
+ * 200 and moved Owen @1 -> @188, taking this check from exit 1 (71/159
+ * reachable) to exit 0 (159/159). The fix is ours to run, not a human's.
  */
 import { DiscordRest } from '../src/discord/rest.ts';
 import { GUILD_ID } from '../src/onboarding/catalog.ts';
@@ -100,10 +108,17 @@ if (blocked.length) {
   // Raising a non-managed role instead would mean raising a role the wave then
   // deletes, which drops us back below the remaining targets mid-run.
   const ownRole = mine.find((r) => r.managed && r.tags?.bot_id === me.id);
-  console.log(`\n  FIX (guild owner only -- a bot cannot move a role to or above its own top`);
-  console.log('  role, so we cannot do this ourselves):');
+  // Measured 2026-09-05 (TOG-1166): an Administrator bot CAN raise its OWN
+  // managed role. Discord constrains the role being written against the actor's
+  // highest role; the bot's own integration role is not above it, so the write
+  // is allowed. A real PATCH returned 200 and moved Owen @1 -> @188. This block
+  // used to say "guild owner only", which sent a human to do a job we can do
+  // ourselves -- the card sat blocked on it.
+  console.log(`\n  FIX (we can do this ourselves -- an Administrator bot may raise its`);
+  console.log('  own managed role; no guild-owner action required):');
   if (ownRole) {
-    console.log(`  drag the integration role "${ownRole.name}" (currently @${ownRole.position}) above`);
+    console.log(`  PATCH /guilds/{id}/roles [{"id":"${ownRole.id}","position":${highest.position + 1}}]`);
+    console.log(`  moves the integration role "${ownRole.name}" (currently @${ownRole.position}) above`);
     console.log(`  "${highest.name.trim() || '(blank)'}" (@${highest.position}), i.e. to position > ${highest.position}.`);
     console.log(`  Use "${ownRole.name}" and NOT "${top.name}": "${ownRole.name}" is managed, so Wave 6`);
     console.log('  does not delete it. A non-managed role would be deleted by the wave itself.');
@@ -114,19 +129,33 @@ if (blocked.length) {
 
 console.log('\n## 3. Wick / anti-nuke -- NOT VERIFIABLE HERE');
 const wick = roles.find((r) => r.name === 'Wick' && r.managed);
+// Wick's own member record, so we compare against its highest role rather than
+// only its integration role.
+const wickMember = wick?.tags?.bot_id
+  ? await rest.get<{ roles: string[] }>(`/guilds/${GUILD}/members/${wick.tags.bot_id}`)
+  : null;
+const wickRoleObjs = roles.filter((r) => wickMember?.roles?.includes(r.id));
 if (wick) {
-  console.log(`  Wick role @${wick.position}; our top role @${top.position}.`);
-  console.log(
-    wick.position > top.position
-      ? '  Wick outranks us: if anti-nuke arms and we are not whitelisted, Wick CAN ban our bot mid-wave.'
-      : '  We outrank the Wick role, but Wick may still act via Administrator.',
-  );
+  // Compare against Wick's HIGHEST role, not its integration role: Wick also
+  // holds non-managed roles, and ban/kick is gated on the actor's highest.
+  // Administrator grants permissions but never bypasses hierarchy -- only the
+  // guild OWNER bypasses both -- so outranking Wick genuinely defuses this.
+  const wickTop = Math.max(...wickRoleObjs.map((r) => r.position), wick.position);
+  console.log(`  Wick integration role @${wick.position}; Wick's highest role @${wickTop}; our top role @${top.position}.`);
+  if (wickTop > top.position) {
+    console.log('  Wick outranks us: if anti-nuke arms and we are not whitelisted, Wick CAN ban our bot mid-wave.');
+    console.log('  The whitelist is UNVERIFIED: it lives in Wick, and Discord exposes no');
+    console.log("  endpoint for another application's config. A human must confirm it in");
+    console.log('  the Wick dashboard (TOG-1166). This script never reports it as passing.');
+  } else {
+    console.log('  We outrank every Wick role. Discord gates ban/kick on the actor\'s highest');
+    console.log('  role, and Administrator does NOT bypass hierarchy (only the guild owner does),');
+    console.log('  so Wick cannot ban or kick our bot -- whitelisted or not. The whitelist is');
+    console.log('  still unreadable via API, but it is no longer load-bearing for Wave 6.');
+  }
 } else {
   console.log('  no managed role named "Wick" found.');
 }
-console.log('  The whitelist itself is UNVERIFIED: it lives in Wick, and Discord exposes');
-console.log('  no endpoint for another application\'s config. A human must confirm it in');
-console.log('  the Wick dashboard (TOG-1166). This script never reports it as passing.');
 
 console.log(`\n## Verdict: ${blocked.length === 0 ? 'PASS -- every target is reachable' : `FAIL -- ${blocked.length} of ${targets.length} targets unreachable`}`);
 process.exit(blocked.length === 0 ? 0 : 1);
