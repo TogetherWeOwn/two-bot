@@ -26,6 +26,7 @@ import {
   seedFixtures,
 } from '../src/staging/fixtures.ts';
 import {
+  FORMER_STAGING_BOT_APPLICATION_ID,
   LIVE_BOT_APPLICATION_ID,
   LIVE_GUILD_ID,
   STAGING_BOT_APPLICATION_ID,
@@ -238,6 +239,16 @@ test('the live bot token is refused, and the message says which bot it is', () =
 test('the staging bot token is accepted', () => {
   const r = checkStagingToken(tokenFor(STAGING_BOT_APPLICATION_ID));
   assert.equal(r.ok, true);
+});
+
+test('the superseded test-two token is refused, not waved through as unknown', () => {
+  // `test-two` held the staging role until 2026-09-05. It is a real bot with a
+  // real token, so a stale shell keeps working against the WRONG guild - the
+  // one failure mode the generic "unrecognised app" branch would hide.
+  const r = checkStagingToken(tokenFor(FORMER_STAGING_BOT_APPLICATION_ID));
+  assert.equal(r.ok, false);
+  assert.match(r.message, /test-two/);
+  assert.match(r.message, new RegExp(STAGING_BOT_APPLICATION_ID));
 });
 
 test('an unrecognised or unparseable token is allowed through to Discord, not hard-failed', () => {
