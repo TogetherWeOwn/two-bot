@@ -170,6 +170,29 @@ export function describePermissions(mask: bigint): { held: string[]; missing: st
 }
 
 /**
+ * The invite URL a human opens to put the staging bot into a server they made.
+ *
+ * This is the ONLY way the bot gets into a guild. `POST /guilds` was the plan
+ * until 2026-09-05, when running it against the real token returned
+ * `{"message":"Bots cannot use this endpoint","code":20001}` - see
+ * `guildCreateIsUnavailable` in ./provision.ts. Discord documents that
+ * endpoint as available to bots in under ten guilds, and that documentation is
+ * wrong for this application, so the invite path is not a fallback: it is the
+ * path.
+ *
+ * `STAGING_PERMISSIONS` rather than Administrator, deliberately - staging is
+ * where we prove the live bot needs no more than the scoped set.
+ */
+export function stagingInviteUrl(applicationId: string = STAGING_BOT_APPLICATION_ID): string {
+  return (
+    'https://discord.com/api/oauth2/authorize' +
+    `?client_id=${applicationId}` +
+    `&permissions=${STAGING_PERMISSIONS}` +
+    '&scope=bot%20applications.commands'
+  );
+}
+
+/**
  * Read the staging guild id. Deliberately a different variable name from the
  * live `DISCORD_GUILD_ID`: a staging run that picks up the live value by
  * accident would seed test members into the real funnel, and there is no undo
@@ -179,9 +202,10 @@ export function stagingGuildId(): string {
   const id = process.env.DISCORD_STAGING_GUILD_ID;
   if (!id) {
     throw new Error(
-      'Missing DISCORD_STAGING_GUILD_ID. No founder posts this any more: run ' +
-        '`npm run staging:provision -- --apply` and the bot creates the server and ' +
-        'prints its id. It is not a secret. See docs/STAGING.md.',
+      'Missing DISCORD_STAGING_GUILD_ID. A human has to create the server: no bot can, ' +
+        'because Discord refuses POST /guilds with code 20001. Run ' +
+        '`npm run staging:provision` for the invite link and the exact steps, then set this ' +
+        'to the new server id. It is not a secret. See docs/STAGING.md.',
     );
   }
   if (id === LIVE_GUILD_ID) {

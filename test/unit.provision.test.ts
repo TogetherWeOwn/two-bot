@@ -39,9 +39,19 @@ const filler = (n: number) =>
 
 // --- chooseGuild ------------------------------------------------------------
 
-test('creates a guild only when the bot is in none like it', () => {
+// This used to assert `create`. It cannot any more: on 2026-09-05 POST /guilds
+// was run for real, at zero guilds, and Discord returned HTTP 400 code 20001
+// "Bots cannot use this endpoint" - on a bare payload and on v9 too. The test
+// now pins the opposite, and pins that the refusal carries the human's next
+// step, because an abort that does not say "make it yourself, here is the
+// link" only moves the dead end one layer up.
+test('never returns create - a bot cannot make a guild (code 20001)', () => {
   const c = chooseGuild({ guilds: [] });
-  assert.equal(c.action, 'create');
+  assert.equal(c.action, 'abort');
+  assert.match(c.reason, /20001/);
+  assert.match(c.reason, /Bots cannot use this endpoint/);
+  assert.match(c.reason, /discord\.com\/api\/oauth2\/authorize/, 'must hand over the invite link');
+  assert.match(c.reason, /DISCORD_STAGING_GUILD_ID/, 'must say where to put the id');
 });
 
 // The case that actually happened on TWO-25: the token we were given was a
@@ -125,13 +135,15 @@ test('past the limit too - a bot in eleven guilds is not a silent no-op', () => 
 
 test('zero guilds warns about nothing - that is the normal first run', () => {
   const c = chooseGuild({ guilds: [] });
-  assert.equal(c.action, 'create');
   assert.deepEqual(c.warnings, []);
 });
 
 test('guilds we did not add the bot to are warned about by name', () => {
   const c = chooseGuild({ guilds: filler(2) });
-  assert.equal(c.action, 'create', 'two strays must not block a first provision');
+  // The action is `abort` now for a reason that has nothing to do with these
+  // strays (no bot can create a guild at all). What matters here, and still
+  // holds, is that both strays are named in the warnings rather than swallowed.
+  assert.match(c.reason, /20001/, 'two strays must not change WHY we stop');
   assert.equal(c.warnings.length, 2);
   assert.match(c.warnings[0], /is in 2 guild\(s\)/);
   assert.match(c.warnings[0], /"other 0"/);
