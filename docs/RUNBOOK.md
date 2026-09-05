@@ -2,6 +2,14 @@
 
 Written for whoever is on the box, not necessarily an engineer.
 
+> **Deploying to Coolify? Read docs/DEPLOY.md instead.** This runbook covers the
+> systemd deployment on a plain host, which is still supported and is how the
+> backup timer runs. The bot itself now ships to the owner's Coolify VPS as a
+> container (TOG-13), where the token is an environment variable rather than a
+> systemd credential and health is `GET /readyz` rather than `systemctl status`.
+> Everything below about preflight, backfill, backups and restores applies to
+> both.
+
 ## Before you deploy
 
 Check the credential and the server permissions first. This takes seconds and
