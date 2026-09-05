@@ -3,43 +3,50 @@
 This is written for QA. You should never need to ask an engineer to reset
 staging, and you should never point a test at the live TWO server.
 
-**Status (2026-09-05): the database half is live, the Discord half is not.**
+**Status (2026-09-05): READY. Both halves are live — nothing is blocked.**
 
-The token landed and the database is real, so four of the five readiness
-checks are green:
+`scripts/staging-doctor.ts` exits **0** and all five readiness checks are
+green:
 
 | Check | State |
 |---|---|
 | staging bot token | **ok** — `Owen QA Test` (`1469137636663758888`) |
+| staging Discord server | **ok** — `TWO Staging` (`1545644954272137297`) |
 | staging database | **ok** — `two_bot_staging` |
 | schema | **ok** — 9 migrations applied |
 | fixtures | **ok** — the known state |
-| staging Discord server | **blocked** — see below |
 
-**The old blocker is gone. A different one replaced it.**
+Set both of these and you can run the suite:
 
-The bot was a member of the live TWO server, and on 2026-09-05 it was removed
-— verified: `GET /users/@me/guilds` returns `[]`, and the live guild
-`326474832151838730` now answers `404`. The live-membership abort no longer
-fires.
-
-**The blocker now: nobody can create the server except a human.** With the bot
-in zero guilds and every guard passing, `staging-provision.ts --apply` was run
-for real and Discord refused the guild-creation call itself:
-
-```
-POST /guilds -> HTTP 400 {"message":"Bots cannot use this endpoint","code":20001}
+```bash
+export DISCORD_STAGING_GUILD_ID=1545644954272137297   # not a secret
+export TWO_STAGING_DATABASE_URL=...                   # the two_bot_staging database
 ```
 
-Confirmed on a bare payload and on API v9 too, so it is the endpoint, not us.
-**This is not a credential or a permission problem and there is nothing to
-grant** — see "Building the staging server" below for the one-minute human step
-that replaces it, and note that Public Bot is OFF, so it must be the developer-portal
-owner of application `1469137636663758888` who does it.
+The server was provisioned on 2026-09-05: `#welcome`, `#general`, `#events`,
+`#bot-log`, voice `Voice 1`, and roles `Moderator`, `Member`, `Game: Test`,
+with the bot's role raised above all three. `staging-provision.ts --apply` is
+idempotent — re-running it reports `0 error(s)` and changes nothing.
 
-Everything that does not need Discord works today, including the full reset
-loop QA runs between test runs. `scripts/staging-doctor.ts` will tell you
-where things stand without you having to read the rest of this page.
+The full reset loop was proven end to end against this guild: deleting three
+members and every `first_message` event made `staging-reset.ts --check` exit
+**1**, and `staging-reset.ts` then restored the known state and exited **0**.
+
+**Two things worth knowing before you read further.**
+
+*The bot did not create this server, and could not.* `POST /guilds` refuses bot
+tokens outright — `{"message":"Bots cannot use this endpoint","code":20001}`,
+confirmed on a bare payload and on API v9. A human created the server and
+invited the bot. If staging is ever rebuilt from scratch, that step is a
+human's, and it is not a credential or a permission problem.
+
+*The bot holds Administrator here, and is not the server owner.* Administrator
+implies every other permission, so `staging-verify.ts` reports a **WARN** on
+permissions rather than a pass: this server cannot prove the live bot needs no
+more than the scoped set, and that proof belongs on the live invite. Not being
+the owner also means role hierarchy is enforced — if role assignment ever
+starts failing, check the bot's role is still above `Moderator`, `Member` and
+`Game: Test`.
 
 ---
 
@@ -220,22 +227,26 @@ The refusal names the owner and the next step, same as the doctor does.
 
 ### One database, one guild
 
-**Do not point two guild ids at the same staging database.** The asymmetry that
-makes this bite: the reset *deletes* scoped to `DISCORD_STAGING_GUILD_ID` (guard
-5), but the funnel counts it verifies against afterwards are **not** scoped —
-`EventStore.countByType` is `SELECT COUNT(*) FROM events WHERE event_type = ?`
-across the whole database (`src/store/eventStore.ts:239`).
+**Fixed 2026-09-05, after it fired for real.** This section used to warn that the
+reset *deletes* scoped to `DISCORD_STAGING_GUILD_ID` (guard 5) while the funnel
+counts it verified against afterwards were **not** scoped. That is exactly what
+happened on the first real-guild run: the database still held a synthetic set
+under `999999999999999001` from before the server existed, the reset seeded
+correctly under `1545644954272137297`, and the verification step then reported
+every funnel row as exactly doubled and exited 1 on a database that was fine.
+Read cold, that looks like fixture corruption.
 
-So fixtures seeded under guild A survive a reset run under guild B, and then
-inflate every count B checks. The failure is loud rather than silent — the reset
-exits non-zero with counts reading `member_join 20/10` — but the cause reads
-like a broken fixture set, and the rows the scoped delete will not touch are the
-last place anyone looks.
+`EventStore.countByType` now takes an optional guild id
+(`src/store/eventStore.ts:338`), and `staging-reset.ts` and `staging-doctor.ts`
+both pass it. `test/unit.staging.test.ts` seeds two guilds into one database and
+pins both halves: scoped counts see one guild, unscoped counts still sum every
+guild — the live bot has exactly one guild and relies on the unscoped meaning.
 
-This is why `two_bot_staging` was left unseeded rather than seeded under a
-placeholder id. If you do strand rows this way, the recovery is a scoped delete
-of the old id, not a `TRUNCATE` — the same three tables the reset itself clears
-(`src/staging/fixtures.ts:299`):
+Stranded rows are still worth cleaning up. They no longer corrupt the count, but
+they are rows nobody meant to keep, and `SELECT DISTINCT guild_id FROM events`
+is the fastest way to notice a guild id you no longer recognise. The recovery is
+a scoped delete of the old id, not a `TRUNCATE` — the same three tables the
+reset itself clears (`src/staging/fixtures.ts:299`):
 
 ```sql
 DELETE FROM events           WHERE guild_id = '<the-stale-id>';
@@ -306,6 +317,10 @@ asserts the two agree, so a half-update fails loudly instead of drifting.
 ---
 
 ## Building the staging server
+
+**This is already done — `TWO Staging` (`1545644954272137297`) exists and is
+provisioned.** Keep reading only if you are rebuilding staging from scratch, or
+you want to know why the server was made by hand.
 
 **One human step, then one command.** The human step cannot be automated — see
 the box below before you go looking for a way around it.
@@ -379,14 +394,17 @@ node scripts/staging-provision.ts --apply --grant-admin <user-id>  # after they 
 
 Share the invite link directly, not in a public channel.
 
-⚠️ **Both of these flags were written for a server the bot owned, and expect to
-fail on a human-made one.** `--invite` needs Create Instant Invite (bit 0) and
-`--grant-admin` creates an Administrator role; the invite permission set
-`17601044499520` grants neither, and an invited bot cannot exceed what its
-invite carried. Expect `HTTP 403` from both. Neither is needed for QA — the person who
-made the server is already in it and can invite anyone else from the Discord
-client in two clicks. Untested against a real human-made guild as of
-2026-09-05.
+**`--invite` works on the current server — measured 2026-09-05**, `DID create a
+7-day, 5-use invite to #welcome`, `0 error(s)`. An earlier version of this page
+predicted `HTTP 403` here, reasoning that the invite set `17601044499520` does
+not carry Create Instant Invite (bit 0) and an invited bot cannot exceed its
+invite. Both of those statements are true and the conclusion was still wrong:
+the bot was added with **Administrator**, which implies bit 0. If staging is
+ever rebuilt with the scoped invite instead, expect the 403 after all.
+
+`--grant-admin` is untested. Neither flag is needed for QA — the person who made
+the server is already in it and can invite anyone else from the Discord client
+in two clicks.
 
 ### The bot does NOT own the server — so both checks apply
 
@@ -399,9 +417,13 @@ That reverses both consequences:
 1. **The role-position failure described below CAN happen, and is the one to
    expect.** The bot's role must sit above `Moderator`, `Member` and
    `Game: Test`. `staging-verify.ts` checks this first.
-2. **The invite permission set is provable on staging again** — an invited bot
-   holds exactly what its invite carried, so a green staging run is real
-   evidence about what the live bot needs.
+2. **The invite permission set would be provable on staging again** — an
+   invited bot holds exactly what its invite carried, so a green staging run
+   would be real evidence about what the live bot needs. ⚠️ **Not on the
+   current server:** the bot was added with **Administrator**, which implies
+   everything, so `staging-verify.ts` WARNs instead of proving the scoped set.
+   That proof belongs on the live invite until staging is rebuilt with
+   `stagingInviteUrl()`.
 3. **The invite must carry Manage Events and Create Events**, which the
    onboarding set `268520512` does not. `event.upsert` posts to
    `/guilds/{id}/scheduled-events`; TOG-463 measured the `403` on a real guild.
@@ -416,8 +438,9 @@ real staging server takes now.
 
 ## Checking the staging server itself
 
-**Needs `DISCORD_STAGING_BOT_TOKEN` — not runnable until a human creates the
-server and invites the bot (see above).**
+**Needs `DISCORD_STAGING_BOT_TOKEN` and `DISCORD_STAGING_GUILD_ID`.** Runnable
+today; it exits **0** against the current server, with one WARN about the bot
+holding Administrator.
 
 ```bash
 node scripts/staging-verify.ts
@@ -444,12 +467,12 @@ human-made server, not its owner.)
 
 | | |
 |---|---|
-| Server | `TWO Staging` — private, created by a human and owned by them. The bot is an ordinary invited member; it cannot create a server (`code 20001`) |
+| Server | `TWO Staging` (`1545644954272137297`) — private, created by a human and owned by them (`275483498603741184`). The bot is an ordinary invited member; it cannot create a server (`code 20001`) |
 | Text channels | `#welcome` `#general` `#events` `#bot-log` |
 | Voice | `Voice 1` — a real one, because `first_voice_session` cannot be asserted without it |
 | Roles | `Moderator` `Member` `Game: Test` |
-| Bot application | `Owen QA Test` (`1469137636663758888`) — Server Members Intent **on**, Presence **off**, Message Content **off**. Public Bot should be **off** — verify this on the new application; the provisioning script detects the consequences either way. **Must not be a member of the live TWO guild** (`326474832151838730`); as of 2026-09-05 it is, and that is the open blocker |
-| Permissions | `17601044499520` — the invite set (`STAGING_INVITE_PERMISSIONS`). `268520512` remains the narrower onboarding set the **live** bot is invited with |
+| Bot application | `Owen QA Test` (`1469137636663758888`) — Server Members Intent **on**, Presence **off**, Message Content **off**. Public Bot should be **off** — verify this on the new application; the provisioning script detects the consequences either way. **Must not be a member of the live TWO guild** (`326474832151838730`); it left on 2026-09-05 and `GET /users/@me/guilds` now returns `TWO Staging` only |
+| Permissions | Actually held: **Administrator** (`8`) — granted by whoever invited the bot, and it implies everything below. `17601044499520` is the invite set (`STAGING_INVITE_PERMISSIONS`) `stagingInviteUrl()` emits; `268520512` remains the narrower onboarding set the **live** bot is invited with |
 
 The invite integer decodes to: Add Reactions, View Channels, Send Messages,
 Embed Links, Read Message History, Manage Roles, **Manage Events**, **Create

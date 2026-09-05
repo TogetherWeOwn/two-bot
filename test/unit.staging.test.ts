@@ -111,6 +111,35 @@ test('two resets at different moments both land on the known state', async () =>
   }
 });
 
+test('a second guild in the same database does not double the counts', async () => {
+  // The real 2026-09-05 failure: the staging DB had been seeded under the
+  // synthetic guild `999999999999999001` and was then seeded again under the
+  // real `1545644954272137297`. Seeding and clearing were guild-scoped, so
+  // both sets were correct - but `staging-reset.ts` verified with an unscoped
+  // count, reported every funnel row as exactly doubled, and exited 1 on a
+  // database that was fine. QA would have read that as fixture corruption.
+  const db = await openDb(':memory:');
+  const OTHER = '999999999999999001';
+  await seedFixtures(db, { guildId: G, now: TEST_NOW });
+  await seedFixtures(db, { guildId: OTHER, now: TEST_NOW });
+  const store = new EventStore(db);
+
+  for (const [type, expected] of Object.entries(EXPECTED_FUNNEL)) {
+    assert.equal(
+      await store.countByType(type as EventType, G),
+      expected,
+      `${type} must count only guild G, not every guild in the database`,
+    );
+    // The unscoped call still means "all guilds" - the live bot has one guild
+    // and relies on that. Pin it so scoping never silently becomes the default.
+    assert.equal(
+      await store.countByType(type as EventType),
+      expected * 2,
+      `${type} unscoped must still sum both guilds`,
+    );
+  }
+});
+
 test('reset clears foreign rows and restores exactly the known state', async () => {
   const { db, store } = await seeded();
 
