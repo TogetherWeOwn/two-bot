@@ -4,6 +4,10 @@ data/*
 # source for the server migration and the diff base for the next audit
 !data/server-audit-*.json
 !data/server-audit-*.csv
+# the effort log's FORMAT is committed; the log itself is not. growth-effort.json
+# is hand-kept per deployment, and `npm run review` reports an absent one as
+# absent rather than scoring it as zero hours
+!data/growth-effort.example.json
 backups/
 *.db
 *.db-wal
