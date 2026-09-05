@@ -35,14 +35,28 @@ one — the same application backs the website's OAuth client.
 
 ## 2. Create the application
 
-**New Resource → Docker Compose**, pointed at this repository.
+> **Already deployed.** The live application is `two-bot-dk`
+> (`cangagerae31txrk2vfvzzyq`) and it is running. This section is for rebuilding
+> from nothing — to ship a change to the running bot, skip to §6.1.
+
+**New Resource → Docker Compose**, pointed at the **mirror**, not GitHub.
 
 | Field | Value |
 |---|---|
-| Repository | `https://github.com/TogetherWeOwn/two-bot` |
+| Repository | `git@135.148.42.223:/srv/git/two-bot.git` |
 | Branch | `main` |
 | Compose file | `docker-compose.yml` |
 | Build context | `/` (repo root) |
+
+**Do not point this at `github.com`.** Coolify on this box cannot clone from
+GitHub: a deploy key is refused by the GitHub *enterprise* policy (TOG-1175), an
+embedded `x-access-token` clone URL 500s, and `private_key_uuid` 422s. The box
+keeps a mirror of the GitHub repo at the path above and re-mirrors every 2
+minutes; Coolify clones from that over SSH.
+
+The failure mode if you get this wrong is quiet: the deploy ends in a few
+seconds with a **zero-byte build log**, which looks like a broken server rather
+than a repository it cannot read.
 
 There is **no build command and no build pack**. Node 24 runs the TypeScript
 directly, so the image has no compile step — if Coolify offers to auto-detect a
@@ -163,10 +177,49 @@ If it never goes green, read the `/readyz` body in the logs:
 | `gateway_disconnected` | Bad or revoked token, or Discord unreachable |
 | `database_unreachable` | `TWO_DATABASE_URL` wrong, or the database is not up |
 
+## 6.1 Shipping a change to the running bot
+
+The application is already live. After your change merges to `main`:
+
+1. **Wait for the mirror.** The box re-mirrors GitHub every 2 minutes. Deploying
+   sooner just rebuilds the previous commit and looks like your change did
+   nothing.
+2. **Trigger the deploy:**
+
+   ```sh
+   curl -X POST -H "Authorization: Bearer $COOLIFY_TOKEN" \
+     "$COOLIFY_URL/api/v1/deploy?uuid=cangagerae31txrk2vfvzzyq&force=true"
+   ```
+
+3. **Confirm it took**, rather than trusting the call returning 200:
+
+   ```sh
+   curl -s -H "Authorization: Bearer $COOLIFY_TOKEN" \
+     "$COOLIFY_URL/api/v1/applications/cangagerae31txrk2vfvzzyq/logs?lines=20"
+   ```
+
+   You want a fresh `ready` line naming the bot, and log timestamps that are
+   advancing. `status: running:healthy` alone is not proof — poll the logs twice
+   a minute apart and check the newest timestamp actually moved.
+
+There is **no public URL to curl.** `docker-compose.yml` deliberately publishes
+no ports (the bot is outbound-only), so the app's sslip.io address returns a
+proxy `404 page not found`. That 404 is correct and is not an outage. `/readyz`
+is reached by the compose healthcheck *inside* the container, which is what
+makes `running:healthy` meaningful: it means the gateway is connected and the
+database answered.
+
 ## 7. Rollback
 
 Coolify keeps previous deployments. **Deployments → the previous entry →
 Redeploy** — that is the rollback, and it is one click.
+
+> **Check this before you need it.** The application tracks branch `main` with
+> `git_commit_sha: HEAD`, so a redeploy rebuilds whatever the mirror's `main`
+> points at *now*. If the bad commit is still on `main`, redeploying the previous
+> entry rebuilds the bad commit. The reliable rollback is therefore to
+> **`git revert` on `main`**, wait for the mirror, then deploy as in §6.1.
+> `Stop` is the immediate lever if the bot is actively doing harm.
 
 Two things it does not undo, so check them before you assume you are back:
 
