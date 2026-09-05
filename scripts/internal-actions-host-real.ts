@@ -14,9 +14,14 @@
  * this one is a difference in Discord, which is the only thing left to measure.
  *
  *   TWO_HOST_DB=postgres://... TWO_HOST_SECRET=... \
- *   TWO_HOST_CHANNEL_KEY=qa-throwaway:<thread id> \
- *   DISCORD_STAGING_BOT_TOKEN=... DISCORD_GUILD_ID=... \
+ *   TWO_HOST_CHANNEL_KEYS=qa-throwaway:<channel id> \
+ *   TWO_INTERNAL_ROLE_KEYS=rocketleague:<a role id IN THE STAGING GUILD> \
+ *   DISCORD_STAGING_BOT_TOKEN=... DISCORD_STAGING_GUILD_ID=... \
  *   node internal-actions-host-real.ts
+ *
+ * Both the guild and the role ids must be staging ones. The bot is not a member
+ * of the live guild any more, so a live snowflake here is not a permission
+ * failure - it is a 404, and it will be reported against the endpoint.
  *
  * The channel key MUST name a throwaway. `announcement.post` here puts a real
  * message in front of real people if it names a member-facing channel, and this
@@ -43,7 +48,19 @@ const KEY_ID = env('TWO_HOST_KEY_ID', 'web-staging');
 const SECRET = env('TWO_HOST_SECRET');
 const PORT = Number(env('TWO_HOST_PORT', '8787'));
 const TOKEN = env('DISCORD_STAGING_BOT_TOKEN');
-const GUILD_ID = env('DISCORD_GUILD_ID');
+/**
+ * The STAGING guild, and only ever the staging guild.
+ *
+ * This used to read DISCORD_GUILD_ID, which is the live guild - a default that
+ * was harmless only while the bot happened to be a member of it. The bot has
+ * since left, so that default now aims every real effect in this file at a
+ * guild the token cannot see, and the endpoint answers `discord_404`. That
+ * reads exactly like an endpoint defect and is not one.
+ *
+ * DISCORD_STAGING_GUILD_ID first, so the safe value is the one you get by
+ * default; DISCORD_GUILD_ID is no longer consulted at all.
+ */
+const GUILD_ID = env('DISCORD_STAGING_GUILD_ID');
 
 /**
  * `key:snowflake`, per TWO_INTERNAL_CHANNEL_KEYS. No default: buildChannelKeys
@@ -51,6 +68,19 @@ const GUILD_ID = env('DISCORD_GUILD_ID');
  * that property is worth more here than the convenience of a fallback.
  */
 const CHANNEL_SPEC = env('TWO_HOST_CHANNEL_KEYS');
+
+/**
+ * `key:snowflake` overrides for role keys, per TWO_INTERNAL_ROLE_KEYS.
+ *
+ * buildRoleKeys() seeds itself from ALL_PICKS, whose role ids are LIVE-guild
+ * snowflakes that do not exist in staging. Calling it bare - as this file did -
+ * silently pinned role.assign to a live role id and produced `discord_404`
+ * against staging, which looks like the endpoint failing and is really this
+ * script disagreeing with src/internal/config.ts:61, where the real bot does
+ * pass this variable through. Same wiring as production, or the run measures
+ * the harness instead of the bot.
+ */
+const ROLE_SPEC = process.env.TWO_INTERNAL_ROLE_KEYS ?? '';
 
 const SCHEMA = process.env.TWO_HOST_SCHEMA ?? 'qa_tog463_real';
 const db = await openDb(DB_SPEC, { schema: SCHEMA, applicationName: `two-bot-qa:${SCHEMA}` });
@@ -63,7 +93,7 @@ const srv = await startInternalActions({
   guildId: GUILD_ID,
   // The only line that differs in substance from the mock host.
   discord: new DiscordActions({ token: TOKEN, base: 'https://discord.com/api/v10' }),
-  roleKeys: buildRoleKeys(),
+  roleKeys: buildRoleKeys(ROLE_SPEC),
   channelKeys: buildChannelKeys(CHANNEL_SPEC),
   enabled: new Set<string>(IMPLEMENTED_ACTIONS),
   store,
