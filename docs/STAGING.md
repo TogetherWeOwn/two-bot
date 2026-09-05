@@ -50,6 +50,52 @@ starts failing, check the bot's role is still above `Moderator`, `Member` and
 
 ---
 
+## Running the TOG-463 acceptance suite
+
+Copy-paste. Every id below is real and was used for a green run on
+2026-09-05; none of them is a secret.
+
+```bash
+export W=/path/to/your/two-bot/worktree
+export QA_DB="$TWO_STAGING_DATABASE_URL"
+export OUT=/tmp/tog463-out
+
+export CHANNEL_ID=1545652796852797450    # #tog463-qa-throwaway
+export ROLE_ID=1545652793937760276       # @tog463-qa-throwaway
+export TARGET=275483498603741184         # the one human member of TWO Staging
+
+bash scripts/run-real-acceptance.sh
+```
+
+Result: **7 requests, 0 failure(s) — `PASS`, exit 0.** `role.assign` returns
+`assigned`, `event.upsert` returns `created`, both against real Discord.
+
+`#tog463-qa-throwaway` and `@tog463-qa-throwaway` exist for exactly this and
+nothing else. The channel is not member-facing, so `announcement.post` putting
+a real message in it is harmless — which matters, because the script cannot
+delete what it posts. The role sits **below** the bot's role, which is what
+makes `role.assign` work rather than 403.
+
+### If you see `role.assign` and `event.upsert` fail together
+
+Do not read that as a permission gate. It was one for a while and it is not
+one now. The overwhelmingly likely cause is the host being bound to a guild
+the staging bot is not in — the live guild, which it has left. That produced
+exactly `discord_404` on `role.assign` and `discord_403` on `event.upsert`,
+which is indistinguishable from a missing grant unless you look at the boot
+line.
+
+`internal-actions-host-real.ts` now refuses to serve in that state and says so
+(`FATAL the staging bot is not a member of guild ...`), so a run that boots at
+all is bound correctly. Check the `acceptance_host_ready` line reports
+`guildId: 1545644954272137297`.
+
+`ROLE_ID` is required for the same class of reason: the default role map is the
+**live** guild's `ALL_PICKS`, whose snowflakes do not resolve here, and an
+unresolvable role id also answers `discord_404`.
+
+---
+
 ## The two rules
 
 1. **Staging has its own everything.** Its own Discord server, its own bot
