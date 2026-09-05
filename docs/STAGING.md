@@ -16,17 +16,26 @@ checks are green:
 | fixtures | **ok** — the known state |
 | staging Discord server | **blocked** — see below |
 
-**The one blocker: the staging bot is a member of the live TWO server.**
-`Owen QA Test` is in `TogetherWeOwn` (`326474832151838730`) and nothing else.
-`staging-provision.ts` therefore aborts before any network write — a bot
-sitting in production receives production gateway events and can act there
-with whatever permissions its invite carried, which is the exact outcome this
-whole document exists to prevent. It is not a bug and it must not be edited
-around.
+**The old blocker is gone. A different one replaced it.**
 
-**To unblock it, a human with Manage Server on the live TWO guild must remove
-`Owen QA Test` from it.** Nothing else is outstanding; re-run
-`staging-provision.ts --apply` afterwards and the bot builds its own server.
+The bot was a member of the live TWO server, and on 2026-09-05 it was removed
+— verified: `GET /users/@me/guilds` returns `[]`, and the live guild
+`326474832151838730` now answers `404`. The live-membership abort no longer
+fires.
+
+**The blocker now: nobody can create the server except a human.** With the bot
+in zero guilds and every guard passing, `staging-provision.ts --apply` was run
+for real and Discord refused the guild-creation call itself:
+
+```
+POST /guilds -> HTTP 400 {"message":"Bots cannot use this endpoint","code":20001}
+```
+
+Confirmed on a bare payload and on API v9 too, so it is the endpoint, not us.
+**This is not a credential or a permission problem and there is nothing to
+grant** — see "Building the staging server" below for the one-minute human step
+that replaces it, and note that Public Bot is OFF, so it must be the developer-portal
+owner of application `1469137636663758888` who does it.
 
 Everything that does not need Discord works today, including the full reset
 loop QA runs between test runs. `scripts/staging-doctor.ts` will tell you
@@ -49,7 +58,7 @@ where things stand without you having to read the rest of this page.
 | Variable | What it is | Where it comes from |
 |---|---|---|
 | `TWO_STAGING_DATABASE_URL` | Postgres URL for the staging database | the `two_bot_staging` database, already provisioned and migrated — see [The staging database](#the-staging-database) |
-| `DISCORD_STAGING_GUILD_ID` | id of the `TWO Staging` server | printed by `staging-provision.ts` and posted on TWO-25 — not secret |
+| `DISCORD_STAGING_GUILD_ID` | id of the `TWO Staging` server | copied from Discord by the human who created the server (right-click → Copy Server ID) and posted on TWO-25 — not secret |
 | `DISCORD_STAGING_BOT_TOKEN` | the `Owen QA Test` bot token | secrets store as `discord_staging_bot_token`, bound to you and to me |
 
 Note what is **not** here: `TWO_DATABASE_URL`, `DISCORD_GUILD_ID` and
@@ -298,45 +307,70 @@ asserts the two agree, so a half-update fails loudly instead of drifting.
 
 ## Building the staging server
 
-**Needs `DISCORD_STAGING_BOT_TOKEN`. Run once, by an engineer.**
+**One human step, then one command.** The human step cannot be automated — see
+the box below before you go looking for a way around it.
+
+> ### A bot cannot create the server. This was measured, not assumed.
+>
+> Discord's docs say a bot in fewer than ten guilds may call `POST /guilds`,
+> and everything in this repo was built on that. On **2026-09-05** it was run
+> for real, with the staging bot in **zero** guilds and every guard passing:
+>
+> ```
+> POST https://discord.com/api/v10/guilds   {"name":"TWO Staging", ...}
+> -> HTTP 400  {"message":"Bots cannot use this endpoint","code":20001}
+> ```
+>
+> Retried with a bare `{"name":"TWO Staging"}` body, and again on API **v9** —
+> the same `20001` all three times. So it is the endpoint refusing bot tokens,
+> not our payload, not our API version, and **not a permission, intent or
+> portal setting anyone can grant**. Do not re-raise this as a credential or a
+> permission request; there is nothing to grant.
+
+**Step 1 — a human makes the server (about a minute).**
+
+1. Discord → **Add a Server** → **Create My Own** → name it exactly `TWO Staging`.
+2. Open the invite link that `node scripts/staging-provision.ts` prints, and
+   pick that server.
+3. Right-click the server → **Copy Server ID** (needs Developer Mode on).
+
+⚠️ **Who can do step 2.** Application `1469137636663758888` (`Owen QA Test`)
+has **Public Bot OFF**. The invite link therefore works *only for the person
+who owns that application in the developer portal* — anyone else opening it
+gets an error, not a server picker. Either the portal owner does steps 1–2, or
+they switch Public Bot on first.
+
+**Step 2 — the script fills it in.** Needs `DISCORD_STAGING_BOT_TOKEN`.
 
 ```bash
+export DISCORD_STAGING_GUILD_ID=<the id from step 1.3>   # not a secret
 node scripts/staging-provision.ts            # prints the plan, changes nothing
-node scripts/staging-provision.ts --apply    # creates it
+node scripts/staging-provision.ts --apply    # creates channels and roles
 ```
 
-Discord lets a bot create a server (`POST /guilds`) as long as it is in fewer
-than ten, and a fresh staging bot is in zero. So the bot makes its own server,
-becomes its owner, and fills in the four text channels, `Voice 1` and the three
-roles from `src/staging/spec.ts`. No invite link, no permission integer, no
-authorize step.
+It adopts that server and creates the four text channels, `Voice 1` and the
+three roles from `src/staging/spec.ts`. Re-runnable: a fully built server plans
+nothing.
 
-**It prints the guild id.** Nobody has that id until this runs. Put it in
-`DISCORD_STAGING_GUILD_ID` and post it on TWO-25.
+Things worth knowing:
 
-Things worth knowing before you run it:
-
-- **Dry run is the default.** A guild the bot created cannot have its ownership
-  transferred to a person, so a mistake can only be deleted, never handed over.
-- **It never creates a second `TWO Staging`.** If one exists it reconciles it.
-  If it somehow finds two, it stops and makes you pick. This matters more than
-  it sounds: a bot can only create guilds while in fewer than ten, so a loop
-  that made ten of them would permanently lose the ability to make another. The
-  script refuses to create past eight.
-- **It counts the bot's guilds before it creates anything, and says what it
-  finds.** `GET /users/@me/guilds` runs first. Zero guilds is the normal first
-  run and prints nothing. Any guild the bot is in that is not ours prints a
-  `WARNING` naming it — the staging bot should only ever be in `TWO Staging`,
-  so anything else means somebody else invited it, which is possible while
-  `test-two` is still a Public Bot. At ten it stops with an explicit message
-  naming the count, the limit and the Public Bot setting, instead of letting
-  Discord refuse `POST /guilds` halfway through a QA run.
-- **If the founder made the server by hand**, invite the bot to it, set
-  `DISCORD_STAGING_GUILD_ID`, and run the same script — it then only fills in
-  what is missing and never creates anything.
+- **Dry run is the default.** It writes into somebody's real Discord server, so
+  it prints the plan first.
+- **The bot does NOT own this server, so role hierarchy is live.** This is the
+  practical consequence of the box above. A bot that creates a guild owns it and
+  bypasses hierarchy; an *invited* bot does not. Its role must sit above
+  `Moderator`, `Member` and `Game: Test` or role assignment fails with a silent
+  403. The script pushes those roles down automatically when there is room, and
+  tells you to drag the bot up when there is not. `staging-verify.ts` checks it.
+- **It counts the bot's guilds first and says what it finds.**
+  `GET /users/@me/guilds` runs before anything else. Any guild the bot is in
+  that is not ours prints a `WARNING` naming it — the staging bot should only
+  ever be in `TWO Staging`, so anything else means somebody invited it.
+- **It never creates a second `TWO Staging`.** If it finds two, it stops and
+  makes you pick.
 - **It never deletes or renames anything.** Channels outside the spec are
   reported and left alone.
-- **A bot-created server has no humans in it.** Not even the founder.
+- **A freshly made server has no humans in it but its creator.**
 
 ```bash
 node scripts/staging-provision.ts --apply --invite                 # 7-day, 5-use link
@@ -345,28 +379,40 @@ node scripts/staging-provision.ts --apply --grant-admin <user-id>  # after they 
 
 Share the invite link directly, not in a public channel.
 
-### One consequence of the bot owning the server
+⚠️ **Both of these flags were written for a server the bot owned, and expect to
+fail on a human-made one.** `--invite` needs Create Instant Invite (bit 0) and
+`--grant-admin` creates an Administrator role; the scoped invite permission set
+`268520512` grants neither, and an invited bot cannot exceed what its invite
+carried. Expect `HTTP 403` from both. Neither is needed for QA — the person who
+made the server is already in it and can invite anyone else from the Discord
+client in two clicks. Untested against a real human-made guild as of
+2026-09-05.
 
-Discord skips permission and hierarchy checks entirely for a guild owner. Two
-things follow:
+### The bot does NOT own the server — so both checks apply
 
-1. The role-position failure described below **cannot happen** on a bot-owned
-   staging server. `staging-verify.ts` knows this and does not report it.
-2. The scoped permission set `268520512` therefore cannot be proved on staging
-   any more — an owner holds everything by definition. That proof moves to the
-   live invite. `staging-verify.ts` says so rather than passing quietly, so
-   nobody later mistakes a green staging run for evidence the live bot needs
-   nothing more.
+An earlier version of this page said the opposite, because the bot was going to
+create the server and a guild's owner bypasses permission and hierarchy checks
+entirely. It cannot create it any more (`code 20001`, see above), so every real
+staging server is human-made with the bot invited into it like any other bot.
+That reverses both consequences:
 
-If the founder created the server by hand and invited the bot normally, both
-checks apply as they always did.
+1. **The role-position failure described below CAN happen, and is the one to
+   expect.** The bot's role must sit above `Moderator`, `Member` and
+   `Game: Test`. `staging-verify.ts` checks this first.
+2. **The scoped permission set `268520512` is provable on staging again** — an
+   invited bot holds exactly what its invite carried, so a green staging run is
+   real evidence about what the live bot needs.
+
+The owner-bypass branch still exists in `evaluateHierarchy` and is still
+correct for any guild the bot does happen to own; it is simply not the path any
+real staging server takes now.
 
 ---
 
 ## Checking the staging server itself
 
-**Needs `DISCORD_STAGING_BOT_TOKEN` — not runnable until the founder creates
-the server.**
+**Needs `DISCORD_STAGING_BOT_TOKEN` — not runnable until a human creates the
+server and invites the bot (see above).**
 
 ```bash
 node scripts/staging-verify.ts
@@ -382,8 +428,10 @@ is that the bot's own role sits *below* a role it is asked to grant. Discord
 returns 403, nothing logs an error, and the member simply never gets the role —
 so the funnel records someone who "chose not to pick a game". A wrong number,
 not a crash, which is why it can survive for days. The fix is one drag in
-**Server Settings → Roles**: put the `test-two` role above `Moderator`,
-`Member` and `Game: Test`. `staging-verify.ts` checks this first.
+**Server Settings → Roles**: put the `Owen QA Test` role above `Moderator`,
+`Member` and `Game: Test`. `staging-verify.ts` checks this first. (This is now
+the expected failure rather than a rare one — the bot is an invited member of a
+human-made server, not its owner.)
 
 ---
 
