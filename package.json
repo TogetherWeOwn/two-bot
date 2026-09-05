@@ -23,6 +23,7 @@
     "voice": "node scripts/voice-sessions.ts",
     "attribution": "node scripts/attribution.ts",
     "gate:check": "node scripts/gate-check.ts",
+    "review": "node scripts/growth-review.ts",
     "dashboard": "node scripts/dashboard.ts",
     "roster": "node scripts/roster.ts",
     "audit:collect": "node scripts/audit-collect.ts",
