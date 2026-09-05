@@ -27,6 +27,7 @@ import { startInternalActions, type InternalServer } from './internal/server.ts'
 import { KeyRing } from './internal/signing.ts';
 import { DiscordActions } from './internal/discordActions.ts';
 import { InternalActionStore } from './internal/store.ts';
+import { startHealthServer, type HealthServer } from './core/health.ts';
 
 const cfg = loadConfig();
 setLogLevel(cfg.logLevel);
@@ -221,12 +222,44 @@ const sweep = setInterval(
 );
 sweep.unref();
 
+// The container health endpoint (TOG-13). Started BEFORE client.login, so that
+// during the seconds a cold start spends connecting to the gateway the platform
+// gets an honest `503 gateway_disconnected` rather than a refused connection -
+// the two look identical to a probe, and only one of them is worth restarting.
+//
+// Off unless TWO_HEALTH_PORT is set, so nothing about running the bot under
+// systemd changes and no port is opened on a host that did not ask for one.
+// The container image sets it; see docs/DEPLOY.md.
+let health: HealthServer | null = null;
+const healthPort = Number(process.env.TWO_HEALTH_PORT ?? 0);
+if (healthPort > 0) {
+  health = await startHealthServer({
+    host: process.env.TWO_HEALTH_BIND_HOST || '0.0.0.0',
+    port: healthPort,
+    // `client.isReady()` is discord.js' own view of the gateway session, so a
+    // reconnect flips readiness back without any bookkeeping of our own.
+    gatewayReady: () => client.isReady(),
+    databaseReady: async () => {
+      try {
+        await db.prepare('SELECT 1').get();
+        return true;
+      } catch (err) {
+        log.error('health_db_probe_failed', { err: String(err) });
+        return false;
+      }
+    },
+  });
+}
+
 async function shutdown(signal: string) {
   log.info('shutdown', { signal });
   clearInterval(sweep);
   presenceProbe?.stop();
   communitySnapshots?.stop();
   scheduledEvents?.stop();
+  // Health goes down first: while the rest is closing, the bot must already be
+  // reporting itself out of service so the platform stops routing to it.
+  if (health) await health.close();
   if (internal) await internal.close();
   try {
     await client.destroy();
