@@ -37,8 +37,14 @@ async function freePort(): Promise<number> {
   return port;
 }
 
-/** Poll until `fn` resolves truthy. The bot needs a moment to open the socket. */
-async function waitFor<T>(fn: () => Promise<T>, timeoutMs = 30_000): Promise<T> {
+/**
+ * Poll until `fn` resolves truthy. The bot needs a moment to open the socket.
+ *
+ * Returns NonNullable<T>: callers signal "not yet" by resolving null, and the
+ * only way out of the loop is a truthy value, so narrowing it here saves every
+ * call site a non-null assertion.
+ */
+async function waitFor<T>(fn: () => Promise<T>, timeoutMs = 30_000): Promise<NonNullable<T>> {
   const deadline = Date.now() + timeoutMs;
   let last: unknown;
   while (Date.now() < deadline) {
