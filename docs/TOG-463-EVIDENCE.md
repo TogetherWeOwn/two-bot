@@ -1,9 +1,82 @@
 # TOG-463 — acceptance evidence
 
-**Verdict: PASS for every step that does not require a real Discord guild.
-NEEDS WORK remains on the real-guild half, which is one founder credential (TWO-21).**
+**Verdict: PASS. All seven steps, against a real Discord guild and real Postgres.**
 
-Last run 2026-09-03 by QA & Release Engineer, run `7e75220d-672a-419e-8b7d-fd07f02755f8`,
+The real-guild half is no longer outstanding. Everything below the "2026-09-03
+mock-Discord run" heading is the earlier, narrower result, kept because it is
+still the proof of the endpoint's *contract* layer and its reproduce block still
+works. Where the two disagree about what is proven, this section wins.
+
+## The real-guild run — 2026-09-05, `main` at `29cf91e`
+
+Run by QA & Release Engineer against staging guild `1545644954272137297`
+(`TWO Staging`), real `https://discord.com/api/v10`, real Postgres, schema
+`qa_tog463_main0905`. Driver: `bash scripts/run-real-acceptance.sh`.
+
+**7 requests, 0 failures — `PASS`, exit 0.**
+
+| # | Check | Result |
+|---|---|---|
+| 1 | Throwaway channel, not member-facing | PASS — `#tog463-qa-throwaway` `1545652796852797450` |
+| 2 | `internal_actions_listening` shows `durable: true` | PASS — and confirmed on disk, see below |
+| 3 | `role.assign` / `announcement.post` / `event.upsert` all `ok:true` | PASS — 3/3, HTTP 200 |
+| 4 | Same Idempotency-Key + fresh nonce → 200, `Idempotent-Replay: true`, one message | PASS — and message count confirmed via Discord |
+| 5 | Tampered byte → `401 unauthorized` | PASS — `bad_signature` |
+| 6 | Verbatim replay → `409 replayed`, no Discord call | PASS — `replayed_nonce`, 2 ms (no egress) |
+| 7 | Every request is a row in `internal_action_log` | PASS — 7/7 |
+
+### Request ids
+
+| step | HTTP | request_id | log outcome |
+|---|---|---|---|
+| 3.role.assign | 200 | `01M1QYHSVQ5142C4QK56CFQAMS` | already_held |
+| 3.announcement.post | 200 | `01M1QYHT12XN4K6HD5794YESK7` | posted |
+| 3.event.upsert | 200 | `01M1QYHT77EMZZ0PRPHWP2M4K0` | created |
+| 4.announcement.replay | 200 | `01M1QYHTQFM1YKMWF0FA1EP813` | replayed:posted / idempotent_replay |
+| 5.tampered | 401 | `01M1QYHTQPPS9ZR4DZVH539H3H` | rejected / bad_signature |
+| 6.first | 200 | `01M1QYHTQT41W8A3QYNREZFM7H` | already_held |
+| 6.verbatim-replay | 409 | `01M1QYHTX6Y8DQWRN22938FNT6` | rejected / replayed_nonce |
+
+### Two things the harness does not actually prove, checked separately
+
+The suite's own assertions are weaker than the issue's wording in two places, so
+neither of these is inherited from a green tick:
+
+- **`durable: true` is a printed field, not a measurement.** Counted the rows the
+  guard would have to be writing: `internal_action_log` 7, `internal_nonces` 5,
+  `internal_idempotency` 2 — in Postgres, after the host exited. An in-memory
+  guard leaves 0.
+- **Step 4 says *exactly one message*; the harness only compares two
+  `message_id`s.** Counted via `GET /channels/1545652796852797450/messages`:
+  exactly one message bearing this run's timestamp, from two `announcement.post`
+  requests.
+
+### The earlier `422`s were never a permission gate
+
+An earlier run read `422 discord_rejected` wrapping `discord_404` as a missing
+Discord grant. It was a misbinding: the host resolved the **live** guild, which
+this bot has left. `discord_404` means "pointed at a guild the token cannot
+see"; `discord_403` means "permissions". Distinguish them before blaming the
+endpoint. Fixed on main (`43ed28c`, `29cf91e`); the host now refuses to boot
+when misbound, verified by pointing it back at the live guild — exit 2, and the
+message names it a configuration error.
+
+### Still not proven, deliberately
+
+The staging bot holds Administrator. A green run here does **not** prove the
+**live** bot can do this on the scoped permission set `17601044499520`. That
+proof belongs to the live invite, and it is a separate question from this card.
+
+---
+
+## The 2026-09-03 mock-Discord run
+
+**Scope: the endpoint's contract layer — auth, signing, replay defence,
+idempotency, audit trail — against real Postgres, with `tools/mock-discord`
+standing in for Discord.** Superseded as a verdict by the section above, which
+covers the same steps against the real thing.
+
+Run 2026-09-03 by QA & Release Engineer, run `7e75220d-672a-419e-8b7d-fd07f02755f8`,
 against **`main` at `a534e2c`**. Every number below was produced by a command in
 this file. Re-run them and you get the same answer; nothing here is inherited
 from a previous run's summary.
@@ -154,23 +227,28 @@ node --test test/e2e.internalactions.test.ts          36/36 pass (Postgres)
 node --test test/*.test.ts                            508/508 pass, 0 fail
 ```
 
-## What is NOT proven, and cannot be until TWO-21 lands
+## What this run did not prove — since closed by the 2026-09-05 run
 
-The Discord side of every result above is `tools/mock-discord`. The boot line
-says `"discord":"mock"` precisely so no reader can mistake this for a staging
-run. Specifically still unproven:
+The Discord side of every result in *this* section is `tools/mock-discord`. The
+boot line says `"discord":"mock"` precisely so no reader can mistake it for a
+staging run. Left unproven here, and **all three now closed** by the real-guild
+run at the top of this file:
 
 - that a real Discord guild accepts these calls (real role ids, channel
   permissions, the bot's own permission set)
 - issue step 1's throwaway-channel requirement, which needs a real channel id
 - `scripts/staging-reset.ts` fixtures, which need a real guild id
 
-**What that leaves:** the endpoint's contract — auth, signing, replay defence,
-idempotency and the audit trail — is proven against real Postgres, out of
-process, on current `main`. What is unproven is Discord's own behaviour, and no
-amount of QA effort substitutes for the token.
+**What this section still stands as:** the endpoint's contract — auth, signing,
+replay defence, idempotency and the audit trail — proven against real Postgres,
+out of process. The token has since landed and Discord's own behaviour is
+measured above, so nothing on this card is waiting on TWO-21.
 
-## Reproducing this
+## Reproducing this (the mock-Discord run)
+
+To reproduce the **real-guild** run instead, see `docs/STAGING.md` — it is one
+script, `scripts/run-real-acceptance.sh`, and every id in it is real and
+non-secret.
 
 ```bash
 export TWO_STAGING_DATABASE_URL="${DATABASE_URL%/*}/two_bot_staging"
