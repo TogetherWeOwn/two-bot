@@ -17,6 +17,10 @@ ROLE_KEY="${ROLE_KEY:-rocketleague}"
 # A member who is actually in the guild; role.assign against a stranger is a
 # different failure (404) and would mask the one we are measuring.
 TARGET="${TARGET:?set TARGET to a discord user id in the guild}"
+# The snowflake ROLE_KEY resolves to. Required, because the built-in role map is
+# the LIVE guild's ALL_PICKS and those ids do not exist on staging - leaving it
+# unset yields discord_404 that reads like a permission denial (TOG-45).
+ROLE_ID="${ROLE_ID:?set ROLE_ID to a role snowflake in this guild, BELOW the bot own role}"
 
 mkdir -p "$OUT"
 cd "$W"
@@ -26,6 +30,7 @@ TWO_HOST_DB="$QA_DB" \
 TWO_HOST_SECRET="$SECRET" \
 TWO_HOST_PORT="$PORT" \
 TWO_HOST_CHANNEL_KEYS="qa-throwaway:$CHANNEL_ID" \
+TWO_HOST_ROLE_KEYS="$ROLE_KEY:$ROLE_ID" \
 TWO_HOST_SCHEMA="$SCHEMA" \
 node scripts/internal-actions-host-real.ts >"$OUT/host-boot.log" 2>&1 &
 HOST_PID=$!
