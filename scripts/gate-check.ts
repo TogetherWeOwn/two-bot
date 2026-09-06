@@ -23,9 +23,14 @@
  *
  * WHAT IT CAN AND CANNOT SEE
  *
- * Two criteria are not observable from a runtime with no live host and no
- * token: the systemd service, and the routed-welcome test. Those report
- * `UNKNOWN`, which counts as red - never as green. `verdict()` in
+ * Two criteria are not observable from a bare agent runtime: the bot process
+ * (needs COOLIFY_URL + COOLIFY_TOKEN to poll the container) and the
+ * routed-welcome test (needs a human to walk an account through the rules gate
+ * in Discord). Those report `UNKNOWN`, which counts as red - never as green.
+ *
+ * NOTE the bot is LIVE as of 2026-09-06 (`two-bot-dk`, `Owen#2309`). An unknown
+ * on the bot side now means "we could not look from here", NOT "it was never
+ * deployed" - do not read it as the latter. `verdict()` in
  * src/growth/gate.ts treats an unknown exactly as hard as a fail, because a
  * gate that goes green on six shrugs is worse than having no gate.
  *
@@ -50,17 +55,46 @@ const SITE = 'https://two.gg';
 
 const o: Observations = {};
 
-// --- bot criterion 1: the service ------------------------------------------
+// --- bot criterion 1: the bot process --------------------------------------
 //
-// systemctl is not reachable from the agent runtime and TOG-13 has not stood a
-// live host up, so from here this is structurally unknowable rather than false.
-// Left to gate.ts to phrase; we only report what we could and could not reach.
+// TOG-13 deployed the bot as a Coolify container (`two-bot-dk`), NOT as a
+// systemd unit, so `systemctl` was never going to answer this and the old
+// "TOG-13 has not deployed one" text outlived the card by a day. When the panel
+// credentials are bound we ask Coolify directly; otherwise this stays unknown,
+// which is honest, rather than false-and-blaming-a-closed-card.
+//
+// `running:healthy` is load-bearing here and only because of what compose's
+// healthcheck is: it hits /readyz in-container, which returns 200 only when the
+// Discord gateway is connected AND Postgres answers. A bare `running` would be
+// a process-exists check and would not satisfy this criterion.
+const COOLIFY_APP = process.env.COOLIFY_APP_UUID || 'cangagerae31txrk2vfvzzyq';
+
 if (process.env.TWO_GATE_SERVICE_ACTIVE === '1') {
   o.serviceActive = true;
   o.serviceDetail = 'reported active by the caller (TWO_GATE_SERVICE_ACTIVE=1).';
 } else if (process.env.TWO_GATE_SERVICE_ACTIVE === '0') {
   o.serviceActive = false;
   o.serviceDetail = 'reported inactive by the caller (TWO_GATE_SERVICE_ACTIVE=0).';
+} else if (process.env.COOLIFY_URL && process.env.COOLIFY_TOKEN) {
+  try {
+    const res = await fetch(`${process.env.COOLIFY_URL.replace(/\/$/, '')}/api/v1/applications/${COOLIFY_APP}`, {
+      headers: { Authorization: `Bearer ${process.env.COOLIFY_TOKEN}`, Accept: 'application/json' },
+      signal: AbortSignal.timeout(12_000),
+    });
+    if (!res.ok) {
+      o.serviceDetail = `the Coolify API answered ${res.status} for ${COOLIFY_APP} - could not read the container state.`;
+    } else {
+      const app = (await res.json()) as { status?: string };
+      const status = String(app.status ?? '');
+      // Coolify reports e.g. `running:healthy`, `running:unhealthy`, `exited`.
+      o.serviceActive = status.startsWith('running') && status.includes('healthy') && !status.includes('unhealthy');
+      o.serviceDetail = o.serviceActive
+        ? `two-bot-dk reports ${status} (healthcheck is /readyz: gateway connected and Postgres answering).`
+        : `two-bot-dk reports ${status}.`;
+    }
+  } catch (err) {
+    o.serviceDetail = `the Coolify API could not be reached: ${err instanceof Error ? err.message : String(err)}`;
+  }
 }
 
 // --- bot criterion 3: the routed welcome -----------------------------------
