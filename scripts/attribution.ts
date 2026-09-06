@@ -47,7 +47,10 @@ if (!allTime && (!Number.isFinite(days!) || days! <= 0)) {
 // bot's database and never a stale local file.
 const dbSpec = process.env.TWO_DATABASE_URL || process.env.TWO_DB_PATH || './data/two.db';
 const nowMs = Date.now();
-const since = allTime ? '0000-01-01T00:00:00.000Z' : new Date(nowMs - days! * 86_400_000).toISOString();
+// Postgres rejects year 0000 (`date/time field value out of range`). The real
+// server has no pre-1970 joins, and this is only a lower bound, so 1970-01-01
+// is safe for both SQLite and Postgres and still reads as "the beginning".
+const since = allTime ? '1970-01-01T00:00:00.000Z' : new Date(nowMs - days! * 86_400_000).toISOString();
 const db = await openDb(dbSpec);
 
 // --- joins -------------------------------------------------------------------
