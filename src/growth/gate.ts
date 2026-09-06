@@ -71,7 +71,15 @@ export interface Criterion {
  * turns on. A boolean here is a fact someone looked at; `undefined` is a gap.
  */
 export interface Observations {
-  /** `systemctl status two-bot` reported active on the live host. */
+  /**
+   * The bot process is up and connected on the live host.
+   *
+   * Deliberately not "systemctl reports active". TOG-13 shipped the bot as a
+   * Coolify container on the owner's VPS (`two-bot-dk`), not as a systemd unit,
+   * so `systemctl` is the wrong instrument on the deployment we actually have.
+   * The criterion is the fact - a running, Discord-connected process - and the
+   * caller reports whichever way it looked.
+   */
   serviceActive?: boolean;
   /** Why the service could not be checked, when it could not be. */
   serviceDetail?: string;
@@ -101,7 +109,12 @@ export interface Observations {
  */
 export const WEB_HOMEPAGE_CODE = 'WEB-HOMEPAGE';
 
-const BOT_OWNER = 'Backend/Bot Engineer (TOG-13 - live token + host + deploy)';
+// TOG-13 (live token + host + deploy) closed 2026-09-06: `two-bot-dk` runs on
+// the Coolify VPS as `Owen#2309`. The bot side is no longer blocked on a deploy
+// that does not exist - it is blocked on OBSERVING the deploy we have, which is
+// a different ask and a different owner action. Naming a closed card as the
+// blocker is how a gate keeps reporting last month's reason.
+const BOT_OWNER = 'Backend/Bot Engineer (two-bot-dk on Coolify - observe the running container)';
 const WEB_OWNER = 'Web team (TOG-48 landing page, TOG-47 Discord OAuth)';
 
 /** `undefined` -> unknown, `true` -> ok, `false` -> fail. The whole point of the module in one line. */
@@ -120,19 +133,20 @@ function observed(
 export function botChecks(o: Observations): Criterion[] {
   const service = observed(
     o.serviceActive,
-    { id: 'bot-service', side: 'bot', title: '`systemctl status two-bot` active on the live host' },
-    'the service reports active.',
+    { id: 'bot-service', side: 'bot', title: 'the bot process is running and connected on the live host' },
+    'the bot process is running and connected to Discord.',
     {
-      detail: o.serviceDetail ?? 'the service is not running on the live host.',
+      detail: o.serviceDetail ?? 'the bot is not running on the live host.',
       owner: BOT_OWNER,
-      action: 'node scripts/coolify-deploy.sh, then re-run this check',
+      action: 'bash scripts/coolify-deploy.sh, then re-run this check',
     },
     {
       detail:
         o.serviceDetail ??
-        'no live host to ask - systemctl is not reachable from the agent runtime, and TOG-13 has not deployed one.',
+        'not observable from the agent runtime - no COOLIFY_URL/COOLIFY_TOKEN bound, so the container could not be polled.',
       owner: BOT_OWNER,
-      action: 'land TOG-13 (host + live token), then re-run this check on the host',
+      action:
+        'bind COOLIFY_URL + COOLIFY_TOKEN and re-run, or poll two-bot-dk logs twice ~70s apart and confirm the last line advances',
     },
   );
 
@@ -192,9 +206,9 @@ export function botChecks(o: Observations): Criterion[] {
     {
       detail:
         o.welcomeDetail ??
-        'not testable without a live bot - the welcome fires on the gateway, which needs the deploy in TOG-13.',
+        'the bot is live, but nobody has run a test account through the rules gate - this needs a human in Discord.',
       owner: BOT_OWNER,
-      action: 'land TOG-13, then run one test account through the rules gate',
+      action: 'run one test account through the rules gate, then re-run with TWO_GATE_WELCOME_OK=1',
     },
   );
 
