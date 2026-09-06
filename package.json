@@ -40,6 +40,7 @@
     "verify:grant:selftest": "node scripts/verify-grant.ts --selftest",
     "backup": "bash scripts/backup.sh",
     "verify:catalog": "node scripts/verify-catalog.ts",
+    "event:sunday-squad": "node scripts/sunday-squad-event.ts",
     "staging:doctor": "node scripts/staging-doctor.ts",
     "staging:reset": "node scripts/staging-reset.ts",
     "staging:check": "node scripts/staging-reset.ts --check",

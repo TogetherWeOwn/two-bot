@@ -19,6 +19,14 @@ actually play", and what currently stops that from finishing.
    the channels those roles just opened.
 5. **They click a link and they are in the room.**
 
+> **Step 3 has an alternative.** With `DISCORD_ANCHOR_WELCOME_CHANNEL_ID` set,
+> the rules-gate-clear moment belongs to the routed Sunday Squad welcome instead
+> — one message, in the Lobby, naming the next anchor event, with nothing
+> attached. Steps 1, 2 and 4 onwards are unchanged and the picker still works;
+> it just stops posting a greeting of its own. Only one of the two may own step
+> 3, because `onboarding_prompted` is once-per-member. See
+> [ANCHOR_EVENT.md](ANCHOR_EVENT.md) (TOG-93).
+
 No DMs at any point. Nothing is mass-messaged. The only public post is the one
 welcome in the landing channel; everything else is an ephemeral reply that only
 that member sees. This is a hard constraint from the issue, and

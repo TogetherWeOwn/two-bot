@@ -7,7 +7,9 @@ import { InviteTracker } from './core/inviteTracker.ts';
 import { ExpectedJoins } from './core/expectedJoins.ts';
 import { FunnelHandlers } from './core/handlers.ts';
 import { createClient, registerHandlers } from './discord/client.ts';
-import { registerOnboarding } from './discord/onboarding.ts';
+import { registerOnboarding, registerGameSelect } from './discord/onboarding.ts';
+import { registerAnchorWelcome } from './discord/anchorWelcome.ts';
+import { occurrencesFrom } from './onboarding/anchorEvent.ts';
 import { RaidWatch } from './analytics/raidWatch.ts';
 import { makeRaidAnnouncer } from './discord/raidAlert.ts';
 import { OnboardingRecorder } from './onboarding/flow.ts';
@@ -101,14 +103,35 @@ registerHandlers(client, { handlers, invites, raid, expectedJoins });
 // Onboarding (TWO-7). Skipped entirely if no landing channel is configured -
 // better to run the funnel with onboarding off than to post into a guessed
 // channel on a live 100-member server.
-if (cfg.landingChannelIds.length === 0) {
-  log.error('onboarding_disabled', { reason: 'DISCORD_LANDING_CHANNEL_IDS is empty' });
-} else {
-  registerOnboarding(client, {
-    recorder: new OnboardingRecorder(store),
-    landingChannelIds: cfg.landingChannelIds,
+//
+// Exactly one thing may own the rules-gate-clear moment, because
+// `onboarding_prompted` is once-per-member by design and whichever handler got
+// there first would silently starve the other. DISCORD_ANCHOR_WELCOME_CHANNEL_ID
+// chooses which (TOG-93); with it unset this block behaves as it always has.
+const onboardingDeps = {
+  recorder: new OnboardingRecorder(store),
+  landingChannelIds: cfg.landingChannelIds,
+  dryRun: cfg.onboardingDryRun,
+};
+
+if (cfg.anchorWelcomeChannelId) {
+  registerAnchorWelcome(client, {
+    recorder: onboardingDeps.recorder,
+    channelId: cfg.anchorWelcomeChannelId,
     dryRun: cfg.onboardingDryRun,
   });
+  // The picker panel outlives any one welcome, so its handler stays live even
+  // though it no longer greets anybody.
+  registerGameSelect(client, onboardingDeps);
+  log.info('anchor_welcome_enabled', {
+    channelId: cfg.anchorWelcomeChannelId,
+    nextOccurrence: occurrencesFrom(Date.now(), 1)[0],
+    dryRun: cfg.onboardingDryRun,
+  });
+} else if (cfg.landingChannelIds.length === 0) {
+  log.error('onboarding_disabled', { reason: 'DISCORD_LANDING_CHANNEL_IDS is empty' });
+} else {
+  registerOnboarding(client, onboardingDeps);
   log.info('onboarding_enabled', {
     landingChannelIds: cfg.landingChannelIds,
     dryRun: cfg.onboardingDryRun,
