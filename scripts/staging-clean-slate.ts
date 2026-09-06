@@ -1,3 +1,16 @@
+import {
+  CATEGORIES,
+  MODERATOR_ROLE,
+  OPERATIONS_CHANNEL_NAMES,
+  OWNER_ROLE,
+  PUBLIC_READ_ONLY,
+  RULES,
+  SCREENING_DESCRIPTION,
+  SERVER_DESCRIPTION,
+  STARTER_MESSAGE,
+  TOPICS,
+  WELCOME_DESCRIPTION,
+} from '../src/redesign/clean-slate.ts';
 import { LIVE_GUILD_ID, STAGING_BOT_APPLICATION_ID, checkStagingToken, stagingGuildId } from '../src/staging/spec.ts';
 
 const API = 'https://discord.com/api/v10';
@@ -27,65 +40,15 @@ const SEND_MESSAGES = 1n << 11n;
 const CONNECT = 1n << 20n;
 const SPEAK = 1n << 21n;
 
-const SERVER_DESCRIPTION =
-  'An 18+ gaming clan since 1998. No application, no interview, no member number — join the Discord, play a session, and find out what it is like when people notice you came back.';
-const WELCOME_DESCRIPTION =
-  'The internet has enough crowded rooms. This one is small on purpose: join, play, come back — that is the whole onboarding process.';
-const STARTER_MESSAGE =
-  "**You're in — that was the whole application.** Tell us what you're playing, on what platform, and when you're usually around. Need a crew tonight? Post the game, platform, and start time in #looking-to-play, then claim a voice room when the party forms.";
 const PREVIOUS_STARTER_MESSAGES = new Set([
   '**Welcome to TWO.** What have you been playing lately? Say hello here, or use #looking-to-play when you want a group now.',
   '**Pull up a chair.** Tell us what you are playing, your platform, and when you are usually around. Looking for a game right now? Post in #looking-to-play, then grab a voice room when your crew is ready.',
 ]);
 
-const TOPICS = {
-  'start-here': 'Four rules, then the server is yours. There is no application, no interview, and no quiz — this page is the only gate. Say hello in #general when you are ready.',
-  announcements: 'Important TWO news and scheduled events. Low-volume and read-only; if it is posted here, it matters.',
-  general: 'The shared table for games, life, questionable strategies, and introductions. New here? Say hello and tell us what you play — this is a place where people notice who comes back.',
-  'looking-to-play': 'Finding a group should not require a spreadsheet, three bots, and divine intervention. Post the game, the platform if it matters, and your start time; claim a voice room when the party forms.',
-  'discord-updates': 'Discord Community and platform notices. Internal record; no conversation.',
-  'moderation-log': 'Screening, anti-raid, report, and moderation actions. Internal evidence; no conversation.',
-  'audit-log': 'Channel, role, configuration, and retained-bot events. Internal evidence; no conversation.',
-  'voice-log': 'Voice join, leave, and session telemetry used for community-health metrics. Internal evidence; no conversation.',
-} as const;
-
-const CATEGORIES = [
-  { name: '👋 START HERE', channels: ['start-here', 'announcements'] },
-  { name: '💬 COMMUNITY', channels: ['general', 'looking-to-play'] },
-  { name: '🔊 VOICE', channels: ['Lobby', 'Squad'] },
-  { name: '🔒 OPERATIONS', channels: ['discord-updates', 'moderation-log', 'audit-log', 'voice-log'] },
-] as const;
-
-const TEXT = new Set(['start-here', 'announcements', 'general', 'looking-to-play', 'discord-updates', 'moderation-log', 'audit-log', 'voice-log']);
-const PUBLIC_READ_ONLY = new Set(['start-here', 'announcements']);
-const OPERATIONS = new Set(['discord-updates', 'moderation-log', 'audit-log', 'voice-log']);
+const TEXT = new Set(Object.keys(TOPICS));
 const VOICE = new Set(['Lobby', 'Squad']);
+const OPERATIONS = OPERATIONS_CHANNEL_NAMES;
 const WANTED_NAMES = new Set<string>(CATEGORIES.flatMap((category) => [category.name, ...category.channels]));
-
-const OWNER_ROLE = {
-  name: 'Owner',
-  color: 0xd4af37,
-  hoist: true,
-  permissions: '0',
-  mentionable: false,
-};
-const MODERATOR_ROLE = {
-  name: 'Moderator',
-  color: 0x5865f2,
-  hoist: true,
-  permissions: String((1n << 1n) | (1n << 2n) | (1n << 13n) | (1n << 16n) | (1n << 28n) | (1n << 40n)),
-  mentionable: false,
-};
-
-const RULES = [
-  'Treat people with respect. Harassment, hate, threats, and targeted abuse are not allowed.',
-  'Keep content legal and appropriate for an 18+ gaming community.',
-  'No spam, scams, malicious links, raids, or unsolicited promotion.',
-  "Follow moderator direction. If something feels unsafe, use Discord's report tools or contact the Owner directly.",
-];
-
-const SCREENING_DESCRIPTION =
-  'Accept the four community rules to enter TWO. This is the only membership gate — there is no application and nothing else to pass.';
 
 let failures = 0;
 type DiscordObject = Record<string, unknown>;
