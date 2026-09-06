@@ -42,6 +42,7 @@ RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY --chown=node:node src/ ./src/
 COPY --chown=node:node scripts/ ./scripts/
 COPY --chown=node:node migrations/ ./migrations/
+COPY --chown=node:node sql/ ./sql/
 COPY --chown=node:node tsconfig.json ./
 
 USER node
