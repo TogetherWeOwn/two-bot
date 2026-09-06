@@ -28,20 +28,21 @@ const CONNECT = 1n << 20n;
 const SPEAK = 1n << 21n;
 
 const SERVER_DESCRIPTION =
-  'Games are better with a crew. TWO is an 18+ place to find teammates, trade stories, and make voice chat feel easy.';
+  'An 18+ gaming clan since 1998. No application, no interview, no member number — join the Discord, play a session, and find out what it is like when people notice you came back.';
 const WELCOME_DESCRIPTION =
-  'Bring a game. Find your crew. Say hello, find a group, and pull up a chair in voice.';
+  'The internet has enough crowded rooms. This one is small on purpose: join, play, come back — that is the whole onboarding process.';
 const STARTER_MESSAGE =
-  '**Pull up a chair.** Tell us what you are playing, your platform, and when you are usually around. Looking for a game right now? Post in #looking-to-play, then grab a voice room when your crew is ready.';
+  "**You're in — that was the whole application.** Tell us what you're playing, on what platform, and when you're usually around. Need a crew tonight? Post the game, platform, and start time in #looking-to-play, then claim a voice room when the party forms.";
 const PREVIOUS_STARTER_MESSAGES = new Set([
   '**Welcome to TWO.** What have you been playing lately? Say hello here, or use #looking-to-play when you want a group now.',
+  '**Pull up a chair.** Tell us what you are playing, your platform, and when you are usually around. Looking for a game right now? Post in #looking-to-play, then grab a voice room when your crew is ready.',
 ]);
 
 const TOPICS = {
-  'start-here': 'Start here, keep it simple: read the four rules, then say hello in #general or post in #looking-to-play when you want a crew.',
+  'start-here': 'Four rules, then the server is yours. There is no application, no interview, and no quiz — this page is the only gate. Say hello in #general when you are ready.',
   announcements: 'Important TWO news and scheduled events. Low-volume and read-only; if it is posted here, it matters.',
-  general: 'The shared table for games, life, questionable strategies, and introductions. New here? Say hello and tell us what you play.',
-  'looking-to-play': 'Need a crew? Post the game, platform if it matters, and when you are starting. When the party forms, claim a voice room.',
+  general: 'The shared table for games, life, questionable strategies, and introductions. New here? Say hello and tell us what you play — this is a place where people notice who comes back.',
+  'looking-to-play': 'Finding a group should not require a spreadsheet, three bots, and divine intervention. Post the game, the platform if it matters, and your start time; claim a voice room when the party forms.',
   'discord-updates': 'Discord Community and platform notices. Internal record; no conversation.',
   'moderation-log': 'Screening, anti-raid, report, and moderation actions. Internal evidence; no conversation.',
   'audit-log': 'Channel, role, configuration, and retained-bot events. Internal evidence; no conversation.',
@@ -77,11 +78,14 @@ const MODERATOR_ROLE = {
 };
 
 const RULES = [
-  'Treat people with respect; no harassment, hate, threats, or targeted abuse.',
+  'Treat people with respect. Harassment, hate, threats, and targeted abuse are not allowed.',
   'Keep content legal and appropriate for an 18+ gaming community.',
   'No spam, scams, malicious links, raids, or unsolicited promotion.',
-  "Follow moderator direction and use Discord's report tools or contact the Owner for safety issues.",
+  "Follow moderator direction. If something feels unsafe, use Discord's report tools or contact the Owner directly.",
 ];
+
+const SCREENING_DESCRIPTION =
+  'Accept the four community rules to enter TWO. This is the only membership gate — there is no application and nothing else to pass.';
 
 let failures = 0;
 type DiscordObject = Record<string, unknown>;
@@ -284,9 +288,9 @@ if (APPLY && communityEnabled && startHere && general && looking) {
     enabled: true,
     description: WELCOME_DESCRIPTION,
     welcome_channels: [
-      { channel_id: startHere.id, description: 'Four quick rules, then the server is yours.', emoji_name: '👋' },
-      { channel_id: general.id, description: 'Say hello and tell us what you play.', emoji_name: '💬' },
-      { channel_id: looking.id, description: 'Name the game, platform, and start time.', emoji_name: '🎮' },
+      { channel_id: startHere.id, description: 'Four rules, then the server is yours.', emoji_name: '👋' },
+      { channel_id: general.id, description: 'Say hello. People notice who comes back.', emoji_name: '💬' },
+      { channel_id: looking.id, description: 'Game, platform, start time — find your crew.', emoji_name: '🎮' },
     ],
   });
   await write('keep native Onboarding off', 'PUT', `/guilds/${guildId}/onboarding`, {
@@ -298,7 +302,7 @@ if (APPLY && communityEnabled && startHere && general && looking) {
   await write('configure Membership Screening placeholder', 'PATCH', `/guilds/${guildId}/member-verification`, {
     enabled: true,
     form_fields: [{ field_type: 'TERMS', label: 'TWO community rules', required: true, values: RULES }],
-    description: 'Accept the four community rules to enter TWO. This is the only membership gate.',
+    description: SCREENING_DESCRIPTION,
   });
 }
 
