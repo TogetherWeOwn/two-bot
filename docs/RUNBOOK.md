@@ -295,6 +295,8 @@ sudo install -m 600 /dev/null /etc/two-bot/two-bot.env
 sudo editor /etc/two-bot/two-bot.env     # see .env.example for the keys
 
 # Backup credentials: separate file, so the backup timer does not need the Discord token.
+# On the production Coolify host, use Coolify's scheduled database backups instead.
+# This manual path is only for a plain systemd host.
 sudo install -o twobot -g twobot -m 600 /dev/null /etc/two-bot/backup.env
 sudo editor /etc/two-bot/backup.env      # TWO_DATABASE_URL, TWO_RESTORE_URL, TWO_BACKUP_UPLOAD_CMD,
                                          # and the TWO_BACKUP_S3_* destination — see "Off-box destination"
@@ -587,6 +589,11 @@ replaced rather than kept, because a runbook entry that cannot be re-run is
 worse than none.
 
 ### Off-box destination
+
+> **Production path:** the Coolify VPS runs scheduled database backups through
+> the Coolify panel to Cloudflare R2 bucket `paperclip-backups`. The wrapper,
+> timer and variables below remain the right answer for a plain systemd host,
+> but they are **not** what the production container uses.
 
 `scripts/pg-backup.ts` splits `TWO_BACKUP_UPLOAD_CMD` on whitespace and appends
 the dump path as the **last** argument. Two consequences, and they bite:
