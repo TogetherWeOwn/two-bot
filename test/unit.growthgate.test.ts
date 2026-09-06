@@ -14,6 +14,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { observeTrackedJoinPath } from '../src/growth/joinPath.ts';
 import {
   EXIT_CODE,
   WEB_HOMEPAGE_CODE,
@@ -144,6 +145,80 @@ test('the website code row is about a funnel row, not a bound code', () => {
   const row = websiteChecks({ ...GREEN, webCodeRowPresent: false }).find((c) => c.id === 'web-code-row')!;
   assert.equal(row.status, 'fail');
   assert.match(row.detail, new RegExp(WEB_HOMEPAGE_CODE));
+});
+
+test('the tracked join path is ok only when redirects reach the expected invite', async () => {
+  const responses = new Map([
+    ['https://two.gg/discord', new Response(null, { status: 302, headers: { location: 'https://discord.gg/4GwEDNRTtx' } })],
+  ]);
+  const requested: string[] = [];
+  const result = await observeTrackedJoinPath('https://two.gg', 'https://discord.gg/4GwEDNRTtx', {
+    homepageHtml: '<p><a href="/discord" data-testid="discord-join">Join the Discord</a></p>',
+    fetch: async (input) => {
+      const url = String(input);
+      requested.push(url);
+      const response = responses.get(url);
+      assert.ok(response, `unexpected request: ${url}`);
+      return response;
+    },
+  });
+
+  assert.equal(result.works, true);
+  assert.deepEqual(requested, ['https://two.gg/discord']);
+  assert.match(result.detail, /302 .*discord\.gg\/4GwEDNRTtx/);
+});
+
+test('the tracked join path fails on a different invite without requesting Discord', async () => {
+  const requested: string[] = [];
+  const result = await observeTrackedJoinPath('https://two.gg', 'https://discord.gg/4GwEDNRTtx', {
+    homepageHtml: '<a data-testid="discord-join" href="/join">Join</a>',
+    fetch: async (input) => {
+      const url = String(input);
+      requested.push(url);
+      return new Response(null, { status: 302, headers: { location: 'https://discord.gg/wrong-code' } });
+    },
+  });
+
+  assert.equal(result.works, false);
+  assert.deepEqual(requested, ['https://two.gg/join']);
+  assert.match(result.detail, /wrong destination/);
+  assert.match(result.detail, /expected https:\/\/discord\.gg\/4GwEDNRTtx/);
+});
+
+test('the tracked join path fails when Phase 1 omits its tracked join link', async () => {
+  let requested = false;
+  const result = await observeTrackedJoinPath('https://two.gg', 'https://discord.gg/4GwEDNRTtx', {
+    homepageHtml: '<a href="/discord">Untracked link</a>',
+    fetch: async () => {
+      requested = true;
+      return new Response(null, { status: 500 });
+    },
+  });
+
+  assert.equal(result.works, false);
+  assert.equal(requested, false);
+  assert.match(result.detail, /did not render its tracked Discord join link/);
+});
+
+test('the join criterion stays unknown until Phase 1 is positively observed', () => {
+  const button = websiteChecks({ domainLive: false, joinButtonDetail: 'not exercised - apex is still old.' }).find(
+    (c) => c.id === 'web-join-button',
+  )!;
+  assert.equal(button.status, 'unknown');
+  assert.match(button.detail, /not exercised/);
+});
+
+test('no website owner or action cites closed build cards', () => {
+  for (const o of [{} as Observations, { ...GREEN, domainLive: false, joinButtonWorks: false }]) {
+    for (const c of websiteChecks(o)) {
+      const text = `${c.owner ?? ''} ${c.action ?? ''}`;
+      assert.doesNotMatch(text, /TOG-(?:48|47|80)\b/, `${c.id} must not cite a closed build card`);
+      if (c.status !== 'ok') {
+        assert.match(text, /TOG-1223/, `${c.id} must point at the current production dependency`);
+        assert.match(text, /npm run/, `${c.id} must provide an executable action`);
+      }
+    }
+  }
 });
 
 test('the scoring loop runs only on green', () => {
