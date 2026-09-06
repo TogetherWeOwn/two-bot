@@ -41,8 +41,16 @@ CHECK_ONLY=0
 
 SERVER_UUID="${COOLIFY_SERVER_UUID:-kaghbfdj7cjkjjf8eisjfj5c}"
 PROJECT_NAME="two-bot"
-APP_NAME="two-bot"
-GIT_REPO="https://github.com/TogetherWeOwn/two-bot"
+# The live application is named `two-bot-dk`, NOT `two-bot`. The lookup below
+# matches on this name, so getting it wrong does not fail loudly - it silently
+# creates a SECOND application beside the running one. See TOG-13.
+APP_NAME="${COOLIFY_APP_NAME:-two-bot-dk}"
+# NOT github.com. Coolify on this box cannot clone from GitHub: deploy keys are
+# forbidden by the GitHub enterprise policy (TOG-1175) and an embedded
+# x-access-token clone URL 500s. The box mirrors the GitHub repo every 2 minutes
+# and Coolify clones from that mirror over SSH. Re-pointing this at github.com
+# breaks every future deploy of a bot that is currently running fine.
+GIT_REPO="${COOLIFY_GIT_REPO:-git@135.148.42.223:/srv/git/two-bot.git}"
 GIT_BRANCH="${TWO_DEPLOY_BRANCH:-main}"
 GUILD_ID="${DISCORD_GUILD_ID:-326474832151838730}"
 
@@ -164,6 +172,18 @@ print(json.dumps({
   echo "  created application $app_uuid"
 else
   echo "  application $app_uuid (existing)"
+  # An existing application already has a clone URL, and this script never
+  # rewrites it. If it points somewhere this box cannot clone from, the deploy
+  # below fails in a few seconds with an EMPTY build log, which reads like a
+  # broken server rather than a bad remote. Say so here instead.
+  existing_repo="$(printf '%s' "$apps" | jq_get "next((a.get('git_repository','') for a in d if a.get('name')=='$APP_NAME'),'')")"
+  if [[ -n "$existing_repo" && "$existing_repo" != "$GIT_REPO" ]]; then
+    say "WARN" "application clone URL is '$existing_repo', not '$GIT_REPO'"
+    if [[ "$existing_repo" == *github.com* ]]; then
+      say "FAIL" "this box cannot clone from github.com - see TOG-1175 and docs/DEPLOY.md 2"
+      exit 2
+    fi
+  fi
 fi
 
 # --- 6. Environment variables ----------------------------------------------
