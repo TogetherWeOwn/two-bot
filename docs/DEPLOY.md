@@ -15,7 +15,8 @@ There are two supported ways to run this bot and they are both current:
 | Health | `GET /readyz` | `systemctl status` |
 
 Use this document. `deploy/*.service` stays in the repo because it is the right
-answer on a plain host, and because the backup timer still runs that way.
+answer on a plain host. In production, backups run through Coolify's scheduled
+database backups to R2 (see §8), not through the host timer.
 
 ---
 
@@ -235,10 +236,16 @@ killed holding them.
 
 ## 8. Backups
 
-Backups are **not** part of this container. `two-bot-backup.timer` runs
-`scripts/pg-backup.ts` on the host against the same Postgres, and uploads
-off-box with `scripts/backup-upload-s3.ts`. See docs/RUNBOOK.md, "Off-box
-destination", for `TWO_BACKUP_S3_*`.
+Backups are **not** part of this container. The production database is backed up
+by Coolify's scheduled backup service to Cloudflare R2 bucket `paperclip-backups`
+(`r2-paperclip-backups` in the panel, `save_s3=true`, daily 03:00 UTC, 7 local /
+30 S3 copies). The operator enabled this on 2026-09-06 (TOG-1189) and confirmed
+objects are visible in the bucket.
+
+The repo still ships `deploy/two-bot-backup.*` and `scripts/bootstrap-host.sh`
+still installs the wrapper and timer, but that path is for a plain systemd host,
+not the Coolify VPS. See docs/RUNBOOK.md, "Off-box destination", for the
+host-timer variables if you ever need it.
 
 A backup that lives on the same disk as the database does not survive losing the
-machine. Configure the off-box destination.
+machine. Verify the off-box destination in the Coolify panel.
