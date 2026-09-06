@@ -83,6 +83,22 @@ test('one unknown among five ok is still red', () => {
   assert.equal(verdict(checks), 'red');
 });
 
+test('no bot criterion blames TOG-13 or systemctl for a deploy that shipped', () => {
+  // TOG-13 closed 2026-09-06 - the bot runs as the Coolify container
+  // `two-bot-dk`, never as a systemd unit. For one day this module answered
+  // every bot criterion with "TOG-13 has not deployed one", which is a false
+  // statement in the one artifact nobody is supposed to second-guess. An
+  // unknown on the bot side must mean "we could not look", not "it never
+  // shipped", so no bot-side text may name a closed card or the wrong tool.
+  for (const o of [{} as Observations, { serviceActive: false, welcomeDelivered: false } as Observations]) {
+    for (const c of botChecks(o)) {
+      const text = `${c.title} ${c.detail} ${c.owner ?? ''} ${c.action ?? ''}`;
+      assert.doesNotMatch(text, /TOG-13/, `${c.id} must not cite the closed TOG-13`);
+      assert.doesNotMatch(text, /systemctl|systemd/i, `${c.id} must not cite systemctl - the bot is a container`);
+    }
+  }
+});
+
 test('zero attributed joins fails rather than reads as not-yet', () => {
   const [, join] = botChecks({ ...GREEN, attributedJoins: 0 });
   assert.equal(join.id, 'bot-attributed-join');
