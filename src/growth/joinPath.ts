@@ -5,20 +5,24 @@ export interface JoinPathObservation {
 
 export interface ObserveJoinPathOptions {
   fetch?: typeof fetch;
-  maxRedirects?: number;
+  homepageHtml?: string;
+}
+
+export interface ObserveApprovedSiteOptions {
+  fetch?: typeof fetch;
+}
+
+export interface ApprovedSiteObservation {
+  live: boolean;
+  detail: string;
+  site?: string;
   homepageHtml?: string;
 }
 
 const JOIN_LINK = /<a\b[^>]*\bhref\s*=\s*(["'])([^"']+)\1[^>]*\bdata-testid\s*=\s*(["'])discord-join\3[^>]*>|<a\b[^>]*\bdata-testid\s*=\s*(["'])discord-join\4[^>]*\bhref\s*=\s*(["'])([^"']+)\5[^>]*>/i;
+const JOIN_INTERSTITIAL = /\bdata-testid\s*=\s*(["'])one-click-join\1/i;
 
-export function trackedJoinPathFromHtml(site: string, html: string): URL | undefined {
-  const match = html.match(JOIN_LINK);
-  const href = match?.[2] ?? match?.[6];
-  if (!href) return undefined;
-
-  const url = new URL(href, site);
-  return url.origin === new URL(site).origin ? url : undefined;
-}
+const APPROVED_SITE = new URL('https://togetherweown.com/');
 
 function sameDestination(actual: URL, expected: URL): boolean {
   return (
@@ -30,14 +34,87 @@ function sameDestination(actual: URL, expected: URL): boolean {
   );
 }
 
-function step(status: number, from: URL, to: URL): string {
-  return `${status} ${from.href} -> ${to.href}`;
+export function trackedJoinPathFromHtml(site: string, html: string): URL | undefined {
+  const match = html.match(JOIN_LINK);
+  const href = match?.[2] ?? match?.[6];
+  if (!href) return undefined;
+
+  const url = new URL(href, site);
+  const expected = new URL('/join', site);
+  return sameDestination(url, expected) ? url : undefined;
+}
+
+export async function observeApprovedPublicSite(
+  vanitySite: string,
+  options: ObserveApprovedSiteOptions = {},
+): Promise<ApprovedSiteObservation> {
+  const request = options.fetch ?? fetch;
+  const vanity = new URL(vanitySite);
+  let response: Response;
+
+  try {
+    response = await request(vanity, {
+      method: 'GET',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(12_000),
+      headers: { Accept: 'text/html,application/xhtml+xml' },
+    });
+  } catch (err) {
+    return {
+      live: false,
+      detail: `${vanity.href} could not be reached: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  const location = response.headers.get('location');
+  if (response.status < 300 || response.status >= 400 || !location) {
+    return {
+      live: false,
+      detail: `${vanity.href} answered ${response.status} instead of redirecting to ${APPROVED_SITE.href}.`,
+    };
+  }
+
+  const publicSite = new URL(location, vanity);
+  if (!sameDestination(publicSite, APPROVED_SITE)) {
+    return {
+      live: false,
+      detail: `${vanity.href} redirected to ${publicSite.href}, not the approved public site ${APPROVED_SITE.href}.`,
+    };
+  }
+
+  try {
+    response = await request(publicSite, {
+      method: 'GET',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(12_000),
+      headers: { Accept: 'text/html,application/xhtml+xml' },
+    });
+  } catch (err) {
+    return {
+      live: false,
+      detail: `${publicSite.href} could not be reached: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  if (!response.ok || (response.url && !sameDestination(new URL(response.url), publicSite))) {
+    return {
+      live: false,
+      detail: `${publicSite.href} returned ${response.status} instead of serving Phase 1 on the approved hostname.`,
+    };
+  }
+
+  return {
+    live: true,
+    detail: `${vanity.href} redirects to ${publicSite.href}, which answers ${response.status} with Phase 1.`,
+    site: publicSite.href,
+    homepageHtml: await response.text(),
+  };
 }
 
 /**
- * Exercise the public join route without following the final Discord redirect.
- * Reaching the expected Location proves the website path is wired while stopping
- * before Discord can render or accept an invite.
+ * Exercise the approved Phase 1 route without following the final Discord
+ * redirect. The tracked homepage link intentionally opens a 200 interstitial;
+ * /discord is the separate route that must expose the exact invite Location.
  */
 export async function observeTrackedJoinPath(
   site: string,
@@ -45,66 +122,80 @@ export async function observeTrackedJoinPath(
   options: ObserveJoinPathOptions = {},
 ): Promise<JoinPathObservation> {
   const request = options.fetch ?? fetch;
-  const maxRedirects = options.maxRedirects ?? 5;
   const expected = new URL(expectedDestination);
   const tracked = options.homepageHtml ? trackedJoinPathFromHtml(site, options.homepageHtml) : undefined;
   if (options.homepageHtml && !tracked) {
     return {
       works: false,
-      detail: 'the Phase 1 homepage did not render its tracked Discord join link.',
+      detail: 'the Phase 1 homepage did not render its tracked /join link.',
     };
   }
 
-  let current = tracked ?? new URL('/join', site);
-  const websiteOrigin = new URL(site).origin;
-  const steps: string[] = [];
+  const join = tracked ?? new URL('/join', site);
+  let response: Response;
 
-  for (let redirects = 0; redirects < maxRedirects; redirects += 1) {
-    let response: Response;
-    try {
-      response = await request(current, {
-        method: 'GET',
-        redirect: 'manual',
-        signal: AbortSignal.timeout(12_000),
-        headers: { Accept: 'text/html,application/xhtml+xml' },
-      });
-    } catch (err) {
-      return {
-        works: false,
-        detail: `${current.href} could not be reached: ${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
+  try {
+    response = await request(join, {
+      method: 'GET',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(12_000),
+      headers: { Accept: 'text/html,application/xhtml+xml' },
+    });
+  } catch (err) {
+    return {
+      works: false,
+      detail: `${join.href} could not be reached: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
 
-    const location = response.headers.get('location');
-    if (response.status < 300 || response.status >= 400 || !location) {
-      return {
-        works: false,
-        detail: `${current.href} answered ${response.status} without a redirect to ${expected.href}.`,
-      };
-    }
+  if (response.status !== 200 || response.headers.has('location')) {
+    return {
+      works: false,
+      detail: `${join.href} answered ${response.status} instead of serving the approved 200 interstitial.`,
+    };
+  }
 
-    const next = new URL(location, current);
-    steps.push(step(response.status, current, next));
+  const joinHtml = await response.text();
+  if (!JOIN_INTERSTITIAL.test(joinHtml)) {
+    return {
+      works: false,
+      detail: `${join.href} answered 200 without the approved join interstitial.`,
+    };
+  }
 
-    if (sameDestination(next, expected)) {
-      return {
-        works: true,
-        detail: `the tracked join path reached the expected invite without opening Discord: ${steps.join('; ')}.`,
-      };
-    }
+  const discord = new URL('/discord', site);
+  try {
+    response = await request(discord, {
+      method: 'GET',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(12_000),
+      headers: { Accept: 'text/html,application/xhtml+xml' },
+    });
+  } catch (err) {
+    return {
+      works: false,
+      detail: `${discord.href} could not be reached: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
 
-    if (next.origin !== websiteOrigin) {
-      return {
-        works: false,
-        detail: `the tracked join path left the website for the wrong destination: ${steps.join('; ')} (expected ${expected.href}).`,
-      };
-    }
+  const location = response.headers.get('location');
+  if (response.status < 300 || response.status >= 400 || !location) {
+    return {
+      works: false,
+      detail: `${discord.href} answered ${response.status} without a redirect to ${expected.href}.`,
+    };
+  }
 
-    current = next;
+  const destination = new URL(location, discord);
+  if (!sameDestination(destination, expected)) {
+    return {
+      works: false,
+      detail: `${discord.href} redirected to the wrong destination ${destination.href} (expected ${expected.href}).`,
+    };
   }
 
   return {
-    works: false,
-    detail: `the tracked join path exceeded ${maxRedirects} website redirects before reaching ${expected.href}: ${steps.join('; ')}.`,
+    works: true,
+    detail: `${join.href} served the approved 200 interstitial; ${discord.href} redirected to the exact expected invite without opening Discord.`,
   };
 }

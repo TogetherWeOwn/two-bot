@@ -37,7 +37,7 @@
  * Exit: 0 green, 1 red. Red is a normal weekly outcome, not a malfunction.
  */
 import { openDb } from '../src/store/db.ts';
-import { observeTrackedJoinPath } from '../src/growth/joinPath.ts';
+import { observeApprovedPublicSite, observeTrackedJoinPath } from '../src/growth/joinPath.ts';
 import {
   EXIT_CODE,
   WEB_HOMEPAGE_CODE,
@@ -51,7 +51,7 @@ import {
 
 const json = process.argv.slice(2).includes('--json');
 
-/** The apex, not a preview URL. Website criterion 1 turns on that distinction. */
+/** The approved vanity entry point, not a preview URL. */
 const SITE = process.env.TWO_GATE_SITE || 'https://two.gg';
 /** The public WEB-HOMEPAGE invite. The observation stops at this redirect and never opens Discord. */
 const EXPECTED_JOIN_DESTINATION = process.env.TWO_GATE_JOIN_DESTINATION || 'https://discord.gg/4GwEDNRTtx';
@@ -112,28 +112,11 @@ if (process.env.TWO_GATE_WELCOME_OK === '1') {
   o.welcomeDelivered = false;
 }
 
-// --- website criterion 1: the real domain ----------------------------------
-let homepageHtml: string | undefined;
-try {
-  const res = await fetch(SITE, { redirect: 'follow', signal: AbortSignal.timeout(12_000) });
-  const landed = new URL(res.url).hostname.replace(/^www\./, '');
-  const apex = new URL(SITE).hostname.replace(/^www\./, '');
-  if (res.ok && landed === apex) {
-    o.domainLive = true;
-    o.domainDetail = `${apex} answers ${res.status} and serves its own content.`;
-    homepageHtml = await res.text();
-  } else if (landed !== apex) {
-    // The failure we actually have today: two.gg resolves to the old WordPress
-    // site. That is not Phase 1 on the real domain, however alive it looks.
-    o.domainLive = false;
-    o.domainDetail = `${apex} returned ${res.status} and redirected to ${landed} - the old site, not Phase 1.`;
-  } else {
-    o.domainLive = false;
-    o.domainDetail = `${apex} returned ${res.status}.`;
-  }
-} catch (err) {
-  o.domainDetail = `${SITE} could not be reached: ${err instanceof Error ? err.message : String(err)}`;
-}
+// --- website criterion 1: the approved public route -------------------------
+const publicSite = await observeApprovedPublicSite(SITE);
+o.domainLive = publicSite.live;
+o.domainDetail = publicSite.detail;
+const homepageHtml = publicSite.homepageHtml;
 
 // --- the funnel: bot criterion 2 and website criterion 3 -------------------
 //
@@ -208,15 +191,15 @@ if (!dbSpec) {
 
 // --- website criterion 2: the tracked join button --------------------------
 //
-// Only meaningful once the domain serves Phase 1. Asking a WordPress page for a
-// join route and recording "absent" would be a fail we invented rather than one
-// we observed, so this stays unknown unless criterion 1 is positively ok.
-if (o.domainLive === true) {
-  const join = await observeTrackedJoinPath(SITE, EXPECTED_JOIN_DESTINATION, { homepageHtml });
+// Only meaningful once the approved public host serves Phase 1. Asking any
+// other page for a join route would be a fail we invented rather than one we
+// observed, so this stays unknown unless criterion 1 is positively ok.
+if (o.domainLive === true && publicSite.site) {
+  const join = await observeTrackedJoinPath(publicSite.site, EXPECTED_JOIN_DESTINATION, { homepageHtml });
   o.joinButtonWorks = join.works;
   o.joinButtonDetail = join.detail;
 } else {
-  o.joinButtonDetail = 'not exercised - the real domain does not observably serve Phase 1 yet.';
+  o.joinButtonDetail = 'not exercised - the approved public route does not observably serve Phase 1 yet.';
 }
 
 // --- report -----------------------------------------------------------------
