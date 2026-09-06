@@ -115,7 +115,9 @@ export const WEB_HOMEPAGE_CODE = 'WEB-HOMEPAGE';
 // a different ask and a different owner action. Naming a closed card as the
 // blocker is how a gate keeps reporting last month's reason.
 const BOT_OWNER = 'Backend/Bot Engineer (two-bot-dk on Coolify - observe the running container)';
-const WEB_OWNER = 'Web team (TOG-48 landing page, TOG-47 Discord OAuth)';
+const WEB_OWNER = 'Web Platform / production cutover ([TOG-1223](/TOG/issues/TOG-1223), then [TOG-59](/TOG/issues/TOG-59) / [TOG-85](/TOG/issues/TOG-85))';
+const WEB_CUTOVER_ACTION =
+  'complete [TOG-1223](/TOG/issues/TOG-1223), execute the apex + /join cutover in [TOG-59](/TOG/issues/TOG-59) / [TOG-85](/TOG/issues/TOG-85), then: npm run gate:check';
 
 /** `undefined` -> unknown, `true` -> ok, `false` -> fail. The whole point of the module in one line. */
 function observed(
@@ -223,12 +225,12 @@ export function websiteChecks(o: Observations): Criterion[] {
     {
       detail: o.domainDetail ?? 'the real domain does not serve Phase 1.',
       owner: WEB_OWNER,
-      action: 'ship Phase 1 to the apex domain (TOG-48), then re-run',
+      action: WEB_CUTOVER_ACTION,
     },
     {
       detail: o.domainDetail ?? 'the domain could not be reached from here.',
       owner: WEB_OWNER,
-      action: 're-run this check from a host with outbound network access',
+      action: 'from a host with outbound network access: npm run gate:check',
     },
   );
 
@@ -239,14 +241,14 @@ export function websiteChecks(o: Observations): Criterion[] {
     {
       detail: o.joinButtonDetail ?? 'the landing page or its tracked join button does not work end to end.',
       owner: WEB_OWNER,
-      action: 'TOG-48 (landing page) and TOG-80 (one-click join), then re-run',
+      action: WEB_CUTOVER_ACTION,
     },
     {
       detail:
         o.joinButtonDetail ??
-        'no landing page to exercise - TOG-48 is blocked, so there is no button to click.',
+        'the tracked join path was not exercised because Phase 1 is not observably live on the apex.',
       owner: WEB_OWNER,
-      action: 'land TOG-48, then re-run',
+      action: WEB_CUTOVER_ACTION,
     },
   );
 
@@ -257,7 +259,7 @@ export function websiteChecks(o: Observations): Criterion[] {
     {
       detail: o.webCodeRowDetail ?? `${WEB_HOMEPAGE_CODE} is bound but has produced no row in the funnel report.`,
       owner: WEB_OWNER,
-      action: 'confirm the join button issues the bound code, then: npm run attribution -- all',
+      action: 'verify /join reaches the WEB-HOMEPAGE invite with npm run gate:check, then: npm run attribution -- all',
     },
     {
       detail: o.webCodeRowDetail ?? 'the funnel could not be read - TWO_DATABASE_URL is not bound in this environment.',
