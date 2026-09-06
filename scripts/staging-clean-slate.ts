@@ -27,8 +27,15 @@ const SEND_MESSAGES = 1n << 11n;
 const CONNECT = 1n << 20n;
 const SPEAK = 1n << 21n;
 
+const SERVER_DESCRIPTION =
+  'TWO is an 18+ gaming clan founded in 1998, now open to new members. We are a small, voice-first community for finding people to play with—read the rules, say hello, and join in.';
+const WELCOME_DESCRIPTION =
+  'An 18+ gaming clan since 1998, now open. Meet people, find a group, and hang out in voice.';
+const STARTER_MESSAGE =
+  '**Welcome to TWO.** What have you been playing lately? Say hello here, or use #looking-to-play when you want a group now.';
+
 const TOPICS = {
-  'start-here': 'Start here: what TWO is, the rules, and where to go next. Read this once, then say hello in #general.',
+  'start-here': 'TWO began as a gaming clan in 1998 and is now open. Read the four rules, then say hello in #general.',
   announcements: 'Important TWO news and scheduled events. Low-volume and read-only; if it is posted here, it matters.',
   general: 'The main room for games, life, and introductions. New here? Say hello and tell us what you have been playing.',
   'looking-to-play': 'Looking for people now? Post the game, platform if relevant, and when you want to start. Move to Lobby when the group forms.',
@@ -246,7 +253,7 @@ const looking = freshChannels.find((channel) => channel.name === 'looking-to-pla
 
 if (APPLY && startHere && announcements) {
   await write('configure guild description and system channels', 'PATCH', `/guilds/${guildId}`, {
-    description: 'TWO is an 18+ gaming community for finding people to play with and hanging out in voice. No application or tryout—read the rules, say hello, and join in.',
+    description: SERVER_DESCRIPTION,
     system_channel_id: startHere.id,
     rules_channel_id: startHere.id,
     public_updates_channel_id: announcements.id,
@@ -272,9 +279,9 @@ if (APPLY && !communityEnabled && startHere && announcements) {
 if (APPLY && communityEnabled && startHere && general && looking) {
   await write('configure three-card Welcome Screen', 'PATCH', `/guilds/${guildId}/welcome-screen`, {
     enabled: true,
-    description: 'TWO is an 18+ gaming community. Read the rules, say hello, and find people to play with.',
+    description: WELCOME_DESCRIPTION,
     welcome_channels: [
-      { channel_id: startHere.id, description: 'Read the rules and where to go next.', emoji_name: '👋' },
+      { channel_id: startHere.id, description: 'Meet TWO, read four rules, and get started.', emoji_name: '👋' },
       { channel_id: general.id, description: 'Say hello and share what you play.', emoji_name: '💬' },
       { channel_id: looking.id, description: 'Post the game and when you want to start.', emoji_name: '🎮' },
     ],
@@ -293,10 +300,19 @@ if (APPLY && communityEnabled && startHere && general && looking) {
 }
 
 if (APPLY && general) {
-  await write('post first-message starter placeholder', 'POST', `/channels/${general.id}/messages`, {
-    content: '**Welcome to TWO.** What have you been playing lately? Say hello here, or use #looking-to-play when you want a group now.',
-    allowed_mentions: { parse: [] },
-  });
+  const recentMessages = await api<Array<{ id: string; author: { id: string }; content: string }>>(
+    'GET',
+    `/channels/${general.id}/messages?limit=50`,
+  );
+  const starterExists = recentMessages.body?.some(
+    (message) => message.author.id === me.body.id && message.content === STARTER_MESSAGE,
+  );
+  if (!starterExists) {
+    await write('post first-message starter placeholder', 'POST', `/channels/${general.id}/messages`, {
+      content: STARTER_MESSAGE,
+      allowed_mentions: { parse: [] },
+    });
+  }
 }
 
 let inviteUrl: string | null = null;
