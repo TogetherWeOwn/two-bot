@@ -28,17 +28,20 @@ const CONNECT = 1n << 20n;
 const SPEAK = 1n << 21n;
 
 const SERVER_DESCRIPTION =
-  'TWO is an 18+ gaming clan founded in 1998, now open to new members. We are a small, voice-first community for finding people to play with—read the rules, say hello, and join in.';
+  'Games are better with a crew. TWO is an 18+ place to find teammates, trade stories, and make voice chat feel easy.';
 const WELCOME_DESCRIPTION =
-  'An 18+ gaming clan since 1998, now open. Meet people, find a group, and hang out in voice.';
+  'Bring a game. Find your crew. Say hello, find a group, and pull up a chair in voice.';
 const STARTER_MESSAGE =
-  '**Welcome to TWO.** What have you been playing lately? Say hello here, or use #looking-to-play when you want a group now.';
+  '**Pull up a chair.** Tell us what you are playing, your platform, and when you are usually around. Looking for a game right now? Post in #looking-to-play, then grab a voice room when your crew is ready.';
+const PREVIOUS_STARTER_MESSAGES = new Set([
+  '**Welcome to TWO.** What have you been playing lately? Say hello here, or use #looking-to-play when you want a group now.',
+]);
 
 const TOPICS = {
-  'start-here': 'TWO began as a gaming clan in 1998 and is now open. Read the four rules, then say hello in #general.',
+  'start-here': 'Start here, keep it simple: read the four rules, then say hello in #general or post in #looking-to-play when you want a crew.',
   announcements: 'Important TWO news and scheduled events. Low-volume and read-only; if it is posted here, it matters.',
-  general: 'The main room for games, life, and introductions. New here? Say hello and tell us what you have been playing.',
-  'looking-to-play': 'Looking for people now? Post the game, platform if relevant, and when you want to start. Move to Lobby when the group forms.',
+  general: 'The shared table for games, life, questionable strategies, and introductions. New here? Say hello and tell us what you play.',
+  'looking-to-play': 'Need a crew? Post the game, platform if it matters, and when you are starting. When the party forms, claim a voice room.',
   'discord-updates': 'Discord Community and platform notices. Internal record; no conversation.',
   'moderation-log': 'Screening, anti-raid, report, and moderation actions. Internal evidence; no conversation.',
   'audit-log': 'Channel, role, configuration, and retained-bot events. Internal evidence; no conversation.',
@@ -281,9 +284,9 @@ if (APPLY && communityEnabled && startHere && general && looking) {
     enabled: true,
     description: WELCOME_DESCRIPTION,
     welcome_channels: [
-      { channel_id: startHere.id, description: 'Meet TWO, read four rules, and get started.', emoji_name: '👋' },
-      { channel_id: general.id, description: 'Say hello and share what you play.', emoji_name: '💬' },
-      { channel_id: looking.id, description: 'Post the game and when you want to start.', emoji_name: '🎮' },
+      { channel_id: startHere.id, description: 'Four quick rules, then the server is yours.', emoji_name: '👋' },
+      { channel_id: general.id, description: 'Say hello and tell us what you play.', emoji_name: '💬' },
+      { channel_id: looking.id, description: 'Name the game, platform, and start time.', emoji_name: '🎮' },
     ],
   });
   await write('keep native Onboarding off', 'PUT', `/guilds/${guildId}/onboarding`, {
@@ -304,14 +307,24 @@ if (APPLY && general) {
     'GET',
     `/channels/${general.id}/messages?limit=50`,
   );
-  const starterExists = recentMessages.body?.some(
+  const currentStarter = recentMessages.body?.find(
     (message) => message.author.id === me.body.id && message.content === STARTER_MESSAGE,
   );
-  if (!starterExists) {
-    await write('post first-message starter placeholder', 'POST', `/channels/${general.id}/messages`, {
-      content: STARTER_MESSAGE,
-      allowed_mentions: { parse: [] },
-    });
+  if (!currentStarter) {
+    const previousStarter = recentMessages.body?.find(
+      (message) => message.author.id === me.body.id && PREVIOUS_STARTER_MESSAGES.has(message.content),
+    );
+    if (previousStarter) {
+      await write('update first-message starter placeholder', 'PATCH', `/channels/${general.id}/messages/${previousStarter.id}`, {
+        content: STARTER_MESSAGE,
+        allowed_mentions: { parse: [] },
+      });
+    } else {
+      await write('post first-message starter placeholder', 'POST', `/channels/${general.id}/messages`, {
+        content: STARTER_MESSAGE,
+        allowed_mentions: { parse: [] },
+      });
+    }
   }
 }
 
