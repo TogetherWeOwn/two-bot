@@ -14,7 +14,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { observeTrackedJoinPath } from '../src/growth/joinPath.ts';
+import { observeApprovedPublicSite, observeTrackedJoinPath } from '../src/growth/joinPath.ts';
 import {
   EXIT_CODE,
   WEB_HOMEPAGE_CODE,
@@ -147,13 +147,47 @@ test('the website code row is about a funnel row, not a bound code', () => {
   assert.match(row.detail, new RegExp(WEB_HOMEPAGE_CODE));
 });
 
-test('the tracked join path is ok only when redirects reach the expected invite', async () => {
+test('the approved vanity domain redirects only to the public Phase 1 host', async () => {
+  const requested: string[] = [];
+  const result = await observeApprovedPublicSite('https://two.gg', {
+    fetch: async (input) => {
+      const url = String(input);
+      requested.push(url);
+      if (url === 'https://two.gg/') {
+        return new Response(null, { status: 301, headers: { location: 'https://togetherweown.com/' } });
+      }
+      assert.equal(url, 'https://togetherweown.com/');
+      return new Response('<a href="/join" data-testid="discord-join">Join</a>', { status: 200 });
+    },
+  });
+
+  assert.equal(result.live, true);
+  assert.equal(result.site, 'https://togetherweown.com/');
+  assert.deepEqual(requested, ['https://two.gg/', 'https://togetherweown.com/']);
+  assert.match(result.detail, /redirects to https:\/\/togetherweown\.com\//);
+});
+
+test('the approved vanity domain rejects a wrong final hostname', async () => {
+  const result = await observeApprovedPublicSite('https://two.gg', {
+    fetch: async () => new Response(null, { status: 301, headers: { location: 'https://phase1.example/' } }),
+  });
+
+  assert.equal(result.live, false);
+  assert.match(result.detail, /not the approved public site/);
+  assert.match(result.detail, /https:\/\/togetherweown\.com\//);
+});
+
+test('the tracked join path requires the approved interstitial then exact invite', async () => {
   const responses = new Map([
-    ['https://two.gg/discord', new Response(null, { status: 302, headers: { location: 'https://discord.gg/4GwEDNRTtx' } })],
+    ['https://togetherweown.com/join', new Response('<a href="/join/discord" data-testid="one-click-join">Join</a>', { status: 200 })],
+    [
+      'https://togetherweown.com/discord',
+      new Response(null, { status: 302, headers: { location: 'https://discord.gg/4GwEDNRTtx' } }),
+    ],
   ]);
   const requested: string[] = [];
-  const result = await observeTrackedJoinPath('https://two.gg', 'https://discord.gg/4GwEDNRTtx', {
-    homepageHtml: '<p><a href="/discord" data-testid="discord-join">Join the Discord</a></p>',
+  const result = await observeTrackedJoinPath('https://togetherweown.com', 'https://discord.gg/4GwEDNRTtx', {
+    homepageHtml: '<p><a href="/join" data-testid="discord-join">Join the Discord</a></p>',
     fetch: async (input) => {
       const url = String(input);
       requested.push(url);
@@ -164,31 +198,65 @@ test('the tracked join path is ok only when redirects reach the expected invite'
   });
 
   assert.equal(result.works, true);
-  assert.deepEqual(requested, ['https://two.gg/discord']);
-  assert.match(result.detail, /302 .*discord\.gg\/4GwEDNRTtx/);
+  assert.deepEqual(requested, ['https://togetherweown.com/join', 'https://togetherweown.com/discord']);
+  assert.match(result.detail, /approved 200 interstitial/);
+  assert.match(result.detail, /exact expected invite/);
 });
 
-test('the tracked join path fails on a different invite without requesting Discord', async () => {
+test('the tracked join path rejects an arbitrary 200 tracked page', async () => {
   const requested: string[] = [];
-  const result = await observeTrackedJoinPath('https://two.gg', 'https://discord.gg/4GwEDNRTtx', {
+  const result = await observeTrackedJoinPath('https://togetherweown.com', 'https://discord.gg/4GwEDNRTtx', {
+    homepageHtml: '<a data-testid="discord-join" href="/about">Join</a>',
+    fetch: async (input) => {
+      requested.push(String(input));
+      return new Response('<h1>About</h1>', { status: 200 });
+    },
+  });
+
+  assert.equal(result.works, false);
+  assert.deepEqual(requested, []);
+  assert.match(result.detail, /did not render its tracked \/join link/);
+});
+
+test('the tracked join path rejects a generic 200 page at /join', async () => {
+  const requested: string[] = [];
+  const result = await observeTrackedJoinPath('https://togetherweown.com', 'https://discord.gg/4GwEDNRTtx', {
+    homepageHtml: '<a data-testid="discord-join" href="/join">Join</a>',
+    fetch: async (input) => {
+      requested.push(String(input));
+      return new Response('<h1>About us</h1>', { status: 200 });
+    },
+  });
+
+  assert.equal(result.works, false);
+  assert.deepEqual(requested, ['https://togetherweown.com/join']);
+  assert.match(result.detail, /without the approved join interstitial/);
+});
+
+test('the tracked join path fails when /discord exposes a different invite', async () => {
+  const requested: string[] = [];
+  const result = await observeTrackedJoinPath('https://togetherweown.com', 'https://discord.gg/4GwEDNRTtx', {
     homepageHtml: '<a data-testid="discord-join" href="/join">Join</a>',
     fetch: async (input) => {
       const url = String(input);
       requested.push(url);
+      if (url.endsWith('/join')) {
+        return new Response('<a href="/join/discord" data-testid="one-click-join">Join</a>', { status: 200 });
+      }
       return new Response(null, { status: 302, headers: { location: 'https://discord.gg/wrong-code' } });
     },
   });
 
   assert.equal(result.works, false);
-  assert.deepEqual(requested, ['https://two.gg/join']);
+  assert.deepEqual(requested, ['https://togetherweown.com/join', 'https://togetherweown.com/discord']);
   assert.match(result.detail, /wrong destination/);
   assert.match(result.detail, /expected https:\/\/discord\.gg\/4GwEDNRTtx/);
 });
 
 test('the tracked join path fails when Phase 1 omits its tracked join link', async () => {
   let requested = false;
-  const result = await observeTrackedJoinPath('https://two.gg', 'https://discord.gg/4GwEDNRTtx', {
-    homepageHtml: '<a href="/discord">Untracked link</a>',
+  const result = await observeTrackedJoinPath('https://togetherweown.com', 'https://discord.gg/4GwEDNRTtx', {
+    homepageHtml: '<a href="/join">Untracked link</a>',
     fetch: async () => {
       requested = true;
       return new Response(null, { status: 500 });
@@ -197,7 +265,7 @@ test('the tracked join path fails when Phase 1 omits its tracked join link', asy
 
   assert.equal(result.works, false);
   assert.equal(requested, false);
-  assert.match(result.detail, /did not render its tracked Discord join link/);
+  assert.match(result.detail, /did not render its tracked \/join link/);
 });
 
 test('the join criterion stays unknown until Phase 1 is positively observed', () => {
