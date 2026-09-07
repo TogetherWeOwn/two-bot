@@ -96,6 +96,7 @@ if (me.status !== 200 || !me.body || me.body.id !== STAGING_BOT_APPLICATION_ID) 
   console.error(`Expected staging bot ${STAGING_BOT_APPLICATION_ID}; Discord returned HTTP ${me.status}.`);
   process.exit(1);
 }
+const stagingBotId = me.body.id;
 const guilds = await api<Array<{ id: string; name: string }>>('GET', '/users/@me/guilds');
 if (guilds.status !== 200 || !guilds.body?.some((guild) => guild.id === guildId)) {
   console.error(`The staging bot is not in guild ${guildId}.`);
@@ -275,11 +276,11 @@ if (APPLY && general) {
     `/channels/${general.id}/messages?limit=50`,
   );
   const currentStarter = recentMessages.body?.find(
-    (message) => message.author.id === me.body.id && message.content === STARTER_MESSAGE,
+    (message) => message.author.id === stagingBotId && message.content === STARTER_MESSAGE,
   );
   if (!currentStarter) {
     const previousStarter = recentMessages.body?.find(
-      (message) => message.author.id === me.body.id && PREVIOUS_STARTER_MESSAGES.has(message.content),
+      (message) => message.author.id === stagingBotId && PREVIOUS_STARTER_MESSAGES.has(message.content),
     );
     if (previousStarter) {
       await write('update first-message starter placeholder', 'PATCH', `/channels/${general.id}/messages/${previousStarter.id}`, {
