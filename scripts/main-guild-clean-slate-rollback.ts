@@ -40,6 +40,7 @@ type Operation = {
     | 'pending-write';
   state: 'pending' | 'applied' | 'rolled_back';
   target: JsonObject;
+  fingerprint?: JsonObject;
   inverse?: JsonObject;
   responseId?: string;
   requestStartedAt?: string;
@@ -122,6 +123,16 @@ function stable(valueToCompare: unknown): string {
   }
   return JSON.stringify(valueToCompare);
 }
+function matchesSubset(actual: unknown, expected: unknown): boolean {
+  if (Array.isArray(expected)) {
+    return Array.isArray(actual) && actual.length === expected.length && expected.every((item, index) => matchesSubset(actual[index], item));
+  }
+  if (expected && typeof expected === 'object') {
+    if (!actual || typeof actual !== 'object' || Array.isArray(actual)) return false;
+    return Object.entries(expected as JsonObject).every(([key, valueToMatch]) => matchesSubset((actual as JsonObject)[key], valueToMatch));
+  }
+  return stable(actual) === stable(expected);
+}
 
 if (!token) die(2, 'Missing DISCORD_BOT_TOKEN.');
 if (applicationIdFromToken(token) !== LIVE_BOT_APPLICATION_ID) die(2, `This token is not the live Owen bot (${LIVE_BOT_APPLICATION_ID}). Nothing was contacted.`);
@@ -140,15 +151,22 @@ if (pre.applicationId !== manifest.applicationId || pre.guildId !== manifest.gui
 const API = apiBase();
 
 async function api<T>(method: 'GET' | 'DELETE' | 'PATCH' | 'PUT', path: string, body?: unknown): Promise<{ status: number; body: T | null }> {
-  const response = await fetch(`${API}${path}`, {
-    method,
-    headers: {
-      Authorization: `Bot ${token}`,
-      ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
-    },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  });
-  return { status: response.status, body: (await response.json().catch(() => null)) as T | null };
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const response = await fetch(`${API}${path}`, {
+      method,
+      headers: {
+        Authorization: `Bot ${token}`,
+        ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    const responseBody = (await response.json().catch(() => null)) as T | null;
+    if (response.status !== 429) return { status: response.status, body: responseBody };
+    const retryAfter = Number((responseBody as { retry_after?: number } | null)?.retry_after ?? 1);
+    if (!Number.isFinite(retryAfter) || retryAfter < 0) return { status: 429, body: responseBody };
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, retryAfter * 1000));
+  }
+  return { status: 429, body: null };
 }
 
 async function members(): Promise<Member[]> {
@@ -195,23 +213,32 @@ if (stable(inventory) !== stable(pre.botInventory)) die(1, 'Rollback preflight b
 
 async function must(method: 'DELETE' | 'PATCH' | 'PUT', path: string, body?: unknown): Promise<void> {
   const result = await api<unknown>(method, path, body);
-  if (result.status >= 300 && result.status !== 404) die(1, `Rollback failed: ${method} ${path} returned HTTP ${result.status}.`);
+  if (method === 'DELETE' && result.status === 404) return;
+  if (result.status >= 300) die(1, `Rollback failed: ${method} ${path} returned HTTP ${result.status}.`);
 }
 
 async function rollback(operation: Operation): Promise<void> {
   if (operation.kind === 'pending-write') die(1, `Operation ${operation.id} has no recoverable rollback kind.`);
   if (operation.kind === 'create-role') {
-    if (!operation.responseId) die(1, `Manifest lacks the created role id for ${operation.label}.`);
+    if (!operation.responseId || !operation.fingerprint) die(1, `Manifest lacks the created role fingerprint for ${operation.label}.`);
     const liveRoles = await api<Role[]>('GET', `/guilds/${guildId}/roles`);
     const role = liveRoles.body?.find((item) => item.id === operation.responseId);
-    if (role && (role.name !== operation.target.name || role.managed)) die(1, `Created role ${operation.responseId} no longer matches the manifest guard.`);
+    if (role && !matchesSubset(role, operation.fingerprint)) die(1, `Created role ${operation.responseId} drifted from its creation fingerprint.`);
+    if (role && currentMembers.some((member) => member.roles?.includes(role.id))) die(1, `Created role ${operation.responseId} is now assigned to a member; refusing deletion.`);
     if (role) await must('DELETE', `/guilds/${guildId}/roles/${role.id}`);
   } else if (operation.kind === 'create-channel') {
-    if (!operation.responseId) die(1, `Manifest lacks the created channel id for ${operation.label}.`);
-    const channels = await api<Array<{ id: string; name: string; type: number; parent_id: string | null }>>('GET', `/guilds/${guildId}/channels`);
+    if (!operation.responseId || !operation.fingerprint) die(1, `Manifest lacks the created channel fingerprint for ${operation.label}.`);
+    const channels = await api<Array<JsonObject>>('GET', `/guilds/${guildId}/channels`);
     const channel = channels.body?.find((item) => item.id === operation.responseId);
-    if (channel && (channel.name !== operation.target.name || channel.type !== operation.target.type)) die(1, `Created channel ${operation.responseId} no longer matches the manifest guard.`);
-    if (channel) await must('DELETE', `/channels/${channel.id}`);
+    if (channel && !matchesSubset(channel, operation.fingerprint)) die(1, `Created channel ${operation.responseId} drifted from its creation fingerprint.`);
+    if (channel && operation.target.type !== 4) {
+      const messages = await api<Array<{ id: string; author?: { id?: string } }>>('GET', `/channels/${operation.responseId}/messages?limit=1`);
+      if (messages.status === 200 && messages.body?.some((message) => message.author?.id !== LIVE_BOT_APPLICATION_ID)) {
+        die(1, `Created channel ${operation.responseId} contains a member message; refusing deletion.`);
+      }
+      if (messages.status !== 200 && messages.status !== 405) die(1, `Could not check created channel ${operation.responseId} for later use: HTTP ${messages.status}.`);
+    }
+    if (channel) await must('DELETE', `/channels/${String(channel.id)}`);
   } else if (operation.kind === 'create-message') {
     if (!operation.responseId) die(1, `Manifest lacks the created message id for ${operation.label}.`);
     const channelId = String(operation.target.channelId);
