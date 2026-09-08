@@ -68,7 +68,12 @@ export type PartialRole = {
   permissions?: string;
   tags?: { bot_id?: string };
 };
-export type PartialChannel = { id: string; name: string; type: number };
+export type PartialChannel = {
+  id: string;
+  name: string;
+  type: number;
+  permission_overwrites?: ChannelOverwrite[];
+};
 
 /**
  * There is no `create` variant. There used to be, and dropping it is the point
@@ -340,33 +345,74 @@ export function chooseGuild(opts: {
  * roles afterwards runs the exact same code path as reconciling a
  * human-made server. One path, tested once.
  */
-export function guildCreatePayload(): {
+export function guildCreatePayload(guildId = '@everyone'): {
   name: string;
-  channels: Array<{ name: string; type: number }>;
+  channels: Array<{ name: string; type: number; permission_overwrites?: ChannelOverwrite[] }>;
 } {
   return {
     name: STAGING_SERVER_NAME,
     channels: [
-      ...STAGING_TEXT_CHANNELS.map((name) => ({ name, type: CHANNEL_TYPE_TEXT })),
-      ...STAGING_VOICE_CHANNELS.map((name) => ({ name, type: CHANNEL_TYPE_VOICE })),
+      ...STAGING_TEXT_CHANNELS.map((name) => channelCreateBody({ name, type: CHANNEL_TYPE_TEXT }, guildId)),
+      ...STAGING_VOICE_CHANNELS.map((name) => channelCreateBody({ name, type: CHANNEL_TYPE_VOICE }, guildId)),
     ],
   };
 }
 
+export interface ChannelOverwrite {
+  id: string;
+  type: number;
+  allow: string;
+  deny: string;
+}
+
+export function staffLogOverwrites(guildId: string, botId?: string): ChannelOverwrite[] {
+  return [
+    { id: guildId, type: 0, allow: '0', deny: String(1n << 10n) },
+    ...(botId
+      ? [{ id: botId, type: 1, allow: String((1n << 10n) | (1n << 11n)), deny: '0' }]
+      : []),
+  ];
+}
+
+export function channelCreateBody(
+  channel: { name: string; type: number },
+  guildId: string,
+  botId?: string,
+) {
+  const staffLog = channel.type === CHANNEL_TYPE_TEXT && channel.name.endsWith('-log');
+  return {
+    ...channel,
+    ...(staffLog ? { permission_overwrites: staffLogOverwrites(guildId, botId) } : {}),
+  };
+}
+
+function needsStaffPrivacyRepair(channel: PartialChannel, guildId: string, botId?: string): boolean {
+  if (channel.type !== CHANNEL_TYPE_TEXT || !channel.name.endsWith('-log')) return false;
+  const overwrites = channel.permission_overwrites ?? [];
+  const everyone = overwrites.find((overwrite) => overwrite.id === guildId);
+  const view = 1n << 10n;
+  if (!everyone || (BigInt(everyone.deny) & view) === 0n) return true;
+  if (!botId) return false;
+  const bot = overwrites.find((overwrite) => overwrite.id === botId);
+  return !bot || (BigInt(bot.allow) & ((1n << 10n) | (1n << 11n))) !== ((1n << 10n) | (1n << 11n));
+}
+
 export type ChannelPlan = {
   create: Array<{ name: string; type: number }>;
+  repair: Array<{ id: string; name: string; permission_overwrites: ChannelOverwrite[] }>;
   present: string[];
   duplicates: string[];
   /** Channels in the guild that the spec does not mention. Never deleted. */
   extra: string[];
 };
 
-export function planChannels(existing: PartialChannel[]): ChannelPlan {
+export function planChannels(existing: PartialChannel[], guildId?: string, botId?: string): ChannelPlan {
   const want = [
     ...STAGING_TEXT_CHANNELS.map((name) => ({ name: name as string, type: CHANNEL_TYPE_TEXT })),
     ...STAGING_VOICE_CHANNELS.map((name) => ({ name: name as string, type: CHANNEL_TYPE_VOICE })),
   ];
   const create: ChannelPlan['create'] = [];
+  const repair: ChannelPlan['repair'] = [];
   const present: string[] = [];
   const duplicates: string[] = [];
 
@@ -376,6 +422,17 @@ export function planChannels(existing: PartialChannel[]): ChannelPlan {
     else {
       present.push(w.name);
       if (hits.length > 1) duplicates.push(w.name);
+      if (guildId) {
+        for (const hit of hits) {
+          if (needsStaffPrivacyRepair(hit, guildId, botId)) {
+            repair.push({
+              id: hit.id,
+              name: hit.name,
+              permission_overwrites: staffLogOverwrites(guildId, botId),
+            });
+          }
+        }
+      }
     }
   }
 
@@ -385,7 +442,7 @@ export function planChannels(existing: PartialChannel[]): ChannelPlan {
     .filter((c) => !wanted.has(`${c.type}:${c.name}`))
     .map((c) => c.name);
 
-  return { create, present, duplicates, extra };
+  return { create, repair, present, duplicates, extra };
 }
 
 export type RolePlan = { create: string[]; present: string[]; duplicates: string[] };

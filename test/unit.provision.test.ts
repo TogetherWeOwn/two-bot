@@ -15,6 +15,7 @@ import {
   CHANNEL_TYPE_VOICE,
   GUILD_CREATE_HEADROOM,
   GUILD_CREATE_LIMIT,
+  channelCreateBody,
   chooseGuild,
   evaluateHierarchy,
   guildCreatePayload,
@@ -212,17 +213,55 @@ test('the live TWO guild is refused outright', () => {
 
 // --- the create payload -----------------------------------------------------
 
-test('the create payload asks for exactly the spec channels and no roles', () => {
-  const p = guildCreatePayload();
+test('the create payload asks for exactly the spec channels, with private staff logs, and no roles', () => {
+  const p = guildCreatePayload(STAGING);
   assert.equal(p.name, STAGING_SERVER_NAME);
   assert.equal(p.channels.length, STAGING_TEXT_CHANNELS.length + STAGING_VOICE_CHANNELS.length);
   for (const n of STAGING_TEXT_CHANNELS) {
-    assert.ok(p.channels.some((c) => c.name === n && c.type === CHANNEL_TYPE_TEXT), `missing #${n}`);
+    const channel = p.channels.find((c) => c.name === n && c.type === CHANNEL_TYPE_TEXT);
+    assert.ok(channel, `missing #${n}`);
+    if (n.endsWith('-log')) {
+      assert.deepEqual(channel.permission_overwrites, [
+        { id: STAGING, type: 0, allow: '0', deny: String(1n << 10n) },
+      ]);
+    }
   }
   for (const n of STAGING_VOICE_CHANNELS) {
     assert.ok(p.channels.some((c) => c.name === n && c.type === CHANNEL_TYPE_VOICE), `missing voice ${n}`);
   }
   assert.equal((p as Record<string, unknown>).roles, undefined);
+});
+
+test('staff log channels deny members and explicitly allow the bot to view and post', () => {
+  const staff = channelCreateBody({ name: 'audit-log', type: CHANNEL_TYPE_TEXT }, STAGING, BOT);
+  assert.deepEqual(staff.permission_overwrites, [
+    { id: STAGING, type: 0, allow: '0', deny: String(1n << 10n) },
+    { id: BOT, type: 1, allow: String((1n << 10n) | (1n << 11n)), deny: '0' },
+  ]);
+  assert.equal(channelCreateBody({ name: 'general', type: CHANNEL_TYPE_TEXT }, STAGING, BOT).permission_overwrites, undefined);
+  assert.equal(channelCreateBody({ name: 'Voice 1', type: CHANNEL_TYPE_VOICE }, STAGING, BOT).permission_overwrites, undefined);
+});
+
+test('reconcile repairs present member-readable staff logs and leaves private ones alone', () => {
+  const view = String(1n << 10n);
+  const sendAndView = String((1n << 10n) | (1n << 11n));
+  const plan = planChannels(
+    [
+      { id: 'audit', name: 'audit-log', type: CHANNEL_TYPE_TEXT },
+      {
+        id: 'voice',
+        name: 'voice-log',
+        type: CHANNEL_TYPE_TEXT,
+        permission_overwrites: [
+          { id: STAGING, type: 0, allow: '0', deny: view },
+          { id: BOT, type: 1, allow: sendAndView, deny: '0' },
+        ],
+      },
+    ],
+    STAGING,
+    BOT,
+  );
+  assert.deepEqual(plan.repair.map((channel) => channel.name), ['audit-log']);
 });
 
 // --- planChannels / planRoles ----------------------------------------------

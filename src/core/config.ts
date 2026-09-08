@@ -52,6 +52,10 @@ export interface Config {
   /** Joins inside `raidWindowSeconds` that raise an alert. */
   raidJoinThreshold: number;
   raidWindowSeconds: number;
+  /** Metadata-only Discord event mirrors. Null means durable/process audit only. */
+  auditLogChannelId: string | null;
+  voiceLogChannelId: string | null;
+  moderationLogChannelId: string | null;
   /**
    * The internal presence instrument (TOG-469). On by default, because a
    * trend instrument that nobody remembered to switch on collects nothing and
@@ -113,6 +117,9 @@ export function loadConfig(): Config {
     staffAlertChannelId: process.env.DISCORD_STAFF_ALERT_CHANNEL_ID || null,
     raidJoinThreshold: Number(process.env.TWO_RAID_JOIN_THRESHOLD ?? 5),
     raidWindowSeconds: Number(process.env.TWO_RAID_WINDOW_SECONDS ?? 60),
+    auditLogChannelId: process.env.DISCORD_AUDIT_LOG_CHANNEL_ID || null,
+    voiceLogChannelId: process.env.DISCORD_VOICE_LOG_CHANNEL_ID || null,
+    moderationLogChannelId: process.env.DISCORD_MODERATION_LOG_CHANNEL_ID || null,
     presenceProbe: process.env.TWO_PRESENCE_PROBE !== '0',
     dbPath: resolveDbSpec(),
     dbPoolMax: Number(process.env.TWO_DB_POOL_MAX ?? 5),

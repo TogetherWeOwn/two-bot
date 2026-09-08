@@ -62,6 +62,7 @@
 import {
   CHANNEL_TYPE_TEXT,
   CHANNEL_TYPE_VOICE,
+  channelCreateBody,
   ROLE_PERMISSIONS,
   chooseGuild,
   evaluateHierarchy,
@@ -215,18 +216,26 @@ const channels = channelsRes.body ?? [];
 const roles = rolesRes.body ?? [];
 
 // --- channels ---------------------------------------------------------------
-const cp = planChannels(channels);
+const cp = planChannels(channels, guildId, botId);
 console.log('\nchannels');
 if (cp.present.length) console.log(`  ok     already there: ${cp.present.join(', ')}`);
 for (const d of cp.duplicates) console.log(`  WARN   more than one "${d}" - tests may pick the wrong one`);
 if (cp.extra.length) console.log(`  note   not in the spec, left alone: ${cp.extra.join(', ')}`);
-if (!cp.create.length) console.log('  ok     nothing to create');
+if (!cp.create.length && !cp.repair.length) console.log('  ok     nothing to create or repair');
 for (const c of cp.create) {
   await write(
     `create ${c.type === CHANNEL_TYPE_VOICE ? 'voice' : 'text'} channel "${c.name}"`,
     'POST',
     `/guilds/${guildId}/channels`,
-    { name: c.name, type: c.type },
+    channelCreateBody(c, guildId, botId),
+  );
+}
+for (const c of cp.repair) {
+  await write(
+    `repair private overwrites on #${c.name}`,
+    'PATCH',
+    `/channels/${c.id}`,
+    { permission_overwrites: c.permission_overwrites },
   );
 }
 
