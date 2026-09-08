@@ -113,10 +113,11 @@ if (weOwnIt) {
 
 // 3. roles exist, and the bot can actually hand them out
 const roles = await api<PartialRole[]>(`/guilds/${guildId}/roles`);
-if (roles.status !== 200 || !roles.body) {
+const hierarchy = roles.body ? evaluateHierarchy({ roles: roles.body, botId, ownerId }) : null;
+if (roles.status !== 200 || !roles.body || !hierarchy) {
   fail('cannot read roles', `HTTP ${roles.status}`);
 } else {
-  const h = evaluateHierarchy({ roles: roles.body, botId, ownerId });
+  const h = hierarchy;
 
   for (const name of h.missing) fail(`role "${name}" is missing`, 'run scripts/staging-provision.ts --apply');
 
@@ -240,6 +241,37 @@ if (app.status === 200 && app.body) {
   }
 } else {
   warn('could not read the application flags', `HTTP ${app.status}`);
+}
+
+// 7. Optional hardened role panels. If configured, verify every bound message
+// and role against staging itself rather than accepting ids from a pasted JSON
+// blob. An empty catalogue is fine for unrelated staging work.
+const panelRaw = process.env.TWO_SELF_ROLE_PANELS ?? '';
+if (panelRaw.trim()) {
+  try {
+    const { loadSelfRolePanels } = await import('../src/selfRoles/config.ts');
+    const panels = loadSelfRolePanels(panelRaw);
+    const knownRoles = new Map((roles.body ?? []).map((role) => [role.id, role]));
+    for (const panel of panels) {
+      const message = await api<{ id: string }>(`/channels/${panel.channelId}/messages/${panel.messageId}`);
+      if (message.status === 200 && message.body?.id === panel.messageId) {
+        pass(`self-role panel "${panel.id}" message exists`, `${panel.mode} in ${panel.channelId}`);
+      } else {
+        fail(`self-role panel "${panel.id}" message missing`, `HTTP ${message.status}`);
+      }
+      for (const option of panel.options) {
+        const role = knownRoles.get(option.roleId);
+        if (!role) fail(`self-role panel "${panel.id}" role missing`, `${option.label} (${option.roleId})`);
+        else if (!weOwnIt && hierarchy && role.position >= (hierarchy.botPosition ?? -1)) {
+          fail(`self-role role "${role.name}" is above the bot`, `position ${role.position}`);
+        } else {
+          pass(`self-role role "${role.name}" assignable`, `panel ${panel.id}`);
+        }
+      }
+    }
+  } catch (err) {
+    fail('TWO_SELF_ROLE_PANELS is invalid', String(err));
+  }
 }
 
 console.log(`\n${fails} fail, ${warns} warn\n`);

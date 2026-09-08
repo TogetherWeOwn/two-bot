@@ -149,6 +149,32 @@ CREATE INDEX IF NOT EXISTS idx_internal_log_time   ON internal_action_log (creat
 CREATE INDEX IF NOT EXISTS idx_internal_log_action ON internal_action_log (action, created_at);
 CREATE INDEX IF NOT EXISTS idx_internal_log_key    ON internal_action_log (key_id, created_at);
 
+-- Per-panel reaction/button/select self-role audit (TOG-1646). event_id is the
+-- Discord interaction id, or a generated reaction dispatch id. Component
+-- gateway replays are claimed before any role mutation.
+CREATE TABLE IF NOT EXISTS self_role_audit (
+  event_id          TEXT PRIMARY KEY,
+  guild_id          TEXT NOT NULL,
+  panel_id          TEXT NOT NULL,
+  member_id         TEXT NOT NULL,
+  source_id         TEXT NOT NULL,
+  option_key        TEXT,
+  role_id           TEXT,
+  source            TEXT NOT NULL,
+  operation         TEXT NOT NULL,
+  outcome           TEXT NOT NULL,
+  code              TEXT,
+  reason            TEXT,
+  added_role_ids    TEXT NOT NULL,
+  removed_role_ids  TEXT NOT NULL,
+  created_at        TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_self_role_audit_panel_time
+  ON self_role_audit (guild_id, panel_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_self_role_audit_member_time
+  ON self_role_audit (guild_id, member_id, created_at);
+
 -- The website's event_key -> Discord's scheduled event id. This is what makes
 -- event.upsert an upsert.
 CREATE TABLE IF NOT EXISTS internal_discord_events (

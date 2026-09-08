@@ -8,6 +8,7 @@ import { ExpectedJoins } from './core/expectedJoins.ts';
 import { FunnelHandlers } from './core/handlers.ts';
 import { createClient, registerHandlers } from './discord/client.ts';
 import { registerOnboarding, registerGameSelect } from './discord/onboarding.ts';
+import { registerSelfRoles } from './discord/selfRoles.ts';
 import { registerAnchorWelcome } from './discord/anchorWelcome.ts';
 import { occurrencesFrom } from './onboarding/anchorEvent.ts';
 import { RaidWatch } from './analytics/raidWatch.ts';
@@ -29,6 +30,8 @@ import { startInternalActions, type InternalServer } from './internal/server.ts'
 import { KeyRing } from './internal/signing.ts';
 import { DiscordActions } from './internal/discordActions.ts';
 import { InternalActionStore } from './internal/store.ts';
+import { loadSelfRolePanels } from './selfRoles/config.ts';
+import { SelfRoleStore } from './store/selfRoleStore.ts';
 import { startHealthServer, type HealthServer } from './core/health.ts';
 
 const cfg = loadConfig();
@@ -136,6 +139,25 @@ if (cfg.anchorWelcomeChannelId) {
     landingChannelIds: cfg.landingChannelIds,
     dryRun: cfg.onboardingDryRun,
   });
+}
+
+// Hardened self-role panels (TOG-1646). The panel catalogue is deployment data:
+// ids are never guessed from the live guild, and an empty catalogue is a clean
+// disable rather than an implicit panel with production ids.
+const selfRolePanels = loadSelfRolePanels();
+if (selfRolePanels.length) {
+  registerSelfRoles(client, {
+    panels: selfRolePanels,
+    store: new SelfRoleStore(db),
+    dryRun: cfg.onboardingDryRun,
+  });
+  log.info('self_roles_enabled', {
+    panels: selfRolePanels.length,
+    modes: [...new Set(selfRolePanels.map((panel) => panel.mode))],
+    dryRun: cfg.onboardingDryRun,
+  });
+} else {
+  log.info('self_roles_disabled', { reason: 'TWO_SELF_ROLE_PANELS is empty' });
 }
 
 // The internal actions endpoint (TWO-24 / TWO-59). Off unless

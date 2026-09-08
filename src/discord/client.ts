@@ -14,6 +14,7 @@ import { log } from '../core/log.ts';
  *   Guilds              - required for any guild event at all
  *   GuildMembers        - member_join / member_leave        (PRIVILEGED)
  *   GuildMessages       - first_message                     (metadata only)
+ *   GuildMessageReactions - reaction-role add/remove        (metadata only)
  *   GuildVoiceStates    - first_voice_session + voice_session_start/end
  *   GuildInvites        - invite create/delete for attribution
  *
@@ -24,6 +25,7 @@ export const INTENTS = [
   GatewayIntentBits.Guilds,
   GatewayIntentBits.GuildMembers,
   GatewayIntentBits.GuildMessages,
+  GatewayIntentBits.GuildMessageReactions,
   GatewayIntentBits.GuildVoiceStates,
   GatewayIntentBits.GuildInvites,
 ];

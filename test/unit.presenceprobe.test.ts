@@ -18,6 +18,7 @@
  */
 import { test, describe, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { GatewayIntentBits } from 'discord.js';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb, type Db } from '../src/store/db.ts';
@@ -83,9 +84,16 @@ describe('presence probe containment', () => {
         'If this instrument seems to need it, the issue has been misread.',
     );
 
-    // And the value check: still exactly the five documented intents, so
-    // adding a sixth of any kind is a conversation rather than a diff.
-    assert.equal(INTENTS.length, 5, 'the intent list changed - see client.ts:22-28');
+    // And the value check: the only addition to the five documented intents is
+    // GuildMessageReactions for TOG-1646. Presence remains absent.
+    assert.deepEqual(INTENTS, [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildMembers,
+      GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.GuildMessageReactions,
+      GatewayIntentBits.GuildVoiceStates,
+      GatewayIntentBits.GuildInvites,
+    ]);
   });
 
   test('the table is not readable through the web_v1 contract', () => {

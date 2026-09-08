@@ -51,6 +51,7 @@ const TABLES = [
   'presence_probe',
   'counter_snapshots',
   'member_exclusions',
+  'self_role_audit',
 ];
 
 /**
@@ -58,7 +59,7 @@ const TABLES = [
  * not touch - so it only has the original three. Everything migration 0002 adds
  * is Postgres-only, like the views that read it.
  */
-const SQLITE_TABLES = ['events', 'members', 'invite_snapshots'];
+const SQLITE_TABLES = ['events', 'members', 'invite_snapshots', 'self_role_audit'];
 
 export interface TestDb {
   db: Db;
