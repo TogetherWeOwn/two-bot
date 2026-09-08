@@ -107,7 +107,12 @@ export async function openSqlite(path: string): Promise<Db> {
   // tables above and its id here, or a database that is later moved to
   // Postgres will try to apply it a second time.
   const stamp = raw.prepare(`INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?, ?)`);
-  for (const id of ['0001_initial', '0002_internal_actions', '0008_members_third_message_at']) {
+  for (const id of [
+    '0001_initial',
+    '0002_internal_actions',
+    '0008_members_third_message_at',
+    '0010_leveling',
+  ]) {
     stamp.run(id, new Date().toISOString());
   }
   return new SqliteDb(raw);
