@@ -45,6 +45,15 @@ export interface Config {
   /** Onboarding observes and logs but changes nothing. */
   onboardingDryRun: boolean;
   /**
+   * TOG-1654 / TOG-1644. `session` = the roleless flow: welcome with a
+   * "what do you want to do" picker routing to #looking-to-play or the Lobby,
+   * goodbye on leave, and NO role writes anywhere. `legacy` (the default) =
+   * the TOG-94 game-role picker, unchanged. One flag, reversible in seconds.
+   */
+  onboardingMode: 'legacy' | 'session';
+  /** Where session-mode goodbyes go. Empty = goodbyes are log-only. */
+  goodbyeChannelIds: string[];
+  /**
    * Staff channel for join-burst alerts (TWO-56). Null = alerts go to the log
    * only. Never a member-facing channel: this posts member IDs.
    */
@@ -110,6 +119,11 @@ export function loadConfig(): Config {
       .filter(Boolean),
     anchorWelcomeChannelId: process.env.DISCORD_ANCHOR_WELCOME_CHANNEL_ID || null,
     onboardingDryRun: process.env.TWO_ONBOARDING_DRY_RUN === '1',
+    onboardingMode: process.env.TWO_ONBOARDING_MODE === 'session' ? 'session' : 'legacy',
+    goodbyeChannelIds: (process.env.DISCORD_GOODBYE_CHANNEL_IDS || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
     staffAlertChannelId: process.env.DISCORD_STAFF_ALERT_CHANNEL_ID || null,
     raidJoinThreshold: Number(process.env.TWO_RAID_JOIN_THRESHOLD ?? 5),
     raidWindowSeconds: Number(process.env.TWO_RAID_WINDOW_SECONDS ?? 60),

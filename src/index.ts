@@ -8,6 +8,8 @@ import { ExpectedJoins } from './core/expectedJoins.ts';
 import { FunnelHandlers } from './core/handlers.ts';
 import { createClient, registerHandlers } from './discord/client.ts';
 import { registerOnboarding, registerGameSelect } from './discord/onboarding.ts';
+import { registerSessionWelcome } from './discord/sessionWelcome.ts';
+import { SessionRecorder } from './onboarding/session.ts';
 import { registerAnchorWelcome } from './discord/anchorWelcome.ts';
 import { occurrencesFrom } from './onboarding/anchorEvent.ts';
 import { RaidWatch } from './analytics/raidWatch.ts';
@@ -114,7 +116,24 @@ const onboardingDeps = {
   dryRun: cfg.onboardingDryRun,
 };
 
-if (cfg.anchorWelcomeChannelId) {
+// Session mode (TOG-1654): the roleless flow owns the gate-clear moment
+// instead, and no other onboarding handler may be registered alongside it -
+// see the starvation note above. The legacy picker code stays in the tree,
+// unregistered, selected back by unsetting TWO_ONBOARDING_MODE.
+if (cfg.onboardingMode === 'session') {
+  registerSessionWelcome(client, {
+    recorder: new SessionRecorder(store),
+    store,
+    landingChannelIds: cfg.landingChannelIds,
+    goodbyeChannelIds: cfg.goodbyeChannelIds,
+    dryRun: cfg.onboardingDryRun,
+  });
+  log.info('session_onboarding_enabled', {
+    landingChannelIds: cfg.landingChannelIds,
+    goodbyeChannelIds: cfg.goodbyeChannelIds,
+    dryRun: cfg.onboardingDryRun,
+  });
+} else if (cfg.anchorWelcomeChannelId) {
   registerAnchorWelcome(client, {
     recorder: onboardingDeps.recorder,
     channelId: cfg.anchorWelcomeChannelId,
