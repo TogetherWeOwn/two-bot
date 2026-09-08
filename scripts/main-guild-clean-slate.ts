@@ -111,6 +111,7 @@ type RollbackOperation = {
     | 'pending-write';
   state: 'pending' | 'applied';
   target: JsonObject;
+  fingerprint?: JsonObject;
   inverse?: JsonObject;
   responseId?: string;
   preparedAt: string;
@@ -183,7 +184,8 @@ async function api<T>(method: 'GET' | 'POST' | 'PATCH' | 'PUT', path: string, bo
     const responseBody = (await response.json().catch(() => null)) as T | null;
     if (response.status !== 429) return { status: response.status, body: responseBody };
     const retryAfter = Number((responseBody as { retry_after?: number } | null)?.retry_after ?? 1);
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, Math.min(retryAfter, 30) * 1000));
+    if (!Number.isFinite(retryAfter) || retryAfter < 0) return { status: 429, body: responseBody };
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, retryAfter * 1000));
   }
   return { status: 429, body: null };
 }
@@ -373,11 +375,30 @@ function onboardingBody(channelIds: Map<string, string>): JsonObject {
   };
 }
 
+const screeningFields = [{ field_type: 'TERMS', label: 'TWO community rules', required: true, values: RULES }];
 const screeningBody: JsonObject = {
-  enabled: true,
-  form_fields: [{ field_type: 'TERMS', label: 'TWO community rules', required: true, values: RULES }],
+  form_fields: JSON.stringify(screeningFields),
   description: SCREENING_DESCRIPTION,
 };
+
+function screeningMatches(actual: JsonObject | null): boolean {
+  if (!actual || actual.description !== SCREENING_DESCRIPTION) return false;
+  const raw = actual.form_fields;
+  try {
+    const fields = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return stable(fields) === stable(screeningFields);
+  } catch {
+    return false;
+  }
+}
+
+function screeningRestoreBody(actual: JsonObject): JsonObject {
+  const raw = actual.form_fields;
+  return {
+    form_fields: typeof raw === 'string' ? raw : JSON.stringify(raw ?? []),
+    description: typeof actual.description === 'string' ? actual.description : '',
+  };
+}
 
 function matchesSubset(actual: unknown, desired: unknown): boolean {
   if (Array.isArray(desired)) {
@@ -402,6 +423,11 @@ if (guilds.status !== 200 || !guilds.body?.some((item) => item.id === guildId)) 
 const pre = await captureState();
 assertAdministrator(pre, 'Preflight');
 assertUnambiguousTargets(pre);
+if (![200, 404].includes(pre.welcomeScreen.status)) die(1, `Preflight could not capture Welcome Screen rollback state: HTTP ${pre.welcomeScreen.status}.`);
+if (pre.onboarding.status !== 200 || !pre.onboarding.body) die(1, `Preflight could not capture Onboarding rollback state: HTTP ${pre.onboarding.status}.`);
+if (pre.membershipScreening.status !== 200 || !pre.membershipScreening.body) {
+  die(1, `Preflight could not capture Membership Screening rollback state: HTTP ${pre.membershipScreening.status}.`);
+}
 
 console.log(`${APPLY ? 'Applying' : 'Planning'} accepted clean-slate structure in ${String(pre.guild.name)} (${guildId}).`);
 console.log('Additive path: no existing channel, category, role, overwrite entry, member, bot, integration, or Raid Protection setting is removed.');
@@ -449,8 +475,11 @@ async function write<T>(operation: Omit<RollbackOperation, 'id' | 'state' | 'pre
   const result = await api<T>(method, path, body);
   if (result.status >= 300) die(1, `Discord write failed for ${entry.label}: HTTP ${result.status} ${JSON.stringify(result.body)}`);
   discordWrites++;
-  if (result.body && typeof result.body === 'object' && 'id' in result.body && typeof (result.body as { id?: unknown }).id === 'string') {
-    entry.responseId = (result.body as { id: string }).id;
+  if (result.body && typeof result.body === 'object') {
+    if ('id' in result.body && typeof (result.body as { id?: unknown }).id === 'string') {
+      entry.responseId = (result.body as { id: string }).id;
+    }
+    if (entry.kind === 'create-role' || entry.kind === 'create-channel') entry.fingerprint = result.body as JsonObject;
   }
   atomicJson(manifestPath, manifest);
   const abortAfterResponse = Number(process.env.MAIN_GUILD_TEST_ABORT_AFTER_RESPONSE ?? '0');
@@ -564,9 +593,9 @@ if (!bodyMatches(pre.guild, guildDesired)) {
 
 const desiredWelcome = welcomeBody(targetChannelIds);
 if (!bodyMatches(pre.welcomeScreen.body, desiredWelcome)) {
-  if (pre.welcomeScreen.status !== 200 || !pre.welcomeScreen.body) die(1, `Welcome Screen pre-state is not restorable (HTTP ${pre.welcomeScreen.status}).`);
+  const welcomeInverse = pre.welcomeScreen.status === 404 ? { enabled: false } : pre.welcomeScreen.body!;
   await write<JsonObject>(
-    { label: 'configure three-card Welcome Screen', kind: 'patch-welcome', target: {}, inverse: pre.welcomeScreen.body },
+    { label: 'configure three-card Welcome Screen', kind: 'patch-welcome', target: {}, inverse: welcomeInverse },
     'PATCH',
     `/guilds/${guildId}/welcome-screen`,
     desiredWelcome,
@@ -584,12 +613,9 @@ if (!bodyMatches(pre.onboarding.body, desiredOnboarding)) {
   );
 }
 
-if (!bodyMatches(pre.membershipScreening.body, screeningBody)) {
-  if (pre.membershipScreening.status !== 200 || !pre.membershipScreening.body) {
-    die(1, `Membership Screening pre-state is not restorable (HTTP ${pre.membershipScreening.status}).`);
-  }
+if (!screeningMatches(pre.membershipScreening.body)) {
   await write<JsonObject>(
-    { label: 'configure four-rule Membership Screening', kind: 'patch-screening', target: {}, inverse: pre.membershipScreening.body },
+    { label: 'configure four-rule Membership Screening', kind: 'patch-screening', target: {}, inverse: screeningRestoreBody(pre.membershipScreening.body!) },
     'PATCH',
     `/guilds/${guildId}/member-verification`,
     screeningBody,
