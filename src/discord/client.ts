@@ -8,12 +8,15 @@ import type { RaidAnnouncer } from './raidAlert.ts';
 import { log } from '../core/log.ts';
 import { applyLevelRoles } from '../leveling/discord.ts';
 import type { LevelingService } from '../leveling/service.ts';
+import type { AuditSink } from '../audit/service.ts';
+import { moderationAuditEvent } from '../audit/discordEvents.ts';
 
 /**
  * Intents we ask Discord for, and why. Keep this list minimal - each one is a
  * permission we have to justify, and GuildMembers/MessageContent are privileged.
  *
  *   Guilds              - required for any guild event at all
+ *   GuildModeration     - GuildAuditLogEntryCreate for moderation mirrors
  *   GuildMembers        - member_join / member_leave        (PRIVILEGED)
  *   GuildMessages       - first_message                     (metadata only)
  *   GuildVoiceStates    - first_voice_session + voice_session_start/end
@@ -24,6 +27,7 @@ import type { LevelingService } from '../leveling/service.ts';
  */
 export const INTENTS = [
   GatewayIntentBits.Guilds,
+  GatewayIntentBits.GuildModeration,
   GatewayIntentBits.GuildMembers,
   GatewayIntentBits.GuildMessages,
   GatewayIntentBits.GuildVoiceStates,
@@ -46,6 +50,8 @@ export interface BotDeps {
    */
   expectedJoins?: ExpectedJoins;
   leveling?: LevelingService;
+  /** Metadata-only staff audit. Optional so the funnel remains independently usable. */
+  audit?: AuditSink;
 }
 
 export function createClient(): Client {
@@ -77,7 +83,14 @@ async function snapshotInvites(guild: Guild, invites: InviteTracker): Promise<st
 
 /** Wire gateway events to the framework-free handlers. */
 export function registerHandlers(client: Client, deps: BotDeps): void {
-  const { handlers, invites, raid, expectedJoins, leveling } = deps;
+  const { handlers, invites, raid, expectedJoins, leveling, audit } = deps;
+
+  const auditSafely = (event: Parameters<NonNullable<BotDeps['audit']>['record']>[0]) => {
+    if (!audit) return;
+    void audit.record(event).catch((err: unknown) => {
+      log.error('operational_audit_failed', { entryId: event.entryId, err: String(err) });
+    });
+  };
 
   client.once(Events.ClientReady, async (c) => {
     log.info('ready', { user: c.user.tag, guilds: c.guilds.cache.size });
@@ -146,11 +159,37 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
   // registered at all when no landing channel is configured, and the funnel
   // number must not depend on whether we happen to be greeting people.
   client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
-    if (!oldMember.pending || newMember.pending) return;
-    await handlers.onGateCleared({
+    if (oldMember.pending && !newMember.pending) {
+      await handlers.onGateCleared({
+        guildId: newMember.guild.id,
+        memberId: newMember.id,
+        isBot: !!newMember.user?.bot,
+      });
+    }
+
+    // A partial old member has no trustworthy role/nickname baseline. Skipping
+    // is safer than reporting every current role as newly granted.
+    if (oldMember.partial) return;
+    const oldRoles = roleIds(oldMember);
+    const newRoles = roleIds(newMember);
+    const addedRoleIds = [...newRoles].filter((id) => !oldRoles.has(id)).sort();
+    const removedRoleIds = [...oldRoles].filter((id) => !newRoles.has(id)).sort();
+    const nicknameChanged = oldMember.nickname !== newMember.nickname;
+    if (!nicknameChanged && addedRoleIds.length === 0 && removedRoleIds.length === 0) return;
+
+    const stableChange = JSON.stringify({ nicknameChanged, addedRoleIds, removedRoleIds });
+    auditSafely({
+      entryId: `member-update:${newMember.guild.id}:${newMember.id}:${stableChange}`,
+      kind: 'member_update',
+      channel: 'audit',
       guildId: newMember.guild.id,
-      memberId: newMember.id,
-      isBot: !!newMember.user?.bot,
+      occurredAt: nowIso(),
+      targetId: newMember.id,
+      metadata: {
+        nicknameChanged,
+        addedRoleIds,
+        removedRoleIds,
+      },
     });
   });
 
@@ -173,6 +212,41 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     });
   });
 
+  client.on(Events.MessageUpdate, (oldMessage, newMessage) => {
+    if (!newMessage.guildId) return;
+    // Without MessageContent this is deliberately metadata-only. Discord can
+    // send duplicate updates; the message id + edited timestamp is the key.
+    const occurredAt = newMessage.editedAt?.toISOString() ?? nowIso();
+    auditSafely({
+      entryId: `message-edit:${newMessage.guildId}:${newMessage.id}:${newMessage.editedTimestamp ?? occurredAt}`,
+      kind: 'message_edit',
+      channel: 'audit',
+      guildId: newMessage.guildId,
+      occurredAt,
+      actorId: newMessage.author?.id ?? oldMessage.author?.id ?? null,
+      targetId: newMessage.author?.id ?? oldMessage.author?.id ?? null,
+      sourceChannelId: newMessage.channelId,
+      messageId: newMessage.id,
+      metadata: { cachedBefore: !oldMessage.partial },
+    });
+  });
+
+  client.on(Events.MessageDelete, (message) => {
+    if (!message.guildId) return;
+    auditSafely({
+      entryId: `message-delete:${message.guildId}:${message.id}`,
+      kind: 'message_delete',
+      channel: 'audit',
+      guildId: message.guildId,
+      occurredAt: nowIso(),
+      actorId: null,
+      targetId: message.author?.id ?? null,
+      sourceChannelId: message.channelId,
+      messageId: message.id,
+      metadata: { cached: !message.partial },
+    });
+  });
+
   client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
     // Discord fires this for mute, deafen, camera and go-live too. Only a
     // change of channel is a session boundary.
@@ -186,6 +260,24 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     // start are the same instant, and taking nowIso() twice would make the
     // pair look like a gap.
     const at = nowIso();
+    const voiceKind = oldState.channelId
+      ? newState.channelId
+        ? 'voice_move'
+        : 'voice_leave'
+      : 'voice_join';
+    auditSafely({
+      // Discord supplies no voice-event id. This deterministic state transition
+      // key suppresses duplicate gateway delivery while preserving later moves.
+      entryId: `${voiceKind}:${guild.id}:${memberId}:${oldState.channelId ?? 'none'}:${newState.channelId ?? 'none'}`,
+      kind: voiceKind,
+      channel: 'voice',
+      guildId: guild.id,
+      occurredAt: at,
+      targetId: memberId,
+      sourceChannelId: oldState.channelId,
+      destinationChannelId: newState.channelId,
+      metadata: { isBot },
+    });
 
     // End first, so a move reads as end(A) then start(B) in occurred order.
     if (oldState.channelId) {
@@ -227,5 +319,15 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     if (invite.guild) await snapshotInvites(invite.guild as Guild, invites);
   });
 
+  client.on(Events.GuildAuditLogEntryCreate, (entry, guild) => {
+    const event = moderationAuditEvent(entry, guild.id);
+    if (event) auditSafely(event);
+  });
+
   client.on(Events.Error, (err) => log.error('client_error', { err: String(err) }));
+}
+
+function roleIds(member: { guild: { id: string }; roles?: { cache?: { keys(): IterableIterator<string> } } }): Set<string> {
+  const keys = member.roles?.cache?.keys();
+  return new Set(keys ? [...keys].filter((id) => id !== member.guild.id) : []);
 }

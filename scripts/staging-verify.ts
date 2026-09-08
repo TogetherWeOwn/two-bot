@@ -43,6 +43,11 @@ import {
   stagingInviteUrl,
 } from '../src/staging/spec.ts';
 import { evaluateHierarchy, type PartialRole } from '../src/staging/provision.ts';
+import {
+  AUDIT_ACCEPTANCE_KINDS,
+  auditAcceptanceSql,
+  evaluateAuditChannels,
+} from '../src/staging/auditAcceptance.ts';
 
 const API = 'https://discord.com/api/v10';
 
@@ -142,9 +147,14 @@ if (roles.status !== 200 || !roles.body) {
 }
 
 // 4. channels
-const channels = await api<Array<{ id: string; name: string; type: number }>>(
-  `/guilds/${guildId}/channels`,
-);
+const channels = await api<
+  Array<{
+    id: string;
+    name: string;
+    type: number;
+    permission_overwrites?: Array<{ id: string; deny: string }>;
+  }>
+>(`/guilds/${guildId}/channels`);
 if (channels.status !== 200 || !channels.body) {
   fail('cannot read channels', `HTTP ${channels.status}`);
 } else {
@@ -161,6 +171,22 @@ if (channels.status !== 200 || !channels.body) {
         `voice channel "${name}" is missing`,
         'first_voice_session cannot be asserted without a real voice channel',
       );
+  }
+
+  const auditChannels = evaluateAuditChannels(channels.body, guildId);
+  for (const name of auditChannels.missing) fail(`#${name} is missing`, 'the parity suite writes evidence there');
+  for (const name of auditChannels.duplicates) {
+    fail(`#${name} is duplicated`, 'every matching staff log must be private; reconcile the duplicate explicitly');
+  }
+  for (const name of auditChannels.memberReadable) {
+    fail(`#${name} is member-readable`, 'deny @everyone ViewChannel and remove role/member ViewChannel allows');
+  }
+  if (
+    auditChannels.missing.length === 0 &&
+    auditChannels.duplicates.length === 0 &&
+    auditChannels.memberReadable.length === 0
+  ) {
+    pass('staff log privacy', 'all three accepted channels are unique with no member-readable overwrite');
   }
 }
 
@@ -198,13 +224,9 @@ if (weOwnIt) {
     // that would not have changed anything. It is still a WARN, because an
     // Administrator staging bot proves nothing about the live scoped grant -
     // but it is not a missing permission.
-    warn(
-      'staging bot holds Administrator',
-      'the spec is the scoped set - staging is where we prove the live bot needs no more',
-    );
     console.log(
       `        Administrator implies the rest, so the scoped set ${STAGING_INVITE_PERMISSIONS} cannot be\n` +
-        '        proved on this server. That proof belongs on the live invite, not here.' +
+        '        proved on this server. Remove Administrator and re-run before parity acceptance.' +
         (missing.length
           ? `\n        (Not held as explicit bits: ${missing.join(', ')} - implied, not missing.)`
           : ''),
@@ -241,6 +263,23 @@ if (app.status === 200 && app.body) {
 } else {
   warn('could not read the application flags', `HTTP ${app.status}`);
 }
+
+// 7. The live-event half of parity is deliberately explicit. The verifier can
+// prove the guild shape and permissions over REST, but it cannot synthesize a
+// human voice move or moderator action by itself. Print the exact database
+// reconciliation query so every slice feeds one evidence index instead of
+// inventing a different acceptance packet.
+console.log('\nAudit parity acceptance\n');
+for (const kind of AUDIT_ACCEPTANCE_KINDS) {
+  console.log(`  VERIFY ${kind}`);
+}
+console.log('\nAfter driving the controlled TWO Staging scenarios, reconcile with:\n');
+console.log(auditAcceptanceSql(guildId));
+console.log('\nRequired controls:');
+console.log('  - repeat one event and prove entry_id dedupe keeps one durable row and one mirror');
+console.log('  - remove Send Messages from one log channel and prove the durable row survives');
+console.log('  - attempt a protected/higher-role moderation target and prove refusal is mirrored');
+console.log('  - inspect payloads for absence of message content, usernames, nicknames and mentions');
 
 console.log(`\n${fails} fail, ${warns} warn\n`);
 process.exit(fails ? 1 : 0);

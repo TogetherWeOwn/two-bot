@@ -32,6 +32,8 @@ import { InternalActionStore } from './internal/store.ts';
 import { startHealthServer, type HealthServer } from './core/health.ts';
 import { LevelingService } from './leveling/service.ts';
 import { registerLeveling } from './leveling/discord.ts';
+import { OperationalAuditStore } from './audit/store.ts';
+import { makeOperationalAudit } from './audit/service.ts';
 
 const cfg = loadConfig();
 setLogLevel(cfg.logLevel);
@@ -101,7 +103,23 @@ log.info('raid_watch_enabled', {
   alertTarget: cfg.staffAlertChannelId ?? 'log only (DISCORD_STAFF_ALERT_CHANNEL_ID unset)',
 });
 
-registerHandlers(client, { handlers, invites, raid, expectedJoins, leveling });
+const audit = makeOperationalAudit(client, {
+  guildId: cfg.guildId,
+  channels: {
+    audit: cfg.auditLogChannelId,
+    voice: cfg.voiceLogChannelId,
+    moderation: cfg.moderationLogChannelId,
+  },
+  store: new OperationalAuditStore(db),
+});
+log.info('operational_audit_enabled', {
+  guildId: cfg.guildId ?? 'all joined guilds (Discord mirrors disabled)',
+  auditTarget: cfg.auditLogChannelId ?? 'durable/process log only',
+  voiceTarget: cfg.voiceLogChannelId ?? cfg.auditLogChannelId ?? 'durable/process log only',
+  moderationTarget: cfg.moderationLogChannelId ?? cfg.auditLogChannelId ?? 'durable/process log only',
+});
+
+registerHandlers(client, { handlers, invites, raid, expectedJoins, leveling, audit });
 registerLeveling(client, { service: leveling, guildId: cfg.guildId });
 
 // Onboarding (TWO-7). Skipped entirely if no landing channel is configured -

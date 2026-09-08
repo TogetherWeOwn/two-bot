@@ -55,11 +55,14 @@ than ~18 months and drop the per-member rows behind them.
 If a member asks to be removed:
 
 ```sql
+DELETE FROM operational_audit_log
+WHERE actor_id = '<id>' OR target_id = '<id>';
 DELETE FROM events  WHERE member_id = '<id>';
 DELETE FROM members WHERE member_id = '<id>';
 ```
 
-This makes historical counts drop slightly, which is correct.
+Run the audit deletion first because its actor/target columns are independent of
+`members`. This makes historical counts drop slightly, which is correct.
 
 ## Boundaries this codebase enforces
 
