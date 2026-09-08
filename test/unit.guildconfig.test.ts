@@ -128,6 +128,56 @@ test('restore applies roles, categories, channels and overwrites in dependency o
   assert.deepEqual((calls[5]!.body as { permission_overwrites: Array<{ id: string }> }).permission_overwrites.map((overwrite) => overwrite.id), [GUILD, id(901)]);
 });
 
+test('restore preserves same-guild managed role ids in channel overwrites', async () => {
+  const source = acceptedSnapshot();
+  const current = acceptedSnapshot();
+  const general = source.channels.find((channel) => channel.name === 'general')!;
+  const currentGeneral = current.channels.find((channel) => channel.name === 'general')!;
+  general.permission_overwrites.push({ id: APP, type: 0, allow: '1', deny: '0' });
+  currentGeneral.permission_overwrites = currentGeneral.permission_overwrites.filter((overwrite) => overwrite.id !== APP);
+
+  const calls: Array<{ path: string; body: unknown }> = [];
+  const api = {
+    async write(_method: string, path: string, body: unknown) {
+      calls.push({ path, body });
+      return {};
+    },
+  } as GuildConfigDiscordApi;
+
+  await applyRestorePlan(api, planRestore(source, current));
+  const restore = calls.find((call) => call.path === `/channels/${currentGeneral.id}`)!;
+  assert.deepEqual((restore.body as { permission_overwrites: Array<{ id: string }> }).permission_overwrites.map((overwrite) => overwrite.id), [GUILD, APP]);
+});
+
+test('restore applies category overwrites to existing and newly created categories', async () => {
+  const source = acceptedSnapshot();
+  const current = acceptedSnapshot();
+  const categories = source.channels.filter((channel) => channel.type === 4);
+  const existingSource = categories[0]!;
+  const createdSource = categories[1]!;
+  existingSource.permission_overwrites = [{ id: APP, type: 0, allow: '1', deny: '0' }];
+  createdSource.permission_overwrites = [{ id: GUILD, type: 0, allow: '0', deny: '2' }];
+  const existingCurrent = current.channels.find((channel) => channel.type === 4 && channel.name === existingSource.name)!;
+  existingCurrent.permission_overwrites = [];
+  current.channels = current.channels.filter((channel) => channel.id !== createdSource.id && channel.parent_id !== createdSource.id);
+
+  const calls: Array<{ method: string; path: string; body: unknown }> = [];
+  const createdCategoryId = id(905);
+  let createdChannel = 905;
+  const api = {
+    async write(method: string, path: string, body: unknown) {
+      calls.push({ method, path, body });
+      return method === 'POST' && path.endsWith('/channels') ? { id: id(createdChannel++) } : {};
+    },
+  } as GuildConfigDiscordApi;
+
+  await applyRestorePlan(api, planRestore(source, current));
+  const categoryPatches = calls.filter((call) => call.method === 'PATCH' && 'permission_overwrites' in (call.body as Record<string, unknown>) && (call.path === `/channels/${existingCurrent.id}` || call.path === `/channels/${createdCategoryId}`));
+  assert.deepEqual(categoryPatches.map((call) => call.path), [`/channels/${existingCurrent.id}`, `/channels/${createdCategoryId}`]);
+  assert.deepEqual((categoryPatches[0]!.body as { permission_overwrites: Array<{ id: string }> }).permission_overwrites.map((overwrite) => overwrite.id), [APP]);
+  assert.deepEqual((categoryPatches[1]!.body as { permission_overwrites: Array<{ id: string }> }).permission_overwrites.map((overwrite) => overwrite.id), [GUILD]);
+});
+
 test('restore sends emoji image data and refuses a non-restorable snapshot emoji', async () => {
   const source = acceptedSnapshot();
   const current = acceptedSnapshot();
