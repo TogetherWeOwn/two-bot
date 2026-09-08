@@ -25,6 +25,9 @@
 /** The live TWO server. Named here only so we can refuse to touch it. */
 export const LIVE_GUILD_ID = '326474832151838730';
 
+/** The live guild's expected name, used as a second irreversible-write guard. */
+export const LIVE_GUILD_NAME = 'TogetherWeOwn';
+
 export const STAGING_SERVER_NAME = 'TWO Staging';
 
 /**
