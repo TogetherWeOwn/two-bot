@@ -2,6 +2,7 @@ import { MESSAGE_RUNGS, nowIso, type FunnelEvent } from './events.ts';
 import type { EventStore } from '../store/eventStore.ts';
 import { VoiceSessionTracker } from './voiceSessions.ts';
 import { log } from './log.ts';
+import type { LevelingService } from '../leveling/service.ts';
 
 /**
  * Framework-free funnel logic.
@@ -42,6 +43,7 @@ export interface MessageInput {
   isBot: boolean;
   channelId: string;
   occurredAt?: string;
+  onLevelUp?: (level: number) => Promise<void>;
 }
 
 export interface VoiceInput {
@@ -50,10 +52,12 @@ export interface VoiceInput {
   isBot: boolean;
   channelId: string;
   occurredAt?: string;
+  onLevelUp?: (level: number) => Promise<void>;
 }
 
 export class FunnelHandlers {
   private store: EventStore;
+  private leveling: LevelingService | null;
   /**
    * Open voice sessions, so an end can carry a duration. Public because the
    * gateway adapter clears it on reconnect and the tests read it; there is no
@@ -61,8 +65,9 @@ export class FunnelHandlers {
    */
   readonly voiceSessions: VoiceSessionTracker;
 
-  constructor(store: EventStore) {
+  constructor(store: EventStore, leveling: LevelingService | null = null) {
     this.store = store;
+    this.leveling = leveling;
     this.voiceSessions = new VoiceSessionTracker();
   }
 
@@ -119,6 +124,10 @@ export class FunnelHandlers {
     if (i.isBot) return null;
     const at = i.occurredAt ?? nowIso();
     await this.store.touchActivity(i.guildId, i.memberId, at);
+    if (this.leveling) {
+      const award = await this.leveling.awardMessage(i.guildId, i.memberId, at, i.channelId);
+      if (award.leveledUp) await i.onLevelUp?.(award.level);
+    }
 
     // One message fills at most one rung: the lowest empty one. The loop is for
     // the two-process race - the bot and the website can both read the same
@@ -221,6 +230,16 @@ export class FunnelHandlers {
       },
     };
     await this.store.record(e);
+    if (this.leveling && durationSeconds !== null) {
+      const award = await this.leveling.awardVoice(
+        i.guildId,
+        i.memberId,
+        durationSeconds,
+        at,
+        open?.channelId ?? i.channelId,
+      );
+      if (award.leveledUp) await i.onLevelUp?.(award.level);
+    }
     // Leaving at T proves they were still there at T, so recency moves too.
     await this.store.touchActivity(i.guildId, i.memberId, at);
     log.info('voice_session_end', {
