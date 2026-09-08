@@ -120,7 +120,7 @@ type RollbackOperation = {
 };
 type RollbackManifest = {
   version: 1;
-  status: 'prepared' | 'applying' | 'applied' | 'postflight_failed';
+  status: 'prepared' | 'applying' | 'apply_failed' | 'applied' | 'postflight_failed';
   generatedAt: string;
   applicationId: string;
   guildId: string;
@@ -377,7 +377,7 @@ function onboardingBody(channelIds: Map<string, string>): JsonObject {
 
 const screeningFields = [{ field_type: 'TERMS', label: 'TWO community rules', required: true, values: RULES }];
 const screeningBody: JsonObject = {
-  form_fields: JSON.stringify(screeningFields),
+  form_fields: screeningFields,
   description: SCREENING_DESCRIPTION,
 };
 
@@ -393,9 +393,8 @@ function screeningMatches(actual: JsonObject | null): boolean {
 }
 
 function screeningRestoreBody(actual: JsonObject): JsonObject {
-  const raw = actual.form_fields;
   return {
-    form_fields: typeof raw === 'string' ? raw : JSON.stringify(raw ?? []),
+    form_fields: actual.form_fields ?? [],
     description: typeof actual.description === 'string' ? actual.description : '',
   };
 }
@@ -473,7 +472,11 @@ async function write<T>(operation: Omit<RollbackOperation, 'id' | 'state' | 'pre
   entry.requestStartedAt = new Date().toISOString();
   atomicJson(manifestPath, manifest);
   const result = await api<T>(method, path, body);
-  if (result.status >= 300) die(1, `Discord write failed for ${entry.label}: HTTP ${result.status} ${JSON.stringify(result.body)}`);
+  if (result.status >= 300) {
+    manifest.status = 'apply_failed';
+    atomicJson(manifestPath, manifest);
+    die(1, `Discord write failed for ${entry.label}: HTTP ${result.status} ${JSON.stringify(result.body)}`);
+  }
   discordWrites++;
   if (result.body && typeof result.body === 'object') {
     if ('id' in result.body && typeof (result.body as { id?: unknown }).id === 'string') {

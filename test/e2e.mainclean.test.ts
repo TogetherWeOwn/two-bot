@@ -37,6 +37,7 @@ type Stub = {
   state: State;
   writes: Array<{ method: string; path: string; body: unknown }>;
   setWelcomeMissing(value: boolean): void;
+  rejectScreeningWrite(value: boolean): void;
   close(): Promise<void>;
 };
 
@@ -101,6 +102,7 @@ async function stubDiscord(admin = true): Promise<Stub> {
   const state = initialState(admin);
   const writes: Stub['writes'] = [];
   let welcomeMissing = false;
+  let screeningWriteRejected = false;
   let next = 100;
   const server: Server = createServer((req, res) => {
     const method = req.method ?? 'GET';
@@ -170,11 +172,12 @@ async function stubDiscord(admin = true): Promise<Stub> {
         }
         if (method === 'PATCH' && path.endsWith('/member-verification')) {
           const request = body as JsonObject;
-          if (typeof request.form_fields !== 'string' || 'version' in request) return send(400, { message: 'invalid member-verification request' });
+          if (screeningWriteRejected) return send(400, { message: 'screening write rejected' });
+          if (!Array.isArray(request.form_fields) || 'version' in request) return send(400, { message: 'invalid member-verification request' });
           state.screening = {
             ...state.screening,
             description: request.description,
-            form_fields: JSON.parse(request.form_fields),
+            form_fields: request.form_fields,
           };
           return send(200, state.screening);
         }
@@ -206,6 +209,9 @@ async function stubDiscord(admin = true): Promise<Stub> {
     writes,
     setWelcomeMissing(value: boolean) {
       welcomeMissing = value;
+    },
+    rejectScreeningWrite(value: boolean) {
+      screeningWriteRejected = value;
     },
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
@@ -325,6 +331,9 @@ test('accepted categories, ten channels, welcome, onboarding, screening and star
     assert.deepEqual(stub.state.onboarding.prompts, []);
     assert.equal(stub.state.screening.description, SCREENING_DESCRIPTION);
     assert.deepEqual((((stub.state.screening.form_fields as JsonObject[])[0]!.values) as string[]), RULES);
+    const screeningWrite = stub.writes.find((request) => request.path.endsWith('/member-verification'))!;
+    assert.ok(Array.isArray((screeningWrite.body as JsonObject).form_fields), 'form_fields must be sent as an array');
+    assert.notEqual(typeof (screeningWrite.body as JsonObject).form_fields, 'string');
     assert.ok([...stub.state.messages.values()].flat().some((message) => message.content === STARTER_MESSAGE));
     assert.ok(stub.writes.every((request) => !/members|bans/.test(request.path)));
     const destructive = stub.writes.filter((request) => request.method === 'DELETE');
@@ -350,6 +359,25 @@ test('a disabled Welcome Screen 404 is captured before writes and enabled safely
     const paths = artifactPaths(dir);
     const pre = JSON.parse(readFileSync(paths.pre, 'utf8')) as { welcomeScreen: { status: number } };
     assert.equal(pre.welcomeScreen.status, 404);
+  } finally {
+    await stub.close();
+  }
+});
+
+test('a rejected Discord write leaves the manifest in apply_failed, not applied', async () => {
+  const stub = await stubDiscord();
+  stub.rejectScreeningWrite(true);
+  const dir = mkdtempSync(join(tmpdir(), 'two-main-write-failure-'));
+  try {
+    const result = await apply(stub, dir);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /Discord write failed for configure four-rule Membership Screening/);
+    const paths = artifactPaths(dir);
+    const manifest = JSON.parse(readFileSync(paths.manifest, 'utf8')) as { status: string; operations: Array<{ label: string; state: string }> };
+    assert.equal(manifest.status, 'apply_failed');
+    assert.equal(manifest.operations.at(-1)?.label, 'configure four-rule Membership Screening');
+    assert.equal(manifest.operations.at(-1)?.state, 'pending');
+    assert.ok(!existsSync(paths.post));
   } finally {
     await stub.close();
   }
