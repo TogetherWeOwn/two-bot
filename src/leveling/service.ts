@@ -4,8 +4,11 @@ export const MESSAGE_XP = 15;
 export const MESSAGE_COOLDOWN_SECONDS = 60;
 export const VOICE_XP_PER_MINUTE = 5;
 export const VOICE_COOLDOWN_SECONDS = 60;
+export const MAX_STORED_XP = Number.MAX_SAFE_INTEGER;
 
 export type XpSource = 'message' | 'voice';
+
+class XpCeilingReached extends Error {}
 
 export interface LevelProfile {
   guildId: string;
@@ -75,8 +78,8 @@ export function levelForXp(xp: number): number {
 }
 
 function clampXp(value: number): number {
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new Error('xp must be a non-negative safe integer');
+  if (!Number.isSafeInteger(value) || value < 0 || value > MAX_STORED_XP) {
+    throw new Error(`xp must be an integer between 0 and ${MAX_STORED_XP}`);
   }
   return value;
 }
@@ -133,73 +136,88 @@ export class LevelingService {
     if (amount <= 0) return this.currentAward(guildId, memberId);
     const cooldownSeconds = source === 'message' ? MESSAGE_COOLDOWN_SECONDS : VOICE_COOLDOWN_SECONDS;
 
-    return this.db.transaction(async (tx) => {
-      const before = await tx
-        .prepare(`SELECT xp FROM member_levels WHERE guild_id = ? AND member_id = ?`)
-        .get<{ xp: number }>(guildId, memberId);
-      const previousXp = Number(before?.xp ?? 0);
-      const previousLevel = levelForXp(previousXp);
+    try {
+      return await this.db.transaction(async (tx) => {
+        const before = await tx
+          .prepare(`SELECT xp FROM member_levels WHERE guild_id = ? AND member_id = ?`)
+          .get<{ xp: number }>(guildId, memberId);
+        const previousXp = Number(before?.xp ?? 0);
+        const previousLevel = levelForXp(previousXp);
 
-      const claimed = await tx
-        .prepare(
-          `INSERT INTO xp_cooldowns (guild_id, member_id, source, last_awarded_at)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT (guild_id, member_id, source) DO UPDATE
-             SET last_awarded_at = excluded.last_awarded_at
-           WHERE xp_cooldowns.last_awarded_at <= ?
-           RETURNING last_awarded_at`,
-        )
-        .get<{ last_awarded_at: string }>(
-          guildId,
-          memberId,
-          source,
-          at,
-          new Date(Date.parse(at) - cooldownSeconds * 1000).toISOString(),
-        );
+        const claimed = await tx
+          .prepare(
+            `INSERT INTO xp_cooldowns (guild_id, member_id, source, last_awarded_at)
+             VALUES (?, ?, ?, ?)
+             ON CONFLICT (guild_id, member_id, source) DO UPDATE
+               SET last_awarded_at = excluded.last_awarded_at
+             WHERE xp_cooldowns.last_awarded_at <= ?
+             RETURNING last_awarded_at`,
+          )
+          .get<{ last_awarded_at: string }>(
+            guildId,
+            memberId,
+            source,
+            at,
+            new Date(Date.parse(at) - cooldownSeconds * 1000).toISOString(),
+          );
 
-      if (!claimed) {
+        if (!claimed) {
+          return {
+            awarded: 0,
+            totalXp: previousXp,
+            level: previousLevel,
+            previousLevel,
+            leveledUp: false,
+          };
+        }
+
+        const messageXp = source === 'message' ? amount : 0;
+        const voiceXp = source === 'voice' ? amount : 0;
+        const row = await tx
+          .prepare(
+            `INSERT INTO member_levels
+               (guild_id, member_id, xp, message_xp, voice_xp, imported_xp, updated_at)
+             VALUES (?, ?, ?, ?, ?, 0, ?)
+             ON CONFLICT (guild_id, member_id) DO UPDATE SET
+               xp = member_levels.xp + excluded.xp,
+               message_xp = member_levels.message_xp + excluded.message_xp,
+               voice_xp = member_levels.voice_xp + excluded.voice_xp,
+               updated_at = excluded.updated_at
+             WHERE member_levels.xp <= ?
+             RETURNING xp`,
+          )
+          .get<{ xp: number }>(
+            guildId,
+            memberId,
+            amount,
+            messageXp,
+            voiceXp,
+            at,
+            MAX_STORED_XP - amount,
+          );
+        if (!row) throw new XpCeilingReached();
+        const totalXp = Number(row.xp);
+        const level = levelForXp(totalXp);
+        await tx
+          .prepare(
+            `INSERT INTO xp_awards
+               (guild_id, member_id, source, xp, occurred_at, channel_id)
+             VALUES (?, ?, ?, ?, ?, ?)`,
+          )
+          .run(guildId, memberId, source, amount, at, channelId ?? null);
+
         return {
-          awarded: 0,
-          totalXp: previousXp,
-          level: previousLevel,
+          awarded: amount,
+          totalXp,
+          level,
           previousLevel,
-          leveledUp: false,
+          leveledUp: level > previousLevel,
         };
-      }
-
-      const messageXp = source === 'message' ? amount : 0;
-      const voiceXp = source === 'voice' ? amount : 0;
-      const row = await tx
-        .prepare(
-          `INSERT INTO member_levels
-             (guild_id, member_id, xp, message_xp, voice_xp, imported_xp, updated_at)
-           VALUES (?, ?, ?, ?, ?, 0, ?)
-           ON CONFLICT (guild_id, member_id) DO UPDATE SET
-             xp = member_levels.xp + excluded.xp,
-             message_xp = member_levels.message_xp + excluded.message_xp,
-             voice_xp = member_levels.voice_xp + excluded.voice_xp,
-             updated_at = excluded.updated_at
-           RETURNING xp`,
-        )
-        .get<{ xp: number }>(guildId, memberId, amount, messageXp, voiceXp, at);
-      const totalXp = Number(row?.xp ?? previousXp + amount);
-      const level = levelForXp(totalXp);
-      await tx
-        .prepare(
-          `INSERT INTO xp_awards
-             (guild_id, member_id, source, xp, occurred_at, channel_id)
-           VALUES (?, ?, ?, ?, ?, ?)`,
-        )
-        .run(guildId, memberId, source, amount, at, channelId ?? null);
-
-      return {
-        awarded: amount,
-        totalXp,
-        level,
-        previousLevel,
-        leveledUp: level > previousLevel,
-      };
-    });
+      });
+    } catch (err) {
+      if (!(err instanceof XpCeilingReached)) throw err;
+      return this.currentAward(guildId, memberId);
+    }
   }
 
   private async currentAward(guildId: string, memberId: string): Promise<XpAward> {
@@ -333,41 +351,60 @@ export class LevelingService {
 
       for (const [memberId, xp] of byMember) {
         totalImportedXp += xp;
-        const current = await tx
+        if (!Number.isSafeInteger(totalImportedXp)) {
+          throw new Error('total imported XP exceeds the safe integer range');
+        }
+        const created = await tx
           .prepare(
-            `SELECT xp, message_xp, voice_xp, imported_xp
-               FROM member_levels
-              WHERE guild_id = ? AND member_id = ?`,
+            `INSERT INTO member_levels
+               (guild_id, member_id, xp, message_xp, voice_xp, imported_xp, updated_at)
+             VALUES (?, ?, ?, 0, 0, ?, ?)
+             ON CONFLICT (guild_id, member_id) DO NOTHING
+             RETURNING member_id`,
           )
-          .get<{ xp: number; message_xp: number; voice_xp: number; imported_xp: number }>(
-            guildId,
-            memberId,
-          );
-        if (!current) {
-          await tx
-            .prepare(
-              `INSERT INTO member_levels
-                 (guild_id, member_id, xp, message_xp, voice_xp, imported_xp, updated_at)
-               VALUES (?, ?, ?, 0, 0, ?, ?)`,
-            )
-            .run(guildId, memberId, xp, xp, at);
+          .get<{ member_id: string }>(guildId, memberId, xp, xp, at);
+        if (created) {
           inserted++;
           continue;
         }
 
-        if (Number(current.imported_xp) === xp) {
+        const changed = await tx
+          .prepare(
+            `UPDATE member_levels
+                SET imported_xp = ?,
+                    xp = message_xp + voice_xp + ?,
+                    updated_at = ?
+              WHERE guild_id = ? AND member_id = ?
+                AND imported_xp <> ?
+                AND message_xp + voice_xp <= ?
+              RETURNING imported_xp`,
+          )
+          .get<{ imported_xp: number }>(
+            xp,
+            xp,
+            at,
+            guildId,
+            memberId,
+            xp,
+            MAX_STORED_XP - xp,
+          );
+        if (changed) {
+          updated++;
+          continue;
+        }
+
+        const current = await tx
+          .prepare(
+            `SELECT imported_xp
+               FROM member_levels
+              WHERE guild_id = ? AND member_id = ?`,
+          )
+          .get<{ imported_xp: number }>(guildId, memberId);
+        if (Number(current?.imported_xp) === xp) {
           unchanged++;
           continue;
         }
-        const organicXp = Number(current.message_xp) + Number(current.voice_xp);
-        await tx
-          .prepare(
-            `UPDATE member_levels
-                SET imported_xp = ?, xp = ?, updated_at = ?
-              WHERE guild_id = ? AND member_id = ?`,
-          )
-          .run(xp, organicXp + xp, at, guildId, memberId);
-        updated++;
+        throw new Error(`imported XP plus organic XP exceeds ${MAX_STORED_XP} for member ${memberId}`);
       }
 
       await tx
