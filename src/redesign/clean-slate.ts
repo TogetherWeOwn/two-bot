@@ -67,3 +67,17 @@ export const TEXT_CHANNEL_NAMES = new Set(Object.keys(TOPICS));
 export const VOICE_CHANNEL_NAMES = new Set(['Lobby', 'Squad']);
 export const PUBLIC_READ_ONLY = new Set(['start-here', 'announcements']);
 export const OPERATIONS_CHANNEL_NAMES = new Set(['discord-updates', 'moderation-log', 'audit-log', 'voice-log']);
+
+export const VIEW_CHANNEL = 1n << 10n;
+export const SEND_MESSAGES = 1n << 11n;
+export const CONNECT = 1n << 20n;
+export const SPEAK = 1n << 21n;
+
+export type EveryoneOverwrite = { id: string; type: 0; allow: string; deny: string };
+
+export function desiredEveryoneOverwrite(guildId: string, name: string): EveryoneOverwrite {
+  if (OPERATIONS_CHANNEL_NAMES.has(name)) return { id: guildId, type: 0, allow: '0', deny: String(VIEW_CHANNEL) };
+  if (PUBLIC_READ_ONLY.has(name)) return { id: guildId, type: 0, allow: String(VIEW_CHANNEL), deny: String(SEND_MESSAGES) };
+  if (VOICE_CHANNEL_NAMES.has(name)) return { id: guildId, type: 0, allow: String(VIEW_CHANNEL | CONNECT | SPEAK), deny: '0' };
+  return { id: guildId, type: 0, allow: String(VIEW_CHANNEL | SEND_MESSAGES), deny: '0' };
+}

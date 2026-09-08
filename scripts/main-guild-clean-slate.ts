@@ -31,9 +31,7 @@ import { LIVE_BOT_APPLICATION_ID, LIVE_GUILD_ID, LIVE_GUILD_NAME } from '../src/
 import {
   CATEGORIES,
   MODERATOR_ROLE,
-  OPERATIONS_CHANNEL_NAMES,
   OWNER_ROLE,
-  PUBLIC_READ_ONLY,
   RULES,
   SCREENING_DESCRIPTION,
   SERVER_DESCRIPTION,
@@ -42,6 +40,7 @@ import {
   TOPICS,
   VOICE_CHANNEL_NAMES,
   WELCOME_DESCRIPTION,
+  desiredEveryoneOverwrite,
 } from '../src/redesign/clean-slate.ts';
 
 const APPLY = process.argv.includes('--apply');
@@ -334,13 +333,6 @@ function assertUnambiguousTargets(state: ExportState): void {
   if (!features.includes('COMMUNITY')) die(1, 'Preflight: the live guild does not have Discord Community enabled; refusing to change that setting implicitly.');
 }
 
-function desiredOverwrite(name: string): Overwrite {
-  if (OPERATIONS_CHANNEL_NAMES.has(name)) return { id: guildId, type: 0, allow: '0', deny: String(VIEW_CHANNEL) };
-  if (PUBLIC_READ_ONLY.has(name)) return { id: guildId, type: 0, allow: String(VIEW_CHANNEL), deny: String(SEND_MESSAGES) };
-  if (VOICE_CHANNEL_NAMES.has(name)) return { id: guildId, type: 0, allow: String(VIEW_CHANNEL | CONNECT | SPEAK), deny: '0' };
-  return { id: guildId, type: 0, allow: String(VIEW_CHANNEL | SEND_MESSAGES), deny: '0' };
-}
-
 function mergeEveryoneOverwrite(existing: Overwrite[], desired: Overwrite): Overwrite[] {
   const relevant = VIEW_CHANNEL | SEND_MESSAGES | CONNECT | SPEAK;
   const index = existing.findIndex((overwrite) => overwrite.id === guildId && overwrite.type === 0);
@@ -552,7 +544,7 @@ for (const category of CATEGORIES) {
   for (const name of category.channels) {
     const type = VOICE_CHANNEL_NAMES.has(name) ? 2 : 0;
     const existing = channels.find((channel) => channel.type === type && channel.parent_id === parentId && channel.name === name);
-    const overwrite = desiredOverwrite(name);
+    const overwrite = desiredEveryoneOverwrite(guildId, name);
     if (!existing) {
       const body = {
         name,

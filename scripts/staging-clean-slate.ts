@@ -1,15 +1,14 @@
 import {
   CATEGORIES,
   MODERATOR_ROLE,
-  OPERATIONS_CHANNEL_NAMES,
   OWNER_ROLE,
-  PUBLIC_READ_ONLY,
   RULES,
   SCREENING_DESCRIPTION,
   SERVER_DESCRIPTION,
   STARTER_MESSAGE,
   TOPICS,
   WELCOME_DESCRIPTION,
+  desiredEveryoneOverwrite,
 } from '../src/redesign/clean-slate.ts';
 import { LIVE_GUILD_ID, STAGING_BOT_APPLICATION_ID, checkStagingToken, stagingGuildId } from '../src/staging/spec.ts';
 
@@ -35,11 +34,6 @@ if (guildId === LIVE_GUILD_ID) {
   process.exit(2);
 }
 
-const VIEW_CHANNEL = 1n << 10n;
-const SEND_MESSAGES = 1n << 11n;
-const CONNECT = 1n << 20n;
-const SPEAK = 1n << 21n;
-
 const PREVIOUS_STARTER_MESSAGES = new Set([
   '**Welcome to TWO.** What have you been playing lately? Say hello here, or use #looking-to-play when you want a group now.',
   '**Pull up a chair.** Tell us what you are playing, your platform, and when you are usually around. Looking for a game right now? Post in #looking-to-play, then grab a voice room when your crew is ready.',
@@ -47,7 +41,6 @@ const PREVIOUS_STARTER_MESSAGES = new Set([
 
 const TEXT = new Set(Object.keys(TOPICS));
 const VOICE = new Set(['Lobby', 'Squad']);
-const OPERATIONS = OPERATIONS_CHANNEL_NAMES;
 const WANTED_NAMES = new Set<string>(CATEGORIES.flatMap((category) => [category.name, ...category.channels]));
 
 let failures = 0;
@@ -165,13 +158,7 @@ for (const category of CATEGORIES) {
   for (const name of category.channels) {
     const type = VOICE.has(name) ? 2 : 0;
     const existing = channels.find((channel) => channel.type === type && channel.name === name);
-    const overwrites = OPERATIONS.has(name)
-      ? [{ id: guildId, type: 0, allow: '0', deny: String(VIEW_CHANNEL) }]
-      : PUBLIC_READ_ONLY.has(name)
-        ? [{ id: guildId, type: 0, allow: String(VIEW_CHANNEL), deny: String(SEND_MESSAGES) }]
-        : VOICE.has(name)
-          ? [{ id: guildId, type: 0, allow: String(VIEW_CHANNEL | CONNECT | SPEAK), deny: '0' }]
-          : [{ id: guildId, type: 0, allow: String(VIEW_CHANNEL | SEND_MESSAGES), deny: '0' }];
+    const overwrites = [desiredEveryoneOverwrite(guildId, name)];
     const body = {
       name,
       type,
