@@ -1,0 +1,211 @@
+/**
+ * The discord.js side of session routing (TOG-1644 / TOG-1654).
+ *
+ *   join (rules accepted) -> welcome post + "what do you want to do" picker
+ *   -> selection -> ephemeral ack linking the destination
+ *   -> leave -> goodbye post
+ *
+ * Three hard rules, all from the accepted decision:
+ *
+ *   NO ROLES. Nothing in this file calls member.roles.add or .remove, and no
+ *   role id appears in it. The zero-role-delta guarantee is structural, not
+ *   behavioural - there is no code path that could grant one.
+ *
+ *   NO DMs. Outbound paths are the welcome post in the landing channel, the
+ *   goodbye post in the goodbye channel, and ephemeral interaction replies.
+ *
+ *   NO LINKS TO DARK CHANNELS. Every destination is checked against Discord's
+ *   own permission answer for *that member* before it is put in front of them.
+ *
+ * The legacy role picker (src/discord/onboarding.ts) stays untouched; this
+ * module is selected by TWO_ONBOARDING_MODE=session in src/index.ts.
+ */
+
+import {
+  ActionRowBuilder,
+  Events,
+  MessageFlags,
+  PermissionsBitField,
+  StringSelectMenuBuilder,
+  StringSelectMenuOptionBuilder,
+  type Client,
+  type GuildMember,
+  type GuildTextBasedChannel,
+} from 'discord.js';
+import { log } from '../core/log.ts';
+import { EventStore } from '../store/eventStore.ts';
+import {
+  SESSION_PICKS,
+  SESSION_SELECT_ID,
+  SessionRecorder,
+  daysInGuild,
+  goodbyeText,
+  planSession,
+  sessionAckText,
+  sessionWelcomeText,
+} from '../onboarding/session.ts';
+
+export interface SessionWelcomeDeps {
+  recorder: SessionRecorder;
+  store: EventStore;
+  /** Welcome goes to the first of these the bot can post in. */
+  landingChannelIds: string[];
+  /** Where goodbyes go. Same rule: first postable channel wins. */
+  goodbyeChannelIds: string[];
+  /** True = record events, send nothing. Used by preflight and staging rehearsal. */
+  dryRun?: boolean;
+}
+
+export function buildSessionMenu(): ActionRowBuilder<StringSelectMenuBuilder> {
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(SESSION_SELECT_ID)
+    .setPlaceholder('What do you want to do right now?')
+    .setMinValues(1)
+    .setMaxValues(SESSION_PICKS.length)
+    .addOptions(
+      SESSION_PICKS.map((p) =>
+        new StringSelectMenuOptionBuilder()
+          .setLabel(p.label)
+          .setValue(p.key)
+          .setEmoji(p.emoji)
+          .setDescription(p.description),
+      ),
+    );
+  return new ActionRowBuilder<StringSelectMenuBuilder>().addComponents(menu);
+}
+
+/** Can this specific member open this specific channel, right now? */
+function memberCanView(member: GuildMember, channelId: string): boolean {
+  const ch = member.guild.channels.cache.get(channelId);
+  if (!ch) return false;
+  const perms = ch.permissionsFor(member);
+  return !!perms?.has(PermissionsBitField.Flags.ViewChannel);
+}
+
+function botCanPost(client: Client, channelId: string): GuildTextBasedChannel | null {
+  const ch = client.channels.cache.get(channelId);
+  if (!ch || !ch.isTextBased() || ch.isDMBased()) return null;
+  const botId = client.user?.id;
+  if (!botId) return null;
+  const perms = ch.permissionsFor(botId);
+  if (!perms?.has(PermissionsBitField.Flags.ViewChannel | PermissionsBitField.Flags.SendMessages)) {
+    return null;
+  }
+  return ch as GuildTextBasedChannel;
+}
+
+export function registerSessionWelcome(client: Client, deps: SessionWelcomeDeps): void {
+  const { recorder } = deps;
+
+  async function promptMember(member: GuildMember): Promise<void> {
+    if (member.user.bot) return;
+    // Idempotency half one: a member who has already been welcomed is not
+    // welcomed again, no matter how many times pending flips.
+    if (await deps.store.hasEvent(member.guild.id, member.id, 'onboarding_prompted')) return;
+
+    const target =
+      deps.landingChannelIds.map((id) => botCanPost(client, id)).find(Boolean) ?? null;
+    if (!target) {
+      log.error('session_welcome_no_channel', {
+        tried: deps.landingChannelIds,
+        memberId: member.id,
+      });
+      return;
+    }
+
+    if (deps.dryRun) {
+      log.info('session_welcome_dry_run', { memberId: member.id, channelId: target.id });
+      await recorder.prompted(member.guild.id, member.id, target.id);
+      return;
+    }
+
+    try {
+      await target.send({
+        content: sessionWelcomeText(`<@${member.id}>`),
+        components: [buildSessionMenu()],
+        allowedMentions: { users: [member.id] },
+      });
+      await recorder.prompted(member.guild.id, member.id, target.id);
+    } catch (err) {
+      log.error('session_welcome_failed', { memberId: member.id, err: String(err) });
+    }
+  }
+
+  client.on(Events.GuildMemberAdd, (member) => {
+    if (member.pending) return; // GuildMemberUpdate picks them up
+    void promptMember(member);
+  });
+
+  client.on(Events.GuildMemberUpdate, (oldMember, newMember) => {
+    if (oldMember.pending && !newMember.pending) void promptMember(newMember);
+  });
+
+  client.on(Events.GuildMemberRemove, async (member) => {
+    // The funnel row is recorded by the core handlers; this is the
+    // human-visible half. Joined-at survives on the member object Discord
+    // hands us even as they leave.
+    const target =
+      deps.goodbyeChannelIds.map((id) => botCanPost(client, id)).find(Boolean) ?? null;
+    if (!target) return;
+    if (deps.dryRun) {
+      log.info('session_goodbye_dry_run', { memberId: member.id });
+      return;
+    }
+    try {
+      await target.send({
+        content: goodbyeText(
+          member.user?.username ?? member.displayName ?? member.id,
+          daysInGuild(member.joinedAt?.toISOString() ?? null, new Date().toISOString()),
+        ),
+        allowedMentions: { parse: [] }, // never ping the person who left
+      });
+      log.info('session_goodbye_posted', { memberId: member.id, channelId: target.id });
+    } catch (err) {
+      log.error('session_goodbye_failed', { memberId: member.id, err: String(err) });
+    }
+  });
+
+  registerSessionSelect(client, deps);
+}
+
+/** The picker handler alone - the panel outlives any single welcome. */
+export function registerSessionSelect(client: Client, deps: SessionWelcomeDeps): void {
+  client.on(Events.InteractionCreate, async (interaction) => {
+    if (!interaction.isStringSelectMenu()) return;
+    if (interaction.customId !== SESSION_SELECT_ID) return;
+    await handleSessionSelect(interaction, deps);
+  });
+}
+
+export async function handleSessionSelect(interaction: unknown, deps: SessionWelcomeDeps): Promise<void> {
+  // Typed loosely so the mock harness and tests can drive it without a full
+  // discord.js interaction object; the real path always arrives via
+  // InteractionCreate.
+  const i = interaction as {
+    member: GuildMember | null;
+    guild: { id: string } | null;
+    values: string[];
+    deferReply(o: { flags: number }): Promise<unknown>;
+    editReply(o: { content: string }): Promise<unknown>;
+  };
+  const member = i.member;
+  if (!member || !i.guild) return;
+
+  // Ephemeral: only the clicker sees the result.
+  await i.deferReply({ flags: MessageFlags.Ephemeral });
+
+  const plan = planSession(i.values, (id) => memberCanView(member, id));
+  if (plan.unknownKeys.length) {
+    log.error('session_picker_unknown_keys', { keys: plan.unknownKeys });
+  }
+
+  await i.editReply({ content: sessionAckText(plan) });
+
+  // Idempotency half two: re-selecting records another channel_routed (it is
+  // a repeatable funnel event, like voice sessions) but changes no member
+  // state - there is none to change. The role-delta assertion in the staging
+  // proof covers this directly.
+  if (plan.channelIds.length) {
+    await deps.recorder.routed(i.guild.id, member.id, plan);
+  }
+}

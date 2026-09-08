@@ -15,6 +15,7 @@ import { createServer, type Server } from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { AddressInfo } from 'node:net';
 import { GAME_PICKS, GAME_HUB_CHANNEL_ID, GATED_CATEGORIES, GUILD_ID as TWO_GUILD_ID } from '../../src/onboarding/catalog.ts';
+import { LOOKING_TO_PLAY_CHANNEL_ID, LOBBY_VOICE_CHANNEL_ID } from '../../src/onboarding/session.ts';
 
 /**
  * The mock guild uses TWO's real ids. Not cosmetic: the onboarding catalog is
@@ -79,6 +80,10 @@ export interface MockDiscord {
   memberAcceptRules(memberId: string, username: string): void;
   /** Simulate the member choosing games in the picker. */
   selectGames(memberId: string, username: string, keys: string[], heldRoleIds?: string[]): void;
+  /** Simulate the member using the session picker (TOG-1644). */
+  selectSession(memberId: string, username: string, keys: string[]): void;
+  /** Simulate the member leaving the guild (triggers goodbye, TOG-1644). */
+  memberRemove(memberId: string, username: string): void;
 
   // --- internal actions endpoint (TWO-59) -----------------------------------
   /** Seed the roles GET /guilds/x/members/y reports, so already_held is reachable. */
@@ -194,6 +199,27 @@ function channelsPayload(lighting: Lighting) {
       guild_id: GUILD_ID,
       name: 'Lobby',
       position: 1,
+      permission_overwrites: [],
+      bitrate: 64000,
+      user_limit: 0,
+    },
+    // The session-routing destinations (TOG-1644): open to @everyone, exactly
+    // as the clean-slate staging structure has them.
+    {
+      id: LOOKING_TO_PLAY_CHANNEL_ID,
+      type: 0,
+      guild_id: GUILD_ID,
+      name: 'looking-to-play',
+      position: 3,
+      permission_overwrites: [],
+      nsfw: false,
+    },
+    {
+      id: LOBBY_VOICE_CHANNEL_ID,
+      type: 2,
+      guild_id: GUILD_ID,
+      name: 'Lobby (session)',
+      position: 2,
       permission_overwrites: [],
       bitrate: 64000,
       user_limit: 0,
@@ -745,6 +771,62 @@ export async function startMockDiscord(
 
     setMemberRoles(memberId: string, roleIds: string[]) {
       memberRoles.set(memberId, roleIds);
+    },
+
+    selectSession(memberId, username, keys) {
+      dispatch('INTERACTION_CREATE', {
+        id: snowflake(),
+        application_id: BOT_ID,
+        type: 3, // MESSAGE_COMPONENT
+        token: 'mock-interaction-token',
+        version: 1,
+        guild_id: GUILD_ID,
+        channel_id: TEXT_CHANNEL,
+        channel: { id: TEXT_CHANNEL, type: 0 },
+        data: {
+          custom_id: 'two:onboarding:session',
+          component_type: 3, // string select
+          values: keys,
+        },
+        member: {
+          user: userPayload(memberId, username),
+          roles: [MEMBER_ROLE],
+          joined_at: new Date().toISOString(),
+          deaf: false,
+          mute: false,
+          pending: false,
+          flags: 0,
+          permissions: '0',
+        },
+        message: {
+          id: snowflake(),
+          type: 0,
+          channel_id: TEXT_CHANNEL,
+          author: userPayload(BOT_ID, 'two-dev-bot', true),
+          content: 'welcome',
+          timestamp: new Date().toISOString(),
+          edited_timestamp: null,
+          tts: false,
+          mention_everyone: false,
+          mentions: [],
+          mention_roles: [],
+          attachments: [],
+          embeds: [],
+          pinned: false,
+          components: [],
+        },
+        app_permissions: '0',
+        locale: 'en-US',
+        entitlements: [],
+        authorizing_integration_owners: {},
+      });
+    },
+
+    memberRemove(memberId, username) {
+      dispatch('GUILD_MEMBER_REMOVE', {
+        guild_id: GUILD_ID,
+        user: userPayload(memberId, username),
+      });
     },
 
     addExistingMember(memberId: string) {
