@@ -21,6 +21,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb, type Db } from '../src/store/db.ts';
+import { GatewayIntentBits } from 'discord.js';
 import { INTENTS } from '../src/discord/client.ts';
 import { WEB_CONTRACT_VIEWS } from '../src/store/webContract.ts';
 import {
@@ -83,9 +84,11 @@ describe('presence probe containment', () => {
         'If this instrument seems to need it, the issue has been misread.',
     );
 
-    // And the value check: still exactly the five documented intents, so
-    // adding a sixth of any kind is a conversation rather than a diff.
-    assert.equal(INTENTS.length, 5, 'the intent list changed - see client.ts:22-28');
+    // And the value check: the six documented intents, including the
+    // non-privileged GuildModeration dispatch used by the operational audit.
+    assert.equal(INTENTS.length, 6, 'the intent list changed - see client.ts:17-29');
+    assert.ok(INTENTS.includes(GatewayIntentBits.GuildModeration));
+    assert.ok(!INTENTS.includes(GatewayIntentBits.GuildPresences));
   });
 
   test('the table is not readable through the web_v1 contract', () => {
