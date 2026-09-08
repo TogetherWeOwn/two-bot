@@ -32,7 +32,13 @@ type State = {
   members: Member[];
   messages: Map<string, Array<{ id: string; author: { id: string }; content: string }>>;
 };
-type Stub = { base: string; state: State; writes: Array<{ method: string; path: string; body: unknown }>; close(): Promise<void> };
+type Stub = {
+  base: string;
+  state: State;
+  writes: Array<{ method: string; path: string; body: unknown }>;
+  setWelcomeMissing(value: boolean): void;
+  close(): Promise<void>;
+};
 
 function initialState(admin = true): State {
   const adminRole = ID(1);
@@ -64,7 +70,7 @@ function initialState(admin = true): State {
     ],
     welcome: { enabled: false, description: 'old welcome', welcome_channels: [], extra: 'kept' },
     onboarding: { prompts: [{ id: 'old' }], default_channel_ids: [legacyGeneral], enabled: true, mode: 1, extra: 'kept' },
-    screening: { enabled: false, form_fields: [], description: 'old screening', extra: 'kept' },
+    screening: { version: '2026-01-01', form_fields: [], description: 'old screening', extra: 'kept' },
     integrations: [{ id: ID(10), application: { id: ID(11) }, name: 'kept integration' }],
     application: { id: LIVE_BOT_APPLICATION_ID, name: 'Owen' },
     members: [
@@ -94,6 +100,7 @@ function cloneState(state: State): JsonObject {
 async function stubDiscord(admin = true): Promise<Stub> {
   const state = initialState(admin);
   const writes: Stub['writes'] = [];
+  let welcomeMissing = false;
   let next = 100;
   const server: Server = createServer((req, res) => {
     const method = req.method ?? 'GET';
@@ -154,6 +161,7 @@ async function stubDiscord(admin = true): Promise<Stub> {
         }
         if (method === 'PATCH' && path.endsWith('/welcome-screen')) {
           state.welcome = { ...state.welcome, ...(body as JsonObject) };
+          welcomeMissing = false;
           return send(200, state.welcome);
         }
         if (method === 'PUT' && path.endsWith('/onboarding')) {
@@ -161,7 +169,13 @@ async function stubDiscord(admin = true): Promise<Stub> {
           return send(200, state.onboarding);
         }
         if (method === 'PATCH' && path.endsWith('/member-verification')) {
-          state.screening = { ...state.screening, ...(body as JsonObject) };
+          const request = body as JsonObject;
+          if (typeof request.form_fields !== 'string' || 'version' in request) return send(400, { message: 'invalid member-verification request' });
+          state.screening = {
+            ...state.screening,
+            description: request.description,
+            form_fields: JSON.parse(request.form_fields),
+          };
           return send(200, state.screening);
         }
         return send(400, { path, method });
@@ -173,12 +187,12 @@ async function stubDiscord(admin = true): Promise<Stub> {
     if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/roles`) return send(200, state.roles);
     if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/channels`) return send(200, state.channels);
     if (path.startsWith(`/api/v10/guilds/${LIVE_GUILD_ID}/members?`)) return send(200, state.members);
-    if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/welcome-screen`) return send(200, state.welcome);
+    if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/welcome-screen`) return welcomeMissing ? send(404, { message: 'Welcome Screen is disabled' }) : send(200, state.welcome);
     if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/onboarding`) return send(200, state.onboarding);
     if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/member-verification`) return send(200, state.screening);
     if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/integrations`) return send(200, state.integrations);
     if (path === '/api/v10/oauth2/applications/@me') return send(200, state.application);
-    let match = /\/channels\/(\d+)\/messages\?limit=50$/.exec(path);
+    let match = /\/channels\/(\d+)\/messages\?limit=(?:1|50)$/.exec(path);
     if (match) return send(200, state.messages.get(match[1]!) ?? []);
     match = /\/channels\/(\d+)\/messages\/(\d+)$/.exec(path);
     if (match) return send(200, (state.messages.get(match[1]!) ?? []).find((message) => message.id === match![2]) ?? {});
@@ -190,6 +204,9 @@ async function stubDiscord(admin = true): Promise<Stub> {
     base: `http://127.0.0.1:${port}/api/v10`,
     state,
     writes,
+    setWelcomeMissing(value: boolean) {
+      welcomeMissing = value;
+    },
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }
@@ -317,6 +334,22 @@ test('accepted categories, ten channels, welcome, onboarding, screening and star
     assert.ok(existsSync(paths.post));
     const pre = JSON.parse(readFileSync(paths.pre, 'utf8')) as JsonObject;
     assert.ok(pre.welcomeScreen && pre.onboarding && pre.membershipScreening && pre.members && pre.botInventory);
+  } finally {
+    await stub.close();
+  }
+});
+
+test('a disabled Welcome Screen 404 is captured before writes and enabled safely', async () => {
+  const stub = await stubDiscord();
+  stub.setWelcomeMissing(true);
+  const dir = mkdtempSync(join(tmpdir(), 'two-main-welcome404-'));
+  try {
+    const result = await apply(stub, dir);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(stub.state.welcome.enabled, true);
+    const paths = artifactPaths(dir);
+    const pre = JSON.parse(readFileSync(paths.pre, 'utf8')) as { welcomeScreen: { status: number } };
+    assert.equal(pre.welcomeScreen.status, 404);
   } finally {
     await stub.close();
   }
