@@ -353,15 +353,15 @@ test('the invite never asks for Administrator', () => {
   assert.equal(STAGING_INVITE_PERMISSIONS & (1n << 5n), 0n, 'Manage Server');
 });
 
-test('the invite is the onboarding set plus exactly the two events bits', () => {
+test('the invite is the operational set plus exactly the two events bits', () => {
   // Pins the relationship rather than the number, so widening the invite is a
   // deliberate edit here and not a silently larger grant.
   assert.equal(
     STAGING_INVITE_PERMISSIONS,
     BigInt(STAGING_PERMISSIONS) | (1n << 33n) | (1n << 44n),
   );
-  assert.equal(STAGING_PERMISSIONS, 268520512, 'the onboarding set is unchanged');
-  assert.equal(STAGING_INVITE_PERMISSIONS, 17601044499520n);
+  assert.equal(STAGING_PERMISSIONS, 268520640, 'onboarding plus View Audit Log');
+  assert.equal(STAGING_INVITE_PERMISSIONS, 17601044499648n);
 });
 
 test('the invite url carries the wider set, not the onboarding one', () => {
