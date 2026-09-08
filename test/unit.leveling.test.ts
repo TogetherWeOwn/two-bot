@@ -1,8 +1,9 @@
 import { after, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { openTestDb } from './helpers/testDb.ts';
+import { openTestDb, usingPostgres } from './helpers/testDb.ts';
 import {
   LevelingService,
+  MAX_STORED_XP,
   levelForXp,
   totalXpForLevel,
 } from '../src/leveling/service.ts';
@@ -105,6 +106,58 @@ test('re-import is idempotent and corrected imports preserve organic XP', async 
   assert.equal(profile.importedXp, 120);
   assert.equal(profile.messageXp, 15);
   assert.equal(profile.xp, 135);
+});
+
+test('concurrent identical imports remain idempotent', { skip: !usingPostgres && 'needs concurrent Postgres transactions' }, async () => {
+  const first = new LevelingService(fixture.db);
+  const second = new LevelingService(fixture.db);
+  const rows = [{ memberId: A, xp: 100 }];
+
+  const summaries = await Promise.all([
+    first.importMee6(GUILD, rows, at(0)),
+    second.importMee6(GUILD, rows, at(1)),
+  ]);
+
+  assert.equal(summaries.reduce((sum, summary) => sum + summary.inserted, 0), 1);
+  assert.equal(summaries.reduce((sum, summary) => sum + summary.unchanged, 0), 1);
+  assert.equal((await first.profile(GUILD, A)).xp, 100);
+});
+
+test('stored XP ceiling rejects unsafe imports and awards without consuming cooldown', async () => {
+  const service = new LevelingService(fixture.db);
+  await service.importMee6(GUILD, [{ memberId: A, xp: MAX_STORED_XP }], at(0));
+
+  const blocked = await service.awardMessage(GUILD, A, at(60));
+  assert.equal(blocked.awarded, 0);
+  assert.equal(blocked.totalXp, MAX_STORED_XP);
+  assert.equal(
+    Number((await fixture.db
+      .prepare(`SELECT COUNT(*) AS count FROM xp_cooldowns WHERE guild_id = ? AND member_id = ?`)
+      .get<{ count: number }>(GUILD, A))?.count ?? 0),
+    0,
+  );
+  await assert.rejects(
+    service.importMee6(GUILD, [
+      { memberId: A, xp: MAX_STORED_XP },
+      { memberId: B, xp: 1 },
+    ], at(120)),
+    /total imported XP exceeds the safe integer range/,
+  );
+});
+
+test('corrected imports cannot overflow organic plus imported XP', async () => {
+  const service = new LevelingService(fixture.db);
+  await service.importMee6(GUILD, [{ memberId: A, xp: MAX_STORED_XP - 15 }], at(0));
+  await service.awardMessage(GUILD, A, at(60));
+
+  await assert.rejects(
+    service.importMee6(GUILD, [{ memberId: A, xp: MAX_STORED_XP }], at(120)),
+    /imported XP plus organic XP exceeds/,
+  );
+  const profile = await service.profile(GUILD, A);
+  assert.equal(profile.xp, MAX_STORED_XP);
+  assert.equal(profile.importedXp, MAX_STORED_XP - 15);
+  assert.equal(profile.messageXp, 15);
 });
 
 test('role rewards replace atomically and rank text is user readable', async () => {
