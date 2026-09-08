@@ -121,6 +121,11 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
   let settingsWrites = 0;
   let emojiWrites = 0;
 
+  const currentRoleIds = new Set(current.roles.map((role) => role.id));
+  for (const role of snapshot.roles.filter((item) => item.managed && currentRoleIds.has(item.id))) {
+    roleIds.set(role.id, role.id);
+  }
+
   const currentRolesByName = new Map(current.roles.filter((role) => !role.managed).map((role) => [role.name, role]));
   for (const role of snapshot.roles.filter((item) => !item.managed && item.id !== snapshot.guildId).sort((a, b) => a.position - b.position)) {
     const actual = currentRolesByName.get(role.name);
@@ -156,6 +161,22 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
         captureId: { resource: 'channel', sourceId: category.id },
       });
       channelWrites++;
+    }
+
+    const expectedOverwrites = category.permission_overwrites ?? [];
+    const knownExpectedOverwrites = expectedOverwrites.map((overwrite) => ({
+      ...overwrite,
+      id: overwrite.type === 0 ? (overwrite.id === snapshot.guildId ? current.guildId : roleIds.get(overwrite.id) ?? overwrite.id) : overwrite.id,
+    }));
+    const hasUnresolvedRoleReference = expectedOverwrites.some((overwrite) => overwrite.type === 0 && overwrite.id !== snapshot.guildId && !roleIds.has(overwrite.id));
+    if ((!actual && expectedOverwrites.length > 0) || hasUnresolvedRoleReference || !same(knownExpectedOverwrites, actual?.permission_overwrites ?? [])) {
+      overwriteOperations.push({
+        label: `restore overwrites ${category.name}`,
+        method: 'PATCH',
+        path: { channelSourceId: category.id },
+        body: { permission_overwrites: overwriteBody(expectedOverwrites, snapshot.guildId) },
+      });
+      overwriteWrites += expectedOverwrites.length || 1;
     }
   }
 
