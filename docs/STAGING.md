@@ -551,11 +551,14 @@ a hard failure; a local-only snapshot must not turn the timer green.
 npm run backup:guild-config
 ```
 
-The systemd path is `two-bot-guild-config-backup.timer`. It requires the staging
-token as `LoadCredential=discord_staging_token`,
-`DISCORD_STAGING_GUILD_ID=1545644954272137297`, and either
+The systemd path is `two-bot-guild-config-backup.timer`. The bootstrap provisions
+`/etc/two-bot/credentials/discord_staging_token` for the Owen QA Test token and
+enables the timer only when that file is non-empty and
+`/etc/two-bot/two-bot.env` sets
+`DISCORD_STAGING_GUILD_ID=1545644954272137297`. It also requires either
 `TWO_GUILD_CONFIG_UPLOAD_CMD` or the existing `TWO_BACKUP_UPLOAD_CMD` in
-`/etc/two-bot/backup.env`.
+`/etc/two-bot/backup.env`; otherwise the snapshot fails rather than remaining
+local-only.
 
 Restore is staging-only, dry-run by default, and requires two explicit write
 flags. It never accepts the live guild id or a snapshot made by a different

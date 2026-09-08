@@ -45,6 +45,7 @@ try {
 
 const api = new GuildConfigDiscordApi({
   apiBase: process.env.GUILD_CONFIG_API_BASE,
+  cdnBase: process.env.GUILD_CONFIG_CDN_BASE,
   token,
   applicationId: STAGING_BOT_APPLICATION_ID,
   guildId,
