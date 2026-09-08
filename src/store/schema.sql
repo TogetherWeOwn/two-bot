@@ -169,7 +169,8 @@ CREATE TABLE IF NOT EXISTS moderation_scheduled_unbans (
   reason       TEXT NOT NULL,
   state        TEXT NOT NULL,
   created_at   TEXT NOT NULL,
-  completed_at TEXT
+  completed_at TEXT,
+  claimed_at   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_moderation_unbans_due
   ON moderation_scheduled_unbans (state, execute_at);
@@ -191,6 +192,40 @@ CREATE INDEX IF NOT EXISTS idx_moderation_audit_time
   ON moderation_audit (guild_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_moderation_audit_target
   ON moderation_audit (guild_id, target_id, created_at);
+
+-- TOG-1659 High fixes: the pre-lockdown @everyone overwrite, and the atomic
+-- moderation idempotency claim. Mirrors migrations/0011_moderation_durability.sql
+-- for the SQLite bootstrap path.
+CREATE TABLE IF NOT EXISTS moderation_lockdowns (
+  channel_id    TEXT PRIMARY KEY,
+  guild_id      TEXT NOT NULL,
+  prior_allow   TEXT NOT NULL,
+  prior_deny    TEXT NOT NULL,
+  reason        TEXT NOT NULL,
+  locked_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_moderation_lockdowns_guild
+  ON moderation_lockdowns (guild_id, locked_at);
+
+CREATE TABLE IF NOT EXISTS moderation_idempotency (
+  guild_id        TEXT NOT NULL,
+  idempotency_key TEXT NOT NULL,
+  action          TEXT NOT NULL,
+  request_hash    TEXT NOT NULL,
+  state           TEXT NOT NULL,
+  outcome         TEXT,
+  result_json     TEXT,
+  claimed_at      TEXT NOT NULL,
+  completed_at    TEXT,
+  PRIMARY KEY (guild_id, idempotency_key)
+);
+CREATE INDEX IF NOT EXISTS idx_moderation_idem_state
+  ON moderation_idempotency (state, claimed_at);
+
+-- At most one pending unban per (guild, user). Partial so a completed job
+-- does not block the next tempban of the same user.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_moderation_pending_unban
+  ON moderation_scheduled_unbans (guild_id, user_id) WHERE state = 'pending';
 
 -- The website's event_key -> Discord's scheduled event id. This is what makes
 -- event.upsert an upsert.

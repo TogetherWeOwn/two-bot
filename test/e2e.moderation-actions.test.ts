@@ -40,7 +40,8 @@ function fixture(targetOver: Partial<Awaited<ReturnType<ModerationResolver['targ
     async kick(_g, u) { calls.push(`kick:${u}`); }, async timeout(_g, u) { calls.push(`timeout:${u}`); },
     async purge(_c, count) { calls.push(`purge:${count}`); return count; },
     async setSlowmode(_c, seconds) { calls.push(`slowmode:${seconds}`); },
-    async setLockdown(_c, _g, locked) { calls.push(locked ? 'lockdown' : 'unlock'); },
+    async getEveryoneOverwrite() { return { allow: '0', deny: '0' }; },
+    async putEveryoneOverwrite(_c, _g, ow) { calls.push(`overwrite:${ow.allow}/${ow.deny}`); },
   };
   const resolver: ModerationResolver = {
     async actor(_g, userId) { return { userId, roleIds: [], highestRolePosition: 10, permissions: ~0n }; },

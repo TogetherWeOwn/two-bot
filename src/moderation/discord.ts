@@ -2,6 +2,15 @@ import { ActionError } from '../internal/errors.ts';
 
 const API = 'https://discord.com/api/v10';
 
+/** PermissionFlagsBits.SendMessages, as the decimal string Discord expects. */
+const SEND_MESSAGES = '2048';
+const EVERYONE_OVERWRITE_TYPE = 0;
+
+export interface EveryoneOverwrite {
+  allow: string;
+  deny: string;
+}
+
 export interface ModerationDiscordClient {
   ban(guildId: string, userId: string, reason: string): Promise<void>;
   unban(guildId: string, userId: string, reason: string): Promise<void>;
@@ -9,7 +18,10 @@ export interface ModerationDiscordClient {
   timeout(guildId: string, userId: string, until: string | null, reason: string): Promise<void>;
   purge(channelId: string, count: number, reason: string): Promise<number>;
   setSlowmode(channelId: string, seconds: number, reason: string): Promise<void>;
-  setLockdown(channelId: string, guildId: string, locked: boolean, reason: string): Promise<void>;
+  /** Read the channel's current @everyone overwrite. Null when none exists. */
+  getEveryoneOverwrite(channelId: string, guildId: string): Promise<EveryoneOverwrite | null>;
+  /** Write the @everyone overwrite. Both masks are full bitmasks. */
+  putEveryoneOverwrite(channelId: string, guildId: string, overwrite: EveryoneOverwrite, reason: string): Promise<void>;
 }
 
 export interface ModerationDiscordOptions {
@@ -71,13 +83,28 @@ export class ModerationDiscord implements ModerationDiscordClient {
     await this.call('PATCH', `/channels/${channelId}`, { rate_limit_per_user: seconds }, reason, [200]);
   }
 
-  async setLockdown(channelId: string, guildId: string, locked: boolean, reason: string): Promise<void> {
-    const deny = locked ? '2048' : '0';
-    const allow = locked ? '0' : '2048';
+  async getEveryoneOverwrite(channelId: string, guildId: string): Promise<EveryoneOverwrite | null> {
+    const res = await this.call('GET', `/channels/${channelId}`, undefined, '', [200]);
+    const body = await readJson(res) as { permission_overwrites?: unknown } | null;
+    if (!body || !Array.isArray(body.permission_overwrites)) return null;
+    const row = body.permission_overwrites.find((entry): entry is { allow: string | number; deny: string | number } =>
+      typeof entry === 'object' && entry !== null
+      && (entry as { id?: unknown }).id === guildId
+      && (entry as { type?: unknown }).type === EVERYONE_OVERWRITE_TYPE);
+    if (!row) return null;
+    return { allow: String(row.allow), deny: String(row.deny) };
+  }
+
+  async putEveryoneOverwrite(
+    channelId: string,
+    guildId: string,
+    overwrite: EveryoneOverwrite,
+    reason: string,
+  ): Promise<void> {
     await this.call(
       'PUT',
       `/channels/${channelId}/permissions/${guildId}`,
-      { type: 0, allow, deny },
+      { type: EVERYONE_OVERWRITE_TYPE, allow: overwrite.allow, deny: overwrite.deny },
       reason,
       [200, 204],
     );
