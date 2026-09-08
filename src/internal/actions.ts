@@ -15,14 +15,19 @@
 import { ActionError } from './errors.ts';
 import type { ActionDiscord, ScheduledEventInput } from './discordActions.ts';
 import type { InternalActionStore } from './store.ts';
+import type { ModerationResolver } from '../moderation/resolver.ts';
+import type { ModerationService } from '../moderation/service.ts';
+import { runModerationAction } from '../moderation/actions.ts';
 import { WEB_ONE_CLICK_SOURCE, type ExpectedJoins } from '../core/expectedJoins.ts';
 import { ALL_PICKS } from '../onboarding/catalog.ts';
+import { MODERATION_ACTIONS } from '../moderation/types.ts';
 
 export const IMPLEMENTED_ACTIONS = [
   'role.assign',
   'guild.add_member',
   'announcement.post',
   'event.upsert',
+  ...MODERATION_ACTIONS,
 ] as const;
 export type ActionName = (typeof IMPLEMENTED_ACTIONS)[number];
 
@@ -36,6 +41,7 @@ export type ActionName = (typeof IMPLEMENTED_ACTIONS)[number];
 export const NEEDS_IDEMPOTENCY_KEY: ReadonlySet<string> = new Set([
   'announcement.post',
   'event.upsert',
+  ...MODERATION_ACTIONS,
 ]);
 
 /** Discord's own ceilings. Rejecting here beats a bare 400 from Discord. */
@@ -65,6 +71,10 @@ export interface ActionContext {
   enabled: Set<string>;
   /** Durable state. Required by every action in NEEDS_IDEMPOTENCY_KEY. */
   store: InternalActionStore | null;
+  /** Moderation lookups and execution. Present only when moderation actions are enabled. */
+  moderation?: { resolver: ModerationResolver; service: ModerationService } | null;
+  /** The signed caller's idempotency key, supplied by server.ts. */
+  idempotencyKey?: string | null;
   /**
    * Join attribution for guild.add_member (§7). The same instance the gateway
    * guildMemberAdd handler reads, which is why it is passed in rather than
@@ -165,6 +175,26 @@ export async function runAction(
       return announcementPost(body, ctx);
     case 'event.upsert':
       return eventUpsert(body, ctx);
+    case 'moderation.ban':
+    case 'moderation.tempban':
+    case 'moderation.kick':
+    case 'moderation.timeout':
+    case 'moderation.warn':
+    case 'moderation.purge':
+    case 'moderation.slowmode':
+    case 'moderation.lockdown':
+    case 'moderation.unlock':
+      if (!ctx.moderation || !ctx.idempotencyKey) {
+        throw new ActionError('action_not_allowed', 'Moderation actions are not configured', {
+          logReason: 'moderation_not_configured',
+        });
+      }
+      return runModerationAction(action, body, {
+        guildId: ctx.guildId,
+        resolver: ctx.moderation.resolver,
+        service: ctx.moderation.service,
+        idempotencyKey: ctx.idempotencyKey,
+      });
   }
 }
 

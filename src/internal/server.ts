@@ -39,6 +39,8 @@ import {
 import type { ActionDiscord } from './discordActions.ts';
 import type { ExpectedJoins } from '../core/expectedJoins.ts';
 import { requestHash, type InternalActionStore } from './store.ts';
+import type { ModerationResolver } from '../moderation/resolver.ts';
+import type { ModerationService } from '../moderation/service.ts';
 
 /** Anything larger than this is a bug on the caller, not a request. */
 const MAX_BODY_BYTES = 64 * 1024;
@@ -78,6 +80,7 @@ export interface InternalServerOptions {
    * `unknown`, exactly as before.
    */
   expectedJoins?: ExpectedJoins | null;
+  moderation?: { resolver: ModerationResolver; service: ModerationService } | null;
   skewSeconds?: number;
   nonceTtlSeconds?: number;
   maxBodyBytes?: number;
@@ -305,6 +308,8 @@ async function authoriseAndRun(
     expectedJoins: opts.expectedJoins ?? null,
     enabled: opts.enabled,
     store,
+    moderation: opts.moderation ?? null,
+    idempotencyKey: null,
   };
 
   if (!NEEDS_IDEMPOTENCY_KEY.has(action)) {
@@ -367,6 +372,7 @@ async function runIdempotently(
   }
 
   try {
+    ctx.idempotencyKey = idempotencyKey;
     const outcome = await runAction(action, body, ctx);
     await store.complete(keyId, idempotencyKey, { outcome: outcome.outcome, result: outcome.result });
     return { ...outcome, replayed: false };
