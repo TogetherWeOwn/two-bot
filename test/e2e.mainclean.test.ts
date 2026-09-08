@@ -158,16 +158,36 @@ async function stubDiscord(admin = true): Promise<Stub> {
           return send(200, channel);
         }
         if (method === 'PATCH' && path === `/api/v10/guilds/${LIVE_GUILD_ID}`) {
-          Object.assign(state.guild, body);
+          const request = body as JsonObject;
+          if ('description' in request) state.guild.description = request.description;
+          if ('system_channel_id' in request) state.guild.system_channel_id = request.system_channel_id;
           return send(200, state.guild);
         }
         if (method === 'PATCH' && path.endsWith('/welcome-screen')) {
-          state.welcome = { ...state.welcome, ...(body as JsonObject) };
+          const request = body as JsonObject;
+          if (request.enabled === false) {
+            state.welcome = { ...state.welcome, ...request };
+          } else {
+            state.welcome = {
+              ...state.welcome,
+              enabled: true,
+              description: request.description,
+              welcome_channels: Array.isArray(request.welcome_channels)
+                ? request.welcome_channels.map((channel) => ({ ...(channel as JsonObject), emoji_id: null }))
+                : request.welcome_channels,
+            };
+          }
           welcomeMissing = false;
           return send(200, state.welcome);
         }
         if (method === 'PUT' && path.endsWith('/onboarding')) {
-          state.onboarding = { ...state.onboarding, ...(body as JsonObject) };
+          const request = body as JsonObject;
+          const defaults = Array.isArray(request.default_channel_ids) ? request.default_channel_ids : [];
+          state.onboarding = {
+            ...state.onboarding,
+            ...request,
+            default_channel_ids: defaults.length === 4 ? [defaults[2], defaults[0], defaults[1], defaults[3]] : defaults,
+          };
           return send(200, state.onboarding);
         }
         if (method === 'PATCH' && path.endsWith('/member-verification')) {
@@ -177,7 +197,7 @@ async function stubDiscord(admin = true): Promise<Stub> {
           state.screening = {
             ...state.screening,
             description: request.description,
-            form_fields: request.form_fields,
+            form_fields: request.form_fields.map((field) => ({ description: null, automations: null, ...(field as JsonObject) })),
           };
           return send(200, state.screening);
         }
@@ -287,7 +307,7 @@ test('Owen without Administrator aborts before writes and before artifacts', asy
   }
 });
 
-test('apply is complete, additive, preserves same-name legacy state, and a second run writes zero times', async () => {
+test('apply is complete, additive, preserves same-name legacy state, and a Discord-shaped second run writes zero times', async () => {
   const stub = await stubDiscord();
   const before = cloneState(stub.state);
   const dir = mkdtempSync(join(tmpdir(), 'two-main-apply-'));
@@ -307,7 +327,31 @@ test('apply is complete, additive, preserves same-name legacy state, and a secon
     const secondDir = mkdtempSync(join(tmpdir(), 'two-main-second-'));
     const second = await apply(stub, secondDir);
     assert.equal(second.code, 0, second.stderr);
+    assert.match(second.stdout, /Applied 0 Discord write\(s\)\./);
     assert.equal(stub.writes.length, writesAfterFirst, 'idempotent second apply must issue zero writes');
+  } finally {
+    await stub.close();
+  }
+});
+
+test('Discord-managed rules and public-updates channels are preserved when description and system channel already match', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-main-managed-guild-fields-'));
+  try {
+    const first = await apply(stub, dir);
+    assert.equal(first.code, 0, first.stderr);
+    const managedRules = ID(900);
+    const managedUpdates = ID(901);
+    stub.state.guild.rules_channel_id = managedRules;
+    stub.state.guild.public_updates_channel_id = managedUpdates;
+    const writesAfterFirst = stub.writes.length;
+
+    const second = await apply(stub, mkdtempSync(join(tmpdir(), 'two-main-managed-guild-fields-second-')));
+    assert.equal(second.code, 0, second.stderr);
+    assert.match(second.stdout, /Applied 0 Discord write\(s\)\./);
+    assert.equal(stub.state.guild.rules_channel_id, managedRules);
+    assert.equal(stub.state.guild.public_updates_channel_id, managedUpdates);
+    assert.equal(stub.writes.length, writesAfterFirst);
   } finally {
     await stub.close();
   }

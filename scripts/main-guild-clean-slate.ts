@@ -386,7 +386,7 @@ function screeningMatches(actual: JsonObject | null): boolean {
   const raw = actual.form_fields;
   try {
     const fields = typeof raw === 'string' ? JSON.parse(raw) : raw;
-    return stable(fields) === stable(screeningFields);
+    return matchesSubset(fields, screeningFields);
   } catch {
     return false;
   }
@@ -412,6 +412,25 @@ function matchesSubset(actual: unknown, desired: unknown): boolean {
 
 function bodyMatches(actual: JsonObject | null, desired: JsonObject): boolean {
   return Boolean(actual) && matchesSubset(actual, desired);
+}
+
+function sameStringSet(actual: unknown, desired: unknown): boolean {
+  if (!Array.isArray(actual) || !Array.isArray(desired)) return false;
+  if (!actual.every((item) => typeof item === 'string') || !desired.every((item) => typeof item === 'string')) return false;
+  return stable([...actual].sort()) === stable([...desired].sort());
+}
+
+function welcomeMatches(actual: JsonObject | null, desired: JsonObject): boolean {
+  if (!actual) return false;
+  return matchesSubset(actual, {
+    description: desired.description,
+    welcome_channels: desired.welcome_channels,
+  });
+}
+
+function onboardingMatches(actual: JsonObject | null, desired: JsonObject): boolean {
+  if (!actual || !matchesSubset(actual, { prompts: desired.prompts, enabled: desired.enabled, mode: desired.mode })) return false;
+  return sameStringSet(actual.default_channel_ids, desired.default_channel_ids);
 }
 
 const me = await api<{ id: string }>('GET', '/users/@me');
@@ -572,8 +591,6 @@ for (const category of CATEGORIES) {
 const guildDesired = {
   description: SERVER_DESCRIPTION,
   system_channel_id: targetChannelIds.get('start-here'),
-  rules_channel_id: targetChannelIds.get('start-here'),
-  public_updates_channel_id: targetChannelIds.get('announcements'),
 };
 if (!bodyMatches(pre.guild, guildDesired)) {
   await write<JsonObject>(
@@ -584,8 +601,6 @@ if (!bodyMatches(pre.guild, guildDesired)) {
       inverse: {
         description: pre.guild.description ?? null,
         system_channel_id: pre.guild.system_channel_id ?? null,
-        rules_channel_id: pre.guild.rules_channel_id ?? null,
-        public_updates_channel_id: pre.guild.public_updates_channel_id ?? null,
       },
     },
     'PATCH',
@@ -595,7 +610,7 @@ if (!bodyMatches(pre.guild, guildDesired)) {
 }
 
 const desiredWelcome = welcomeBody(targetChannelIds);
-if (!bodyMatches(pre.welcomeScreen.body, desiredWelcome)) {
+if (!welcomeMatches(pre.welcomeScreen.body, desiredWelcome)) {
   const welcomeInverse = pre.welcomeScreen.status === 404 ? { enabled: false } : pre.welcomeScreen.body!;
   await write<JsonObject>(
     { label: 'configure three-card Welcome Screen', kind: 'patch-welcome', target: {}, inverse: welcomeInverse },
@@ -606,7 +621,7 @@ if (!bodyMatches(pre.welcomeScreen.body, desiredWelcome)) {
 }
 
 const desiredOnboarding = onboardingBody(targetChannelIds);
-if (!bodyMatches(pre.onboarding.body, desiredOnboarding)) {
+if (!onboardingMatches(pre.onboarding.body, desiredOnboarding)) {
   if (pre.onboarding.status !== 200 || !pre.onboarding.body) die(1, `Onboarding pre-state is not restorable (HTTP ${pre.onboarding.status}).`);
   await write<JsonObject>(
     { label: 'keep native Onboarding off', kind: 'patch-onboarding', target: {}, inverse: pre.onboarding.body },
