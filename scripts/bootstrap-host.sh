@@ -199,6 +199,7 @@ sudo -u "$APP_USER" sh -c "cd '$APP_DIR' && npm ci --omit=dev"
 say "Secrets"
 CRED_DIR="$ENV_DIR/credentials"
 TOKEN_FILE="$CRED_DIR/discord_token"
+STAGING_TOKEN_FILE="$CRED_DIR/discord_staging_token"
 install -d -o root -g root -m 700 "$CRED_DIR"
 new_secrets=0
 if [ -s "$TOKEN_FILE" ]; then
@@ -206,6 +207,11 @@ if [ -s "$TOKEN_FILE" ]; then
 else
   install -o root -g root -m 600 /dev/null "$TOKEN_FILE"
   new_secrets=1
+fi
+if [ -s "$STAGING_TOKEN_FILE" ]; then
+  echo "$STAGING_TOKEN_FILE present - left alone"
+else
+  install -o root -g root -m 600 /dev/null "$STAGING_TOKEN_FILE"
 fi
 if [ -e "$ENV_DIR/two-bot.env" ]; then
   echo "$ENV_DIR/two-bot.env present - left alone"
@@ -265,8 +271,9 @@ if [ "$new_secrets" -eq 1 ]; then
 
   Secrets files are empty. Fill them in before this can start, then re-run me:
 
-    sudo editor $TOKEN_FILE              # the bot token, one line, nothing else
-    sudo editor $ENV_DIR/two-bot.env     # DISCORD_GUILD_ID, TWO_DATABASE_URL - no token
+    sudo editor $TOKEN_FILE              # the live bot token, one line, nothing else
+    sudo editor $STAGING_TOKEN_FILE      # Owen QA Test token; required only for guild-config snapshots
+    sudo editor $ENV_DIR/two-bot.env     # DISCORD_GUILD_ID, DISCORD_STAGING_GUILD_ID, TWO_DATABASE_URL - no token
     sudo editor $ENV_DIR/backup.env      # TWO_DATABASE_URL, TWO_RESTORE_URL, TWO_BACKUP_UPLOAD_CMD
 
   Keys and what each one does: .env.example and docs/SECRETS.md.
@@ -352,7 +359,26 @@ set -e
 
 # --- Start -----------------------------------------------------------------
 say "Start"
-systemctl enable --now two-bot two-bot-backup.timer two-bot-guild-config-backup.timer two-bot-rules-gate-timeout.timer two-bot-restore-drill.timer
+systemctl enable --now two-bot two-bot-backup.timer two-bot-rules-gate-timeout.timer two-bot-restore-drill.timer
+if [ -s "$STAGING_TOKEN_FILE" ] && grep -Eq '^[[:space:]]*(export[[:space:]]+)?DISCORD_STAGING_GUILD_ID[[:space:]]*=[[:space:]]*1545644954272137297[[:space:]]*$' "$ENV_DIR/two-bot.env"; then
+  systemctl enable --now two-bot-guild-config-backup.timer
+  echo "two-bot-guild-config-backup.timer enabled for TWO Staging"
+else
+  systemctl disable --now two-bot-guild-config-backup.timer >/dev/null 2>&1 || true
+  cat >&2 <<EOF
+
+  WARNING: TWO Staging guild-configuration snapshots are disabled.
+
+  The unit is installed, but it will not run until both are true:
+
+    $STAGING_TOKEN_FILE contains the Owen QA Test token
+    $ENV_DIR/two-bot.env sets DISCORD_STAGING_GUILD_ID=1545644954272137297
+
+  Fill those exact staging-only values and re-run this bootstrap. The live bot
+  token and live guild id are deliberately not accepted for this timer.
+
+EOF
+fi
 systemctl restart two-bot          # re-runs land the new code
 sleep 5
 

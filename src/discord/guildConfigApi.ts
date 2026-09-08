@@ -10,27 +10,36 @@ type ApiResult<T> = { status: number; body: T | null };
 
 export type GuildConfigApiOptions = {
   apiBase?: string;
+  cdnBase?: string;
   token: string;
   applicationId: string;
   guildId: string;
 };
 
-export function checkedApiBase(raw: string | undefined): string {
-  if (!raw) return 'https://discord.com/api/v10';
+function checkedTestBase(raw: string, name: string): string {
   let parsed: URL;
   try {
     parsed = new URL(raw);
   } catch {
-    throw new Error(`GUILD_CONFIG_API_BASE is not a URL: ${raw}`);
+    throw new Error(`${name} is not a URL: ${raw}`);
   }
   if (!['127.0.0.1', 'localhost', '::1'].includes(parsed.hostname)) {
-    throw new Error(`GUILD_CONFIG_API_BASE is a test seam and only accepts loopback. Got host ${parsed.hostname}.`);
+    throw new Error(`${name} is a test seam and only accepts loopback. Got host ${parsed.hostname}.`);
   }
   return raw.replace(/\/$/, '');
 }
 
+export function checkedApiBase(raw: string | undefined): string {
+  return raw ? checkedTestBase(raw, 'GUILD_CONFIG_API_BASE') : 'https://discord.com/api/v10';
+}
+
+export function checkedCdnBase(raw: string | undefined): string {
+  return raw ? checkedTestBase(raw, 'GUILD_CONFIG_CDN_BASE') : 'https://cdn.discordapp.com';
+}
+
 export class GuildConfigDiscordApi {
   readonly apiBase: string;
+  readonly cdnBase: string;
   readonly token: string;
   readonly applicationId: string;
   readonly guildId: string;
@@ -38,6 +47,7 @@ export class GuildConfigDiscordApi {
 
   constructor(options: GuildConfigApiOptions) {
     this.apiBase = checkedApiBase(options.apiBase);
+    this.cdnBase = checkedCdnBase(options.cdnBase);
     this.token = options.token;
     this.applicationId = options.applicationId;
     this.guildId = options.guildId;
@@ -94,6 +104,16 @@ export class GuildConfigDiscordApi {
     }
   }
 
+  async captureEmojiImage(emoji: GuildConfigEmoji): Promise<string | undefined> {
+    if (emoji.managed || !emoji.name) return undefined;
+    const extension = emoji.animated ? 'gif' : 'png';
+    const response = await fetch(`${this.cdnBase}/emojis/${emoji.id}.${extension}`);
+    if (!response.ok) throw new Error(`Could not download emoji ${emoji.name}: HTTP ${response.status}.`);
+    const contentType = response.headers.get('content-type')?.split(';', 1)[0] ?? `image/${extension}`;
+    if (!contentType.startsWith('image/')) throw new Error(`Emoji ${emoji.name} returned non-image content type ${contentType}.`);
+    return `data:${contentType};base64,${Buffer.from(await response.arrayBuffer()).toString('base64')}`;
+  }
+
   async capture(): Promise<GuildConfigSnapshot> {
     const [guild, roles, channels, emojis] = await Promise.all([
       this.request<JsonObject>('GET', `/guilds/${this.guildId}`),
@@ -105,6 +125,7 @@ export class GuildConfigDiscordApi {
     if (roles.status !== 200 || !roles.body) throw new Error(`Could not read guild roles: HTTP ${roles.status}.`);
     if (channels.status !== 200 || !channels.body) throw new Error(`Could not read guild channels: HTTP ${channels.status}.`);
     if (emojis.status !== 200 || !emojis.body) throw new Error(`Could not read guild emojis: HTTP ${emojis.status}.`);
+    const capturedEmojis = await Promise.all(emojis.body.map(async (emoji) => ({ ...emoji, image: await this.captureEmojiImage(emoji) })));
     return {
       version: 1,
       generatedAt: new Date().toISOString(),
@@ -113,7 +134,7 @@ export class GuildConfigDiscordApi {
       guild: guild.body,
       roles: roles.body,
       channels: channels.body,
-      emojis: emojis.body,
+      emojis: capturedEmojis,
     };
   }
 

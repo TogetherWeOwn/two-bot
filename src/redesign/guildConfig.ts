@@ -52,6 +52,7 @@ export type GuildConfigEmoji = {
   managed: boolean;
   animated: boolean;
   available: boolean;
+  image?: string;
 };
 
 export type GuildConfigSnapshot = {
@@ -156,6 +157,7 @@ export function canonicalSnapshot(snapshot: GuildConfigSnapshot): JsonObject {
         managed: emoji.managed,
         animated: emoji.animated,
         available: emoji.available,
+        image: emoji.image ?? null,
       }))
       .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '') || a.id.localeCompare(b.id)),
   };

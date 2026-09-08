@@ -11,16 +11,22 @@ import {
 } from './guildConfig.ts';
 
 type JsonObject = Record<string, unknown>;
+type RestoreResource = 'role' | 'channel';
+type RestoreReference = { restoreReference: RestoreResource; sourceId: string };
+type RestoreValue = unknown | RestoreReference | RestoreValue[] | { [key: string]: RestoreValue };
+type RestorePath = string | { channelSourceId: string };
 
 export type RestoreOperation = {
   label: string;
   method: 'POST' | 'PATCH';
-  path: string;
-  body: JsonObject | Array<JsonObject>;
+  path: RestorePath;
+  body: RestoreValue;
+  captureId?: { resource: RestoreResource; sourceId: string };
 };
 
 export type RestorePlan = {
   counts: { roles: number; channels: number; overwrites: number; settings: number; emojis: number; operations: number };
+  knownIds: { roles: Record<string, string>; channels: Record<string, string> };
   operations: RestoreOperation[];
 };
 
@@ -40,25 +46,75 @@ function roleBody(role: GuildConfigRole): JsonObject {
   return bodyFromFields(role as unknown as JsonObject, ROLE_FIELDS);
 }
 
-function channelBody(channel: GuildConfigChannel, parentId: string | null, overwrites: GuildConfigOverwrite[]): JsonObject {
+function reference(resource: RestoreResource, sourceId: string): RestoreReference {
+  return { restoreReference: resource, sourceId };
+}
+
+function channelCoreBody(channel: GuildConfigChannel, parentId: string | RestoreReference | null): RestoreValue {
   return {
     ...bodyFromFields(channel as unknown as JsonObject, CHANNEL_FIELDS),
     type: channel.type,
     parent_id: parentId,
-    permission_overwrites: overwrites,
   };
 }
 
+function overwriteBody(overwrites: GuildConfigOverwrite[], guildId: string): RestoreValue[] {
+  return overwrites.map((overwrite) => ({
+    ...overwrite,
+    id: overwrite.type === 0 ? reference('role', overwrite.id === guildId ? guildId : overwrite.id) : overwrite.id,
+  }));
+}
+
 function emojiImage(emoji: GuildConfigEmoji): string {
-  const extension = emoji.animated ? 'gif' : 'png';
-  return `https://cdn.discordapp.com/emojis/${emoji.id}.${extension}`;
+  if (!emoji.image || !/^data:image\/(?:png|gif|jpe?g);base64,[A-Za-z0-9+/=]+$/.test(emoji.image)) {
+    throw new Error(`Snapshot emoji ${emoji.name ?? emoji.id} has no restorable image data URI.`);
+  }
+  return emoji.image;
+}
+
+function resolvedReference(referenceValue: RestoreReference, ids: { roles: Map<string, string>; channels: Map<string, string> }): string {
+  const values = referenceValue.restoreReference === 'role' ? ids.roles : ids.channels;
+  const resolved = values.get(referenceValue.sourceId);
+  if (!resolved) throw new Error(`Restore dependency ${referenceValue.restoreReference} ${referenceValue.sourceId} has not been created.`);
+  return resolved;
+}
+
+function resolveValue(value: RestoreValue, ids: { roles: Map<string, string>; channels: Map<string, string> }): unknown {
+  if (Array.isArray(value)) return value.map((item) => resolveValue(item, ids));
+  if (value && typeof value === 'object') {
+    if ('restoreReference' in value && 'sourceId' in value) return resolvedReference(value as RestoreReference, ids);
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, resolveValue(item, ids)]));
+  }
+  return value;
+}
+
+function resolvedPath(path: RestorePath, channelIds: Map<string, string>): string {
+  if (typeof path === 'string') return path;
+  const channelId = channelIds.get(path.channelSourceId);
+  if (!channelId) throw new Error(`Restore dependency channel ${path.channelSourceId} has not been created.`);
+  return `/channels/${channelId}`;
+}
+
+function existingCandidate(channel: GuildConfigChannel, parent: GuildConfigChannel | null, current: GuildConfigSnapshot, actualParentId: string | null): GuildConfigChannel | undefined {
+  const candidates = current.channels.filter((item) => item.type === channel.type && item.name === channel.name);
+  const exact = candidates.filter((item) => item.parent_id === actualParentId);
+  if (exact.length > 1 || (exact.length === 0 && candidates.length > 1)) {
+    throw new Error(`Target has multiple ${channel.name} channels in ${parent?.name ?? 'the guild root'}; restore is ambiguous.`);
+  }
+  if (exact[0]) return exact[0];
+  return parent && actualParentId === null ? undefined : candidates[0];
 }
 
 export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigSnapshot): RestorePlan {
   if (snapshot.guildId !== current.guildId) throw new Error(`Snapshot guild ${snapshot.guildId} does not match target guild ${current.guildId}.`);
-  const operations: RestoreOperation[] = [];
-  const roleIds = new Map<string, string>();
+  const roleIds = new Map<string, string>([[snapshot.guildId, current.guildId]]);
   const channelIds = new Map<string, string>();
+  const roleOperations: RestoreOperation[] = [];
+  const categoryOperations: RestoreOperation[] = [];
+  const channelOperations: RestoreOperation[] = [];
+  const overwriteOperations: RestoreOperation[] = [];
+  const settingsOperations: RestoreOperation[] = [];
+  const emojiOperations: RestoreOperation[] = [];
   let roleWrites = 0;
   let channelWrites = 0;
   let overwriteWrites = 0;
@@ -66,16 +122,22 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
   let emojiWrites = 0;
 
   const currentRolesByName = new Map(current.roles.filter((role) => !role.managed).map((role) => [role.name, role]));
-  for (const role of snapshot.roles.filter((item) => !item.managed && item.id !== snapshot.guildId)) {
+  for (const role of snapshot.roles.filter((item) => !item.managed && item.id !== snapshot.guildId).sort((a, b) => a.position - b.position)) {
     const actual = currentRolesByName.get(role.name);
     if (!actual) {
-      operations.push({ label: `create role ${role.name}`, method: 'POST', path: `/guilds/${current.guildId}/roles`, body: roleBody(role) });
+      roleOperations.push({
+        label: `create role ${role.name}`,
+        method: 'POST',
+        path: `/guilds/${current.guildId}/roles`,
+        body: roleBody(role),
+        captureId: { resource: 'role', sourceId: role.id },
+      });
       roleWrites++;
       continue;
     }
     roleIds.set(role.id, actual.id);
     if (!same(roleBody(role), roleBody(actual))) {
-      operations.push({ label: `patch role ${role.name}`, method: 'PATCH', path: `/guilds/${current.guildId}/roles/${actual.id}`, body: roleBody(role) });
+      roleOperations.push({ label: `patch role ${role.name}`, method: 'PATCH', path: `/guilds/${current.guildId}/roles/${actual.id}`, body: roleBody(role) });
       roleWrites++;
     }
   }
@@ -83,65 +145,107 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
   const currentCategories = new Map(current.channels.filter((channel) => channel.type === 4).map((channel) => [channel.name, channel]));
   for (const category of snapshot.channels.filter((channel) => channel.type === 4).sort((a, b) => a.position - b.position)) {
     const actual = currentCategories.get(category.name);
-    if (actual) channelIds.set(category.id, actual.id);
-    else {
-      operations.push({ label: `create category ${category.name}`, method: 'POST', path: `/guilds/${current.guildId}/channels`, body: { name: category.name, type: 4 } });
+    if (actual) {
+      channelIds.set(category.id, actual.id);
+    } else {
+      categoryOperations.push({
+        label: `create category ${category.name}`,
+        method: 'POST',
+        path: `/guilds/${current.guildId}/channels`,
+        body: { name: category.name, type: 4 },
+        captureId: { resource: 'channel', sourceId: category.id },
+      });
       channelWrites++;
     }
   }
 
   for (const channel of snapshot.channels.filter((item) => item.type !== 4).sort((a, b) => a.position - b.position)) {
-    const parent = channel.parent_id ? snapshot.channels.find((item) => item.id === channel.parent_id) : null;
-    const actualParentId: string | null = parent ? currentCategories.get(parent.name)?.id ?? null : null;
-    if (parent && !actualParentId) continue;
-    const candidates = current.channels.filter((item) => item.type === channel.type && item.name === channel.name && item.parent_id === actualParentId);
-    if (candidates.length > 1) throw new Error(`Target has multiple ${channel.name} channels in ${parent?.name ?? 'the guild root'}; restore is ambiguous.`);
-    const actual = candidates[0];
-    const overwrites = channel.permission_overwrites.map((overwrite) => ({
-      ...overwrite,
-      id: overwrite.id === snapshot.guildId ? current.guildId : roleIds.get(overwrite.id) ?? overwrite.id,
-    }));
+    const parent = channel.parent_id ? snapshot.channels.find((item) => item.id === channel.parent_id) ?? null : null;
+    const actualParentId = parent ? channelIds.get(parent.id) ?? null : null;
+    const actual = existingCandidate(channel, parent, current, actualParentId);
+    const targetParent = parent ? reference('channel', parent.id) : null;
+    const expectedKnown = channelCoreBody(channel, actualParentId);
+    const targetBody = channelCoreBody(channel, targetParent);
+
     if (!actual) {
-      operations.push({ label: `create channel ${channel.name}`, method: 'POST', path: `/guilds/${current.guildId}/channels`, body: channelBody(channel, actualParentId, overwrites) });
+      channelOperations.push({
+        label: `create channel ${channel.name}`,
+        method: 'POST',
+        path: `/guilds/${current.guildId}/channels`,
+        body: targetBody,
+        captureId: { resource: 'channel', sourceId: channel.id },
+      });
       channelWrites++;
-      overwriteWrites += overwrites.length;
-      continue;
+    } else {
+      channelIds.set(channel.id, actual.id);
+      const actualBody = channelCoreBody(actual, actual.parent_id);
+      if ((parent && !actualParentId) || !same(expectedKnown, actualBody)) {
+        channelOperations.push({ label: `patch channel ${channel.name}`, method: 'PATCH', path: { channelSourceId: channel.id }, body: targetBody });
+        channelWrites++;
+      }
     }
-    channelIds.set(channel.id, actual.id);
-    const expected = channelBody(channel, actualParentId, overwrites);
-    const actualBody = channelBody(actual, actual.parent_id, actual.permission_overwrites ?? []);
-    if (!same(expected, actualBody)) {
-      operations.push({ label: `patch channel ${channel.name}`, method: 'PATCH', path: `/channels/${actual.id}`, body: expected });
-      channelWrites++;
-      if (!same(overwrites, actual.permission_overwrites ?? [])) overwriteWrites++;
+
+    const expectedOverwrites = channel.permission_overwrites ?? [];
+    const knownExpectedOverwrites = expectedOverwrites.map((overwrite) => ({
+      ...overwrite,
+      id: overwrite.type === 0 ? (overwrite.id === snapshot.guildId ? current.guildId : roleIds.get(overwrite.id) ?? overwrite.id) : overwrite.id,
+    }));
+    const hasCreatedRoleReference = expectedOverwrites.some((overwrite) => overwrite.type === 0 && overwrite.id !== snapshot.guildId && !roleIds.has(overwrite.id));
+    if ((!actual && expectedOverwrites.length > 0) || hasCreatedRoleReference || !same(knownExpectedOverwrites, actual?.permission_overwrites ?? [])) {
+      overwriteOperations.push({
+        label: `restore overwrites ${channel.name}`,
+        method: 'PATCH',
+        path: { channelSourceId: channel.id },
+        body: { permission_overwrites: overwriteBody(expectedOverwrites, snapshot.guildId) },
+      });
+      overwriteWrites += expectedOverwrites.length || 1;
     }
   }
 
-  const guildBody = bodyFromFields(snapshot.guild, GUILD_FIELDS);
+  const guildBody = bodyFromFields(snapshot.guild, GUILD_FIELDS) as Record<string, RestoreValue>;
+  let unresolvedGuildChannel = false;
+  const knownGuildBody = { ...guildBody } as JsonObject;
   for (const field of ['system_channel_id', 'rules_channel_id', 'public_updates_channel_id', 'afk_channel_id'] as const) {
     const snapshotChannelId = snapshot.guild[field];
-    if (typeof snapshotChannelId === 'string') guildBody[field] = channelIds.get(snapshotChannelId) ?? null;
-    else if (snapshotChannelId === null) guildBody[field] = null;
+    if (typeof snapshotChannelId === 'string') {
+      guildBody[field] = reference('channel', snapshotChannelId);
+      const knownId = channelIds.get(snapshotChannelId);
+      knownGuildBody[field] = knownId ?? null;
+      unresolvedGuildChannel ||= !knownId;
+    } else if (snapshotChannelId === null) {
+      guildBody[field] = null;
+      knownGuildBody[field] = null;
+    }
   }
-  const currentGuildBody = bodyFromFields(current.guild, Object.keys(guildBody));
-  if (!same(guildBody, currentGuildBody)) {
-    operations.push({ label: 'restore guild settings', method: 'PATCH', path: `/guilds/${current.guildId}`, body: guildBody });
+  const currentGuildBody = bodyFromFields(current.guild, Object.keys(knownGuildBody));
+  if (unresolvedGuildChannel || !same(knownGuildBody, currentGuildBody)) {
+    settingsOperations.push({ label: 'restore guild settings', method: 'PATCH', path: `/guilds/${current.guildId}`, body: guildBody });
     settingsWrites++;
   }
 
   const currentEmojis = new Map(current.emojis.filter((emoji) => emoji.name).map((emoji) => [emoji.name!, emoji]));
   for (const emoji of snapshot.emojis.filter((item) => !item.managed && item.name)) {
-    const roles = emoji.roles.map((roleId) => roleIds.get(roleId) ?? roleId);
+    const roles = emoji.roles.map((roleId) => reference('role', roleId));
+    const knownRoles = emoji.roles.map((roleId) => roleIds.get(roleId) ?? roleId);
+    const hasCreatedRoleReference = emoji.roles.some((roleId) => !roleIds.has(roleId));
     const actual = currentEmojis.get(emoji.name!);
     if (!actual) {
-      operations.push({ label: `create emoji ${emoji.name}`, method: 'POST', path: `/guilds/${current.guildId}/emojis`, body: { name: emoji.name, image: emojiImage(emoji), roles } });
+      emojiOperations.push({ label: `create emoji ${emoji.name}`, method: 'POST', path: `/guilds/${current.guildId}/emojis`, body: { name: emoji.name, image: emojiImage(emoji), roles } });
       emojiWrites++;
-    } else if (!same({ name: emoji.name, roles }, { name: actual.name, roles: actual.roles })) {
-      operations.push({ label: `patch emoji ${emoji.name}`, method: 'PATCH', path: `/guilds/${current.guildId}/emojis/${actual.id}`, body: { name: emoji.name, roles } });
+    } else if (hasCreatedRoleReference || !same({ name: emoji.name, roles: knownRoles }, { name: actual.name, roles: actual.roles })) {
+      emojiOperations.push({ label: `patch emoji ${emoji.name}`, method: 'PATCH', path: `/guilds/${current.guildId}/emojis/${actual.id}`, body: { name: emoji.name, roles } });
       emojiWrites++;
     }
   }
 
+  const operations = [
+    ...roleOperations,
+    ...categoryOperations,
+    ...channelOperations,
+    ...overwriteOperations,
+    ...settingsOperations,
+    ...emojiOperations,
+  ];
   return {
     counts: {
       roles: roleWrites,
@@ -151,12 +255,23 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
       emojis: emojiWrites,
       operations: operations.length,
     },
+    knownIds: { roles: Object.fromEntries(roleIds), channels: Object.fromEntries(channelIds) },
     operations,
   };
 }
 
 export async function applyRestorePlan(api: GuildConfigDiscordApi, plan: RestorePlan): Promise<void> {
-  for (const operation of plan.operations) await api.write(operation.method, operation.path, operation.body);
+  const ids = {
+    roles: new Map(Object.entries(plan.knownIds.roles)),
+    channels: new Map(Object.entries(plan.knownIds.channels)),
+  };
+  for (const operation of plan.operations) {
+    const result = await api.write<{ id?: string }>(operation.method, resolvedPath(operation.path, ids.channels), resolveValue(operation.body, ids));
+    if (!operation.captureId) continue;
+    if (!result?.id) throw new Error(`${operation.label} returned no Discord id.`);
+    const values = operation.captureId.resource === 'role' ? ids.roles : ids.channels;
+    values.set(operation.captureId.sourceId, result.id);
+  }
 }
 
 export function snapshotsEqual(left: GuildConfigSnapshot, right: GuildConfigSnapshot): boolean {

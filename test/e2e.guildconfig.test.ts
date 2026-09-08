@@ -20,7 +20,7 @@ type JsonObject = Record<string, unknown>;
 type Role = { id: string; name: string; managed: boolean; color: number; hoist: boolean; permissions: string; mentionable: boolean; position: number };
 type Overwrite = { id: string; type: number; allow: string; deny: string };
 type Channel = { id: string; name: string; type: number; parent_id: string | null; position: number; topic?: string | null; permission_overwrites: Overwrite[] };
-type Emoji = { id: string; name: string; roles: string[]; require_colons: boolean; managed: boolean; animated: boolean; available: boolean };
+type Emoji = { id: string; name: string; roles: string[]; require_colons: boolean; managed: boolean; animated: boolean; available: boolean; image?: string };
 type State = { guild: JsonObject; roles: Role[]; channels: Channel[]; emojis: Emoji[] };
 
 function acceptedState(): State {
@@ -72,6 +72,11 @@ async function stubDiscord() {
       if (path === `/api/v10/guilds/${GUILD}/members/${STAGING_BOT_APPLICATION_ID}`) return send(200, { roles: [STAGING_BOT_APPLICATION_ID] });
       if (path === `/api/v10/guilds/${GUILD}/channels`) return send(200, state.channels);
       if (path === `/api/v10/guilds/${GUILD}/emojis`) return send(200, state.emojis);
+      if (path === `/emojis/${id(90)}.png`) {
+        const image = Buffer.from('two');
+        res.writeHead(200, { 'content-type': 'image/png', 'content-length': image.length });
+        return res.end(image);
+      }
       return send(404, { path });
     }
     const chunks: Buffer[] = [];
@@ -124,6 +129,7 @@ test('snapshot captures roles/channels/overwrites/settings/emoji and fails witho
   try {
     const failed = await run(SNAPSHOT, [], {
       GUILD_CONFIG_API_BASE: stub.base,
+      GUILD_CONFIG_CDN_BASE: stub.base.replace(/\/api\/v10$/, ''),
       TWO_GUILD_CONFIG_BACKUP_DIR: dir,
       TWO_GUILD_CONFIG_UPLOAD_CMD: '',
       TWO_BACKUP_UPLOAD_CMD: '',
@@ -136,6 +142,7 @@ test('snapshot captures roles/channels/overwrites/settings/emoji and fails witho
     assert.equal(snapshot.roles.length, stub.state.roles.length);
     assert.equal(snapshot.channels.length, stub.state.channels.length);
     assert.equal(snapshot.emojis.length, 1);
+    assert.equal(snapshot.emojis[0].image, 'data:image/png;base64,dHdv');
     assert.ok(snapshot.channels.some((channel: Channel) => channel.permission_overwrites.length > 0));
     assert.equal(drift.counts.drift, 0);
   } finally {
@@ -154,21 +161,22 @@ test('restore drill is dry-run by default, guarded, repairs drift, emits hashes/
     applicationId: STAGING_BOT_APPLICATION_ID,
     guildId: GUILD,
     ...stub.state,
+    emojis: stub.state.emojis.map((emoji) => ({ ...emoji, image: 'data:image/png;base64,dHdv' })),
   })}\n`);
   stub.state.guild.description = 'drift';
   stub.state.roles.find((role) => role.name === 'Owner')!.color = 0;
   stub.state.channels.find((channel) => channel.name === 'general')!.permission_overwrites = [];
   try {
-    const dry = await run(RESTORE, ['--snapshot', source], { GUILD_CONFIG_API_BASE: stub.base });
+    const dry = await run(RESTORE, ['--snapshot', source], { GUILD_CONFIG_API_BASE: stub.base, GUILD_CONFIG_CDN_BASE: stub.base.replace(/\/api\/v10$/, '') });
     assert.equal(dry.code, 0, dry.stderr);
     assert.match(dry.stdout, /WOULD patch role Owner/);
     assert.equal(stub.writes.length, 0);
 
-    const refused = await run(RESTORE, ['--snapshot', source, '--apply'], { GUILD_CONFIG_API_BASE: stub.base });
+    const refused = await run(RESTORE, ['--snapshot', source, '--apply'], { GUILD_CONFIG_API_BASE: stub.base, GUILD_CONFIG_CDN_BASE: stub.base.replace(/\/api\/v10$/, '') });
     assert.equal(refused.code, 2);
     assert.equal(stub.writes.length, 0);
 
-    const applied = await run(RESTORE, ['--snapshot', source, '--confirm-staging-guild', '--apply', '--evidence', evidence], { GUILD_CONFIG_API_BASE: stub.base });
+    const applied = await run(RESTORE, ['--snapshot', source, '--confirm-staging-guild', '--apply', '--evidence', evidence], { GUILD_CONFIG_API_BASE: stub.base, GUILD_CONFIG_CDN_BASE: stub.base.replace(/\/api\/v10$/, '') });
     assert.equal(applied.code, 0, applied.stderr);
     assert.match(applied.stdout, /before=[0-9a-f]{64} after=[0-9a-f]{64} source=[0-9a-f]{64}/);
     assert.match(applied.stdout, /remaining=0/);
@@ -181,7 +189,7 @@ test('restore drill is dry-run by default, guarded, repairs drift, emits hashes/
     assert.deepEqual(stub.state.channels.find((channel) => channel.name === 'general')!.permission_overwrites, [desiredEveryoneOverwrite(GUILD, 'general')]);
 
     const writes = stub.writes.length;
-    const second = await run(RESTORE, ['--snapshot', source, '--confirm-staging-guild', '--apply'], { GUILD_CONFIG_API_BASE: stub.base });
+    const second = await run(RESTORE, ['--snapshot', source, '--confirm-staging-guild', '--apply'], { GUILD_CONFIG_API_BASE: stub.base, GUILD_CONFIG_CDN_BASE: stub.base.replace(/\/api\/v10$/, '') });
     assert.equal(second.code, 0, second.stderr);
     assert.match(second.stdout, /applying 0 operation\(s\)/);
     assert.match(second.stdout, /complete with 0 Discord write\(s\)/);
