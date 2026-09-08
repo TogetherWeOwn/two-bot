@@ -1,31 +1,33 @@
 /**
- * Build the owner-accepted clean-slate structure (TOG-1311 rev 84f6ea56, accepted
- * on TOG-1317) in the LIVE TWO guild — ADDITIVELY.
+ * Apply the owner-accepted clean-slate structure to the live TWO guild.
  *
- * Differences from scripts/staging-clean-slate.ts, all deliberate:
+ * This script is additive by construction: it creates the accepted roles,
+ * categories, channels and starter message only when absent; it never removes
+ * an existing guild object or member. Existing same-name channels are adopted
+ * only when they are already inside the intended category. Existing overwrite
+ * entries are merged rather than replaced.
  *
- *  - ADDITIVE ONLY. No channel, role, or bot is deleted or renamed. TOG-1313's
- *    removal gates are closed, and nothing in the accepted proposal removes
- *    anything. Existing channels keep their position in the sidebar; the new
- *    categories are appended at the bottom. A follow-up reordering/removal is a
- *    separate, separately-approved step.
- *  - The token must be the LIVE bot (application 1539711683898118154) and the
- *    guild id the LIVE guild (326474832151838730) — the opposite guard from the
- *    staging script, for the same reason: a run must be unable to hit the wrong
- *    target, in either direction.
- *  - `--confirm-main-guild` is required. Without it the script plans and exits
- *    without writing, so a rehearsal is always safe.
- *  - Every write records the inverse operation to an undo manifest, so rollback
- *    is a file + a loop, not archaeology.
+ * Live execution requires both --apply and --confirm-main-guild. Before the
+ * first Discord write it fsyncs a complete pre-export and an empty rollback
+ * manifest. Every later write is journalled before the request and settled
+ * after the response, so an interrupted operation remains visible to rollback.
  *
- * Run:
- *   DISCORD_BOT_TOKEN=… node --experimental-strip-types \
- *     scripts/main-guild-clean-slate.ts                 # plan only (no writes)
- *   … --confirm-main-guild --apply                      # build, with undo manifest
- *   … --confirm-main-guild --apply --export            # + final-state export
+ *   DISCORD_BOT_TOKEN=… node scripts/main-guild-clean-slate.ts
+ *   DISCORD_BOT_TOKEN=… node scripts/main-guild-clean-slate.ts \
+ *     --confirm-main-guild --apply
+ *
+ * Test-only API overrides must be loopback URLs.
  */
-
-import { LIVE_BOT_APPLICATION_ID, LIVE_GUILD_ID } from '../src/staging/spec.ts';
+import {
+  closeSync,
+  fsyncSync,
+  mkdirSync,
+  openSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { LIVE_BOT_APPLICATION_ID, LIVE_GUILD_ID, LIVE_GUILD_NAME } from '../src/staging/spec.ts';
 import {
   CATEGORIES,
   MODERATOR_ROLE,
@@ -42,31 +44,133 @@ import {
   WELCOME_DESCRIPTION,
 } from '../src/redesign/clean-slate.ts';
 
-const API = 'https://discord.com/api/v10';
 const APPLY = process.argv.includes('--apply');
-const EXPORT = process.argv.includes('--export');
 const CONFIRMED = process.argv.includes('--confirm-main-guild');
 const token = process.env.DISCORD_BOT_TOKEN;
 const guildId = process.env.DISCORD_GUILD_ID ?? LIVE_GUILD_ID;
-
+const ADMINISTRATOR = 1n << 3n;
 const VIEW_CHANNEL = 1n << 10n;
 const SEND_MESSAGES = 1n << 11n;
 const CONNECT = 1n << 20n;
 const SPEAK = 1n << 21n;
 
-type DiscordObject = Record<string, unknown>;
+type JsonObject = Record<string, unknown>;
 type Overwrite = { id: string; type: number; allow: string; deny: string };
-type UndoEntry = { action: string; method: string; path: string; body?: unknown };
+type Role = {
+  id: string;
+  name: string;
+  managed: boolean;
+  color: number;
+  hoist: boolean;
+  permissions: string;
+  mentionable?: boolean;
+  tags?: { bot_id?: string; integration_id?: string };
+};
+type Channel = {
+  id: string;
+  name: string;
+  type: number;
+  parent_id: string | null;
+  topic?: string | null;
+  permission_overwrites: Overwrite[];
+};
+type Member = {
+  user?: { id: string; username?: string; bot?: boolean };
+  roles?: string[];
+  premium_since?: string | null;
+  pending?: boolean;
+};
+type ApiResult<T> = { status: number; body: T | null };
+type ExportState = {
+  generatedAt: string;
+  applicationId: string;
+  guildId: string;
+  guild: JsonObject;
+  roles: Role[];
+  channels: Channel[];
+  welcomeScreen: ApiResult<JsonObject>;
+  onboarding: ApiResult<JsonObject>;
+  membershipScreening: ApiResult<JsonObject>;
+  integrations: { status: number; body: Array<{ id: string; name: string | null; applicationId: string | null }> };
+  application: { status: number; body: { id: string; name: string | null; flags: number | null } };
+  members: Array<{ id: string; bot: boolean; username: string | null; roles: string[]; premiumSince: string | null; pending: boolean }>;
+  botInventory: { memberBotIds: string[]; integrationApplicationIds: string[]; guildApplicationId: string | null };
+};
+type RollbackOperation = {
+  id: number;
+  label: string;
+  kind:
+    | 'create-role'
+    | 'create-channel'
+    | 'patch-channel'
+    | 'patch-guild'
+    | 'patch-welcome'
+    | 'patch-onboarding'
+    | 'patch-screening'
+    | 'create-message'
+    | 'pending-write';
+  state: 'pending' | 'applied';
+  target: JsonObject;
+  inverse?: JsonObject;
+  responseId?: string;
+  preparedAt: string;
+  requestStartedAt?: string;
+  appliedAt?: string;
+};
+type RollbackManifest = {
+  version: 1;
+  status: 'prepared' | 'applying' | 'applied' | 'postflight_failed';
+  generatedAt: string;
+  applicationId: string;
+  guildId: string;
+  preExportPath: string;
+  postExportPath: string;
+  operations: RollbackOperation[];
+};
 
-const undo: UndoEntry[] = [];
-let failures = 0;
-const writes: string[] = [];
-
-function recordUndo(entry: UndoEntry) {
-  undo.push(entry);
+function die(code: number, message: string): never {
+  console.error(message);
+  process.exit(code);
 }
 
-async function api<T>(method: string, path: string, body?: unknown): Promise<{ status: number; body: T | null }> {
+function applicationIdFromToken(value: string): string | null {
+  const segment = value.trim().split('.')[0];
+  if (!segment) return null;
+  try {
+    const decoded = Buffer.from(segment, 'base64').toString('utf8');
+    return /^\d{15,25}$/.test(decoded) ? decoded : null;
+  } catch {
+    return null;
+  }
+}
+
+function apiBase(): string {
+  const raw = process.env.MAIN_GUILD_API_BASE;
+  if (!raw) return 'https://discord.com/api/v10';
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    die(2, `MAIN_GUILD_API_BASE is not a URL: ${raw}`);
+  }
+  if (!['127.0.0.1', 'localhost', '::1'].includes(parsed.hostname)) {
+    die(2, `MAIN_GUILD_API_BASE is a test seam and only accepts loopback. Got host ${parsed.hostname}.`);
+  }
+  return raw.replace(/\/$/, '');
+}
+
+if (!token) die(2, 'Missing DISCORD_BOT_TOKEN.');
+const applicationId = applicationIdFromToken(token);
+if (applicationId !== LIVE_BOT_APPLICATION_ID) {
+  die(2, `This token is not the live Owen bot (${LIVE_BOT_APPLICATION_ID}). Nothing was contacted.`);
+}
+if (guildId !== LIVE_GUILD_ID) die(2, `DISCORD_GUILD_ID is not the live guild ${LIVE_GUILD_ID}. Nothing was contacted.`);
+if (APPLY && !CONFIRMED) die(2, 'Refusing to write without --confirm-main-guild. Nothing was changed.');
+
+const API = apiBase();
+let discordWrites = 0;
+
+async function api<T>(method: 'GET' | 'POST' | 'PATCH' | 'PUT', path: string, body?: unknown): Promise<ApiResult<T>> {
   for (let attempt = 0; attempt < 5; attempt++) {
     const response = await fetch(`${API}${path}`, {
       method,
@@ -79,295 +183,453 @@ async function api<T>(method: string, path: string, body?: unknown): Promise<{ s
     const responseBody = (await response.json().catch(() => null)) as T | null;
     if (response.status !== 429) return { status: response.status, body: responseBody };
     const retryAfter = Number((responseBody as { retry_after?: number } | null)?.retry_after ?? 1);
-    await new Promise((resolve) => setTimeout(resolve, Math.min(retryAfter, 30) * 1000));
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, Math.min(retryAfter, 30) * 1000));
   }
   return { status: 429, body: null };
 }
 
-async function write<T>(label: string, method: string, path: string, body?: unknown, undoEntry?: UndoEntry): Promise<T | null> {
-  if (!APPLY || !CONFIRMED) {
-    console.log(`WOULD ${label}`);
-    return null;
+function stable(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value as JsonObject)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stable(item)}`)
+      .join(',')}}`;
   }
-  const result = await api<T>(method, path, body);
-  if (result.status >= 300) {
-    console.error(`ERROR ${label}: HTTP ${result.status} ${JSON.stringify(result.body)}`);
-    failures++;
-    return null;
-  }
-  console.log(`DID   ${label}`);
-  writes.push(label);
-  if (undoEntry) recordUndo(undoEntry);
-  return result.body;
+  return JSON.stringify(value);
 }
 
-function applicationIdFromToken(value: string): string | null {
-  const seg = value.trim().split('.')[0];
-  if (!seg) return null;
+function atomicJson(path: string, value: unknown): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const temporary = `${path}.${process.pid}.tmp`;
+  const fd = openSync(temporary, 'w', 0o600);
   try {
-    const decoded = Buffer.from(seg, 'base64').toString('utf8');
-    return /^\d{15,25}$/.test(decoded) ? decoded : null;
-  } catch {
-    return null;
+    writeFileSync(fd, `${JSON.stringify(value, null, 2)}\n`);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(temporary, path);
+  const dirFd = openSync(dirname(path), 'r');
+  try {
+    fsyncSync(dirFd);
+  } finally {
+    closeSync(dirFd);
   }
 }
 
-// ---- guards: refuse to run against anything but the live pair ----
-
-if (!token) {
-  console.error('Missing DISCORD_BOT_TOKEN.');
-  process.exit(2);
-}
-const appId = applicationIdFromToken(token);
-if (appId !== LIVE_BOT_APPLICATION_ID) {
-  console.error(
-    `This token is application ${appId}, not the live Owen bot (${LIVE_BOT_APPLICATION_ID}). ` +
-      'Refusing to run. Nothing was contacted.',
-  );
-  process.exit(2);
-}
-if (guildId !== LIVE_GUILD_ID) {
-  console.error(`DISCORD_GUILD_ID is ${guildId}, not the live guild ${LIVE_GUILD_ID}. Refusing to run.`);
-  process.exit(2);
-}
-if (!APPLY && !EXPORT) {
-  // pure planning is the default; nothing below writes unless --apply
-}
-if (APPLY && !CONFIRMED) {
-  console.error('Refusing to write to the live guild without --confirm-main-guild. Plan-only run completed.');
-  process.exit(2);
-}
-
-const me = await api<{ id: string; username: string }>('GET', '/users/@me');
-if (me.status !== 200 || !me.body || me.body.id !== LIVE_BOT_APPLICATION_ID) {
-  console.error(`Expected live bot ${LIVE_BOT_APPLICATION_ID}; Discord returned HTTP ${me.status}.`);
-  process.exit(1);
-}
-const guilds = await api<Array<{ id: string }>>('GET', '/users/@me/guilds');
-if (guilds.status !== 200 || !guilds.body?.some((g) => g.id === guildId)) {
-  console.error(`The live bot is not in guild ${guildId}.`);
-  process.exit(1);
-}
-const guild = await api<{ id: string; name: string; owner_id: string; features: string[] }>('GET', `/guilds/${guildId}`);
-if (guild.status !== 200 || !guild.body) {
-  console.error(`Could not read guild ${guildId}: HTTP ${guild.status}.`);
-  process.exit(1);
-}
-
-console.log(`\n${APPLY && CONFIRMED ? 'Applying' : 'Planning'} clean-slate structure (ADDITIVE) in ${guild.body.name} (${guildId})`);
-console.log('No deletions. No renames. No bot or credential changes. Removal gates (TOG-1313) stay closed.\n');
-
-// ---- roles: create if absent, reconcile colour/hoist/permissions if drifted ----
-
-let roles = (await api<Array<{ id: string; name: string; managed: boolean; color: number; hoist: boolean; permissions: string }>>('GET', `/guilds/${guildId}/roles`)).body ?? [];
-
-for (const wanted of [OWNER_ROLE, MODERATOR_ROLE]) {
-  const existing = roles.find((role) => !role.managed && role.name === wanted.name);
-  if (!existing) {
-    const created = await write<{ id: string }>(
-      `create ${wanted.name} role`,
-      'POST',
-      `/guilds/${guildId}/roles`,
-      wanted,
-      { action: `delete ${wanted.name} role`, method: 'DELETE', path: `/guilds/${guildId}/roles/{createdId}` },
-    );
-    // fill the created id into the undo path
-    if (created) undo[undo.length - 1].path = `/guilds/${guildId}/roles/${created.id}`;
-  } else if (existing.color !== wanted.color || existing.hoist !== wanted.hoist || existing.permissions !== wanted.permissions) {
-    await write(`reconcile ${wanted.name} role`, 'PATCH', `/guilds/${guildId}/roles/${existing.id}`, wanted, {
-      action: `restore ${wanted.name} role`,
-      method: 'PATCH',
-      path: `/guilds/${guildId}/roles/${existing.id}`,
-      body: { color: existing.color, hoist: existing.hoist, permissions: existing.permissions },
-    });
+async function allMembers(): Promise<Member[]> {
+  const members: Member[] = [];
+  let after = '0';
+  for (;;) {
+    const page = await api<Member[]>('GET', `/guilds/${guildId}/members?limit=1000&after=${after}`);
+    if (page.status !== 200 || !page.body) die(1, `Preflight could not read members: HTTP ${page.status}.`);
+    members.push(...page.body);
+    if (page.body.length < 1000) break;
+    const last = page.body.at(-1)?.user?.id;
+    if (!last) die(1, 'Preflight member pagination returned an entry without a user id.');
+    after = last;
   }
+  return members;
 }
 
-// ---- channels & categories: create if absent; reconcile topic/overwrites/parent only ----
-
-let channels = (await api<Array<{ id: string; name: string; type: number; parent_id: string | null; topic?: string | null; permission_overwrites: Overwrite[] }>>('GET', `/guilds/${guildId}/channels`)).body ?? [];
-
-const equalOverwrites = (a: Overwrite[], b: Overwrite[]): boolean => {
-  const normalize = (items: Overwrite[]) => items.map((item) => `${item.id}:${item.type}:${item.allow}:${item.deny}`).sort();
-  return JSON.stringify(normalize(a)) === JSON.stringify(normalize(b));
-};
-
-const categoryIds = new Map<string, string>();
-for (const wanted of CATEGORIES) {
-  const existing = channels.find((channel) => channel.type === 4 && channel.name === wanted.name);
-  if (existing) categoryIds.set(wanted.name, existing.id);
-  else {
-    const created = await write<{ id: string }>(`create category ${wanted.name}`, 'POST', `/guilds/${guildId}/channels`, { name: wanted.name, type: 4 }, {
-      action: `delete category ${wanted.name}`,
-      method: 'DELETE',
-      path: '/channels/{createdId}',
-    });
-    if (created) {
-      categoryIds.set(wanted.name, created.id);
-      undo[undo.length - 1].path = `/channels/${created.id}`;
-    } else {
-      // plan mode: a category that will exist by the time its channels are
-      // created. A sentinel keeps those channels in the plan instead of
-      // silently skipping them because no id exists yet.
-      categoryIds.set(wanted.name, 'pending-category-id');
-    }
-  }
-}
-
-channels = APPLY && CONFIRMED ? ((await api<typeof channels>('GET', `/guilds/${guildId}/channels`)).body ?? channels) : channels;
-for (const category of CATEGORIES) {
-  const parentId = categoryIds.get(category.name) ?? channels.find((channel) => channel.type === 4 && channel.name === category.name)?.id;
-  if (!parentId || parentId === 'pending-category-id') {
-    if (APPLY && CONFIRMED) {
-      console.error(`Category ${category.name} was not created; skipping its channels rather than parenting them nowhere.`);
-      continue;
-    }
-  }
-  for (const name of category.channels) {
-    const type = VOICE_CHANNEL_NAMES.has(name) ? 2 : 0;
-    const existing = channels.find((channel) => channel.type === type && channel.name === name);
-    const overwrites: Overwrite[] = OPERATIONS_CHANNEL_NAMES.has(name)
-      ? [{ id: guildId, type: 0, allow: '0', deny: String(VIEW_CHANNEL) }]
-      : PUBLIC_READ_ONLY.has(name)
-        ? [{ id: guildId, type: 0, allow: String(VIEW_CHANNEL), deny: String(SEND_MESSAGES) }]
-        : VOICE_CHANNEL_NAMES.has(name)
-          ? [{ id: guildId, type: 0, allow: String(VIEW_CHANNEL | CONNECT | SPEAK), deny: '0' }]
-          : [{ id: guildId, type: 0, allow: String(VIEW_CHANNEL | SEND_MESSAGES), deny: '0' }];
-    const body = {
-      name,
-      type,
-      ...(parentId && parentId !== 'pending-category-id' ? { parent_id: parentId } : {}),
-      ...(TEXT_CHANNEL_NAMES.has(name) ? { topic: TOPICS[name as keyof typeof TOPICS] } : {}),
-      permission_overwrites: overwrites,
-    };
-    if (!existing) {
-      const created = await write<{ id: string }>(`create ${type === 2 ? 'voice' : 'text'} channel ${name}`, 'POST', `/guilds/${guildId}/channels`, body, {
-        action: `delete channel ${name}`,
-        method: 'DELETE',
-        path: '/channels/{createdId}',
-      });
-      if (created) undo[undo.length - 1].path = `/channels/${created.id}`;
-    } else if (
-      existing.parent_id !== parentId ||
-      (TEXT_CHANNEL_NAMES.has(name) && existing.topic !== TOPICS[name as keyof typeof TOPICS]) ||
-      !equalOverwrites(existing.permission_overwrites ?? [], overwrites)
-    ) {
-      await write(`reconcile channel ${name}`, 'PATCH', `/channels/${existing.id}`, body, {
-        action: `restore channel ${name}`,
-        method: 'PATCH',
-        path: `/channels/${existing.id}`,
-        body: {
-          name: existing.name,
-          type: existing.type,
-          parent_id: existing.parent_id ?? undefined,
-          ...(existing.topic ? { topic: existing.topic } : {}),
-          permission_overwrites: existing.permission_overwrites ?? [],
-        },
-      });
-    }
-  }
-}
-
-// ---- server-level settings; undo carries the pre-change values ----
-
-const freshChannels = APPLY && CONFIRMED ? ((await api<typeof channels>('GET', `/guilds/${guildId}/channels`)).body ?? channels) : channels;
-const startHere = freshChannels.find((channel) => channel.name === 'start-here' && channel.type === 0);
-const announcements = freshChannels.find((channel) => channel.name === 'announcements' && channel.type === 0);
-const general = freshChannels.find((channel) => channel.name === 'general' && channel.type === 0);
-const looking = freshChannels.find((channel) => channel.name === 'looking-to-play' && channel.type === 0);
-
-const currentGuild: DiscordObject = (await api<DiscordObject>('GET', `/guilds/${guildId}`)).body ?? guild.body;
-
-if (startHere && announcements) {
-  const desired = {
-    description: SERVER_DESCRIPTION,
-    system_channel_id: startHere.id,
-    rules_channel_id: startHere.id,
-    public_updates_channel_id: announcements.id,
+function botInventory(guild: JsonObject, members: Member[], integrations: ExportState['integrations']): ExportState['botInventory'] {
+  const integrationApplicationIds = integrations.body
+    .map((integration) => integration.applicationId)
+    .filter((id): id is string => Boolean(id))
+    .sort();
+  return {
+    memberBotIds: members.filter((member) => member.user?.bot).map((member) => member.user!.id).sort(),
+    integrationApplicationIds,
+    guildApplicationId: typeof guild.application_id === 'string' ? guild.application_id : null,
   };
-  const descriptionChanged = currentGuild.description !== SERVER_DESCRIPTION;
-  const systemChanged = currentGuild.system_channel_id !== startHere.id;
-  const rulesChanged = currentGuild.rules_channel_id !== startHere.id;
-  const updatesChanged = currentGuild.public_updates_channel_id !== announcements.id;
-  if (descriptionChanged || systemChanged || rulesChanged || updatesChanged) {
-    await write('configure guild description and system channels', 'PATCH', `/guilds/${guildId}`, desired, {
-      action: 'restore guild description and system channels',
-      method: 'PATCH',
-      path: `/guilds/${guildId}`,
-      body: {
-        description: currentGuild.description ?? '',
-        system_channel_id: currentGuild.system_channel_id,
-        rules_channel_id: currentGuild.rules_channel_id,
-        public_updates_channel_id: currentGuild.public_updates_channel_id,
-      },
-    });
-  }
 }
 
-const communityEnabled = (currentGuild.features as string[] | undefined)?.includes('COMMUNITY');
+async function captureState(): Promise<ExportState> {
+  const guild = await api<JsonObject>('GET', `/guilds/${guildId}`);
+  const roles = await api<Role[]>('GET', `/guilds/${guildId}/roles`);
+  const channels = await api<Channel[]>('GET', `/guilds/${guildId}/channels`);
+  const welcomeScreen = await api<JsonObject>('GET', `/guilds/${guildId}/welcome-screen`);
+  const onboarding = await api<JsonObject>('GET', `/guilds/${guildId}/onboarding`);
+  const membershipScreening = await api<JsonObject>('GET', `/guilds/${guildId}/member-verification`);
+  const integrations = await api<JsonObject[]>('GET', `/guilds/${guildId}/integrations`);
+  const application = await api<JsonObject>('GET', '/oauth2/applications/@me');
+  if (guild.status !== 200 || !guild.body) die(1, `Could not read guild ${guildId}: HTTP ${guild.status}.`);
+  if (roles.status !== 200 || !roles.body) die(1, `Could not read guild roles: HTTP ${roles.status}.`);
+  if (channels.status !== 200 || !channels.body) die(1, `Could not read guild channels: HTTP ${channels.status}.`);
+  if (integrations.status !== 200 || !integrations.body) die(1, `Could not inventory integrations: HTTP ${integrations.status}.`);
+  if (application.status !== 200 || !application.body) die(1, `Could not inventory the current application: HTTP ${application.status}.`);
+  if (application.body.id !== LIVE_BOT_APPLICATION_ID) die(1, `Current application inventory returned ${String(application.body.id)}, expected Owen ${LIVE_BOT_APPLICATION_ID}.`);
+  const rawMembers = await allMembers();
+  const integrationEvidence: ExportState['integrations'] = {
+    status: integrations.status,
+    body: integrations.body.map((integration) => {
+      const linkedApplication = integration.application as JsonObject | undefined;
+      return {
+        id: typeof integration.id === 'string' ? integration.id : '',
+        name: typeof integration.name === 'string' ? integration.name : null,
+        applicationId: typeof linkedApplication?.id === 'string' ? linkedApplication.id : null,
+      };
+    }),
+  };
+  const applicationEvidence: ExportState['application'] = {
+    status: application.status,
+    body: {
+      id: typeof application.body.id === 'string' ? application.body.id : '',
+      name: typeof application.body.name === 'string' ? application.body.name : null,
+      flags: typeof application.body.flags === 'number' ? application.body.flags : null,
+    },
+  };
+  return {
+    generatedAt: new Date().toISOString(),
+    applicationId: LIVE_BOT_APPLICATION_ID,
+    guildId,
+    guild: guild.body,
+    roles: roles.body,
+    channels: channels.body,
+    welcomeScreen,
+    onboarding,
+    membershipScreening,
+    integrations: integrationEvidence,
+    application: applicationEvidence,
+    members: rawMembers
+      .map((member) => ({
+        id: member.user?.id ?? '',
+        bot: Boolean(member.user?.bot),
+        username: member.user?.username ?? null,
+        roles: [...(member.roles ?? [])].sort(),
+        premiumSince: member.premium_since ?? null,
+        pending: Boolean(member.pending),
+      }))
+      .filter((member) => member.id)
+      .sort((a, b) => a.id.localeCompare(b.id)),
+    botInventory: botInventory(guild.body, rawMembers, integrationEvidence),
+  };
+}
 
-if (communityEnabled && startHere && general && looking) {
-  const welcomeNow = await api<DiscardableWelcome>('GET', `/guilds/${guildId}/welcome-screen`);
-  const welcomeBody = {
+function assertAdministrator(state: ExportState, phase: string): void {
+  const botMember = state.members.find((member) => member.id === LIVE_BOT_APPLICATION_ID && member.bot);
+  if (!botMember) die(1, `${phase}: Owen is missing from the member inventory.`);
+  const adminRoles = state.roles.filter((role) => botMember.roles.includes(role.id) && (BigInt(role.permissions) & ADMINISTRATOR) !== 0n);
+  if (adminRoles.length === 0) die(1, `${phase}: Owen does not have Administrator. Aborting.`);
+}
+
+function assertUnambiguousTargets(state: ExportState): void {
+  for (const category of CATEGORIES) {
+    const matches = state.channels.filter((channel) => channel.type === 4 && channel.name === category.name);
+    if (matches.length > 1) die(1, `Preflight found multiple categories named ${category.name}; refusing ambiguous adoption.`);
+    if (!matches[0]) continue;
+    for (const name of category.channels) {
+      const type = VOICE_CHANNEL_NAMES.has(name) ? 2 : 0;
+      const children = state.channels.filter((channel) => channel.type === type && channel.parent_id === matches[0]!.id && channel.name === name);
+      if (children.length > 1) die(1, `Preflight found multiple ${name} channels in ${category.name}; refusing ambiguous adoption.`);
+    }
+  }
+  const features = Array.isArray(state.guild.features) ? state.guild.features : [];
+  if (state.guild.name !== LIVE_GUILD_NAME) {
+    die(1, `Preflight: expected guild name ${LIVE_GUILD_NAME}, received ${String(state.guild.name)}.`);
+  }
+  if (!features.includes('COMMUNITY')) die(1, 'Preflight: the live guild does not have Discord Community enabled; refusing to change that setting implicitly.');
+}
+
+function desiredOverwrite(name: string): Overwrite {
+  if (OPERATIONS_CHANNEL_NAMES.has(name)) return { id: guildId, type: 0, allow: '0', deny: String(VIEW_CHANNEL) };
+  if (PUBLIC_READ_ONLY.has(name)) return { id: guildId, type: 0, allow: String(VIEW_CHANNEL), deny: String(SEND_MESSAGES) };
+  if (VOICE_CHANNEL_NAMES.has(name)) return { id: guildId, type: 0, allow: String(VIEW_CHANNEL | CONNECT | SPEAK), deny: '0' };
+  return { id: guildId, type: 0, allow: String(VIEW_CHANNEL | SEND_MESSAGES), deny: '0' };
+}
+
+function mergeEveryoneOverwrite(existing: Overwrite[], desired: Overwrite): Overwrite[] {
+  const relevant = VIEW_CHANNEL | SEND_MESSAGES | CONNECT | SPEAK;
+  const index = existing.findIndex((overwrite) => overwrite.id === guildId && overwrite.type === 0);
+  if (index === -1) return [...existing, desired];
+  const current = existing[index]!;
+  const merged = {
+    ...current,
+    allow: String((BigInt(current.allow) & ~relevant) | BigInt(desired.allow)),
+    deny: String((BigInt(current.deny) & ~relevant) | BigInt(desired.deny)),
+  };
+  return existing.map((overwrite, itemIndex) => (itemIndex === index ? merged : overwrite));
+}
+
+function welcomeBody(channelIds: Map<string, string>): JsonObject {
+  return {
     enabled: true,
     description: WELCOME_DESCRIPTION,
     welcome_channels: [
-      { channel_id: startHere.id, description: 'Four rules, then the server is yours.', emoji_name: '👋' },
-      { channel_id: general.id, description: 'Say hello. People notice who comes back.', emoji_name: '💬' },
-      { channel_id: looking.id, description: 'Game, platform, start time — find your crew.', emoji_name: '🎮' },
+      { channel_id: channelIds.get('start-here'), description: 'Four rules, then the server is yours.', emoji_name: '👋' },
+      { channel_id: channelIds.get('general'), description: 'Say hello. People notice who comes back.', emoji_name: '💬' },
+      { channel_id: channelIds.get('looking-to-play'), description: 'Game, platform, start time — find your crew.', emoji_name: '🎮' },
     ],
   };
-  if (welcomeNow.status === 200 && welcomeNow.body && (welcomeNow.body.description !== WELCOME_DESCRIPTION || welcomeNow.body.enabled !== true)) {
-    await write('configure three-card Welcome Screen', 'PATCH', `/guilds/${guildId}/welcome-screen`, welcomeBody, {
-      action: 'restore previous Welcome Screen',
-      method: 'PATCH',
-      path: `/guilds/${guildId}/welcome-screen`,
-      body: {
-        enabled: welcomeNow.body.enabled ?? false,
-        description: welcomeNow.body.description ?? '',
-        welcome_channels: (welcomeNow.body.welcome_channels as unknown[]) ?? [],
-      },
-    });
-  }
 }
 
-if (general) {
-  const recentMessages = await api<Array<{ id: string; author: { id: string }; content: string }>>(
-    'GET',
-    `/channels/${general.id}/messages?limit=50`,
+function onboardingBody(channelIds: Map<string, string>): JsonObject {
+  return {
+    prompts: [],
+    default_channel_ids: ['start-here', 'announcements', 'general', 'looking-to-play'].map((name) => channelIds.get(name)),
+    enabled: false,
+    mode: 0,
+  };
+}
+
+const screeningBody: JsonObject = {
+  enabled: true,
+  form_fields: [{ field_type: 'TERMS', label: 'TWO community rules', required: true, values: RULES }],
+  description: SCREENING_DESCRIPTION,
+};
+
+function matchesSubset(actual: unknown, desired: unknown): boolean {
+  if (Array.isArray(desired)) {
+    return Array.isArray(actual) && actual.length === desired.length && desired.every((item, index) => matchesSubset(actual[index], item));
+  }
+  if (desired && typeof desired === 'object') {
+    if (!actual || typeof actual !== 'object' || Array.isArray(actual)) return false;
+    return Object.entries(desired as JsonObject).every(([key, value]) => matchesSubset((actual as JsonObject)[key], value));
+  }
+  return stable(actual) === stable(desired);
+}
+
+function bodyMatches(actual: JsonObject | null, desired: JsonObject): boolean {
+  return Boolean(actual) && matchesSubset(actual, desired);
+}
+
+const me = await api<{ id: string }>('GET', '/users/@me');
+if (me.status !== 200 || me.body?.id !== LIVE_BOT_APPLICATION_ID) die(1, `Discord did not authenticate as Owen (${LIVE_BOT_APPLICATION_ID}).`);
+const guilds = await api<Array<{ id: string }>>('GET', '/users/@me/guilds');
+if (guilds.status !== 200 || !guilds.body?.some((item) => item.id === guildId)) die(1, `Owen is not in guild ${guildId}.`);
+
+const pre = await captureState();
+assertAdministrator(pre, 'Preflight');
+assertUnambiguousTargets(pre);
+
+console.log(`${APPLY ? 'Applying' : 'Planning'} accepted clean-slate structure in ${String(pre.guild.name)} (${guildId}).`);
+console.log('Additive path: no existing channel, category, role, overwrite entry, member, bot, integration, or Raid Protection setting is removed.');
+
+if (!APPLY) {
+  console.log('Plan complete. Add --confirm-main-guild --apply to persist a pre-export and apply it. No writes were sent.');
+  process.exit(0);
+}
+
+const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+const artifactDir = resolve(process.env.MAIN_GUILD_ARTIFACT_DIR ?? 'data/main-guild-clean-slate');
+mkdirSync(artifactDir, { recursive: true });
+const preExportPath = join(artifactDir, `${stamp}-pre.json`);
+const postExportPath = join(artifactDir, `${stamp}-post.json`);
+const manifestPath = resolve(process.env.UNDO_MANIFEST_PATH ?? join(artifactDir, `${stamp}-rollback.json`));
+atomicJson(preExportPath, pre);
+const manifest: RollbackManifest = {
+  version: 1,
+  status: 'prepared',
+  generatedAt: new Date().toISOString(),
+  applicationId: LIVE_BOT_APPLICATION_ID,
+  guildId,
+  preExportPath,
+  postExportPath,
+  operations: [],
+};
+atomicJson(manifestPath, manifest);
+console.log(`Pre-export persisted: ${preExportPath}`);
+console.log(`Rollback manifest persisted: ${manifestPath}`);
+
+async function write<T>(operation: Omit<RollbackOperation, 'id' | 'state' | 'preparedAt'>, method: 'POST' | 'PATCH' | 'PUT', path: string, body: unknown): Promise<T> {
+  const entry: RollbackOperation = {
+    ...operation,
+    id: manifest.operations.length + 1,
+    state: 'pending',
+    preparedAt: new Date().toISOString(),
+  };
+  manifest.status = 'applying';
+  manifest.operations.push(entry);
+  atomicJson(manifestPath, manifest);
+  const abortBeforeRequest = Number(process.env.MAIN_GUILD_TEST_ABORT_BEFORE_REQUEST ?? '0');
+  if (abortBeforeRequest > 0 && entry.id >= abortBeforeRequest) die(85, `Test interruption after manifest preparation for operation ${entry.id}.`);
+  entry.requestStartedAt = new Date().toISOString();
+  atomicJson(manifestPath, manifest);
+  const result = await api<T>(method, path, body);
+  if (result.status >= 300) die(1, `Discord write failed for ${entry.label}: HTTP ${result.status} ${JSON.stringify(result.body)}`);
+  discordWrites++;
+  if (result.body && typeof result.body === 'object' && 'id' in result.body && typeof (result.body as { id?: unknown }).id === 'string') {
+    entry.responseId = (result.body as { id: string }).id;
+  }
+  atomicJson(manifestPath, manifest);
+  const abortAfterResponse = Number(process.env.MAIN_GUILD_TEST_ABORT_AFTER_RESPONSE ?? '0');
+  if (abortAfterResponse > 0 && discordWrites >= abortAfterResponse) die(87, `Test interruption after Discord accepted write ${discordWrites}, before it was settled.`);
+  entry.state = 'applied';
+  entry.appliedAt = new Date().toISOString();
+  atomicJson(manifestPath, manifest);
+  console.log(`DID ${entry.label}`);
+  const abortAfter = Number(process.env.MAIN_GUILD_TEST_ABORT_AFTER_WRITES ?? '0');
+  if (abortAfter > 0 && discordWrites >= abortAfter) die(86, `Test interruption after ${discordWrites} write(s).`);
+  return result.body as T;
+}
+
+let roles = [...pre.roles];
+for (const wanted of [OWNER_ROLE, MODERATOR_ROLE]) {
+  const existing = roles.find((role) => !role.managed && role.name === wanted.name);
+  if (existing) continue;
+  const created = await write<Role>(
+    { label: `create ${wanted.name} role`, kind: 'create-role', target: { name: wanted.name } },
+    'POST',
+    `/guilds/${guildId}/roles`,
+    wanted,
   );
-  const starterPresent = recentMessages.body?.some((message) => message.author.id === LIVE_BOT_APPLICATION_ID && message.content === STARTER_MESSAGE);
-  if (!starterPresent) {
-    const posted = await write<{ id: string }>('post first-message starter', 'POST', `/channels/${general.id}/messages`, {
-      content: STARTER_MESSAGE,
-      allowed_mentions: { parse: [] },
-    }, {
-      action: 'delete first-message starter',
-      method: 'DELETE',
-      path: `/channels/${general.id}/messages/{createdId}`,
-    });
-    if (posted) undo[undo.length - 1].path = `/channels/${general.id}/messages/${posted.id}`;
+  roles.push(created);
+}
+
+let channels = [...pre.channels];
+const categoryIds = new Map<string, string>();
+for (const category of CATEGORIES) {
+  const existing = channels.find((channel) => channel.type === 4 && channel.name === category.name);
+  if (existing) {
+    categoryIds.set(category.name, existing.id);
+    continue;
+  }
+  const created = await write<Channel>(
+    { label: `create category ${category.name}`, kind: 'create-channel', target: { name: category.name, type: 4, parentId: null } },
+    'POST',
+    `/guilds/${guildId}/channels`,
+    { name: category.name, type: 4 },
+  );
+  channels.push(created);
+  categoryIds.set(category.name, created.id);
+}
+
+const targetChannelIds = new Map<string, string>();
+for (const category of CATEGORIES) {
+  const parentId = categoryIds.get(category.name)!;
+  for (const name of category.channels) {
+    const type = VOICE_CHANNEL_NAMES.has(name) ? 2 : 0;
+    const existing = channels.find((channel) => channel.type === type && channel.parent_id === parentId && channel.name === name);
+    const overwrite = desiredOverwrite(name);
+    if (!existing) {
+      const body = {
+        name,
+        type,
+        parent_id: parentId,
+        ...(TEXT_CHANNEL_NAMES.has(name) ? { topic: TOPICS[name as keyof typeof TOPICS] } : {}),
+        permission_overwrites: [overwrite],
+      };
+      const created = await write<Channel>(
+        { label: `create ${name} in ${category.name}`, kind: 'create-channel', target: { name, type, parentId } },
+        'POST',
+        `/guilds/${guildId}/channels`,
+        body,
+      );
+      channels.push(created);
+      targetChannelIds.set(name, created.id);
+      continue;
+    }
+    targetChannelIds.set(name, existing.id);
+    const mergedOverwrites = mergeEveryoneOverwrite(existing.permission_overwrites ?? [], overwrite);
+    const desiredTopic = TEXT_CHANNEL_NAMES.has(name) ? TOPICS[name as keyof typeof TOPICS] : existing.topic;
+    if (existing.topic === desiredTopic && stable(existing.permission_overwrites ?? []) === stable(mergedOverwrites)) continue;
+    const inverse: JsonObject = {
+      topic: existing.topic ?? null,
+      permission_overwrites: existing.permission_overwrites ?? [],
+    };
+    await write<Channel>(
+      { label: `reconcile ${name} inside ${category.name}`, kind: 'patch-channel', target: { channelId: existing.id }, inverse },
+      'PATCH',
+      `/channels/${existing.id}`,
+      { ...(TEXT_CHANNEL_NAMES.has(name) ? { topic: desiredTopic } : {}), permission_overwrites: mergedOverwrites },
+    );
   }
 }
 
-type DiscardableWelcome = { enabled?: boolean; description?: string; welcome_channels?: unknown[] } | null;
-
-if (APPLY && CONFIRMED || EXPORT) {
-  const finalGuild = await api<DiscordObject>('GET', `/guilds/${guildId}`);
-  const finalRoles = await api<DiscordObject[]>('GET', `/guilds/${guildId}/roles`);
-  const finalChannels = await api<DiscordObject[]>('GET', `/guilds/${guildId}/channels`);
-  console.log('\n---BEGIN MAIN GUILD CLEAN SLATE EXPORT---');
-  console.log(JSON.stringify({ generatedAt: new Date().toISOString(), guild: finalGuild.body, roles: finalRoles.body, channels: finalChannels.body }, null, 2));
-  console.log('---END MAIN GUILD CLEAN SLATE EXPORT---');
+const guildDesired = {
+  description: SERVER_DESCRIPTION,
+  system_channel_id: targetChannelIds.get('start-here'),
+  rules_channel_id: targetChannelIds.get('start-here'),
+  public_updates_channel_id: targetChannelIds.get('announcements'),
+};
+if (!bodyMatches(pre.guild, guildDesired)) {
+  await write<JsonObject>(
+    {
+      label: 'configure guild description and system channels',
+      kind: 'patch-guild',
+      target: {},
+      inverse: {
+        description: pre.guild.description ?? null,
+        system_channel_id: pre.guild.system_channel_id ?? null,
+        rules_channel_id: pre.guild.rules_channel_id ?? null,
+        public_updates_channel_id: pre.guild.public_updates_channel_id ?? null,
+      },
+    },
+    'PATCH',
+    `/guilds/${guildId}`,
+    guildDesired,
+  );
 }
 
-if (APPLY && CONFIRMED) {
-  const manifest = JSON.stringify({ generatedAt: new Date().toISOString(), guildId, writes, undo }, null, 2);
-  const manifestPath = process.env.UNDO_MANIFEST_PATH ?? 'main-guild-clean-slate-undo.json';
-  const { writeFileSync } = await import('node:fs');
-  writeFileSync(manifestPath, manifest);
-  console.log(`\nUndo manifest written to ${manifestPath} (${undo.length} reversible steps).`);
+const desiredWelcome = welcomeBody(targetChannelIds);
+if (!bodyMatches(pre.welcomeScreen.body, desiredWelcome)) {
+  if (pre.welcomeScreen.status !== 200 || !pre.welcomeScreen.body) die(1, `Welcome Screen pre-state is not restorable (HTTP ${pre.welcomeScreen.status}).`);
+  await write<JsonObject>(
+    { label: 'configure three-card Welcome Screen', kind: 'patch-welcome', target: {}, inverse: pre.welcomeScreen.body },
+    'PATCH',
+    `/guilds/${guildId}/welcome-screen`,
+    desiredWelcome,
+  );
 }
 
-console.log(`\nDone with ${failures} error(s). ${APPLY && CONFIRMED ? `${writes.length} write(s) applied.` : 'No writes (plan only).'}`);
-process.exit(failures ? 1 : 0);
+const desiredOnboarding = onboardingBody(targetChannelIds);
+if (!bodyMatches(pre.onboarding.body, desiredOnboarding)) {
+  if (pre.onboarding.status !== 200 || !pre.onboarding.body) die(1, `Onboarding pre-state is not restorable (HTTP ${pre.onboarding.status}).`);
+  await write<JsonObject>(
+    { label: 'keep native Onboarding off', kind: 'patch-onboarding', target: {}, inverse: pre.onboarding.body },
+    'PUT',
+    `/guilds/${guildId}/onboarding`,
+    desiredOnboarding,
+  );
+}
+
+if (!bodyMatches(pre.membershipScreening.body, screeningBody)) {
+  if (pre.membershipScreening.status !== 200 || !pre.membershipScreening.body) {
+    die(1, `Membership Screening pre-state is not restorable (HTTP ${pre.membershipScreening.status}).`);
+  }
+  await write<JsonObject>(
+    { label: 'configure four-rule Membership Screening', kind: 'patch-screening', target: {}, inverse: pre.membershipScreening.body },
+    'PATCH',
+    `/guilds/${guildId}/member-verification`,
+    screeningBody,
+  );
+}
+
+const generalId = targetChannelIds.get('general')!;
+const messages = await api<Array<{ id: string; author: { id: string }; content: string }>>('GET', `/channels/${generalId}/messages?limit=50`);
+if (messages.status !== 200 || !messages.body) die(1, `Could not inspect the target #general starter message: HTTP ${messages.status}.`);
+if (!messages.body.some((message) => message.author.id === LIVE_BOT_APPLICATION_ID && message.content === STARTER_MESSAGE)) {
+  await write<{ id: string }>(
+    {
+      label: 'post first-message starter',
+      kind: 'create-message',
+      target: { channelId: generalId, authorId: LIVE_BOT_APPLICATION_ID, content: STARTER_MESSAGE },
+    },
+    'POST',
+    `/channels/${generalId}/messages`,
+    { content: STARTER_MESSAGE, allowed_mentions: { parse: [] } },
+  );
+}
+
+const post = await captureState();
+atomicJson(postExportPath, post);
+console.log(`Post-export persisted: ${postExportPath}`);
+
+try {
+  assertAdministrator(post, 'Postflight');
+  if (stable(post.botInventory) !== stable(pre.botInventory)) throw new Error('bot/application inventory changed');
+  if (stable(post.members.map((member) => member.id)) !== stable(pre.members.map((member) => member.id))) throw new Error('member inventory changed');
+  if (stable(post.members.filter((member) => member.premiumSince).map((member) => member.id)) !== stable(pre.members.filter((member) => member.premiumSince).map((member) => member.id))) {
+    throw new Error('purchased-member inventory changed');
+  }
+} catch (error) {
+  manifest.status = 'postflight_failed';
+  atomicJson(manifestPath, manifest);
+  die(1, `Postflight failed: ${error instanceof Error ? error.message : String(error)}. Run the guarded rollback command below.`);
+}
+
+manifest.status = 'applied';
+atomicJson(manifestPath, manifest);
+console.log(`Applied ${discordWrites} Discord write(s).`);
+console.log(`Rollback: DISCORD_BOT_TOKEN=… node scripts/main-guild-clean-slate-rollback.ts --manifest ${JSON.stringify(manifestPath)} --confirm-main-guild --apply`);
