@@ -6,6 +6,8 @@ import type { ExpectedJoins } from '../core/expectedJoins.ts';
 import type { RaidWatch } from '../analytics/raidWatch.ts';
 import type { RaidAnnouncer } from './raidAlert.ts';
 import { log } from '../core/log.ts';
+import { applyLevelRoles } from '../leveling/discord.ts';
+import type { LevelingService } from '../leveling/service.ts';
 
 /**
  * Intents we ask Discord for, and why. Keep this list minimal - each one is a
@@ -43,6 +45,7 @@ export interface BotDeps {
    * which is what every existing test does.
    */
   expectedJoins?: ExpectedJoins;
+  leveling?: LevelingService;
 }
 
 export function createClient(): Client {
@@ -74,7 +77,7 @@ async function snapshotInvites(guild: Guild, invites: InviteTracker): Promise<st
 
 /** Wire gateway events to the framework-free handlers. */
 export function registerHandlers(client: Client, deps: BotDeps): void {
-  const { handlers, invites, raid, expectedJoins } = deps;
+  const { handlers, invites, raid, expectedJoins, leveling } = deps;
 
   client.once(Events.ClientReady, async (c) => {
     log.info('ready', { user: c.user.tag, guilds: c.guilds.cache.size });
@@ -163,6 +166,10 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
       isBot: msg.author.bot,
       channelId: msg.channelId,
       occurredAt: new Date(msg.createdTimestamp).toISOString(),
+      onLevelUp:
+        leveling && msg.member
+          ? (level) => applyLevelRoles(msg.member!, leveling, level)
+          : undefined,
     });
   });
 
@@ -182,12 +189,17 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
 
     // End first, so a move reads as end(A) then start(B) in occurred order.
     if (oldState.channelId) {
+      const member = oldState.member ?? newState.member;
       await handlers.onVoiceLeave({
         guildId: guild.id,
         memberId,
         isBot,
         channelId: oldState.channelId,
         occurredAt: at,
+        onLevelUp:
+          leveling && member
+            ? (level) => applyLevelRoles(member, leveling, level)
+            : undefined,
       });
     }
     if (newState.channelId) {

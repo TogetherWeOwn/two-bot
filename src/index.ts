@@ -30,6 +30,8 @@ import { KeyRing } from './internal/signing.ts';
 import { DiscordActions } from './internal/discordActions.ts';
 import { InternalActionStore } from './internal/store.ts';
 import { startHealthServer, type HealthServer } from './core/health.ts';
+import { LevelingService } from './leveling/service.ts';
+import { registerLeveling } from './leveling/discord.ts';
 
 const cfg = loadConfig();
 setLogLevel(cfg.logLevel);
@@ -71,7 +73,8 @@ const invites = new InviteTracker(db);
 // One instance, two ends: guild.add_member writes the "expect this member"
 // note, the gateway join handler consumes it. docs/INTERNAL_ACTIONS.md §7.
 const expectedJoins = new ExpectedJoins();
-const handlers = new FunnelHandlers(store);
+const leveling = new LevelingService(db);
+const handlers = new FunnelHandlers(store, leveling);
 
 const client = createClient();
 
@@ -98,7 +101,8 @@ log.info('raid_watch_enabled', {
   alertTarget: cfg.staffAlertChannelId ?? 'log only (DISCORD_STAFF_ALERT_CHANNEL_ID unset)',
 });
 
-registerHandlers(client, { handlers, invites, raid, expectedJoins });
+registerHandlers(client, { handlers, invites, raid, expectedJoins, leveling });
+registerLeveling(client, { service: leveling, guildId: cfg.guildId });
 
 // Onboarding (TWO-7). Skipped entirely if no landing channel is configured -
 // better to run the funnel with onboarding off than to post into a guessed
