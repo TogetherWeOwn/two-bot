@@ -52,6 +52,10 @@ export interface Config {
   /** Joins inside `raidWindowSeconds` that raise an alert. */
   raidJoinThreshold: number;
   raidWindowSeconds: number;
+  ticketCategoryId: string | null;
+  ticketStaffRoleId: string | null;
+  ticketPanelChannelId: string | null;
+  ticketCooldownSeconds: number;
   /**
    * The internal presence instrument (TOG-469). On by default, because a
    * trend instrument that nobody remembered to switch on collects nothing and
@@ -113,6 +117,10 @@ export function loadConfig(): Config {
     staffAlertChannelId: process.env.DISCORD_STAFF_ALERT_CHANNEL_ID || null,
     raidJoinThreshold: Number(process.env.TWO_RAID_JOIN_THRESHOLD ?? 5),
     raidWindowSeconds: Number(process.env.TWO_RAID_WINDOW_SECONDS ?? 60),
+    ticketCategoryId: process.env.DISCORD_TICKET_CATEGORY_ID || null,
+    ticketStaffRoleId: process.env.DISCORD_TICKET_STAFF_ROLE_ID || null,
+    ticketPanelChannelId: process.env.DISCORD_TICKET_PANEL_CHANNEL_ID || null,
+    ticketCooldownSeconds: Number(process.env.TWO_TICKET_COOLDOWN_SECONDS ?? 300),
     presenceProbe: process.env.TWO_PRESENCE_PROBE !== '0',
     dbPath: resolveDbSpec(),
     dbPoolMax: Number(process.env.TWO_DB_POOL_MAX ?? 5),
