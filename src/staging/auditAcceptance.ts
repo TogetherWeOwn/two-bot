@@ -33,6 +33,7 @@ export interface AuditAcceptanceResult {
 export function evaluateAuditChannels(
   channels: StagingChannel[],
   guildId: string,
+  botId?: string,
 ): AuditAcceptanceResult {
   const missing: string[] = [];
   const memberReadable: string[] = [];
@@ -52,7 +53,11 @@ export function evaluateAuditChannels(
       const everyone = overwrites.find((overwrite) => overwrite.id === guildId);
       const denied = everyone ? BigInt(everyone.deny) : 0n;
       if ((denied & VIEW_CHANNEL) === 0n) return true;
-      return overwrites.some((overwrite) => (BigInt(overwrite.allow ?? '0') & VIEW_CHANNEL) !== 0n);
+      return overwrites.some(
+        (overwrite) =>
+          !(overwrite.id === botId && overwrite.type === 1) &&
+          (BigInt(overwrite.allow ?? '0') & VIEW_CHANNEL) !== 0n,
+      );
     });
     if (readable) memberReadable.push(name);
   }
@@ -60,11 +65,43 @@ export function evaluateAuditChannels(
   return { missing, memberReadable, duplicates };
 }
 
-export function auditAcceptanceSql(guildId: string): string {
+export interface AuditAcceptanceRow {
+  event_kind: string;
+  rows: number | string;
+  distinct_entries: number | string;
+  pending_deliveries: number | string;
+}
+
+export interface AuditEvidenceResult {
+  missing: OperationalAuditKind[];
+  duplicates: OperationalAuditKind[];
+  pendingDeliveries: OperationalAuditKind[];
+}
+
+export function evaluateAuditEvidence(rows: AuditAcceptanceRow[]): AuditEvidenceResult {
+  const byKind = new Map(rows.map((row) => [row.event_kind, row]));
+  const missing: OperationalAuditKind[] = [];
+  const duplicates: OperationalAuditKind[] = [];
+  const pendingDeliveries: OperationalAuditKind[] = [];
+  for (const kind of AUDIT_ACCEPTANCE_KINDS) {
+    const row = byKind.get(kind);
+    if (!row || Number(row.distinct_entries) < 1) {
+      missing.push(kind);
+      continue;
+    }
+    if (Number(row.rows) !== Number(row.distinct_entries)) duplicates.push(kind);
+    if (Number(row.pending_deliveries) > 0) pendingDeliveries.push(kind);
+  }
+  return { missing, duplicates, pendingDeliveries };
+}
+
+export function auditAcceptanceSql(guildId: string, since?: string): string {
   const quotedGuild = guildId.replaceAll("'", "''");
   const kinds = AUDIT_ACCEPTANCE_KINDS.map((kind) => `'${kind}'`).join(', ');
-  return `SELECT event_kind, COUNT(*) AS rows, COUNT(DISTINCT entry_id) AS distinct_entries\n` +
+  const sinceSql = since ? ` AND occurred_at >= '${since.replaceAll("'", "''")}'` : '';
+  return `SELECT event_kind, COUNT(*) AS rows, COUNT(DISTINCT entry_id) AS distinct_entries,\n` +
+    `       COUNT(*) FILTER (WHERE delivery_state IN ('pending', 'delivering')) AS pending_deliveries\n` +
     `FROM operational_audit_log\n` +
-    `WHERE guild_id = '${quotedGuild}' AND event_kind IN (${kinds})\n` +
+    `WHERE guild_id = '${quotedGuild}' AND event_kind IN (${kinds})${sinceSql}\n` +
     `GROUP BY event_kind ORDER BY event_kind;`;
 }

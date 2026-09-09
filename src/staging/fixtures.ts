@@ -339,6 +339,7 @@ export async function resetStagingData(db: Db, opts: SeedOptions): Promise<SeedR
     await tx.prepare(`DELETE FROM events WHERE guild_id = ?`).run(opts.guildId);
     await tx.prepare(`DELETE FROM members WHERE guild_id = ?`).run(opts.guildId);
     await tx.prepare(`DELETE FROM invite_snapshots WHERE guild_id = ?`).run(opts.guildId);
+    await tx.prepare(`DELETE FROM operational_audit_log WHERE guild_id = ?`).run(opts.guildId);
   });
   return seedFixtures(db, opts);
 }

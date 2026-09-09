@@ -56,6 +56,7 @@ const TABLES = [
   'level_role_rewards',
   'level_import_runs',
   'member_levels',
+  'operational_audit_log',
 ];
 
 /**
@@ -72,6 +73,7 @@ const SQLITE_TABLES = [
   'level_role_rewards',
   'level_import_runs',
   'member_levels',
+  'operational_audit_log',
 ];
 
 export interface TestDb {

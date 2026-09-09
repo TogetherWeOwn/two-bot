@@ -47,7 +47,10 @@ import {
   AUDIT_ACCEPTANCE_KINDS,
   auditAcceptanceSql,
   evaluateAuditChannels,
+  evaluateAuditEvidence,
+  type AuditAcceptanceRow,
 } from '../src/staging/auditAcceptance.ts';
+import { openDb } from '../src/store/db.ts';
 
 const API = 'https://discord.com/api/v10';
 
@@ -64,6 +67,25 @@ if (!token) {
 const tokenCheck = checkStagingToken(token);
 if (!tokenCheck.ok) {
   console.error(`\n${tokenCheck.message}\n`);
+  process.exit(2);
+}
+
+const auditSince = process.env.TWO_AUDIT_ACCEPTANCE_SINCE;
+if (!auditSince || !Number.isFinite(Date.parse(auditSince))) {
+  console.error(
+    '\nMissing or invalid TWO_AUDIT_ACCEPTANCE_SINCE. Set it to the ISO timestamp immediately before ' +
+      'driving the controlled audit scenarios so old staging rows cannot produce a false PASS.\n',
+  );
+  process.exit(2);
+}
+const stagingDbUrl = process.env.TWO_STAGING_DATABASE_URL?.trim();
+if (!stagingDbUrl || !/^postgres(ql)?:\/\//.test(stagingDbUrl)) {
+  console.error('\nMissing TWO_STAGING_DATABASE_URL (must be the Postgres staging database).\n');
+  process.exit(2);
+}
+const stagingDbName = new URL(stagingDbUrl).pathname.split('/').filter(Boolean).at(-1) ?? '';
+if (!/staging|test/i.test(stagingDbName)) {
+  console.error(`\nRefusing audit acceptance against non-staging database "${stagingDbName}".\n`);
   process.exit(2);
 }
 
@@ -173,7 +195,7 @@ if (channels.status !== 200 || !channels.body) {
       );
   }
 
-  const auditChannels = evaluateAuditChannels(channels.body, guildId);
+  const auditChannels = evaluateAuditChannels(channels.body, guildId, botId);
   for (const name of auditChannels.missing) fail(`#${name} is missing`, 'the parity suite writes evidence there');
   for (const name of auditChannels.duplicates) {
     fail(`#${name} is duplicated`, 'every matching staff log must be private; reconcile the duplicate explicitly');
@@ -264,20 +286,30 @@ if (app.status === 200 && app.body) {
   warn('could not read the application flags', `HTTP ${app.status}`);
 }
 
-// 7. The live-event half of parity is deliberately explicit. The verifier can
-// prove the guild shape and permissions over REST, but it cannot synthesize a
-// human voice move or moderator action by itself. Print the exact database
-// reconciliation query so every slice feeds one evidence index instead of
-// inventing a different acceptance packet.
+// 7. Reconcile the controlled live scenarios against the staging database.
+// The explicit lower bound prevents yesterday's evidence hiding a dead gateway
+// listener today.
 console.log('\nAudit parity acceptance\n');
-for (const kind of AUDIT_ACCEPTANCE_KINDS) {
-  console.log(`  VERIFY ${kind}`);
+let auditDb;
+try {
+  auditDb = await openDb(stagingDbUrl, { skipMigrations: true, applicationName: 'two-bot-staging-verify' });
+  const rows = await auditDb.prepare(auditAcceptanceSql(guildId, auditSince)).all<AuditAcceptanceRow>();
+  const evidence = evaluateAuditEvidence(rows);
+  for (const kind of AUDIT_ACCEPTANCE_KINDS) {
+    if (evidence.missing.includes(kind)) fail(`${kind} durable evidence is missing`, `since ${auditSince}`);
+    else if (evidence.duplicates.includes(kind)) fail(`${kind} contains duplicate entry ids`, 'rows must equal distinct entry_id count');
+    else if (evidence.pendingDeliveries.includes(kind)) fail(`${kind} has a pending audit mirror`, 'retry delivery before acceptance');
+    else pass(`${kind} evidence`, `durable and delivered since ${auditSince}`);
+  }
+} catch (err) {
+  fail('audit evidence query failed', String(err));
+} finally {
+  await auditDb?.close();
 }
-console.log('\nAfter driving the controlled TWO Staging scenarios, reconcile with:\n');
-console.log(auditAcceptanceSql(guildId));
-console.log('\nRequired controls:');
+
+console.log('\nRequired controlled scenarios:');
 console.log('  - repeat one event and prove entry_id dedupe keeps one durable row and one mirror');
-console.log('  - remove Send Messages from one log channel and prove the durable row survives');
+console.log('  - remove Send Messages from one log channel and prove the durable row survives, then retries');
 console.log('  - attempt a protected/higher-role moderation target and prove refusal is mirrored');
 console.log('  - inspect payloads for absence of message content, usernames, nicknames and mentions');
 
