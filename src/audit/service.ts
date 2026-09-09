@@ -1,7 +1,7 @@
 import { PermissionsBitField, type Client, type GuildTextBasedChannel } from 'discord.js';
 import { log } from '../core/log.ts';
 import { auditEventFields, formatAuditEvent, type AuditChannel, type OperationalAuditEvent } from './events.ts';
-import type { OperationalAuditStore } from './store.ts';
+import type { OperationalAuditStore, StoredOperationalAudit } from './store.ts';
 
 export interface AuditChannelIds {
   audit: string | null;
@@ -19,6 +19,7 @@ export interface OperationalAuditOptions {
 
 export interface AuditSink {
   record(event: OperationalAuditEvent): Promise<boolean>;
+  retryPending(): Promise<number>;
 }
 
 async function botCanPost(
@@ -41,60 +42,98 @@ async function botCanPost(
 export function makeOperationalAudit(client: Client, options: OperationalAuditOptions): AuditSink {
   const configured = new Set(Object.values(options.channels).filter((id): id is string => Boolean(id)));
 
+  const deliver = async (stored: StoredOperationalAudit): Promise<void> => {
+    const channelId = stored.mirrorChannelId;
+    if (!channelId) return;
+    if (options.dryRun) {
+      await options.store?.markDeliveryFailed(stored.event.entryId, 'dry_run');
+      log.info('operational_audit_dry_run', { entryId: stored.event.entryId, channelId });
+      return;
+    }
+
+    const channel = await botCanPost(client, channelId, stored.event.guildId);
+    if (!channel) {
+      await options.store?.markDeliveryFailed(stored.event.entryId, 'channel_unavailable');
+      log.error('operational_audit_undeliverable', {
+        entryId: stored.event.entryId,
+        channelId,
+        reason: 'channel missing, wrong guild, not text, or bot lacks View/Send',
+      });
+      return;
+    }
+
+    try {
+      await channel.send({
+        content: formatAuditEvent(stored.event),
+        allowedMentions: { parse: [] },
+      });
+      await options.store?.markDelivered(stored.event.entryId);
+      log.info('operational_audit_posted', { entryId: stored.event.entryId, channelId });
+    } catch (err) {
+      await options.store?.markDeliveryFailed(stored.event.entryId, 'discord_send_failed');
+      log.error('operational_audit_post_failed', { entryId: stored.event.entryId, channelId, err: String(err) });
+    }
+  };
+
   return {
     async record(event) {
-      // The Discord mirror is itself a message. Never let it recursively audit
-      // its own posts, even if the bot's user id is unavailable on a partial.
-      if (event.sourceChannelId && configured.has(event.sourceChannelId)) return false;
+      const sourceIsAuditSink = Boolean(event.sourceChannelId && configured.has(event.sourceChannelId));
+      const requestedChannelId = sourceIsAuditSink ? null : channelFor(options.channels, event.channel);
+      const mirrorChannelId =
+        requestedChannelId && options.guildId && event.guildId === options.guildId
+          ? requestedChannelId
+          : null;
 
       log.info('operational_audit', auditEventFields(event));
 
       let inserted = true;
       if (options.store) {
         try {
-          inserted = await options.store.record(event);
+          inserted = await options.store.record(event, mirrorChannelId);
         } catch (err) {
           log.error('operational_audit_write_failed', { entryId: event.entryId, err: String(err) });
-          inserted = false;
+          return false;
         }
       }
-      if (!inserted) return false;
 
-      const channelId = channelFor(options.channels, event.channel);
-      if (!channelId) return true;
-      if (!options.guildId || event.guildId !== options.guildId) {
+      if (sourceIsAuditSink) {
+        log.info('operational_audit_tamper_recorded', {
+          entryId: event.entryId,
+          sourceChannelId: event.sourceChannelId,
+        });
+        return inserted;
+      }
+      if (requestedChannelId && !mirrorChannelId) {
         log.error('operational_audit_undeliverable', {
           entryId: event.entryId,
-          channelId,
+          channelId: requestedChannelId,
           reason: 'event guild is not the configured mirror guild',
         });
-        return true;
+        return inserted;
       }
-      if (options.dryRun) {
-        log.info('operational_audit_dry_run', { entryId: event.entryId, channelId });
-        return true;
+      if (!mirrorChannelId) return inserted;
+
+      if (!options.store) {
+        const ephemeral: StoredOperationalAudit = {
+          event,
+          mirrorChannelId,
+          deliveryState: 'delivering',
+          deliveryAttempts: 0,
+        };
+        await deliver(ephemeral);
+        return inserted;
       }
 
-      const channel = await botCanPost(client, channelId, event.guildId);
-      if (!channel) {
-        log.error('operational_audit_undeliverable', {
-          entryId: event.entryId,
-          channelId,
-          reason: 'channel missing, wrong guild, not text, or bot lacks View/Send',
-        });
-        return true;
-      }
+      const claimed = await options.store.claim(event.entryId);
+      if (claimed) await deliver(claimed);
+      return inserted;
+    },
 
-      try {
-        await channel.send({
-          content: formatAuditEvent(event),
-          allowedMentions: { parse: [] },
-        });
-        log.info('operational_audit_posted', { entryId: event.entryId, channelId });
-      } catch (err) {
-        log.error('operational_audit_post_failed', { entryId: event.entryId, channelId, err: String(err) });
-      }
-      return true;
+    async retryPending() {
+      if (!options.store) return 0;
+      const pending = await options.store.claimPending();
+      for (const item of pending) await deliver(item);
+      return pending.length;
     },
   };
 }

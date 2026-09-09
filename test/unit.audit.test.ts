@@ -1,8 +1,8 @@
 import { EventEmitter } from 'node:events';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { AuditLogEvent, Events, GatewayIntentBits, type Client } from 'discord.js';
-import { INTENTS, registerHandlers } from '../src/discord/client.ts';
+import { AuditLogEvent, ChannelType, Events, GatewayIntentBits, Partials, type Client } from 'discord.js';
+import { createClient, INTENTS, registerHandlers } from '../src/discord/client.ts';
 import { moderationAuditEvent } from '../src/audit/discordEvents.ts';
 import { formatAuditEvent, type OperationalAuditEvent } from '../src/audit/events.ts';
 import { makeOperationalAudit } from '../src/audit/service.ts';
@@ -38,6 +38,7 @@ function deps(events: OperationalAuditEvent[]) {
         events.push(event);
         return true;
       },
+      retryPending: async () => 0,
     },
   };
 }
@@ -48,8 +49,45 @@ function roles(ids: string[]) {
   return { cache: new Map(ids.map((id) => [id, {}])) };
 }
 
-test('gateway requests the moderation intent required by GuildAuditLogEntryCreate', () => {
+test('gateway requests moderation and partial messages for complete audit delivery', () => {
   assert.ok(INTENTS.includes(GatewayIntentBits.GuildModeration));
+  const client = createClient();
+  assert.ok(client.options.partials?.includes(Partials.Message));
+  client.destroy();
+});
+
+test('uncached delete and update gateway actions emit partial messages', async () => {
+  const client = createClient();
+  const internals = client as unknown as {
+    guilds: { _add(data: unknown): unknown };
+    channels: { _add(data: unknown): unknown };
+    actions: {
+      MessageDelete: { handle(data: unknown): unknown };
+      MessageUpdate: { handle(data: unknown): { old?: never; updated?: never } };
+    };
+  };
+  internals.guilds._add({ id: GUILD, unavailable: false });
+  internals.channels._add({ id: CHANNEL_A, guild_id: GUILD, type: ChannelType.GuildText, name: 'general' });
+
+  const deleted: Array<{ id: string; partial: boolean }> = [];
+  const updated: Array<{ oldPartial: boolean; newPartial: boolean }> = [];
+  client.on(Events.MessageDelete, (message) => deleted.push({ id: message.id, partial: message.partial }));
+  client.on(Events.MessageUpdate, (oldMessage, newMessage) => {
+    updated.push({ oldPartial: oldMessage.partial, newPartial: newMessage.partial });
+  });
+
+  internals.actions.MessageDelete.handle({ id: 'uncached-delete', channel_id: CHANNEL_A, guild_id: GUILD });
+  const edit = internals.actions.MessageUpdate.handle({
+    id: 'uncached-edit',
+    channel_id: CHANNEL_A,
+    guild_id: GUILD,
+    edited_timestamp: '2026-09-09T00:00:00.000Z',
+  });
+  if (edit.old && edit.updated) client.emit(Events.MessageUpdate, edit.old, edit.updated);
+
+  assert.deepEqual(deleted, [{ id: 'uncached-delete', partial: true }]);
+  assert.deepEqual(updated, [{ oldPartial: true, newPartial: true }]);
+  client.destroy();
 });
 
 test('gateway logging covers edit/delete, member deltas and voice move without content or nicknames', async () => {
@@ -196,6 +234,82 @@ test('mirror text suppresses raw message content and keeps stable ids', () => {
   assert.match(text, new RegExp(MEMBER));
   assert.match(text, /message-2/);
   assert.doesNotMatch(text, /content|username|nickname|reason/);
+});
+
+test('audit-sink message tampering is stored but never remirrored', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  let sent = 0;
+  const channel = {
+    id: CHANNEL_A,
+    guild: { id: GUILD, members: { me: { id: 'bot' } } },
+    isTextBased: () => true,
+    isDMBased: () => false,
+    permissionsFor: () => ({ has: () => true }),
+    send: async () => { sent++; },
+  };
+  const client = { channels: { cache: new Map([[CHANNEL_A, channel]]), fetch: async () => channel } } as unknown as Client;
+  const sink = makeOperationalAudit(client, {
+    guildId: GUILD,
+    channels: { audit: CHANNEL_A, voice: null, moderation: null },
+    store,
+  });
+  const recorded = await sink.record({
+    entryId: 'tamper-delete',
+    kind: 'message_delete',
+    channel: 'audit',
+    guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z',
+    sourceChannelId: CHANNEL_A,
+    messageId: 'audit-message',
+  });
+  assert.equal(recorded, true);
+  assert.equal(sent, 0);
+  const row = await store.get('tamper-delete');
+  assert.equal(row?.deliveryState, 'none');
+  await db.close();
+});
+
+test('failed audit delivery is retryable without duplicating the durable row', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  let attempts = 0;
+  const channel = {
+    id: CHANNEL_A,
+    guild: { id: GUILD, members: { me: { id: 'bot' } } },
+    isTextBased: () => true,
+    isDMBased: () => false,
+    permissionsFor: () => ({ has: () => true }),
+    send: async () => {
+      attempts++;
+      if (attempts === 1) throw new Error('transient Discord failure');
+    },
+  };
+  const client = { channels: { cache: new Map([[CHANNEL_A, channel]]), fetch: async () => channel } } as unknown as Client;
+  const sink = makeOperationalAudit(client, {
+    guildId: GUILD,
+    channels: { audit: CHANNEL_A, voice: null, moderation: null },
+    store,
+  });
+  const event: OperationalAuditEvent = {
+    entryId: 'retry-me',
+    kind: 'message_delete',
+    channel: 'audit',
+    guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z',
+    sourceChannelId: CHANNEL_B,
+    messageId: 'message-2',
+  };
+  assert.equal(await sink.record(event), true);
+  assert.equal((await store.get(event.entryId))?.deliveryState, 'pending');
+  assert.equal(await sink.record(event), false);
+  assert.equal(attempts, 2);
+  const row = await store.get(event.entryId);
+  assert.equal(row?.deliveryState, 'delivered');
+  assert.equal(row?.deliveryAttempts, 2);
+  const count = await db.prepare(`SELECT COUNT(*) AS n FROM operational_audit_log`).get<{ n: number }>();
+  assert.equal(Number(count?.n), 1);
+  await db.close();
 });
 
 test('Discord mirror refuses a configured channel from another guild', async () => {

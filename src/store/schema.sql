@@ -163,7 +163,14 @@ CREATE TABLE IF NOT EXISTS operational_audit_log (
   message_id              TEXT,
   action                  TEXT,
   metadata_json           TEXT NOT NULL,
-  created_at              TEXT NOT NULL
+  created_at              TEXT NOT NULL,
+  mirror_channel_id       TEXT,
+  delivery_state          TEXT NOT NULL DEFAULT 'none',
+  delivery_attempts       INTEGER NOT NULL DEFAULT 0,
+  delivery_attempted_at   TEXT,
+  delivery_last_error     TEXT,
+  delivery_lease_until    TEXT,
+  mirrored_at             TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_operational_audit_time
@@ -172,6 +179,8 @@ CREATE INDEX IF NOT EXISTS idx_operational_audit_kind
   ON operational_audit_log (guild_id, event_kind, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_operational_audit_target
   ON operational_audit_log (guild_id, target_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_operational_audit_delivery
+  ON operational_audit_log (delivery_state, created_at);
 
 -- The website's event_key -> Discord's scheduled event id. This is what makes
 -- event.upsert an upsert.

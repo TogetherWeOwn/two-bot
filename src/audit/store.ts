@@ -1,5 +1,14 @@
 import type { Db } from '../store/driver.ts';
-import type { OperationalAuditEvent } from './events.ts';
+import type { AuditChannel, OperationalAuditEvent, OperationalAuditKind } from './events.ts';
+
+export type AuditDeliveryState = 'none' | 'pending' | 'delivering' | 'delivered';
+
+export interface StoredOperationalAudit {
+  event: OperationalAuditEvent;
+  mirrorChannelId: string | null;
+  deliveryState: AuditDeliveryState;
+  deliveryAttempts: number;
+}
 
 export class OperationalAuditStore {
   private db: Db;
@@ -8,14 +17,17 @@ export class OperationalAuditStore {
     this.db = db;
   }
 
-  async record(event: OperationalAuditEvent): Promise<boolean> {
+  async record(event: OperationalAuditEvent, mirrorChannelId: string | null = null): Promise<boolean> {
+    const now = new Date().toISOString();
     const result = await this.db
       .prepare(
         `INSERT INTO operational_audit_log
            (entry_id, event_kind, guild_id, occurred_at, actor_id, target_id,
             source_channel_id, destination_channel_id, message_id, action,
-            metadata_json, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            metadata_json, created_at, mirror_channel_id, delivery_state,
+            delivery_attempts, delivery_attempted_at, delivery_last_error,
+            delivery_lease_until, mirrored_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, NULL, NULL, NULL)
          ON CONFLICT (entry_id) DO NOTHING`,
       )
       .run(
@@ -30,8 +42,130 @@ export class OperationalAuditStore {
         event.messageId ?? null,
         event.action ?? null,
         JSON.stringify(event.metadata ?? {}),
-        new Date().toISOString(),
+        now,
+        mirrorChannelId,
+        mirrorChannelId ? 'pending' : 'none',
       );
     return result.changes === 1;
+  }
+
+  async get(entryId: string): Promise<StoredOperationalAudit | null> {
+    const row = await this.db.prepare(`${SELECT_AUDIT} WHERE entry_id = ?`).get<Record<string, unknown>>(entryId);
+    return row ? storedAudit(row) : null;
+  }
+
+  async claim(entryId: string, leaseMs = 60_000): Promise<StoredOperationalAudit | null> {
+    const now = new Date();
+    const leaseUntil = new Date(now.getTime() + leaseMs).toISOString();
+    const result = await this.db
+      .prepare(
+        `UPDATE operational_audit_log
+            SET delivery_state = 'delivering', delivery_lease_until = ?
+          WHERE entry_id = ?
+            AND mirror_channel_id IS NOT NULL
+            AND (delivery_state = 'pending'
+              OR (delivery_state = 'delivering' AND delivery_lease_until < ?))`,
+      )
+      .run(leaseUntil, entryId, now.toISOString());
+    return result.changes === 1 ? await this.get(entryId) : null;
+  }
+
+  async claimPending(limit = 25, leaseMs = 60_000): Promise<StoredOperationalAudit[]> {
+    const rows = await this.db
+      .prepare(
+        `${SELECT_AUDIT}
+          WHERE mirror_channel_id IS NOT NULL
+            AND (delivery_state = 'pending'
+              OR (delivery_state = 'delivering' AND delivery_lease_until < ?))
+          ORDER BY created_at, entry_id LIMIT ?`,
+      )
+      .all<Record<string, unknown>>(new Date().toISOString(), limit);
+    const claimed: StoredOperationalAudit[] = [];
+    for (const row of rows) {
+      const item = await this.claim(String(row.entry_id), leaseMs);
+      if (item) claimed.push(item);
+    }
+    return claimed;
+  }
+
+  async markDelivered(entryId: string): Promise<void> {
+    const now = new Date().toISOString();
+    await this.db
+      .prepare(
+        `UPDATE operational_audit_log
+            SET delivery_state = 'delivered',
+                delivery_attempts = delivery_attempts + 1,
+                delivery_attempted_at = ?,
+                delivery_last_error = NULL,
+                delivery_lease_until = NULL,
+                mirrored_at = ?
+          WHERE entry_id = ? AND delivery_state = 'delivering'`,
+      )
+      .run(now, now, entryId);
+  }
+
+  async markDeliveryFailed(entryId: string, classification: string): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE operational_audit_log
+            SET delivery_state = 'pending',
+                delivery_attempts = delivery_attempts + 1,
+                delivery_attempted_at = ?,
+                delivery_last_error = ?,
+                delivery_lease_until = NULL
+          WHERE entry_id = ? AND delivery_state = 'delivering'`,
+      )
+      .run(new Date().toISOString(), classification.slice(0, 120), entryId);
+  }
+}
+
+const SELECT_AUDIT =
+  `SELECT entry_id, event_kind, guild_id, occurred_at, actor_id, target_id,
+          source_channel_id, destination_channel_id, message_id, action,
+          metadata_json, mirror_channel_id, delivery_state, delivery_attempts
+     FROM operational_audit_log`;
+
+function storedAudit(row: Record<string, unknown>): StoredOperationalAudit {
+  return {
+    event: {
+      entryId: String(row.entry_id),
+      kind: String(row.event_kind) as OperationalAuditKind,
+      channel: channelForKind(String(row.event_kind) as OperationalAuditKind),
+      guildId: String(row.guild_id),
+      occurredAt: toIso(row.occurred_at),
+      actorId: nullableString(row.actor_id),
+      targetId: nullableString(row.target_id),
+      sourceChannelId: nullableString(row.source_channel_id),
+      destinationChannelId: nullableString(row.destination_channel_id),
+      messageId: nullableString(row.message_id),
+      action: nullableString(row.action),
+      metadata: parseMetadata(row.metadata_json),
+    },
+    mirrorChannelId: nullableString(row.mirror_channel_id),
+    deliveryState: String(row.delivery_state) as AuditDeliveryState,
+    deliveryAttempts: Number(row.delivery_attempts ?? 0),
+  };
+}
+
+function channelForKind(kind: OperationalAuditKind): AuditChannel {
+  if (kind.startsWith('voice_')) return 'voice';
+  if (kind === 'moderation_action') return 'moderation';
+  return 'audit';
+}
+
+function nullableString(value: unknown): string | null {
+  return value === null || value === undefined ? null : String(value);
+}
+
+function toIso(value: unknown): string {
+  return value instanceof Date ? value.toISOString() : String(value);
+}
+
+function parseMetadata(value: unknown): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(String(value ?? '{}'));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
   }
 }

@@ -256,6 +256,21 @@ if (!cfg.guildId) {
   });
 }
 
+// Retry durable audit mirrors after transient Discord failures. The row itself
+// is the queue, so a restart resumes exactly where the prior process stopped.
+const auditDeliverySweep = setInterval(
+  () => {
+    void audit.retryPending().catch((err: unknown) => {
+      log.error('operational_audit_retry_failed', { err: String(err) });
+    });
+  },
+  60 * 1000,
+);
+auditDeliverySweep.unref();
+void audit.retryPending().catch((err: unknown) => {
+  log.error('operational_audit_retry_failed', { err: String(err) });
+});
+
 // Inactivity sweep once an hour. Cheap query; no outbound messages.
 const sweep = setInterval(
   () => {
@@ -299,6 +314,7 @@ if (healthPort > 0) {
 async function shutdown(signal: string) {
   log.info('shutdown', { signal });
   clearInterval(sweep);
+  clearInterval(auditDeliverySweep);
   presenceProbe?.stop();
   communitySnapshots?.stop();
   scheduledEvents?.stop();

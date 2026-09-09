@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, Events, type Guild } from 'discord.js';
+import { Client, GatewayIntentBits, Events, Partials, type Guild } from 'discord.js';
 import { nowIso } from '../core/events.ts';
 import type { FunnelHandlers } from '../core/handlers.ts';
 import type { InviteTracker, InviteState } from '../core/inviteTracker.ts';
@@ -55,7 +55,7 @@ export interface BotDeps {
 }
 
 export function createClient(): Client {
-  return new Client({ intents: INTENTS });
+  return new Client({ intents: INTENTS, partials: [Partials.Message] });
 }
 
 async function snapshotInvites(guild: Guild, invites: InviteTracker): Promise<string[]> {

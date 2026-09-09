@@ -112,6 +112,8 @@ export async function openSqlite(path: string): Promise<Db> {
     '0002_internal_actions',
     '0008_members_third_message_at',
     '0010_leveling',
+    '0011_operational_audit',
+    '0012_operational_audit_delivery',
   ]) {
     stamp.run(id, new Date().toISOString());
   }

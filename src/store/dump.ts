@@ -38,7 +38,7 @@ import { pipeline } from 'node:stream/promises';
 import type { Db } from './driver.ts';
 
 /** Everything the bot owns. The website's own tables are not ours to back up. */
-export const DUMP_TABLES = ['events', 'members', 'invite_snapshots'] as const;
+export const DUMP_TABLES = ['events', 'members', 'invite_snapshots', 'operational_audit_log'] as const;
 export type DumpTable = (typeof DUMP_TABLES)[number];
 
 /**
@@ -60,7 +60,7 @@ function assertDumpTable(name: unknown, where: string): asserts name is DumpTabl
   }
 }
 
-export const DUMP_VERSION = 1;
+export const DUMP_VERSION = 2;
 
 export interface DumpTableInfo {
   name: DumpTable;
@@ -105,6 +105,7 @@ function orderFor(table: DumpTable, columns: string[]): string {
   if (table === 'events') return 'id';
   if (table === 'members') return 'guild_id, member_id';
   if (table === 'invite_snapshots') return 'guild_id, code';
+  if (table === 'operational_audit_log') return 'entry_id';
   return columns.slice(0, 1).join(', ');
 }
 
