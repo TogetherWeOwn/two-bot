@@ -110,8 +110,10 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
   const roleIds = new Map<string, string>([[snapshot.guildId, current.guildId]]);
   const channelIds = new Map<string, string>();
   const roleOperations: RestoreOperation[] = [];
+  const rolePositionOperations: RestoreOperation[] = [];
   const categoryOperations: RestoreOperation[] = [];
   const channelOperations: RestoreOperation[] = [];
+  const channelPositionOperations: RestoreOperation[] = [];
   const overwriteOperations: RestoreOperation[] = [];
   const settingsOperations: RestoreOperation[] = [];
   const emojiOperations: RestoreOperation[] = [];
@@ -127,7 +129,9 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
   }
 
   const currentRolesByName = new Map(current.roles.filter((role) => !role.managed).map((role) => [role.name, role]));
-  for (const role of snapshot.roles.filter((item) => !item.managed && item.id !== snapshot.guildId).sort((a, b) => a.position - b.position)) {
+  const sourceRoles = snapshot.roles.filter((item) => !item.managed && item.id !== snapshot.guildId).sort((a, b) => a.position - b.position);
+  let rolePositionsDiffer = false;
+  for (const role of sourceRoles) {
     const actual = currentRolesByName.get(role.name);
     if (!actual) {
       roleOperations.push({
@@ -138,30 +142,46 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
         captureId: { resource: 'role', sourceId: role.id },
       });
       roleWrites++;
+      rolePositionsDiffer = true;
       continue;
     }
     roleIds.set(role.id, actual.id);
+    rolePositionsDiffer ||= role.position !== actual.position;
     if (!same(roleBody(role), roleBody(actual))) {
       roleOperations.push({ label: `patch role ${role.name}`, method: 'PATCH', path: `/guilds/${current.guildId}/roles/${actual.id}`, body: roleBody(role) });
       roleWrites++;
     }
   }
+  if (rolePositionsDiffer) {
+    rolePositionOperations.push({
+      label: 'restore role positions',
+      method: 'PATCH',
+      path: `/guilds/${current.guildId}/roles`,
+      body: sourceRoles.map((role) => ({ id: reference('role', role.id), position: role.position })),
+    });
+    roleWrites++;
+  }
 
   const currentCategories = new Map(current.channels.filter((channel) => channel.type === 4).map((channel) => [channel.name, channel]));
+  let channelPositionsDiffer = false;
+  const sourceChannelPositions: RestoreValue[] = [];
   for (const category of snapshot.channels.filter((channel) => channel.type === 4).sort((a, b) => a.position - b.position)) {
     const actual = currentCategories.get(category.name);
     if (actual) {
       channelIds.set(category.id, actual.id);
+      channelPositionsDiffer ||= category.position !== actual.position;
     } else {
       categoryOperations.push({
         label: `create category ${category.name}`,
         method: 'POST',
         path: `/guilds/${current.guildId}/channels`,
-        body: { name: category.name, type: 4 },
+        body: { name: category.name, type: 4, position: category.position },
         captureId: { resource: 'channel', sourceId: category.id },
       });
       channelWrites++;
+      channelPositionsDiffer = true;
     }
+    sourceChannelPositions.push({ id: reference('channel', category.id), position: category.position });
 
     const expectedOverwrites = category.permission_overwrites ?? [];
     const knownExpectedOverwrites = expectedOverwrites.map((overwrite) => ({
@@ -193,18 +213,25 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
         label: `create channel ${channel.name}`,
         method: 'POST',
         path: `/guilds/${current.guildId}/channels`,
-        body: targetBody,
+        body: { ...(targetBody as JsonObject), position: channel.position },
         captureId: { resource: 'channel', sourceId: channel.id },
       });
       channelWrites++;
+      channelPositionsDiffer = true;
     } else {
       channelIds.set(channel.id, actual.id);
+      channelPositionsDiffer ||= channel.position !== actual.position;
       const actualBody = channelCoreBody(actual, actual.parent_id);
       if ((parent && !actualParentId) || !same(expectedKnown, actualBody)) {
         channelOperations.push({ label: `patch channel ${channel.name}`, method: 'PATCH', path: { channelSourceId: channel.id }, body: targetBody });
         channelWrites++;
       }
     }
+    sourceChannelPositions.push({
+      id: reference('channel', channel.id),
+      position: channel.position,
+      parent_id: parent ? reference('channel', parent.id) : null,
+    });
 
     const expectedOverwrites = channel.permission_overwrites ?? [];
     const knownExpectedOverwrites = expectedOverwrites.map((overwrite) => ({
@@ -221,6 +248,16 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
       });
       overwriteWrites += expectedOverwrites.length || 1;
     }
+  }
+
+  if (channelPositionsDiffer) {
+    channelPositionOperations.push({
+      label: 'restore channel positions',
+      method: 'PATCH',
+      path: `/guilds/${current.guildId}/channels`,
+      body: sourceChannelPositions,
+    });
+    channelWrites++;
   }
 
   const guildBody = bodyFromFields(snapshot.guild, GUILD_FIELDS) as Record<string, RestoreValue>;
@@ -261,8 +298,10 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
 
   const operations = [
     ...roleOperations,
+    ...rolePositionOperations,
     ...categoryOperations,
     ...channelOperations,
+    ...channelPositionOperations,
     ...overwriteOperations,
     ...settingsOperations,
     ...emojiOperations,

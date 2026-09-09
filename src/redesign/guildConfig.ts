@@ -201,30 +201,38 @@ export function driftAgainstAcceptedSpec(snapshot: GuildConfigSnapshot): GuildCo
   const wanted = acceptedSpec(snapshot.guildId);
   pushIfDifferent(drift, 'guild.description', SERVER_DESCRIPTION, snapshot.guild.description ?? null, 'patch');
 
-  for (const role of [OWNER_ROLE, MODERATOR_ROLE]) {
+  const wantedRoles = [OWNER_ROLE, MODERATOR_ROLE];
+  const actualRoles = new Map<string, GuildConfigRole>();
+  for (const role of wantedRoles) {
     const actual = snapshot.roles.find((item) => !item.managed && item.name === role.name);
     if (!actual) {
       drift.push({ path: `roles.${role.name}`, expected: role, actual: null, restore: 'create' });
       continue;
     }
+    actualRoles.set(role.name, actual);
     for (const field of ['color', 'hoist', 'permissions', 'mentionable'] as const) {
       pushIfDifferent(drift, `roles.${role.name}.${field}`, role[field], actual[field], 'patch');
     }
   }
+  const expectedRoleOrder = wantedRoles.map((role) => role.name).filter((name) => actualRoles.has(name));
+  const actualRoleOrder = [...actualRoles.values()].sort((a, b) => b.position - a.position).map((role) => role.name);
+  pushIfDifferent(drift, 'roles.positions', expectedRoleOrder, actualRoleOrder, 'patch');
 
-  for (const category of CATEGORIES) {
+  for (const [categoryPosition, category] of CATEGORIES.entries()) {
     const actualCategory = snapshot.channels.find((channel) => channel.type === 4 && channel.name === category.name);
     if (!actualCategory) {
-      drift.push({ path: `channels.${category.name}`, expected: { name: category.name, type: 4 }, actual: null, restore: 'create' });
+      drift.push({ path: `channels.${category.name}`, expected: { name: category.name, type: 4, position: categoryPosition }, actual: null, restore: 'create' });
       continue;
     }
-    for (const name of category.channels) {
+    pushIfDifferent(drift, `channels.${category.name}.position`, categoryPosition, actualCategory.position, 'patch');
+    for (const [channelPosition, name] of category.channels.entries()) {
       const type = VOICE_CHANNEL_NAMES.has(name) ? 2 : 0;
       const actual = snapshot.channels.find((channel) => channel.type === type && channel.name === name && channel.parent_id === actualCategory.id);
       if (!actual) {
-        drift.push({ path: `channels.${category.name}.${name}`, expected: { name, type, parent: category.name }, actual: null, restore: 'create' });
+        drift.push({ path: `channels.${category.name}.${name}`, expected: { name, type, parent: category.name, position: channelPosition }, actual: null, restore: 'create' });
         continue;
       }
+      pushIfDifferent(drift, `channels.${category.name}.${name}.position`, channelPosition, actual.position, 'patch');
       if (TEXT_CHANNEL_NAMES.has(name)) pushIfDifferent(drift, `channels.${category.name}.${name}.topic`, TOPICS[name as keyof typeof TOPICS], actual.topic ?? null, 'patch');
       const expectedOverwrite = desiredEveryoneOverwrite(snapshot.guildId, name);
       const actualOverwrite = actual.permission_overwrites?.find((overwrite) => overwrite.id === snapshot.guildId && overwrite.type === 0) ?? null;

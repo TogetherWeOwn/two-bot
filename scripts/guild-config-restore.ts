@@ -88,11 +88,15 @@ const evidence = {
   afterHash: configHash(canonicalSnapshot(after)),
   counts: { before: beforeCounts, source: targetCounts, after: afterCounts },
   applied: plan.counts,
+  hashesEqual: configHash(canonicalSnapshot(after)) === configHash(canonicalSnapshot(snapshot)),
   remaining: remaining.counts,
   remainingOperations: remaining.operations,
 };
 if (evidenceArgument) writeFileSync(resolve(evidenceArgument), `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
 console.log(`guild-config-restore: before=${evidence.beforeHash} after=${evidence.afterHash} source=${evidence.sourceHash}`);
 console.log(`guild-config-restore: counts=${JSON.stringify(evidence.counts)} applied=${JSON.stringify(plan.counts)} remaining=${remaining.counts.operations}`);
-if (remaining.counts.operations > 0) die(`restore is incomplete; ${remaining.counts.operations} operation(s) remain`);
+if (!evidence.hashesEqual) {
+  console.error(`guild-config-restore: residual drift=${JSON.stringify(remaining.operations)}`);
+  die(`restore is incomplete; post-restore hash does not match source hash (${remaining.counts.operations} operation(s) remain)`);
+}
 console.log(`guild-config-restore: complete with ${api.writes} Discord write(s)`);
