@@ -1,12 +1,19 @@
 # The internal actions endpoint
 
-**Status: `v0.4` — the endpoint is complete and tested (TOG-44), and join
+**Status: `v0.5` — the endpoint is complete and tested (TOG-44), and join
 attribution for one-click joins is built (TOG-464). Nothing on this page is
 specification any more.**
 
-All four allowlisted actions are built. Three are live by default —
+All four originally allowlisted actions are built. Three are live by default —
 `role.assign`, `announcement.post`, `event.upsert` — and `guild.add_member`
 is built and tested but switched off until the CEO signs off (§3).
+
+TOG-1648 also implements `automations.import` and `automations.export`, but
+**does not widen the approved allowlist**: both remain off unless
+`TWO_INTERNAL_ALLOW_AUTOMATIONS=1` records a separate approval. Destructive
+`overwrite: true` imports require the additional
+`TWO_INTERNAL_ALLOW_AUTOMATIONS_OVERWRITE=1` capability. Shipping the code
+alone grants every existing signing key nothing new.
 
 The pieces that were waiting on Postgres landed with TOG-37 and are now in
 `src/internal/store.ts` and `migrations/0002_internal_actions.sql`: the durable
@@ -172,6 +179,8 @@ it is there for logging and for showing "already posted" rather than "posted".
 | `announcement.post` | **live** | **needs key** | View Channel + Send Messages in the target channel |
 | `event.upsert` | **live** | **needs key** on create; update is natural | Manage Events |
 | `guild.add_member` | **built and tested, switched off — awaiting CEO sign-off** (TOG-57) | natural — Discord returns 204 if already a member | Create Instant Invite |
+| `automations.import` | **built and tested, switched off — awaiting allowlist approval** | **needs key**; max import is the guild's remaining command budget | None directly; changes definitions only |
+| `automations.export` | **built and tested, switched off — awaiting allowlist approval** | natural — read-only | None |
 
 `guild.add_member` only answers when `TWO_INTERNAL_ALLOW_ADD_MEMBER=1`, and
 that flag is the record of the CEO's decision rather than a convenience. With
@@ -560,6 +569,8 @@ and opens no port.
 | `TWO_INTERNAL_ROLE_KEYS` | Extra `role-key:<snowflake>` pairs beyond the self-assignable set. |
 | `TWO_INTERNAL_CHANNEL_KEYS` | `channel-key:<snowflake>` pairs for `announcement.post` and `event.upsert`. **Empty by default** — with none set, there is no channel the website may address. |
 | `TWO_INTERNAL_ALLOW_ADD_MEMBER` | `1` to enable `guild.add_member`. **Requires the CEO's sign-off.** |
+| `TWO_INTERNAL_ALLOW_AUTOMATIONS` | `1` to enable non-destructive `automations.import` and `automations.export`. **Default off; set only after allowlist approval.** |
+| `TWO_INTERNAL_ALLOW_AUTOMATIONS_OVERWRITE` | `1` to permit `overwrite: true` imports. Has no effect unless the base automations flag is also on. |
 
 `DISCORD_GUILD_ID` is required when the endpoint is on — the actions act on one
 guild, and guessing which is not a thing this should do.
@@ -586,6 +597,7 @@ takeover, the sweep — everything with a clock in it), and
 
 | Version | Date | Change |
 |---|---|---|
+| `v0.5` | 2026-09-09 | TOG-1648: `automations.import` and `automations.export` implemented but default off behind `TWO_INTERNAL_ALLOW_AUTOMATIONS`; destructive overwrite has a second flag and imports are bounded by the remaining Discord guild-command budget. This does not widen the approved allowlist by default. |
 | `v0.1` | 2026-08-19 | First specification. Three approved actions from TWO-24, plus `guild.add_member` proposed on TWO-57 and awaiting CEO sign-off. |
 | `v0.2` | 2026-08-19 | TWO-59: the pre-Postgres slice implemented — listener, HMAC, skew, replay, rate limits, error envelope, request logging, `role.assign` live and `guild.add_member` built but switched off. No wire-format change. |
 | `v0.4` | 2026-09-03 | TOG-464: join attribution for one-click joins (§7) built — the last unbuilt piece of this page. No wire-format change: the caller sends nothing new, and the only observable difference is that a `guild.add_member` join lands in the funnel as `web:one_click` instead of `unknown`. |

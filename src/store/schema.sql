@@ -371,6 +371,98 @@ CREATE TABLE IF NOT EXISTS level_import_runs (
   imported_at       TEXT    NOT NULL
 );
 
+
+-- ---------------------------------------------------------------------------
+-- Automations: admin-defined commands, scheduled messages and stickies
+-- (TOG-1648, MEE6 custom commands + StickyBot parity).
+--
+-- Kept equivalent to migrations/0011_automations.sql, which is the Postgres
+-- side and carries the full commentary. SQLite cannot express the same regex
+-- CHECKs, so it enforces the portable length/prefix subset while the service
+-- owns the full name and trigger validation for every write path.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS automation_commands (
+  guild_id      TEXT NOT NULL,
+  name          TEXT NOT NULL,
+  description   TEXT NOT NULL,
+  template      TEXT NOT NULL,
+  text_trigger  TEXT,
+  enabled       BOOLEAN NOT NULL DEFAULT TRUE,
+  created_by    TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  updated_by    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  PRIMARY KEY (guild_id, name),
+  CHECK (length(name) BETWEEN 1 AND 32),
+  CHECK (length(description) BETWEEN 1 AND 100),
+  CHECK (length(template) BETWEEN 1 AND 2000),
+  CHECK (text_trigger IS NULL OR (
+    length(text_trigger) BETWEEN 2 AND 33 AND substr(text_trigger, 1, 1) = '!'
+  ))
+);
+
+-- One live text trigger per guild; lower() so !FAQ cannot shadow !faq. The
+-- full shape check lives in src/automations/service.ts for both drivers.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_commands_trigger
+  ON automation_commands (guild_id, lower(text_trigger))
+  WHERE text_trigger IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS scheduled_messages (
+  id               TEXT PRIMARY KEY,
+  guild_id         TEXT NOT NULL,
+  channel_id       TEXT NOT NULL,
+  body             TEXT NOT NULL,
+  next_run_at      TEXT NOT NULL,
+  interval_seconds INTEGER,
+  enabled          BOOLEAN NOT NULL DEFAULT TRUE,
+  last_run_at      TEXT,
+  last_message_id  TEXT,
+  created_by       TEXT NOT NULL,
+  created_at       TEXT NOT NULL,
+  updated_by       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL,
+  claim_token      TEXT,
+  claimed_at       TEXT,
+  CHECK (length(body) BETWEEN 1 AND 2000),
+  CHECK (interval_seconds IS NULL OR interval_seconds BETWEEN 60 AND 31536000)
+);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_messages_due
+  ON scheduled_messages (enabled, next_run_at);
+
+CREATE TABLE IF NOT EXISTS sticky_messages (
+  guild_id         TEXT NOT NULL,
+  channel_id       TEXT NOT NULL,
+  body             TEXT NOT NULL,
+  debounce_seconds INTEGER NOT NULL DEFAULT 5,
+  enabled          BOOLEAN NOT NULL DEFAULT TRUE,
+  last_message_id  TEXT,
+  last_posted_at   TEXT,
+  created_by       TEXT NOT NULL,
+  created_at       TEXT NOT NULL,
+  updated_by       TEXT NOT NULL,
+  updated_at       TEXT NOT NULL,
+  claim_token      TEXT,
+  claimed_at       TEXT,
+  PRIMARY KEY (guild_id, channel_id),
+  CHECK (length(body) BETWEEN 1 AND 2000),
+  CHECK (debounce_seconds BETWEEN 1 AND 300)
+);
+
+CREATE TABLE IF NOT EXISTS automation_audit_log (
+  id         TEXT PRIMARY KEY,
+  guild_id   TEXT NOT NULL,
+  actor_id   TEXT,
+  action     TEXT NOT NULL,
+  target_key TEXT,
+  outcome    TEXT NOT NULL,
+  reason     TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_automation_audit_guild_time
+  ON automation_audit_log (guild_id, created_at);
+
 -- ---------------------------------------------------------------------------
 -- tickets: private support-channel lifecycle and bounded audit transcripts.
 -- ---------------------------------------------------------------------------

@@ -58,3 +58,17 @@ test('the briefly shipped constrained 0010 checksum is normalized before 0011 ap
   assert.ok(migrated.includes('0011_leveling_xp_ceiling'));
   assert.deepEqual(applied, ['0011_leveling_xp_ceiling']);
 });
+
+test('automation lease columns are repaired by an immutable migration after 0015', () => {
+  const migrations = loadMigrations();
+  const automations = migrations.find((migration) => migration.id === '0015_automations');
+  const claims = migrations.find((migration) => migration.id === '0016_automation_claims');
+
+  assert.ok(automations);
+  assert.ok(claims, 'an already-applied 0015 must be repaired by a new migration');
+  assert.ok(migrations.indexOf(claims) > migrations.indexOf(automations));
+  assert.match(claims.sql, /ALTER TABLE scheduled_messages ADD COLUMN IF NOT EXISTS claim_token TEXT/);
+  assert.match(claims.sql, /ALTER TABLE scheduled_messages ADD COLUMN IF NOT EXISTS claimed_at TEXT/);
+  assert.match(claims.sql, /ALTER TABLE sticky_messages ADD COLUMN IF NOT EXISTS claim_token TEXT/);
+  assert.match(claims.sql, /ALTER TABLE sticky_messages ADD COLUMN IF NOT EXISTS claimed_at TEXT/);
+});

@@ -18,6 +18,7 @@ import { startMockDiscord, type MockDiscord } from '../tools/mock-discord/server
 import { startInternalActions, type InternalServer, type InternalServerOptions } from '../src/internal/server.ts';
 import { KeyRing, sign } from '../src/internal/signing.ts';
 import { buildRoleKeys, buildChannelKeys, IMPLEMENTED_ACTIONS } from '../src/internal/actions.ts';
+import { MAX_CUSTOM_COMMANDS } from '../src/discord/commandNames.ts';
 import {
   DiscordActions,
   type ActionDiscord,
@@ -25,6 +26,7 @@ import {
   type ScheduledEventInput,
 } from '../src/internal/discordActions.ts';
 import { AUTH_FAILURE_MESSAGE } from '../src/internal/errors.ts';
+import { CommandCapacityError } from '../src/automations/errors.ts';
 import { InternalActionStore } from '../src/internal/store.ts';
 import { ExpectedJoins } from '../src/core/expectedJoins.ts';
 import { openTestDb, type TestDb } from './helpers/testDb.ts';
@@ -109,6 +111,7 @@ async function start(over: Partial<InternalServerOptions> = {}): Promise<Interna
     channelKeys: buildChannelKeys(CHANNEL_KEY_SPEC),
     enabled: new Set(ALL_ACTIONS),
     store: freshStore(),
+    syncCommands: async () => 0,
     ...over,
   });
   servers.push(srv);
@@ -138,7 +141,7 @@ interface CallOptions {
   signature?: string;
   contentType?: string | null;
   omitAuth?: boolean;
-  /** Sent as Idempotency-Key. Required by announcement.post and event.upsert. */
+  /** Sent as Idempotency-Key. Required by write actions that are not naturally idempotent. */
   idempotencyKey?: string;
 }
 
@@ -494,6 +497,156 @@ test('anything but POST /internal/actions is a 404', async () => {
 
 // --- limits ------------------------------------------------------------------
 
+test('automation imports accept Discord command budget and reject overflow before work', async () => {
+  let seen = 0;
+  const srv = await start({
+    automations: {
+      async importMee6(_guildId, body) {
+        seen = (body as unknown[]).length;
+        return { imported: seen, skipped: 0 };
+      },
+      async exportCommands() {
+        return [];
+      },
+    },
+  });
+  const commands = Array.from({ length: MAX_CUSTOM_COMMANDS }, (_, i) => ({
+    command: `bulk${i}`,
+    response: 'x'.repeat(1_900),
+  }));
+  const accepted = await call(srv, {
+    body: { action: 'automations.import', commands },
+    idempotencyKey: newKey(),
+  });
+  assert.equal(accepted.status, 200);
+  assert.equal(seen, MAX_CUSTOM_COMMANDS);
+
+  seen = 0;
+  const rejected = await call(srv, {
+    body: {
+      action: 'automations.import',
+      commands: [...commands, { command: 'overflow', response: 'no' }],
+    },
+    idempotencyKey: newKey(),
+  });
+  assert.equal(rejected.status, 400);
+  assert.equal(rejected.body.error?.code, 'malformed');
+  assert.equal(seen, 0);
+});
+
+test('automation import capacity rejection is a non-retryable caller error', async () => {
+  const srv = await start({
+    automations: {
+      async importMee6() {
+        throw new CommandCapacityError('Import would exceed the guild command limit.');
+      },
+      async exportCommands() {
+        return [];
+      },
+    },
+  });
+  const result = await call(srv, {
+    body: { action: 'automations.import', commands: [{ command: 'faq', response: 'A' }] },
+    idempotencyKey: newKey(),
+  });
+  assert.equal(result.status, 400);
+  assert.equal(result.body.error?.code, 'malformed');
+  assert.equal(result.body.error?.retryable, false);
+});
+
+test('signed automation import passes the guild custom-command ceiling to the importer', async () => {
+  let options: { overwrite?: boolean; maxCommands?: number } | undefined;
+  const srv = await start({
+    automations: {
+      async importMee6(_guildId, _body, _actorId, received) {
+        options = received;
+        return { imported: 1, skipped: 0 };
+      },
+      async exportCommands() {
+        return [];
+      },
+    },
+  });
+  const result = await call(srv, {
+    body: { action: 'automations.import', commands: [{ command: 'faq', response: 'A' }] },
+    idempotencyKey: newKey(),
+  });
+  assert.equal(result.status, 200);
+  assert.deepEqual(options, { overwrite: false, maxCommands: MAX_CUSTOM_COMMANDS });
+});
+
+test('signed automation import publishes changed slash commands', async () => {
+  let syncs = 0;
+  const srv = await start({
+    automations: {
+      async importMee6() {
+        return { imported: 1, skipped: 0 };
+      },
+      async exportCommands() {
+        return [];
+      },
+    },
+    syncCommands: async () => ++syncs,
+  });
+  const result = await call(srv, {
+    body: { action: 'automations.import', commands: [{ command: 'faq', response: 'A' }] },
+    idempotencyKey: newKey(),
+  });
+  assert.equal(result.status, 200);
+  assert.equal(syncs, 1);
+});
+
+test('signed automation import refuses before writing when command sync is absent', async () => {
+  let imports = 0;
+  const srv = await start({
+    automations: {
+      async importMee6() {
+        imports++;
+        return { imported: 1, skipped: 0 };
+      },
+      async exportCommands() {
+        return [];
+      },
+    },
+    syncCommands: null,
+  });
+  const result = await call(srv, {
+    body: { action: 'automations.import', commands: [{ command: 'faq', response: 'A' }] },
+    idempotencyKey: newKey(),
+  });
+  assert.equal(result.status, 403);
+  assert.equal(imports, 0);
+});
+
+test('destructive automation import needs the stronger overwrite capability', async () => {
+  let imports = 0;
+  const automations = {
+    async importMee6() {
+      imports++;
+      return { imported: 1, skipped: 0 };
+    },
+    async exportCommands() {
+      return [];
+    },
+  };
+  const denied = await start({ automations });
+  const deniedResult = await call(denied, {
+    body: { action: 'automations.import', commands: [{ command: 'faq', response: 'A' }], overwrite: true },
+    idempotencyKey: newKey(),
+  });
+  assert.equal(deniedResult.status, 403);
+  assert.equal(deniedResult.body.error?.code, 'action_not_allowed');
+  assert.equal(imports, 0);
+
+  const allowed = await start({ automations, allowAutomationOverwrite: true });
+  const allowedResult = await call(allowed, {
+    body: { action: 'automations.import', commands: [{ command: 'faq', response: 'A' }], overwrite: true },
+    idempotencyKey: newKey(),
+  });
+  assert.equal(allowedResult.status, 200);
+  assert.equal(imports, 1);
+});
+
 test('over the rate limit returns 429 with a usable Retry-After', async () => {
   const { client } = recordingDiscord();
   const srv = await start({ discord: client });
@@ -716,6 +869,60 @@ test('announcement.post posts once and returns the message id', async () => {
   const sent = posts[0].body as { content: string; allowed_mentions: { parse: string[] } };
   assert.equal(sent.content, 'Server maintenance at 20:00 UTC.');
   assert.deepEqual(sent.allowed_mentions.parse, []);
+});
+
+test('automations.import requires a key and sequential retries replay once', async () => {
+  let imports = 0;
+  const srv = await start({
+    automations: {
+      async importMee6() {
+        imports++;
+        return { imported: 1, skipped: 0 };
+      },
+      async exportCommands() {
+        return [];
+      },
+    },
+  });
+  const body = { action: 'automations.import', commands: [{ command: 'faq', response: 'A' }] };
+  const absent = await call(srv, { body });
+  assert.equal(absent.status, 400);
+
+  const key = newKey();
+  const first = await call(srv, { body, idempotencyKey: key });
+  const retry = await call(srv, { body, idempotencyKey: key });
+  assert.equal(first.status, 200);
+  assert.equal(retry.status, 200);
+  assert.equal(retry.replayed, true);
+  assert.equal(imports, 1);
+});
+
+test('concurrent automations.import retries run the importer once', async () => {
+  let release: (() => void) | null = null;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let imports = 0;
+  const srv = await start({
+    automations: {
+      async importMee6() {
+        imports++;
+        await held;
+        return { imported: 1, skipped: 0 };
+      },
+      async exportCommands() {
+        return [];
+      },
+    },
+  });
+  const body = { action: 'automations.import', commands: [{ command: 'faq', response: 'A' }] };
+  const key = newKey();
+  const first = call(srv, { body, idempotencyKey: key });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  const overlap = await call(srv, { body, idempotencyKey: key });
+  assert.equal(overlap.status, 409);
+  assert.equal(overlap.body.error?.code, 'in_progress');
+  release!();
+  assert.equal((await first).status, 200);
+  assert.equal(imports, 1);
 });
 
 test('a retry with the same idempotency key is a no-op and replays the result', async () => {

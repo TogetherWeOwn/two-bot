@@ -85,6 +85,30 @@ test('internal actions keys load from a credential', () => {
   assert.ok(cfg);
   assert.equal(cfg.keys.length, 1);
   assert.equal(cfg.keys[0].id, 'web-1');
+  assert.equal(cfg.enabled.has('automations.import'), false);
+  assert.equal(cfg.enabled.has('automations.export'), false);
+  assert.equal(cfg.allowAutomationOverwrite, false);
+});
+
+test('automation internal actions require explicit base and overwrite flags', () => {
+  const cfg = loadInternalActionsConfig({
+    TWO_INTERNAL_ACTIONS: '1',
+    TWO_INTERNAL_KEYS: 'web-1:0123456789abcdef0123456789abcdef',
+    TWO_INTERNAL_ALLOW_AUTOMATIONS: '1',
+    TWO_INTERNAL_ALLOW_AUTOMATIONS_OVERWRITE: '1',
+  } as NodeJS.ProcessEnv);
+  assert.ok(cfg);
+  assert.equal(cfg.enabled.has('automations.import'), true);
+  assert.equal(cfg.enabled.has('automations.export'), true);
+  assert.equal(cfg.allowAutomationOverwrite, true);
+
+  const overwriteOnly = loadInternalActionsConfig({
+    TWO_INTERNAL_ACTIONS: '1',
+    TWO_INTERNAL_KEYS: 'web-1:0123456789abcdef0123456789abcdef',
+    TWO_INTERNAL_ALLOW_AUTOMATIONS_OVERWRITE: '1',
+  } as NodeJS.ProcessEnv);
+  assert.ok(overwriteOnly);
+  assert.equal(overwriteOnly.allowAutomationOverwrite, false);
 });
 
 test('internal actions still accept TWO_INTERNAL_KEYS from the environment', () => {

@@ -38,12 +38,6 @@ export const MODERATION_COMMAND_DATA = [
   channelCommand('unlock', 'Allow @everyone to send messages'),
 ].map((command) => command.setDMPermission(false).toJSON());
 
-export async function registerModerationCommands(client: Client, options: ModerationCommandOptions): Promise<void> {
-  const application = client.application;
-  if (!application) throw new Error('Cannot register moderation commands before ClientReady');
-  await application.commands.set(MODERATION_COMMAND_DATA, options.guildId);
-}
-
 export function registerModerationHandler(client: Client, options: ModerationCommandOptions): void {
   client.on(Events.InteractionCreate, async (interaction) => {
     if (!interaction.isChatInputCommand() || !MODERATION_COMMANDS.includes(interaction.commandName as never)) return;

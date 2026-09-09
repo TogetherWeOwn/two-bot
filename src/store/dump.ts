@@ -56,6 +56,10 @@ export const DUMP_TABLES = [
   'containment_events',
   'containment_incidents',
   'join_risk_flags',
+  'automation_commands',
+  'scheduled_messages',
+  'sticky_messages',
+  'automation_audit_log',
   'tickets',
   'ticket_transcripts',
   'automod_violations',
@@ -135,6 +139,10 @@ function orderFor(table: DumpTable, columns: string[]): string {
   if (table === 'containment_events') return 'occurred_at, audit_entry_id';
   if (table === 'containment_incidents') return 'started_at, id';
   if (table === 'join_risk_flags') return 'joined_at, event_id';
+  if (table === 'automation_commands') return 'guild_id, name';
+  if (table === 'scheduled_messages') return 'guild_id, id';
+  if (table === 'sticky_messages') return 'guild_id, channel_id';
+  if (table === 'automation_audit_log') return 'created_at, id';
   if (table === 'tickets') return 'created_at, id';
   if (table === 'ticket_transcripts') return 'created_at, ticket_id';
   if (table === 'automod_violations') return 'guild_id, user_id';

@@ -43,7 +43,8 @@ import type { ModerationResolver } from '../moderation/resolver.ts';
 import type { ModerationService } from '../moderation/service.ts';
 
 /** Anything larger than this is a bug on the caller, not a request. */
-const MAX_BODY_BYTES = 64 * 1024;
+// A full MEE6 export may hold hundreds of 2,000-character templates.
+const MAX_BODY_BYTES = 2 * 1024 * 1024;
 
 /**
  * What we accept as an Idempotency-Key. A UUID is what the doc asks for, but
@@ -80,6 +81,12 @@ export interface InternalServerOptions {
    * `unknown`, exactly as before.
    */
   expectedJoins?: ExpectedJoins | null;
+  /** Automations import/export service; null means those verbs fail closed. */
+  automations?: ActionContext['automations'];
+  /** Destructive imports need a stronger capability than ordinary import/export. */
+  allowAutomationOverwrite?: boolean;
+  /** Publish custom slash commands after a successful signed import. */
+  syncCommands?: (() => Promise<number>) | null;
   moderation?: { resolver: ModerationResolver; service: ModerationService } | null;
   skewSeconds?: number;
   nonceTtlSeconds?: number;
@@ -306,6 +313,9 @@ async function authoriseAndRun(
     roleKeys: opts.roleKeys,
     channelKeys: opts.channelKeys ?? new Map(),
     expectedJoins: opts.expectedJoins ?? null,
+    automations: opts.automations ?? null,
+    allowAutomationOverwrite: opts.allowAutomationOverwrite === true,
+    syncCommands: opts.syncCommands ?? null,
     enabled: opts.enabled,
     store,
     moderation: opts.moderation ?? null,
