@@ -8,6 +8,8 @@ export interface StoredOperationalAudit {
   mirrorChannelId: string | null;
   deliveryState: AuditDeliveryState;
   deliveryAttempts: number;
+  deliveryNonce: string | null;
+  mirrorMessageId: string | null;
 }
 
 export class OperationalAuditStore {
@@ -60,7 +62,9 @@ export class OperationalAuditStore {
     const result = await this.db
       .prepare(
         `UPDATE operational_audit_log
-            SET delivery_state = 'delivering', delivery_lease_until = ?
+            SET delivery_state = 'delivering',
+                delivery_lease_until = ?,
+                delivery_nonce = COALESCE(delivery_nonce, entry_id)
           WHERE entry_id = ?
             AND mirror_channel_id IS NOT NULL
             AND (delivery_state = 'pending'
@@ -88,9 +92,9 @@ export class OperationalAuditStore {
     return claimed;
   }
 
-  async markDelivered(entryId: string): Promise<void> {
+  async markDelivered(entryId: string, messageId: string): Promise<void> {
     const now = new Date().toISOString();
-    await this.db
+    const result = await this.db
       .prepare(
         `UPDATE operational_audit_log
             SET delivery_state = 'delivered',
@@ -98,10 +102,24 @@ export class OperationalAuditStore {
                 delivery_attempted_at = ?,
                 delivery_last_error = NULL,
                 delivery_lease_until = NULL,
+                mirror_message_id = ?,
                 mirrored_at = ?
           WHERE entry_id = ? AND delivery_state = 'delivering'`,
       )
-      .run(now, now, entryId);
+      .run(now, messageId, now, entryId);
+    if (result.changes !== 1) throw new Error('audit_delivery_ack_not_persisted');
+  }
+
+  async markAcknowledgementFailed(entryId: string): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE operational_audit_log
+            SET delivery_attempts = delivery_attempts + 1,
+                delivery_attempted_at = ?,
+                delivery_last_error = 'delivery_ack_failed'
+          WHERE entry_id = ? AND delivery_state = 'delivering'`,
+      )
+      .run(new Date().toISOString(), entryId);
   }
 
   async markDeliveryFailed(entryId: string, classification: string): Promise<void> {
@@ -122,7 +140,8 @@ export class OperationalAuditStore {
 const SELECT_AUDIT =
   `SELECT entry_id, event_kind, guild_id, occurred_at, actor_id, target_id,
           source_channel_id, destination_channel_id, message_id, action,
-          metadata_json, mirror_channel_id, delivery_state, delivery_attempts
+          metadata_json, mirror_channel_id, delivery_state, delivery_attempts,
+          delivery_nonce, mirror_message_id
      FROM operational_audit_log`;
 
 function storedAudit(row: Record<string, unknown>): StoredOperationalAudit {
@@ -144,6 +163,8 @@ function storedAudit(row: Record<string, unknown>): StoredOperationalAudit {
     mirrorChannelId: nullableString(row.mirror_channel_id),
     deliveryState: String(row.delivery_state) as AuditDeliveryState,
     deliveryAttempts: Number(row.delivery_attempts ?? 0),
+    deliveryNonce: nullableString(row.delivery_nonce),
+    mirrorMessageId: nullableString(row.mirror_message_id),
   };
 }
 

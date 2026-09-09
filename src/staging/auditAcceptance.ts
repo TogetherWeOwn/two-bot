@@ -69,7 +69,7 @@ export interface AuditAcceptanceRow {
   event_kind: string;
   rows: number | string;
   distinct_entries: number | string;
-  pending_deliveries: number | string;
+  incomplete_deliveries: number | string;
 }
 
 export interface AuditEvidenceResult {
@@ -90,7 +90,7 @@ export function evaluateAuditEvidence(rows: AuditAcceptanceRow[]): AuditEvidence
       continue;
     }
     if (Number(row.rows) !== Number(row.distinct_entries)) duplicates.push(kind);
-    if (Number(row.pending_deliveries) > 0) pendingDeliveries.push(kind);
+    if (Number(row.incomplete_deliveries) > 0) pendingDeliveries.push(kind);
   }
   return { missing, duplicates, pendingDeliveries };
 }
@@ -100,7 +100,7 @@ export function auditAcceptanceSql(guildId: string, since?: string): string {
   const kinds = AUDIT_ACCEPTANCE_KINDS.map((kind) => `'${kind}'`).join(', ');
   const sinceSql = since ? ` AND occurred_at >= '${since.replaceAll("'", "''")}'` : '';
   return `SELECT event_kind, COUNT(*) AS rows, COUNT(DISTINCT entry_id) AS distinct_entries,\n` +
-    `       COUNT(*) FILTER (WHERE delivery_state IN ('pending', 'delivering')) AS pending_deliveries\n` +
+    `       COUNT(*) FILTER (WHERE delivery_state <> 'delivered') AS incomplete_deliveries\n` +
     `FROM operational_audit_log\n` +
     `WHERE guild_id = '${quotedGuild}' AND event_kind IN (${kinds})${sinceSql}\n` +
     `GROUP BY event_kind ORDER BY event_kind;`;

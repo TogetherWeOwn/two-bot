@@ -62,16 +62,44 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
       return;
     }
 
+    let messageId: string | null = null;
     try {
-      await channel.send({
+      const message = await channel.send({
         content: formatAuditEvent(stored.event),
         allowedMentions: { parse: [] },
+        nonce: stored.deliveryNonce ?? stored.event.entryId,
+        enforceNonce: true,
       });
-      await options.store?.markDelivered(stored.event.entryId);
-      log.info('operational_audit_posted', { entryId: stored.event.entryId, channelId });
-    } catch (err) {
+      messageId = message.id;
+    } catch {
       await options.store?.markDeliveryFailed(stored.event.entryId, 'discord_send_failed');
-      log.error('operational_audit_post_failed', { entryId: stored.event.entryId, channelId, err: String(err) });
+      log.error('operational_audit_post_failed', {
+        entryId: stored.event.entryId,
+        channelId,
+        classification: 'discord_send_failed',
+      });
+      return;
+    }
+
+    try {
+      await options.store?.markDelivered(stored.event.entryId, messageId);
+      log.info('operational_audit_posted', { entryId: stored.event.entryId, channelId, messageId });
+    } catch {
+      // The Discord nonce is stable for this durable event, so retrying the
+      // ambiguous post-send/pre-ack window returns the original message rather
+      // than creating a second mirror.
+      try {
+        await options.store?.markAcknowledgementFailed(stored.event.entryId);
+      } catch {
+        // The original acknowledgement write already proved the store may be
+        // unavailable. Keep the lease for a safe nonce-enforced retry.
+      }
+      log.error('operational_audit_ack_failed', {
+        entryId: stored.event.entryId,
+        channelId,
+        messageId,
+        classification: 'delivery_ack_failed',
+      });
     }
   };
 
@@ -119,6 +147,8 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
           mirrorChannelId,
           deliveryState: 'delivering',
           deliveryAttempts: 0,
+          deliveryNonce: event.entryId,
+          mirrorMessageId: null,
         };
         await deliver(ephemeral);
         return inserted;

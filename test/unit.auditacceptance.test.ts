@@ -106,15 +106,17 @@ test('acceptance evidence requires every kind, unique entry ids and completed mi
     event_kind,
     rows: 1,
     distinct_entries: 1,
-    pending_deliveries: 0,
+    incomplete_deliveries: 0,
   }));
   assert.deepEqual(evaluateAuditEvidence(rows), { missing: [], duplicates: [], pendingDeliveries: [] });
 
   assert.deepEqual(evaluateAuditEvidence(rows.slice(1)).missing, ['message_edit']);
   const duplicate = rows.map((row) => row.event_kind === 'message_delete' ? { ...row, rows: 2 } : row);
   assert.deepEqual(evaluateAuditEvidence(duplicate).duplicates, ['message_delete']);
-  const pending = rows.map((row) => row.event_kind === 'voice_move' ? { ...row, pending_deliveries: 1 } : row);
+  const pending = rows.map((row) => row.event_kind === 'voice_move' ? { ...row, incomplete_deliveries: 1 } : row);
   assert.deepEqual(evaluateAuditEvidence(pending).pendingDeliveries, ['voice_move']);
+  const none = rows.map((row) => row.event_kind === 'member_update' ? { ...row, incomplete_deliveries: 1 } : row);
+  assert.deepEqual(evaluateAuditEvidence(none).pendingDeliveries, ['member_update']);
 });
 
 test('acceptance SQL enumerates every logging parity event and the staging guild', () => {
@@ -124,5 +126,6 @@ test('acceptance SQL enumerates every logging parity event and the staging guild
   assert.match(sql, new RegExp(since.replaceAll('.', '\\.')));
   for (const kind of AUDIT_ACCEPTANCE_KINDS) assert.match(sql, new RegExp(kind));
   assert.match(sql, /COUNT\(DISTINCT entry_id\)/);
-  assert.match(sql, /pending_deliveries/);
+  assert.match(sql, /delivery_state <> 'delivered'/);
+  assert.match(sql, /incomplete_deliveries/);
 });
