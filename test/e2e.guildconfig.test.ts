@@ -408,6 +408,96 @@ test('overwrite preflight rejects unowned bits on a new root channel before any 
   }
 });
 
+test('Administrator does not bypass overwrite role hierarchy before any write', async () => {
+  const stub = await stubDiscord({ botPosition: 5 });
+  const dir = mkdtempSync(join(tmpdir(), 'two-guild-admin-hierarchy-'));
+  const source = join(dir, 'source.json');
+  const sourceState = structuredClone(stub.state);
+  const owner = sourceState.roles.find((role) => role.name === 'Owner')!;
+  sourceState.channels.find((channel) => channel.name === 'general')!.permission_overwrites.push({ id: owner.id, type: 0, allow: '1', deny: '0' });
+  writeFileSync(source, `${JSON.stringify({
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    applicationId: STAGING_BOT_APPLICATION_ID,
+    guildId: GUILD,
+    ...sourceState,
+    emojis: sourceState.emojis.map((emoji) => ({ ...emoji, image: 'data:image/png;base64,dHdv' })),
+  })}\n`);
+  try {
+    const applied = await run(RESTORE, ['--snapshot', source, '--confirm-staging-guild', '--apply'], { GUILD_CONFIG_API_BASE: stub.base, GUILD_CONFIG_CDN_BASE: stub.base.replace(/\/api\/v10$/, '') });
+    assert.equal(applied.code, 1);
+    assert.match(applied.stderr, /hierarchy preflight failed: Owen role position 5 is not above overwrite target Owner \(10\)/);
+    assert.equal(stub.writes.length, 0);
+  } finally {
+    await stub.close();
+  }
+});
+
+test('new child overwrite preflight uses the desired parent permission ceiling before any write', async () => {
+  const managePermissions = (1n << 4n) | (1n << 28n);
+  const grantRoleId = id(3);
+  const stub = await stubDiscord({ botPermissions: 0n, botRoleIds: [STAGING_BOT_APPLICATION_ID, grantRoleId] });
+  const dir = mkdtempSync(join(tmpdir(), 'two-guild-new-child-parent-ceiling-'));
+  const source = join(dir, 'source.json');
+  const grantRole: Role = { id: grantRoleId, name: 'Owen Restore', managed: false, color: 0, hoist: false, permissions: String(managePermissions), mentionable: false, position: 8 };
+  stub.state.roles.push(grantRole);
+  const sourceState = structuredClone(stub.state);
+  const parent = sourceState.channels.find((channel) => channel.type === 4 && channel.name === CATEGORIES[0]!.name)!;
+  parent.permission_overwrites = [{ id: GUILD, type: 0, allow: '0', deny: String(managePermissions) }];
+  const child = sourceState.channels.find((channel) => channel.parent_id === parent.id)!;
+  stub.state.channels = stub.state.channels.filter((channel) => channel.id !== child.id);
+  writeFileSync(source, `${JSON.stringify({
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    applicationId: STAGING_BOT_APPLICATION_ID,
+    guildId: GUILD,
+    ...sourceState,
+    emojis: sourceState.emojis.map((emoji) => ({ ...emoji, image: 'data:image/png;base64,dHdv' })),
+  })}\n`);
+  try {
+    const applied = await run(RESTORE, ['--snapshot', source, '--confirm-staging-guild', '--apply'], { GUILD_CONFIG_API_BASE: stub.base, GUILD_CONFIG_CDN_BASE: stub.base.replace(/\/api\/v10$/, '') });
+    assert.equal(applied.code, 1);
+    assert.match(applied.stderr, new RegExp(`channel permission preflight failed: ${child.name} \\(missing Manage Channels, Manage Roles; unowned mask`));
+    assert.equal(stub.writes.length, 0);
+  } finally {
+    await stub.close();
+  }
+});
+
+test('child overwrite preflight uses the desired parent state changed by the same restore', async () => {
+  const managePermissions = (1n << 4n) | (1n << 28n);
+  const sendMessages = 1n << 11n;
+  const grantRoleId = id(3);
+  const stub = await stubDiscord({ botPermissions: 0n, botRoleIds: [STAGING_BOT_APPLICATION_ID, grantRoleId] });
+  const dir = mkdtempSync(join(tmpdir(), 'two-guild-stale-parent-ceiling-'));
+  const source = join(dir, 'source.json');
+  const grantRole: Role = { id: grantRoleId, name: 'Owen Restore', managed: false, color: 0, hoist: false, permissions: String(managePermissions), mentionable: false, position: 8 };
+  stub.state.roles.push(grantRole);
+  const sourceState = structuredClone(stub.state);
+  const parent = sourceState.channels.find((channel) => channel.type === 4 && channel.name === CATEGORIES[0]!.name)!;
+  const currentParent = stub.state.channels.find((channel) => channel.id === parent.id)!;
+  currentParent.permission_overwrites = [{ id: STAGING_BOT_APPLICATION_ID, type: 1, allow: String(sendMessages), deny: '0' }];
+  parent.permission_overwrites = [];
+  sourceState.channels.find((channel) => channel.parent_id === parent.id)!.permission_overwrites.push({ id: GUILD, type: 0, allow: String(sendMessages), deny: '0' });
+  writeFileSync(source, `${JSON.stringify({
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    applicationId: STAGING_BOT_APPLICATION_ID,
+    guildId: GUILD,
+    ...sourceState,
+    emojis: sourceState.emojis.map((emoji) => ({ ...emoji, image: 'data:image/png;base64,dHdv' })),
+  })}\n`);
+  try {
+    const applied = await run(RESTORE, ['--snapshot', source, '--confirm-staging-guild', '--apply'], { GUILD_CONFIG_API_BASE: stub.base, GUILD_CONFIG_CDN_BASE: stub.base.replace(/\/api\/v10$/, '') });
+    assert.equal(applied.code, 1);
+    assert.match(applied.stderr, /channel permission preflight failed/);
+    assert.match(applied.stderr, /unowned mask [1-9]\d*/);
+    assert.equal(stub.writes.length, 0);
+  } finally {
+    await stub.close();
+  }
+});
+
 test('restore drill is dry-run by default, guarded, repairs drift including ordering, emits hashes/counts, and is idempotent', async () => {
   const stub = await stubDiscord();
   const dir = mkdtempSync(join(tmpdir(), 'two-guild-restore-'));
