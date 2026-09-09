@@ -63,39 +63,40 @@ test('SQLite ticket store reserves one active ticket and supports cleanup recove
     const active = await store.activate(reserved.id, 'channel');
     assert.equal(active?.status, 'open');
     assert.equal(active?.channelId, 'channel');
-    assert.equal((await store.beginClose('channel', '2026-09-08T12:00:30.000Z'))?.status, 'closing');
-    assert.equal(await store.recoverInterrupted('2026-09-08T12:01:00.000Z', 'guild'), 1);
+    const closing = await store.beginClose('channel', '2026-09-08T12:00:30.000Z');
+    assert.equal(closing?.status, 'closing');
+    assert.equal((await store.staleClosing('2026-09-08T12:01:00.000Z', 'guild')).length, 1);
+    assert.equal(await store.reopenInterruptedClose(reserved.id, closing!.closingStartedAt!), true);
     assert.equal((await store.byChannel('channel'))?.status, 'open');
     assert.equal((await store.byChannel('channel'))?.closingStartedAt, null);
-    assert.equal((await store.beginClose('channel', '2026-09-08T12:01:30.000Z'))?.status, 'closing');
 
-    await store.saveTranscript({
+    const secondClosing = await store.beginClose('channel', '2026-09-08T12:01:30.000Z');
+    assert.ok(secondClosing);
+    assert.equal(await store.saveTranscript({
       ticketId: reserved.id,
       guildId: 'guild',
       channelId: 'channel',
       openerId: 'member',
       claimedBy: null,
-      content: 'first snapshot',
-      messageCount: 1,
-      createdAt: '2026-09-08T12:01:00.000Z',
-      purgeAfter: '2026-12-07T12:01:00.000Z',
-    });
-    await store.saveTranscript({
-      ticketId: reserved.id,
-      guildId: 'guild',
-      channelId: 'channel',
-      openerId: 'member',
-      claimedBy: 'staff',
       content: 'complete snapshot',
       messageCount: 2,
       createdAt: '2026-09-08T12:02:00.000Z',
       purgeAfter: '2026-12-07T12:02:00.000Z',
-    });
-    const transcript = await db.prepare(`SELECT content, message_count FROM ticket_transcripts WHERE ticket_id = ?`).get<{ content: string; message_count: number }>(reserved.id);
-    assert.equal(transcript?.content, 'complete snapshot');
-    assert.equal(transcript?.message_count, 2);
-    assert.equal(await store.recoverInterrupted('2026-09-08T12:02:00.000Z', 'guild'), 1);
+    }, secondClosing.closingStartedAt), true);
+    assert.equal(await store.transcriptExists(reserved.id), true);
+    assert.equal(await store.recoverClosingToCleanup(reserved.id, secondClosing.closingStartedAt!), true);
     assert.equal((await store.byChannel('channel'))?.status, 'cleanup_pending');
+    assert.equal(await store.saveTranscript({
+      ticketId: reserved.id,
+      guildId: 'guild',
+      channelId: 'channel',
+      openerId: 'member',
+      claimedBy: null,
+      content: 'late stale snapshot',
+      messageCount: 1,
+      createdAt: '2026-09-08T12:03:00.000Z',
+      purgeAfter: '2026-12-07T12:03:00.000Z',
+    }, secondClosing.closingStartedAt), false);
     assert.equal((await db.prepare(`SELECT content FROM ticket_transcripts WHERE ticket_id = ?`).get<{ content: string }>(reserved.id))?.content, 'complete snapshot');
 
     await store.markCleanupPending(reserved.id, '2026-09-08T12:02:00.000Z');
@@ -114,7 +115,7 @@ test('interrupted ticket creation remains recoverable after its cutoff', async (
     const reservation = await store.reserve('guild', 'member', '2026-09-08T12:00:00.000Z');
     assert.ok(reservation);
     assert.equal((await store.staleCreating('2026-09-08T12:01:00.000Z', 'guild')).length, 1);
-    assert.equal(await store.recoverInterrupted('2026-09-08T12:01:00.000Z', 'guild'), 0);
+    assert.equal((await store.staleClosing('2026-09-08T12:01:00.000Z', 'guild')).length, 0);
     assert.equal((await store.activeFor('guild', 'member'))?.status, 'creating');
     await store.recordCreatedChannel(reservation.id, 'channel');
     assert.equal((await store.staleCreating('2026-09-08T12:01:00.000Z', 'guild'))[0]?.channelId, 'channel');
@@ -129,7 +130,9 @@ test('ticket transcript purge and member erasure delete sensitive rows', async (
     const store = new TicketStore(db);
     const reserved = (await store.reserve('guild', 'member', '2026-09-08T12:00:00.000Z'))!;
     await store.activate(reserved.id, 'channel');
-    await store.saveTranscript({
+    const closing = await store.beginClose('channel', '2026-09-08T12:00:30.000Z');
+    assert.ok(closing);
+    assert.equal(await store.saveTranscript({
       ticketId: reserved.id,
       guildId: 'guild',
       channelId: 'channel',
@@ -139,10 +142,10 @@ test('ticket transcript purge and member erasure delete sensitive rows', async (
       messageCount: 1,
       createdAt: '2026-09-08T12:01:00.000Z',
       purgeAfter: '2026-09-09T12:01:00.000Z',
-    });
+    }, closing.closingStartedAt), true);
     assert.equal(await store.purgeExpired('2026-09-09T12:01:00.000Z'), 1);
 
-    await store.saveTranscript({
+    assert.equal(await store.saveTranscript({
       ticketId: reserved.id,
       guildId: 'guild',
       channelId: 'channel',
@@ -152,7 +155,7 @@ test('ticket transcript purge and member erasure delete sensitive rows', async (
       messageCount: 1,
       createdAt: '2026-09-08T12:02:00.000Z',
       purgeAfter: '2026-12-07T12:02:00.000Z',
-    });
+    }, closing.closingStartedAt), true);
     await store.eraseMember('member');
     assert.equal((await db.prepare(`SELECT COUNT(*) AS n FROM tickets`).get<{ n: number }>())?.n, 0);
     assert.equal((await db.prepare(`SELECT COUNT(*) AS n FROM ticket_transcripts`).get<{ n: number }>())?.n, 0);

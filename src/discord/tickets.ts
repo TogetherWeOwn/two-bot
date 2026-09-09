@@ -116,26 +116,37 @@ export class TicketStore {
     await this.db.prepare(`DELETE FROM tickets WHERE id = ? AND status IN ('creating', 'open')`).run(ticketId);
   }
 
-  async recoverInterrupted(cutoff: string, guildId?: string | null): Promise<number> {
-    const guildClause = guildId ? ' AND guild_id = ?' : '';
-    const params = guildId ? [cutoff, guildId] : [cutoff];
-    return (
-      await this.db
-        .prepare(
-          `UPDATE tickets SET status = 'cleanup_pending'
-             WHERE status = 'closing' AND closing_started_at <= ?${guildClause}
-               AND EXISTS (SELECT 1 FROM ticket_transcripts WHERE ticket_id = tickets.id)`,
-        )
-        .run(...params)
-    ).changes + (
-      await this.db
-        .prepare(
-          `UPDATE tickets SET status = 'open', closing_started_at = NULL
-             WHERE status = 'closing' AND closing_started_at <= ?${guildClause}
-               AND NOT EXISTS (SELECT 1 FROM ticket_transcripts WHERE ticket_id = tickets.id)`,
-        )
-        .run(...params)
-    ).changes;
+  async staleClosing(cutoff: string, guildId?: string | null): Promise<TicketRecord[]> {
+    const rows = guildId
+      ? await this.db
+          .prepare(`SELECT id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closing_started_at, closed_at FROM tickets WHERE status = 'closing' AND closing_started_at <= ? AND guild_id = ? ORDER BY closing_started_at`)
+          .all<TicketRow>(cutoff, guildId)
+      : await this.db
+          .prepare(`SELECT id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closing_started_at, closed_at FROM tickets WHERE status = 'closing' AND closing_started_at <= ? ORDER BY closing_started_at`)
+          .all<TicketRow>(cutoff);
+    return rows.map(toTicket);
+  }
+
+  async transcriptExists(ticketId: string): Promise<boolean> {
+    return !!(await this.db.prepare(`SELECT ticket_id FROM ticket_transcripts WHERE ticket_id = ?`).get(ticketId));
+  }
+
+  async recoverClosingToCleanup(ticketId: string, closingStartedAt: string): Promise<boolean> {
+    const result = await this.db
+      .prepare(`UPDATE tickets SET status = 'cleanup_pending' WHERE id = ? AND status = 'closing' AND closing_started_at = ?`)
+      .run(ticketId, closingStartedAt);
+    return result.changes === 1;
+  }
+
+  async reopenInterruptedClose(ticketId: string, closingStartedAt: string): Promise<boolean> {
+    const result = await this.db
+      .prepare(
+        `UPDATE tickets SET status = 'open', closing_started_at = NULL
+           WHERE id = ? AND status = 'closing' AND closing_started_at = ?
+             AND NOT EXISTS (SELECT 1 FROM ticket_transcripts WHERE ticket_id = tickets.id)`,
+      )
+      .run(ticketId, closingStartedAt);
+    return result.changes === 1;
   }
 
   async staleCreating(cutoff: string, guildId?: string | null): Promise<TicketRecord[]> {
@@ -186,20 +197,34 @@ export class TicketStore {
     await this.db.prepare(`UPDATE tickets SET status = 'open', closing_started_at = NULL WHERE id = ? AND status = 'closing'`).run(ticketId);
   }
 
-  async saveTranscript(t: TicketTranscript): Promise<void> {
-    await this.db
+  async saveTranscript(t: TicketTranscript, closingStartedAt?: string | null): Promise<boolean> {
+    const result = await this.db
       .prepare(
         `INSERT INTO ticket_transcripts
            (ticket_id, guild_id, channel_id, opener_id, claimed_by, content, message_count, created_at, purge_after)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (ticket_id) DO UPDATE SET
-           claimed_by = excluded.claimed_by,
-           content = excluded.content,
-           message_count = excluded.message_count,
-           created_at = excluded.created_at,
-           purge_after = excluded.purge_after`,
+         SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?
+          WHERE EXISTS (
+            SELECT 1 FROM tickets
+             WHERE id = ? AND status = 'closing'
+               AND (? IS NULL OR closing_started_at = ?)
+          )
+         ON CONFLICT (ticket_id) DO NOTHING`,
       )
-      .run(t.ticketId, t.guildId, t.channelId, t.openerId, t.claimedBy, t.content, t.messageCount, t.createdAt, t.purgeAfter);
+      .run(
+        t.ticketId,
+        t.guildId,
+        t.channelId,
+        t.openerId,
+        t.claimedBy,
+        t.content,
+        t.messageCount,
+        t.createdAt,
+        t.purgeAfter,
+        t.ticketId,
+        closingStartedAt ?? null,
+        closingStartedAt ?? null,
+      );
+    return result.changes === 1;
   }
 
   async markCleanupPending(ticketId: string, closedAt: string, channelId?: string): Promise<void> {
@@ -417,7 +442,14 @@ async function closeTicket(interaction: ButtonInteraction, deps: TicketDeps, sto
     const createdAt = new Date().toISOString();
     await (channel as TextChannel).permissionOverwrites.edit(ticket.openerId, { SendMessages: false });
     const data = await fetchTranscript(channel as TextChannel);
-    await store.saveTranscript({ ...data, ticketId: ticket.id, guildId: ticket.guildId, channelId: ticket.channelId, openerId: ticket.openerId, claimedBy: ticket.claimedBy, createdAt, purgeAfter: purgeAfter(createdAt) });
+    const saved = await store.saveTranscript(
+      { ...data, ticketId: ticket.id, guildId: ticket.guildId, channelId: ticket.channelId, openerId: ticket.openerId, claimedBy: ticket.claimedBy, createdAt, purgeAfter: purgeAfter(createdAt) },
+      ticket.closingStartedAt,
+    );
+    if (!saved) {
+      await interaction.editReply({ content: 'This ticket close was already recovered or completed.' });
+      return;
+    }
     await store.markCleanupPending(ticket.id, createdAt);
     await interaction.editReply({ content: 'Ticket transcript saved. Cleaning up the private channel.' });
     try {
@@ -425,7 +457,12 @@ async function closeTicket(interaction: ButtonInteraction, deps: TicketDeps, sto
       await store.markClosed(ticket.id, createdAt);
       log.info('ticket_closed', { ticketId: ticket.id, guildId: ticket.guildId, messageCount: data.messageCount });
     } catch (err) {
-      log.error('ticket_cleanup_failed', { ticketId: ticket.id, channelId: ticket.channelId, err: String(err) });
+      if (isUnknownChannel(err)) {
+        await store.markClosed(ticket.id, createdAt);
+        log.info('ticket_cleanup_already_absent', { ticketId: ticket.id, channelId: ticket.channelId });
+      } else {
+        log.error('ticket_cleanup_failed', { ticketId: ticket.id, channelId: ticket.channelId, err: String(err) });
+      }
     }
   } catch (err) {
     await (channel as TextChannel).permissionOverwrites.edit(ticket.openerId, {
@@ -491,6 +528,42 @@ async function recoverCreating(client: Client, store: TicketStore, cutoff: strin
   return recovered;
 }
 
+async function recoverClosing(client: Client, store: TicketStore, cutoff: string, guildId?: string | null): Promise<number> {
+  let recovered = 0;
+  for (const ticket of await store.staleClosing(cutoff, guildId)) {
+    if (!ticket.closingStartedAt) continue;
+    if (await store.transcriptExists(ticket.id)) {
+      if (await store.recoverClosingToCleanup(ticket.id, ticket.closingStartedAt)) recovered++;
+      continue;
+    }
+    if (!ticket.channelId) {
+      log.error('ticket_close_recovery_failed', { ticketId: ticket.id, err: 'ticket has no channel id' });
+      continue;
+    }
+    try {
+      const channel = await client.channels.fetch(ticket.channelId);
+      if (!channel || !channel.isTextBased() || channel.isDMBased() || !('permissionOverwrites' in channel)) {
+        log.error('ticket_close_recovery_failed', { ticketId: ticket.id, channelId: ticket.channelId, err: 'channel is unavailable' });
+        continue;
+      }
+      await (channel as TextChannel).permissionOverwrites.edit(ticket.openerId, {
+        ViewChannel: true,
+        SendMessages: true,
+        ReadMessageHistory: true,
+      });
+      if (await store.reopenInterruptedClose(ticket.id, ticket.closingStartedAt)) recovered++;
+    } catch (err) {
+      if (isUnknownChannel(err)) {
+        await store.recoverClosingToCleanup(ticket.id, ticket.closingStartedAt);
+        recovered++;
+      } else {
+        log.error('ticket_close_recovery_failed', { ticketId: ticket.id, channelId: ticket.channelId, err: String(err) });
+      }
+    }
+  }
+  return recovered;
+}
+
 async function retryCleanup(client: Client, store: TicketStore, guildId?: string | null): Promise<void> {
   for (const ticket of await store.cleanupPending(guildId)) {
     if (!ticket.channelId) continue;
@@ -516,20 +589,27 @@ export function registerTickets(client: Client, deps: TicketDeps): void {
     const purged = await store.purgeExpired(new Date().toISOString());
     if (purged > 0) log.info('ticket_transcripts_purged', { count: purged });
   };
+  const recover = async (): Promise<void> => {
+    const cutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    const closingRecovered = await recoverClosing(client, store, cutoff, deps.guildId);
+    const creatingRecovered = await recoverCreating(client, store, cutoff, deps.guildId);
+    if (closingRecovered + creatingRecovered > 0) log.info('ticket_interrupted_recovered', { count: closingRecovered + creatingRecovered });
+    await retryCleanup(client, store, deps.guildId);
+  };
   client.once(Events.ClientReady, async () => {
     if (deps.guildId && !client.guilds.cache.has(deps.guildId)) return;
     try {
-      const cutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
-      const recovered = await store.recoverInterrupted(cutoff, deps.guildId);
-      const creatingRecovered = await recoverCreating(client, store, cutoff, deps.guildId);
-      if (recovered + creatingRecovered > 0) log.info('ticket_interrupted_recovered', { count: recovered + creatingRecovered });
+      await recover();
       await ensurePanel(client, deps.panelChannelId);
-      await retryCleanup(client, store, deps.guildId);
       await purge();
     } catch (err) {
       log.error('tickets_ready_failed', { err: String(err) });
     }
   });
+  const recoveryTimer = setInterval(() => {
+    void recover().catch((err) => log.error('ticket_recovery_failed', { err: String(err) }));
+  }, 5 * 60 * 1000);
+  recoveryTimer.unref();
   const purgeTimer = setInterval(() => {
     void purge().catch((err) => log.error('ticket_transcript_purge_failed', { err: String(err) }));
   }, 60 * 60 * 1000);
