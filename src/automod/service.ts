@@ -135,12 +135,24 @@ export class AutomodService {
           message.messageId,
         );
     const sanction = sanctionFor(Math.max(1, count), this.options.policy.sanctions);
+    let refusalReason: string | undefined;
     if (!this.options.dryRun && sanction.action !== 'delete') {
-      const target = await this.resolver.target(message.guildId, message.authorId);
-      await this.moderation.execute(this.moderationRequest(message, target, sanction, count, reason));
+      try {
+        const target = await this.resolver.target(message.guildId, message.authorId);
+        await this.moderation.execute(this.moderationRequest(message, target, sanction, count, reason));
+      } catch (err) {
+        if (!isSanctionRefusal(err)) throw err;
+        refusalReason = err.logReason;
+      }
     }
 
-    const outcome = this.options.dryRun ? 'dry_run' : sanction.action === 'delete' ? 'deleted' : sanction.action;
+    const outcome = refusalReason
+      ? 'refused'
+      : this.options.dryRun
+        ? 'dry_run'
+        : sanction.action === 'delete'
+          ? 'deleted'
+          : sanction.action;
     const result: AutomodResult = { matched: true, deleted, filter, sanction: sanction.action };
     await this.moderationStore.recordAudit({
       requestId: idempotencyKey,
@@ -154,10 +166,12 @@ export class AutomodService {
       idempotencyKey,
       metadata: {
         message_id: message.messageId,
+        filter,
         violation_count: this.options.dryRun ? null : count,
         sanction: sanction.action,
         timeout_seconds: sanction.timeoutSeconds,
         dry_run: this.options.dryRun,
+        refusal_reason: refusalReason,
       },
     }).catch((err: unknown) => {
       log.error('automod_audit_failed', { requestId: message.messageId, err: String(err) });
@@ -215,4 +229,8 @@ function sanctionFor(count: number, sanctions: AutomodSanction[]): AutomodSancti
 
 function sanctionName(value: unknown): AutomodSanction['action'] | undefined {
   return value === 'delete' || value === 'warn' || value === 'timeout' ? value : undefined;
+}
+
+function isSanctionRefusal(err: unknown): err is ActionError {
+  return err instanceof ActionError && err.code === 'action_not_allowed';
 }
