@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { openDb } from '../src/store/db.ts';
 import { LevelingService, type Mee6ImportRow } from '../src/leveling/service.ts';
+import { LIVE_GUILD_ID } from '../src/staging/spec.ts';
 
 interface Mee6Player {
   id?: string;
@@ -11,8 +12,9 @@ interface Mee6Player {
 
 function usage(): never {
   console.error(
-    'Usage: node scripts/levels-import-mee6.ts --guild <snowflake> --file <export.json>\n' +
-      'Accepted JSON: an array of players, or {players:[...]}; each player needs id/user_id and xp.',
+    'Usage: node scripts/levels-import-mee6.ts --guild <snowflake> --file <export.json> [--allow-live-guild]\n' +
+      'Accepted JSON: an array of players, or {players:[...]}; each player needs id/user_id and xp.\n' +
+      '--allow-live-guild is only for an owner-approved rollout.',
   );
   process.exit(2);
 }
@@ -48,6 +50,13 @@ function parseRows(value: unknown): Mee6ImportRow[] {
 
 const guildId = arg('--guild');
 if (!/^\d{17,20}$/.test(guildId)) throw new Error('--guild must be a Discord snowflake');
+if (guildId === LIVE_GUILD_ID && !process.argv.includes('--allow-live-guild')) {
+  console.error(
+    `Refusing live guild ${LIVE_GUILD_ID}. ` +
+      'Use --allow-live-guild only for an owner-approved rollout.',
+  );
+  process.exit(2);
+}
 const file = arg('--file');
 const rows = parseRows(JSON.parse(readFileSync(file, 'utf8')));
 const dbSpec = process.env.TWO_DATABASE_URL?.trim() || process.env.TWO_DB_PATH || './data/two.db';

@@ -55,8 +55,11 @@ than ~18 months and drop the per-member rows behind them.
 If a member asks to be removed:
 
 ```sql
-DELETE FROM events  WHERE member_id = '<id>';
-DELETE FROM members WHERE member_id = '<id>';
+DELETE FROM xp_awards   WHERE member_id = '<id>';
+DELETE FROM xp_cooldowns WHERE member_id = '<id>';
+DELETE FROM member_levels WHERE member_id = '<id>';
+DELETE FROM events      WHERE member_id = '<id>';
+DELETE FROM members     WHERE member_id = '<id>';
 ```
 
 This makes historical counts drop slightly, which is correct.
