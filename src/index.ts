@@ -38,7 +38,7 @@ import { ModerationDiscord } from './moderation/discord.ts';
 import { RestModerationResolver } from './moderation/resolver.ts';
 import { ModerationService } from './moderation/service.ts';
 import { ModerationStore } from './moderation/store.ts';
-import { registerModerationCommands, registerModerationHandler } from './moderation/commands.ts';
+import { MODERATION_COMMAND_DATA, registerModerationHandler } from './moderation/commands.ts';
 import { loadAutomodConfig } from './automod/config.ts';
 import { AutomodService } from './automod/service.ts';
 import { AutomodStore } from './automod/store.ts';
@@ -56,6 +56,12 @@ import { GuildConfigDiscordApi } from './discord/guildConfigApi.ts';
 import type { GuildConfigSnapshot } from './redesign/guildConfig.ts';
 import { readFileSync } from 'node:fs';
 import { STAGING_BOT_APPLICATION_ID, TWO_STAGING_GUILD_ID } from './staging/spec.ts';
+import { CommandRegistry } from './discord/commandRegistry.ts';
+import { AutomationStore } from './automations/store.ts';
+import { AutomationDiscord, registerAutomationCommands } from './automations/discord.ts';
+import { AutomationService } from './automations/service.ts';
+import { registerAutomationGateway } from './automations/gateway.ts';
+import { startScheduler } from './automations/scheduler.ts';
 
 const cfg = loadConfig();
 setLogLevel(cfg.logLevel);
@@ -259,17 +265,44 @@ if (cfg.guildId && moderationResolver && moderationService) {
     resolver: moderationResolver,
     service: moderationService,
   });
-  client.once('ready', async () => {
-    await registerModerationCommands(client, {
-      guildId: cfg.guildId!,
-      resolver: moderationResolver,
-      service: moderationService,
-    });
-    log.info('moderation_enabled', {
-      guildId: cfg.guildId,
-      protectedRoles: moderationCfg.protectedRoleIds.size,
-    });
+
+}
+
+// Automations (TOG-1648): custom commands, scheduled messages, stickies.
+let automationScheduler: ReturnType<typeof startScheduler> | null = null;
+const automationStore = new AutomationStore(db);
+const automationDiscord = new AutomationDiscord({
+  token: cfg.discordToken,
+  base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+});
+const automationService = new AutomationService(automationStore, automationDiscord);
+
+let commandRegistry: CommandRegistry | null = null;
+if (cfg.guildId) {
+  commandRegistry = new CommandRegistry(client, {
+    guildId: cfg.guildId,
+    automations: automationStore,
+    additionalBuiltins: moderationResolver && moderationService ? MODERATION_COMMAND_DATA : [],
   });
+  commandRegistry.register();
+  registerAutomationCommands(client, {
+    guildId: cfg.guildId,
+    service: automationService,
+    store: automationStore,
+    syncCommands: () => commandRegistry!.sync(),
+  });
+  registerAutomationGateway(client, {
+    service: automationService,
+    textCommandsEnabled: process.env.TWO_TEXT_COMMANDS === '1',
+    findTrigger: (guildId, word) => automationStore.findTextTrigger(guildId, word),
+  });
+  automationScheduler = startScheduler(automationService);
+  log.info('automations_enabled', {
+    guildId: cfg.guildId,
+    textCommands: process.env.TWO_TEXT_COMMANDS === '1' ? 'on' : 'off (slash-only)',
+  });
+} else {
+  log.info('automations_disabled', { reason: 'DISCORD_GUILD_ID is unset' });
 }
 
 // Onboarding (TWO-7). Skipped entirely if no landing channel is configured -
@@ -336,6 +369,9 @@ if (internalCfg) {
     // database as everything else, so it is covered by the same backups.
     store: new InternalActionStore(db),
     expectedJoins,
+    automations: automationService,
+    allowAutomationOverwrite: internalCfg.allowAutomationOverwrite,
+    syncCommands: commandRegistry ? () => commandRegistry!.sync() : null,
     moderation: moderationResolver && moderationService
       ? { resolver: moderationResolver, service: moderationService }
       : null,
@@ -461,6 +497,7 @@ if (healthPort > 0) {
 async function shutdown(signal: string) {
   log.info('shutdown', { signal });
   clearInterval(sweep);
+  automationScheduler?.stop();
   if (moderationSweep) clearInterval(moderationSweep);
   presenceProbe?.stop();
   communitySnapshots?.stop();

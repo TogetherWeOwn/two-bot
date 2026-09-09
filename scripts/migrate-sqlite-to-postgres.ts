@@ -32,7 +32,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { existsSync } from 'node:fs';
 import { openDb, isPostgresSpec, type Db } from '../src/store/db.ts';
 import { migrate } from '../src/store/migrate.ts';
-import { migrationValuesMatch } from './migration-values.ts';
+import { migrationValue, migrationValuesMatch } from './migration-values.ts';
 
 const args = new Set(process.argv.slice(2));
 const dryRun = args.has('--dry-run');
@@ -56,6 +56,10 @@ const OPTIONAL_TABLES = [
   'ticket_transcripts',
   'automod_violations',
   'automod_processed_messages',
+  'automation_commands',
+  'scheduled_messages',
+  'sticky_messages',
+  'automation_audit_log',
 ] as const;
 const TABLES = [...REQUIRED_TABLES, ...OPTIONAL_TABLES] as const;
 type Table = (typeof TABLES)[number];
@@ -76,6 +80,10 @@ const PRIMARY_KEYS: Record<Table, readonly string[]> = {
   ticket_transcripts: ['ticket_id'],
   automod_violations: ['guild_id', 'user_id'],
   automod_processed_messages: ['guild_id', 'message_id'],
+  automation_commands: ['guild_id', 'name'],
+  scheduled_messages: ['id'],
+  sticky_messages: ['guild_id', 'channel_id'],
+  automation_audit_log: ['id'],
 };
 
 const sqlitePath = process.env.TWO_SQLITE_PATH || process.env.TWO_DB_PATH || './data/two.db';
@@ -200,7 +208,7 @@ try {
       if (rows.length === 0) break;
 
       const params: unknown[] = [];
-      for (const row of rows) for (const c of shared) params.push(row[c] ?? null);
+      for (const row of rows) for (const c of shared) params.push(migrationValue(t, c, row[c]));
 
       // DO NOTHING so that a re-run after a partial failure is safe rather
       // than an error. The verification below is what proves it landed.

@@ -44,6 +44,11 @@ export function intents(_automodEnabled = process.env.TWO_AUTOMOD === '1'): Gate
 
 export const INTENTS = intents();
 
+/** Message content is already required by tickets/automod on current main. */
+export function intentsFor(_env: NodeJS.ProcessEnv = process.env): GatewayIntentBits[] {
+  return [...INTENTS];
+}
+
 export interface BotDeps {
   handlers: FunnelHandlers;
   invites: InviteTracker;
@@ -67,7 +72,7 @@ export interface BotDeps {
 
 export function createClient(automodEnabled = process.env.TWO_AUTOMOD === '1'): Client {
   return new Client({
-    intents: intents(automodEnabled),
+    intents: intentsFor(),
     ...(automodEnabled
       ? {
           partials: [Partials.Message, Partials.Channel],
