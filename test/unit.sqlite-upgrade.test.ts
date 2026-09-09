@@ -1,10 +1,15 @@
 import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
+import { execFile } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { promisify } from 'node:util';
 import { openSqlite } from '../src/store/sqliteDriver.ts';
+
+const run = promisify(execFile);
+const OPEN_HELPER = new URL('./helpers/open-sqlite.ts', import.meta.url).pathname;
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -136,6 +141,24 @@ test('existing SQLite leveling tables gain the XP ceiling without losing data', 
     1,
   );
   await reopened.close();
+});
+
+test('concurrent SQLite opens perform the leveling rebuild once', async () => {
+  const { path, raw } = legacyLevelingDb();
+  raw.exec('PRAGMA journal_mode = WAL');
+  raw.close();
+
+  await Promise.all([
+    run('node', [OPEN_HELPER, path]),
+    run('node', [OPEN_HELPER, path]),
+  ]);
+
+  const checked = await openSqlite(path);
+  assert.equal(
+    Number((await checked.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE id = '0011_leveling_xp_ceiling'`).get<{ count: number }>())?.count),
+    1,
+  );
+  await checked.close();
 });
 
 test('unsafe legacy SQLite XP aborts the rebuild and leaves the old tables intact', async () => {
