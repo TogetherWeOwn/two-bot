@@ -127,15 +127,15 @@ export class GuildConfigDiscordApi {
         return effective;
       };
       const blockedTargets = plan.overwriteTargets.flatMap((target) => {
-        if (!target.currentId) return [];
-        const effective = effectivePermissions(target.currentOverwrites);
+        const targetEffective = target.currentId ? effectivePermissions(target.currentOverwrites) : permissions;
         const missingChannelPermissions = [
           { name: 'Manage Channels', bit: 1n << 4n },
           { name: 'Manage Roles', bit: 1n << 28n },
-        ].filter((permission) => (effective & permission.bit) === 0n).map((permission) => permission.name);
+        ].filter((permission) => (targetEffective & permission.bit) === 0n).map((permission) => permission.name);
+        const permissionCeiling = effectivePermissions(target.permissionCeilingOverwrites);
         const requestedOverwrites = target.desiredOverwrites.length > 0 ? target.desiredOverwrites : target.inheritedDesiredOverwrites;
         const requested = requestedOverwrites.reduce((mask, overwrite) => mask | BigInt(overwrite.allow) | BigInt(overwrite.deny), 0n);
-        const unowned = requested & ~effective;
+        const unowned = requested & ~permissionCeiling;
         if (missingChannelPermissions.length === 0 && unowned === 0n) return [];
         return [`${target.name} (missing ${missingChannelPermissions.join(', ') || 'none'}; unowned mask ${unowned})`];
       });
