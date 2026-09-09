@@ -21,7 +21,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb, type Db } from '../src/store/db.ts';
-import { INTENTS } from '../src/discord/client.ts';
+import { INTENTS, intents } from '../src/discord/client.ts';
 import { WEB_CONTRACT_VIEWS } from '../src/store/webContract.ts';
 import {
   runProbeCycle,
@@ -83,8 +83,10 @@ describe('presence probe containment', () => {
         'If this instrument seems to need it, the issue has been misread.',
     );
 
-    // And the value check: ticket transcripts add MessageContent, but the
-    // presence probe still must not add GuildPresences.
+    // And the value check: ticket transcripts require MessageContent, while
+    // automod must not add a duplicate intent or introduce GuildPresences.
+    assert.equal(intents(false).length, 6, 'the default intent list changed - see client.ts');
+    assert.equal(intents(true).length, 6, 'automod must reuse the existing MessageContent intent');
     assert.equal(INTENTS.length, 6, 'the intent list changed - see client.ts intent rationale');
   });
 

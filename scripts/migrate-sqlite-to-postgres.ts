@@ -51,6 +51,8 @@ const OPTIONAL_TABLES = [
   'moderation_idempotency',
   'tickets',
   'ticket_transcripts',
+  'automod_violations',
+  'automod_processed_messages',
 ] as const;
 const TABLES = [...REQUIRED_TABLES, ...OPTIONAL_TABLES] as const;
 type Table = (typeof TABLES)[number];
@@ -66,6 +68,8 @@ const PRIMARY_KEYS: Record<Table, readonly string[]> = {
   moderation_idempotency: ['guild_id', 'idempotency_key'],
   tickets: ['id'],
   ticket_transcripts: ['ticket_id'],
+  automod_violations: ['guild_id', 'user_id'],
+  automod_processed_messages: ['guild_id', 'message_id'],
 };
 
 const sqlitePath = process.env.TWO_SQLITE_PATH || process.env.TWO_DB_PATH || './data/two.db';
