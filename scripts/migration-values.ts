@@ -9,7 +9,9 @@ export type MigrationTable =
   | 'moderation_idempotency'
   | 'operational_audit_log'
   | 'tickets'
-  | 'ticket_transcripts';
+  | 'ticket_transcripts'
+  | 'automod_violations'
+  | 'automod_processed_messages';
 
 export function migrationValuesMatch(
   table: MigrationTable,

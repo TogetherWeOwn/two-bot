@@ -283,6 +283,8 @@ const app = await api<{ flags?: number }>('/applications/@me');
 if (app.status === 200 && app.body) {
   const GUILD_MEMBERS_LIMITED = 1 << 14;
   const GUILD_MEMBERS = 1 << 15;
+  const MESSAGE_CONTENT_LIMITED = 1 << 18;
+  const MESSAGE_CONTENT = 1 << 19;
   const flags = app.body.flags ?? 0;
   if (flags & (GUILD_MEMBERS_LIMITED | GUILD_MEMBERS)) {
     pass('Server Members Intent is on');
@@ -290,6 +292,14 @@ if (app.status === 200 && app.body) {
     fail(
       'Server Members Intent is OFF',
       'no member_join events will fire. Developer Portal > Bot > Privileged Gateway Intents',
+    );
+  }
+  if (flags & (MESSAGE_CONTENT_LIMITED | MESSAGE_CONTENT)) {
+    pass('Message Content Intent is on');
+  } else {
+    fail(
+      'Message Content Intent is OFF',
+      'custom automod cannot inspect messages. Developer Portal > Bot > Privileged Gateway Intents',
     );
   }
 } else {

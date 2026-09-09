@@ -316,6 +316,7 @@ test('the invite carries every permission the internal actions need', () => {
     { action: 'announcement.post', name: 'View Channel', bit: 1n << 10n },
     { action: 'announcement.post', name: 'Send Messages', bit: 1n << 11n },
     { action: 'event.upsert', name: 'Manage Events', bit: 1n << 33n },
+    { action: 'automod.timeout', name: 'Moderate Members', bit: 1n << 40n },
   ];
   const missing = REQUIRED.filter((p) => !(STAGING_INVITE_PERMISSIONS & p.bit)).map(
     (p) => `${p.action} needs ${p.name}`,
@@ -333,6 +334,7 @@ test('the events bits survive the 32-bit shift trap', () => {
   // permission integer that grants Kick Members instead of Manage Events.
   assert.equal(1 << 33, 2, 'if this ever changes, the guard below can be simplified');
   assert.equal(STAGING_INVITE_PERMISSIONS & (1n << 33n), 1n << 33n, 'Manage Events');
+  assert.equal(STAGING_INVITE_PERMISSIONS & (1n << 40n), 1n << 40n, 'Moderate Members');
   assert.equal(STAGING_INVITE_PERMISSIONS & (1n << 44n), 1n << 44n, 'Create Events');
   // What the buggy number-arithmetic version would produce: the shifts wrap to
   // bits 1 and 12, so you get Kick Members and Send TTS Messages instead.
@@ -371,15 +373,16 @@ test('staging marker verification requires the leading audit identity field', ()
   assert.doesNotMatch(markerScanner, /message\.content\.includes\(/);
 });
 
-test('the invite is the operational set plus exactly the two events bits', () => {
+test('the invite is the low-bit set plus events and timeout permissions', () => {
   // Pins the relationship rather than the number, so widening the invite is a
-  // deliberate edit here and not a silently larger grant.
+  // deliberate edit here and not a silently larger grant. Manage Messages is
+  // low-bit; timeout needs the high Moderate Members bit.
   assert.equal(
     STAGING_INVITE_PERMISSIONS,
-    BigInt(STAGING_PERMISSIONS) | (1n << 33n) | (1n << 44n),
+    BigInt(STAGING_PERMISSIONS) | (1n << 33n) | (1n << 40n) | (1n << 44n),
   );
-  assert.equal(STAGING_PERMISSIONS, 268520640, 'onboarding plus View Audit Log');
-  assert.equal(STAGING_INVITE_PERMISSIONS, 17601044499648n);
+  assert.equal(STAGING_PERMISSIONS, 268528832, 'the low-bit set adds Manage Messages and View Audit Log');
+  assert.equal(STAGING_INVITE_PERMISSIONS, 18700556135616n);
 });
 
 test('the invite url carries the wider set, not the onboarding one', () => {
@@ -402,11 +405,12 @@ test('describePermissions reports the events bits as missing when they are', () 
   // configuration we had already measured as broken.
   const onboardingOnly = BigInt(STAGING_PERMISSIONS);
   const { missing } = describePermissions(onboardingOnly);
-  assert.deepEqual(missing, ['Manage Events', 'Create Events']);
+  assert.deepEqual(missing, ['Manage Events', 'Moderate Members', 'Create Events']);
 
   const everything = describePermissions(STAGING_INVITE_PERMISSIONS);
   assert.deepEqual(everything.missing, []);
   assert.ok(everything.held.includes('Manage Events'));
+  assert.ok(everything.held.includes('Moderate Members'));
 });
 
 test('the real 2026-09-05 failing mask is diagnosed, not waved through', () => {
