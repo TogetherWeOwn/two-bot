@@ -1,6 +1,10 @@
 import { after, before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { loadSelfRolePanels, SelfRoleConfigError } from '../src/selfRoles/config.ts';
+import {
+  loadSelfRolePanels,
+  SelfRoleConfigError,
+  validateSelfRolePanelRoles,
+} from '../src/selfRoles/config.ts';
 import {
   emojiIdentity,
   parseSelfRoleCustomId,
@@ -10,6 +14,7 @@ import {
   selfRoleCustomId,
 } from '../src/selfRoles/plan.ts';
 import type { SelfRolePanel } from '../src/selfRoles/types.ts';
+import { validateSelfRoleDispatch } from '../src/discord/selfRoles.ts';
 import { SelfRoleStore } from '../src/store/selfRoleStore.ts';
 import { openTestDb, type TestDb } from './helpers/testDb.ts';
 
@@ -24,8 +29,8 @@ const panel: SelfRolePanel = {
   exclusive: true,
   color: true,
   options: [
-    { key: 'red', label: 'Red', roleId: A, emoji: '🔴' },
-    { key: 'blue', label: 'Blue', roleId: B, emoji: '🔵' },
+    { key: 'red', label: 'Red', roleId: A, permissions: '0', emoji: '🔴' },
+    { key: 'blue', label: 'Blue', roleId: B, permissions: '0', emoji: '🔵' },
   ],
 };
 
@@ -51,9 +56,63 @@ test('configuration rejects duplicate panels, messages, roles, and unsafe color 
     /color requires exclusive=true/,
   );
   assert.throws(
-    () => loadSelfRolePanels(JSON.stringify([{ ...panel, options: [...panel.options, { key: 'green', label: 'Green', roleId: A }] }])),
+    () => loadSelfRolePanels(JSON.stringify([{ ...panel, options: [...panel.options, { key: 'green', label: 'Green', roleId: A, permissions: '0' }] }])),
     /offers role .* more than once/,
   );
+});
+
+test('configuration rejects a declared privileged role permission', () => {
+  assert.throws(
+    () => loadSelfRolePanels(JSON.stringify([{
+      ...panel,
+      options: [{ ...panel.options[0], permissions: String(1n << 2n) }], // BanMembers
+    }])),
+    /roleId 111111111111111111 has privileged permission BanMembers.*permissions/,
+  );
+});
+
+test('startup resolution rejects a role whose live permissions gained privilege', () => {
+  assert.throws(
+    () => validateSelfRolePanelRoles([panel], [
+      { id: A, name: 'Staff', permissions: String(1n << 2n) }, // BanMembers
+      { id: B, name: 'Blue', permissions: '0' },
+    ]),
+    /role 111111111111111111 \("Staff"\) has privileged permission BanMembers/,
+  );
+});
+
+test('dispatch re-check rejects a role that gains privilege after startup', () => {
+  const roles = new Map([
+    [A, { id: A, managed: false, editable: true, permissions: { bitfield: 1n << 13n } }], // ManageMessages
+  ]);
+  const member = {
+    guild: {
+      members: { me: { permissions: { has: () => true } } },
+      roles: { cache: { get: (id: string) => roles.get(id) } },
+    },
+  };
+  assert.deepEqual(validateSelfRoleDispatch(panel, member as never, [A]), {
+    code: 'privileged_role',
+    reason: `role ${A} has privileged permission ManageMessages`,
+    publicMessage: 'That role is not safe for self-service. Staff have been notified in the logs.',
+  });
+});
+
+test('dispatch re-check rejects any live permission-mask drift', () => {
+  const roles = new Map([
+    [A, { id: A, managed: false, editable: true, permissions: { bitfield: 1n << 10n } }], // ViewChannel
+  ]);
+  const member = {
+    guild: {
+      members: { me: { permissions: { has: () => true } } },
+      roles: { cache: { get: (id: string) => roles.get(id) } },
+    },
+  };
+  assert.deepEqual(validateSelfRoleDispatch(panel, member as never, [A]), {
+    code: 'role_permissions_changed',
+    reason: `role ${A} permission mask changed from 0 to 1024`,
+    publicMessage: 'That role changed after this panel was configured. Staff have been notified in the logs.',
+  });
 });
 
 test('exclusive color selection removes old colors and adds exactly one new color', () => {

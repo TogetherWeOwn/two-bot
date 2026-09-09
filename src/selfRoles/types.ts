@@ -5,6 +5,8 @@ export interface SelfRoleOption {
   key: string;
   label: string;
   roleId: string;
+  /** Exact Discord permission mask approved for this role at deployment. */
+  permissions: string;
   emoji?: string;
   description?: string;
 }

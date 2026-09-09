@@ -43,6 +43,7 @@ import {
   stagingInviteUrl,
 } from '../src/staging/spec.ts';
 import { evaluateHierarchy, type PartialRole } from '../src/staging/provision.ts';
+import { findSelfRolePrivilegedPermission } from '../src/selfRoles/permissions.ts';
 
 const API = 'https://discord.com/api/v10';
 
@@ -262,10 +263,24 @@ if (panelRaw.trim()) {
       for (const option of panel.options) {
         const role = knownRoles.get(option.roleId);
         if (!role) fail(`self-role panel "${panel.id}" role missing`, `${option.label} (${option.roleId})`);
-        else if (!weOwnIt && hierarchy && role.position >= (hierarchy.botPosition ?? -1)) {
-          fail(`self-role role "${role.name}" is above the bot`, `position ${role.position}`);
-        } else {
-          pass(`self-role role "${role.name}" assignable`, `panel ${panel.id}`);
+        else {
+          const livePermissions = BigInt(role.permissions ?? '0');
+          const privileged = findSelfRolePrivilegedPermission(livePermissions);
+          if (privileged) {
+            fail(
+              `self-role role "${role.name}" has privileged permission ${privileged}`,
+              `panel ${panel.id} must never make staff capabilities self-service`,
+            );
+          } else if (livePermissions !== BigInt(option.permissions)) {
+            fail(
+              `self-role role "${role.name}" permission mask changed`,
+              `panel ${panel.id} pins ${option.permissions}, Discord reports ${livePermissions}`,
+            );
+          } else if (!weOwnIt && hierarchy && role.position >= (hierarchy.botPosition ?? -1)) {
+            fail(`self-role role "${role.name}" is above the bot`, `position ${role.position}`);
+          } else {
+            pass(`self-role role "${role.name}" assignable`, `panel ${panel.id}`);
+          }
         }
       }
     }

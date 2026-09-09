@@ -1,4 +1,5 @@
 import { emojiIdentity } from './plan.ts';
+import { findSelfRolePrivilegedPermission } from './permissions.ts';
 import type { SelfRolePanel } from './types.ts';
 
 const SNOWFLAKE = /^\d{17,20}$/;
@@ -45,6 +46,58 @@ export function loadSelfRolePanels(raw = process.env.TWO_SELF_ROLE_PANELS ?? '')
   return panels;
 }
 
+export interface SelfRoleResolvedRole {
+  id: string;
+  name?: string;
+  permissions: string | bigint | { bitfield: bigint };
+}
+
+/**
+ * Resolve the deployment catalogue against Discord before any controls are
+ * registered or published. The JSON alone cannot prove a snowflake is safe;
+ * the live role permission mask is the authorization boundary.
+ */
+export function validateSelfRolePanelRoles(
+  panels: readonly SelfRolePanel[],
+  roles: readonly SelfRoleResolvedRole[],
+): void {
+  const byId = new Map(roles.map((role) => [role.id, role]));
+  for (const panel of panels) {
+    for (const option of panel.options) {
+      const role = byId.get(option.roleId);
+      if (!role) {
+        throw new SelfRoleConfigError(
+          `panel "${panel.id}" option "${option.key}" role ${option.roleId} does not exist`,
+        );
+      }
+      let livePermissions: bigint;
+      try {
+        livePermissions = typeof role.permissions === 'object'
+          ? role.permissions.bitfield
+          : BigInt(role.permissions);
+      } catch {
+        throw new SelfRoleConfigError(
+          `panel "${panel.id}" option "${option.key}" role ${option.roleId} has an invalid permission mask`,
+        );
+      }
+      const privileged = findSelfRolePrivilegedPermission(livePermissions);
+      if (privileged) {
+        throw new SelfRoleConfigError(
+          `panel "${panel.id}" option "${option.key}" role ${option.roleId}` +
+            `${role.name ? ` ("${role.name}")` : ''} has privileged permission ${privileged}`,
+        );
+      }
+      if (livePermissions !== BigInt(option.permissions)) {
+        throw new SelfRoleConfigError(
+          `panel "${panel.id}" option "${option.key}" role ${option.roleId}` +
+            `${role.name ? ` ("${role.name}")` : ''} permission mask changed from ` +
+            `${option.permissions} to ${livePermissions}`,
+        );
+      }
+    }
+  }
+}
+
 function parsePanel(value: unknown, index: number): SelfRolePanel {
   const at = `panel[${index}]`;
   const panel = record(value, at);
@@ -78,6 +131,13 @@ function parsePanel(value: unknown, index: number): SelfRolePanel {
     const key = shortKey(o.key, `${oat}.key`);
     const label = text(o.label, `${oat}.label`, 100);
     const roleId = snowflake(o.roleId, `${oat}.roleId`);
+    const permissions = permissionMask(o.permissions, `${oat}.permissions`);
+    const privileged = findSelfRolePrivilegedPermission(permissions);
+    if (privileged) {
+      throw new SelfRoleConfigError(
+        `${oat}.roleId ${roleId} has privileged permission ${privileged} in ${oat}.permissions`,
+      );
+    }
     const emoji = optionalText(o.emoji, `${oat}.emoji`, 100);
     const description = optionalText(o.description, `${oat}.description`, 100);
     const emojiKey = emoji ? emojiIdentity(emoji) : undefined;
@@ -91,7 +151,7 @@ function parsePanel(value: unknown, index: number): SelfRolePanel {
     optionKeys.add(key);
     roleIds.add(roleId);
     if (emojiKey) emojis.add(emojiKey);
-    return { key, label, roleId, ...(emoji ? { emoji } : {}), ...(description ? { description } : {}) };
+    return { key, label, roleId, permissions, ...(emoji ? { emoji } : {}), ...(description ? { description } : {}) };
   });
 
   return { id, channelId, messageId, mode, exclusive, color, options };
@@ -129,6 +189,17 @@ function snowflake(value: unknown, at: string): string {
     throw new SelfRoleConfigError(`${at} must be a Discord snowflake string`);
   }
   return value;
+}
+
+function permissionMask(value: unknown, at: string): string {
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) {
+    throw new SelfRoleConfigError(`${at} must be a Discord permission bitfield string`);
+  }
+  try {
+    return BigInt(value).toString();
+  } catch {
+    throw new SelfRoleConfigError(`${at} must be a Discord permission bitfield string`);
+  }
 }
 
 function optionalBoolean(value: unknown, at: string): boolean | undefined {

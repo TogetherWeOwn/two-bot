@@ -20,6 +20,7 @@ import {
 } from 'discord.js';
 import { log } from '../core/log.ts';
 import { parseSelfRoleCustomId, planSelfRoleChange, reactionOptionKey, selfRoleCustomId } from '../selfRoles/plan.ts';
+import { findSelfRolePrivilegedPermission } from '../selfRoles/permissions.ts';
 import type { SelfRolePanel, SelfRolePanelMode } from '../selfRoles/types.ts';
 import type { SelfRoleStore } from '../store/selfRoleStore.ts';
 
@@ -248,7 +249,7 @@ async function applyRoleDelta(opts: {
   }
 
   const reason = `TWO self-role panel ${panel.id}`;
-  const failure = validateRoles(member, [...opts.addRoleIds, ...opts.removeRoleIds]);
+  const failure = validateSelfRoleDispatch(panel, member, [...opts.addRoleIds, ...opts.removeRoleIds]);
   if (failure) {
     await audit(opts, 'rejected', failure.code, failure.reason);
     log.error('self_role_rejected', { panelId: panel.id, memberId: member.id, code: failure.code });
@@ -307,7 +308,8 @@ async function applyRoleDelta(opts: {
   }
 }
 
-function validateRoles(
+export function validateSelfRoleDispatch(
+  panel: SelfRolePanel,
   member: GuildMember,
   roleIds: readonly string[],
 ): { code: string; reason: string; publicMessage: string } | null {
@@ -323,6 +325,24 @@ function validateRoles(
     const role = member.guild.roles.cache.get(roleId);
     if (!role) {
       return { code: 'missing_role', reason: `role ${roleId} is not in the guild cache`, publicMessage: 'That role no longer exists.' };
+    }
+    const privileged = findSelfRolePrivilegedPermission(role.permissions);
+    if (privileged) {
+      return {
+        code: 'privileged_role',
+        reason: `role ${roleId} has privileged permission ${privileged}`,
+        publicMessage: 'That role is not safe for self-service. Staff have been notified in the logs.',
+      };
+    }
+    const option = panel.options.find((candidate) => candidate.roleId === roleId);
+    if (!option || role.permissions.bitfield !== BigInt(option.permissions)) {
+      return {
+        code: 'role_permissions_changed',
+        reason: option
+          ? `role ${roleId} permission mask changed from ${option.permissions} to ${role.permissions.bitfield}`
+          : `role ${roleId} is not configured on panel ${panel.id}`,
+        publicMessage: 'That role changed after this panel was configured. Staff have been notified in the logs.',
+      };
     }
     if (role.managed || !role.editable) {
       return {

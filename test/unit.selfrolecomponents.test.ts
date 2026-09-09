@@ -12,8 +12,8 @@ const panel: SelfRolePanel = {
   exclusive: false,
   color: false,
   options: [
-    { key: 'one', label: 'One', roleId: '333333333333333333', description: 'First' },
-    { key: 'two', label: 'Two', roleId: '444444444444444444', emoji: '🎮' },
+    { key: 'one', label: 'One', roleId: '333333333333333333', permissions: '0', description: 'First' },
+    { key: 'two', label: 'Two', roleId: '444444444444444444', permissions: '0', emoji: '🎮' },
   ],
 };
 
@@ -43,6 +43,7 @@ test('button panels chunk at five controls per row and show held roles', () => {
       key: `r${i}`,
       label: `Role ${i}`,
       roleId: `${i + 1}`.padStart(18, '1'),
+      permissions: '0',
     })),
   };
   const rows = buildSelfRoleComponents(buttons, [buttons.options[0].roleId]);

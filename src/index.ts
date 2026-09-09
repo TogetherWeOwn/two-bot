@@ -30,7 +30,7 @@ import { startInternalActions, type InternalServer } from './internal/server.ts'
 import { KeyRing } from './internal/signing.ts';
 import { DiscordActions } from './internal/discordActions.ts';
 import { InternalActionStore } from './internal/store.ts';
-import { loadSelfRolePanels } from './selfRoles/config.ts';
+import { loadSelfRolePanels, validateSelfRolePanelRoles } from './selfRoles/config.ts';
 import { SelfRoleStore } from './store/selfRoleStore.ts';
 import { startHealthServer, type HealthServer } from './core/health.ts';
 
@@ -146,6 +146,17 @@ if (cfg.anchorWelcomeChannelId) {
 // disable rather than an implicit panel with production ids.
 const selfRolePanels = loadSelfRolePanels();
 if (selfRolePanels.length) {
+  if (!cfg.guildId) {
+    throw new Error('TWO_SELF_ROLE_PANELS requires DISCORD_GUILD_ID - every panel belongs to one guild.');
+  }
+  const selfRoleRoles = await new DiscordRest({
+    token: cfg.discordToken,
+    base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+  }).get<Array<{ id: string; name?: string; permissions: string }>>(`/guilds/${cfg.guildId}/roles`);
+  if (!selfRoleRoles) {
+    throw new Error(`TWO_SELF_ROLE_PANELS roles could not be resolved for guild ${cfg.guildId}`);
+  }
+  validateSelfRolePanelRoles(selfRolePanels, selfRoleRoles);
   registerSelfRoles(client, {
     panels: selfRolePanels,
     store: new SelfRoleStore(db),
