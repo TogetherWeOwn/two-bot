@@ -3,7 +3,7 @@ import { ActionError } from '../internal/errors.ts';
 import type { ModerationDiscordClient } from '../moderation/discord.ts';
 import type { ModerationExecution } from '../moderation/service.ts';
 import type { ModerationService } from '../moderation/service.ts';
-import type { ModerationStore } from '../moderation/store.ts';
+import type { ModerationClaim, ModerationStore } from '../moderation/store.ts';
 import type { ModerationTarget } from '../moderation/types.ts';
 import { log } from '../core/log.ts';
 import { matchAutomod, MemoryRepeatTracker, type RepeatTracker } from './matcher.ts';
@@ -61,7 +61,12 @@ export class AutomodService {
     const requestHash = createHash('sha256')
       .update(JSON.stringify({ filter, authorId: message.authorId, channelId: message.channelId }))
       .digest('hex');
-    const claim = await this.moderationStore.claim(message.guildId, idempotencyKey, `automod.${filter}`, requestHash);
+    let claim: ModerationClaim;
+    try {
+      claim = await this.moderationStore.claim(message.guildId, idempotencyKey, `automod.${filter}`, requestHash);
+    } catch (err) {
+      throw new AutomodProcessingError(err, true);
+    }
     if (claim.state === 'replayed') {
       return {
         matched: true,
@@ -92,10 +97,13 @@ export class AutomodService {
     try {
       return await this.runClaimed(message, filter, idempotencyKey, () => { deleteAttempted = true; });
     } catch (err) {
-      if (!deleteAttempted) {
-        await this.moderationStore.release(message.guildId, idempotencyKey);
-      } else if (this.isDefiniteDeleteFailure(err)) {
-        await this.moderationStore.release(message.guildId, idempotencyKey);
+      if (!deleteAttempted || this.isDefiniteDeleteFailure(err)) {
+        await this.moderationStore.release(message.guildId, idempotencyKey).catch((releaseErr: unknown) => {
+          log.error('automod_idempotency_release_failed', {
+            requestId: message.messageId,
+            err: String(releaseErr),
+          });
+        });
       }
       // Retain the claim after a successful delete or an uncertain mutation. A
       // gateway retry must not repeat sanctions whose Discord outcome is unknown.

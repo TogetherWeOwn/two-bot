@@ -2,12 +2,29 @@ import { EventEmitter } from 'node:events';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Events, type Client } from 'discord.js';
+import { AutomodService } from '../src/automod/service.ts';
+import type { AutomodPolicy } from '../src/automod/types.ts';
 import { registerHandlers } from '../src/discord/client.ts';
-import type { AutomodService } from '../src/automod/service.ts';
 import type { FunnelHandlers } from '../src/core/handlers.ts';
 import type { InviteTracker } from '../src/core/inviteTracker.ts';
+import { ActionError } from '../src/internal/errors.ts';
+import type { ModerationDiscordClient } from '../src/moderation/discord.ts';
+import type { ModerationService } from '../src/moderation/service.ts';
+import type { ModerationStore } from '../src/moderation/store.ts';
+import type { AutomodStore } from '../src/automod/store.ts';
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+const policy: AutomodPolicy = {
+  badWords: ['blocked'],
+  blockedAttachmentExtensions: [],
+  allowedDomains: [],
+  repeatedMessageCount: 3,
+  repeatedMessageWindowSeconds: 30,
+  mentionLimit: 3,
+  bypassRoleIds: new Set(),
+  exemptChannelIds: new Set(),
+  sanctions: [{ violations: 1, action: 'delete' }],
+};
 
 function deps() {
   let recorded = 0;
@@ -59,6 +76,34 @@ function message(id: string, content: string) {
   };
 }
 
+function failingAutomod(failure: 'claim' | 'release'): AutomodService {
+  const moderationStore = {
+    claim: async () => {
+      if (failure === 'claim') throw new Error('db unavailable');
+      return { state: 'claimed' as const };
+    },
+    release: async () => { throw new Error('release unavailable'); },
+  } as unknown as ModerationStore;
+  const discord = {
+    deleteMessage: async () => {
+      throw new ActionError('discord_rejected', 'Discord refused the request with 403');
+    },
+  } as unknown as ModerationDiscordClient;
+  return new AutomodService(
+    discord,
+    {} as ModerationService,
+    moderationStore,
+    {} as AutomodStore,
+    { target: async () => { throw new Error('not reached'); } },
+    {
+      dryRun: false,
+      owenUserId: '1469137636663758888',
+      botHighestRolePosition: 10,
+      policy,
+    },
+  );
+}
+
 test('blocked gateway messages do not earn funnel activity or leveling', async () => {
   const d = deps();
   const bus = new EventEmitter();
@@ -71,6 +116,20 @@ test('blocked gateway messages do not earn funnel activity or leveling', async (
   bus.emit(Events.MessageCreate, message('allowed-1', 'allowed'));
   await settle();
   assert.equal(d.recorded(), 1);
+});
+
+test('matched storage failures do not earn funnel activity or leveling', async () => {
+  for (const failure of ['claim', 'release'] as const) {
+    const d = deps();
+    const bus = new EventEmitter();
+    registerHandlers(bus as unknown as Client, {
+      ...d,
+      automod: { service: failingAutomod(failure), guildId: '1545644954272137297' },
+    });
+    bus.emit(Events.MessageCreate, message(`${failure}-failure`, 'blocked'));
+    await settle();
+    assert.equal(d.recorded(), 0, `${failure} failure must remain matched at the gateway`);
+  }
 });
 
 test('edited and uncached partial messages are inspected at edit time', async () => {
