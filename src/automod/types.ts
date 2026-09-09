@@ -37,7 +37,7 @@ export interface AutomodMessage {
   content: string;
   mentionedUserIds: string[];
   attachmentNames: string[];
-  createdTimestamp: number;
+  observedTimestamp: number;
 }
 
 export interface AutomodResult {

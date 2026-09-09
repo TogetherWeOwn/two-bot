@@ -189,8 +189,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     content: string;
     mentions: { users: { keys(): IterableIterator<string> } };
     attachments: { values(): IterableIterator<{ name: string | null }> };
-    createdTimestamp: number;
-  }): Promise<boolean> => {
+  }, observedTimestamp: number): Promise<boolean> => {
     if (!automod || !msg.guildId || msg.guildId !== automod.guildId || !msg.author) return false;
     try {
       const result = await automod.service.inspect({
@@ -203,7 +202,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
         content: msg.content,
         mentionedUserIds: [...msg.content.matchAll(/<@!?(\d{17,20})>/g)].map((match) => match[1]),
         attachmentNames: [...msg.attachments.values()].flatMap((item) => item.name ? [item.name] : []),
-        createdTimestamp: msg.createdTimestamp,
+        observedTimestamp,
       });
       return result.matched;
     } catch (err) {
@@ -219,7 +218,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
 
   client.on(Events.MessageCreate, async (msg) => {
     if (!msg.guildId) return; // ignore DMs
-    if (await inspectAutomod(msg)) return;
+    if (await inspectAutomod(msg, msg.createdTimestamp)) return;
     await handlers.onMessage({
       guildId: msg.guildId,
       memberId: msg.author.id,
@@ -238,7 +237,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     try {
       const msg = partial.partial ? await partial.fetch() : partial;
       if (!msg.author) return;
-      await inspectAutomod(msg);
+      await inspectAutomod(msg, Date.now());
     } catch (err) {
       log.error('automod_edit_fetch_failed', {
         guildId: partial.guildId,

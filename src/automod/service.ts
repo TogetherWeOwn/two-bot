@@ -57,7 +57,7 @@ export class AutomodService {
 
     const filter = matchAutomod(message, this.options.policy, this.repeats);
     if (!filter) return { matched: false, deleted: false };
-    const idempotencyKey = `automod:${message.messageId}`;
+    const idempotencyKey = `automod:${this.options.dryRun ? 'dry-run:' : ''}${message.messageId}`;
     const requestHash = createHash('sha256')
       .update(JSON.stringify({ filter, authorId: message.authorId, channelId: message.channelId }))
       .digest('hex');
@@ -72,22 +72,33 @@ export class AutomodService {
       };
     }
     if (claim.state === 'in_flight') {
-      throw new ActionError('in_progress', 'An earlier attempt at this automod action has an uncertain outcome', {
-        logReason: 'automod_idempotent_in_flight',
-      });
+      throw new AutomodProcessingError(
+        new ActionError('in_progress', 'An earlier attempt at this automod action has an uncertain outcome', {
+          logReason: 'automod_idempotent_in_flight',
+        }),
+        true,
+      );
     }
     if (claim.state === 'mismatch') {
-      throw new ActionError('malformed', 'This message id was used for a different automod result', {
-        logReason: 'automod_idempotency_key_reused',
-      });
+      throw new AutomodProcessingError(
+        new ActionError('malformed', 'This message id was used for a different automod result', {
+          logReason: 'automod_idempotency_key_reused',
+        }),
+        true,
+      );
     }
 
+    let deleteAttempted = false;
     try {
-      return await this.runClaimed(message, filter, idempotencyKey);
+      return await this.runClaimed(message, filter, idempotencyKey, () => { deleteAttempted = true; });
     } catch (err) {
-      // Keep the outer claim after work begins. A warn/timeout may have succeeded
-      // even when the response or the later completion write failed; releasing
-      // here would let a gateway retry repeat the sanction.
+      if (!deleteAttempted) {
+        await this.moderationStore.release(message.guildId, idempotencyKey);
+      } else if (this.isDefiniteDeleteFailure(err)) {
+        await this.moderationStore.release(message.guildId, idempotencyKey);
+      }
+      // Retain the claim after a successful delete or an uncertain mutation. A
+      // gateway retry must not repeat sanctions whose Discord outcome is unknown.
       throw new AutomodProcessingError(err, true);
     }
   }
@@ -96,11 +107,13 @@ export class AutomodService {
     message: AutomodMessage,
     filter: NonNullable<AutomodResult['filter']>,
     idempotencyKey: string,
+    markDeleteAttempted: () => void,
   ): Promise<AutomodResult> {
     const reason = `Automod ${filter.replace(/_/g, ' ')}`;
     let deleted = false;
     if (!this.options.dryRun) {
       if (!this.discord.deleteMessage) throw new Error('automod requires exact message deletion support');
+      markDeleteAttempted();
       await this.discord.deleteMessage(message.channelId, message.messageId, reason);
       deleted = true;
     }
@@ -122,7 +135,7 @@ export class AutomodService {
     const outcome = this.options.dryRun ? 'dry_run' : sanction.action === 'delete' ? 'deleted' : sanction.action;
     const result: AutomodResult = { matched: true, deleted, filter, sanction: sanction.action };
     await this.moderationStore.recordAudit({
-      requestId: `automod:${message.messageId}`,
+      requestId: idempotencyKey,
       guildId: message.guildId,
       actorId: this.options.owenUserId,
       action: `automod.${filter}`,
@@ -146,6 +159,11 @@ export class AutomodService {
       result: { deleted, sanction: sanction.action },
     });
     return result;
+  }
+
+  private isDefiniteDeleteFailure(err: unknown): boolean {
+    return err instanceof ActionError
+      && (err.code === 'discord_rejected' || err.code === 'action_not_allowed' || err.code === 'malformed');
   }
 
   private moderationRequest(

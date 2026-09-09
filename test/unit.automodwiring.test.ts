@@ -12,6 +12,7 @@ const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 function deps() {
   let recorded = 0;
   const inspected: string[] = [];
+  const observed: number[] = [];
   const handlers = {
     onMessage: async () => { recorded++; },
     onJoin: async () => null,
@@ -27,8 +28,9 @@ function deps() {
     inviterFor: async () => null,
   } as unknown as InviteTracker;
   const automod = {
-    inspect: async (message: { messageId: string; content: string }) => {
+    inspect: async (message: { messageId: string; content: string; observedTimestamp: number }) => {
       inspected.push(`${message.messageId}:${message.content}`);
+      observed.push(message.observedTimestamp);
       return { matched: message.content === 'blocked', deleted: message.content === 'blocked' };
     },
   } as unknown as AutomodService;
@@ -37,6 +39,7 @@ function deps() {
     invites,
     automod: { service: automod, guildId: '1545644954272137297' },
     inspected,
+    observed,
     recorded: () => recorded,
   };
 }
@@ -70,21 +73,28 @@ test('blocked gateway messages do not earn funnel activity or leveling', async (
   assert.equal(d.recorded(), 1);
 });
 
-test('edited and uncached partial messages are inspected too', async () => {
-  const d = deps();
-  const bus = new EventEmitter();
-  registerHandlers(bus as unknown as Client, d);
-  bus.emit(Events.MessageUpdate, message('edited-1', 'allowed'), message('edited-1', 'blocked'));
-  await settle();
-  const fetched = message('edited-2', 'blocked');
-  bus.emit(Events.MessageUpdate, null, {
-    ...fetched,
-    partial: true,
-    fetch: async () => fetched,
-  });
-  await settle();
-  assert.deepEqual(d.inspected, ['edited-1:blocked', 'edited-2:blocked']);
-  assert.equal(d.recorded(), 0, 'edits never create a second funnel message event');
+test('edited and uncached partial messages are inspected at edit time', async () => {
+  const realNow = Date.now;
+  Date.now = () => 2_000;
+  try {
+    const d = deps();
+    const bus = new EventEmitter();
+    registerHandlers(bus as unknown as Client, d);
+    bus.emit(Events.MessageUpdate, message('edited-1', 'allowed'), message('edited-1', 'blocked'));
+    await settle();
+    const fetched = message('edited-2', 'blocked');
+    bus.emit(Events.MessageUpdate, null, {
+      ...fetched,
+      partial: true,
+      fetch: async () => fetched,
+    });
+    await settle();
+    assert.deepEqual(d.inspected, ['edited-1:blocked', 'edited-2:blocked']);
+    assert.deepEqual(d.observed, [2_000, 2_000]);
+    assert.equal(d.recorded(), 0, 'edits never create a second funnel message event');
+  } finally {
+    Date.now = realNow;
+  }
 });
 
 test('messages outside the configured guild are never inspected', async () => {

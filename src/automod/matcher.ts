@@ -22,12 +22,12 @@ export class MemoryRepeatTracker implements RepeatTracker {
     if (!normalizedContent) return false;
     const key = `${message.guildId}:${message.authorId}`;
     const windowMs = policy.repeatedMessageWindowSeconds * 1000;
-    const cutoff = message.createdTimestamp - windowMs;
+    const cutoff = message.observedTimestamp - windowMs;
     const recent = (this.rows.get(key) ?? []).filter((row) => row.at >= cutoff);
     const existing = recent.findIndex((row) => row.messageId === message.messageId);
     if (existing >= 0) recent.splice(existing, 1);
     const digest = createHmac('sha256', this.digestKey).update(normalizedContent).digest('hex');
-    recent.push({ messageId: message.messageId, digest, at: message.createdTimestamp });
+    recent.push({ messageId: message.messageId, digest, at: message.observedTimestamp });
     this.rows.set(key, recent.slice(-policy.repeatedMessageCount));
     this.scheduleExpiry(key, windowMs);
     return recent.filter((row) => row.digest === digest).length >= policy.repeatedMessageCount;

@@ -1,10 +1,12 @@
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadAutomodConfig } from '../src/automod/config.ts';
+import { ActionError } from '../src/internal/errors.ts';
 import { matchAutomod, MemoryRepeatTracker } from '../src/automod/matcher.ts';
 import { AutomodService } from '../src/automod/service.ts';
 import { AutomodStore } from '../src/automod/store.ts';
-import type { AutomodMessage, AutomodPolicy } from '../src/automod/types.ts';
+import { AutomodProcessingError, type AutomodMessage, type AutomodPolicy } from '../src/automod/types.ts';
 import type { ModerationDiscordClient } from '../src/moderation/discord.ts';
 import { ModerationService } from '../src/moderation/service.ts';
 import { ModerationStore } from '../src/moderation/store.ts';
@@ -44,7 +46,7 @@ function message(overrides: Partial<AutomodMessage> = {}): AutomodMessage {
     content: 'ordinary message',
     mentionedUserIds: [],
     attachmentNames: [],
-    createdTimestamp: Date.parse('2026-09-09T06:00:00.000Z'),
+    observedTimestamp: Date.parse('2026-09-09T06:00:00.000Z'),
     ...overrides,
   };
 }
@@ -104,9 +106,9 @@ test('repeat filter requires distinct message ids inside the window and tracks e
   const tracker = new MemoryRepeatTracker();
   assert.equal(matchAutomod(message({ messageId: '1', content: 'repeat me' }), policy, tracker), null);
   assert.equal(matchAutomod(message({ messageId: '1', content: 'other text' }), policy, tracker), null);
-  assert.equal(matchAutomod(message({ messageId: '2', content: 'repeat me', createdTimestamp: message().createdTimestamp + 1000 }), policy, tracker), null);
-  assert.equal(matchAutomod(message({ messageId: '3', content: 'repeat me', createdTimestamp: message().createdTimestamp + 2000 }), policy, tracker), null);
-  assert.equal(matchAutomod(message({ messageId: '1', content: 'repeat me', createdTimestamp: message().createdTimestamp + 3000 }), policy, tracker), 'repeated_message');
+  assert.equal(matchAutomod(message({ messageId: '2', content: 'repeat me', observedTimestamp: message().observedTimestamp + 1000 }), policy, tracker), null);
+  assert.equal(matchAutomod(message({ messageId: '3', content: 'repeat me', observedTimestamp: message().observedTimestamp + 2000 }), policy, tracker), null);
+  assert.equal(matchAutomod(message({ messageId: '1', content: 'repeat me', observedTimestamp: message().observedTimestamp + 3000 }), policy, tracker), 'repeated_message');
 });
 
 test('deletes, warns, then times out through the reviewed moderation service', async () => {
@@ -168,7 +170,7 @@ test('dry-run matches do not advance the enforceable sanctions ledger', async ()
     { target: async () => { throw new Error('not reached'); } },
     { dryRun: true, owenUserId: OWEN, botHighestRolePosition: 10, policy },
   );
-  await dryRun.inspect(message({ messageId: 'dry-1', content: 'very bad' }));
+  await dryRun.inspect(message({ messageId: 'same-message', content: 'very bad' }));
   await dryRun.inspect(message({ messageId: 'dry-2', content: 'very bad' }));
   assert.equal((await testDb.db.prepare('SELECT COUNT(*) AS n FROM automod_violations').get<{ n: number }>())?.n, 0);
 
@@ -180,9 +182,37 @@ test('dry-run matches do not advance the enforceable sanctions ledger', async ()
     { target: async () => { throw new Error('not reached'); } },
     { dryRun: false, owenUserId: OWEN, botHighestRolePosition: 10, policy },
   );
-  const first = await enforce.inspect(message({ messageId: 'enforce-1', content: 'very bad' }));
+  const first = await enforce.inspect(message({ messageId: 'same-message', content: 'very bad' }));
   assert.equal(first.sanction, 'delete');
-  assert.deepEqual(calls, ['delete:enforce-1']);
+  assert.deepEqual(calls, ['delete:same-message']);
+  await testDb.cleanup();
+});
+
+test('a definite message deletion refusal releases the claim for retry', async () => {
+  const testDb = await openTestDb(import.meta.filename);
+  let calls = 0;
+  const discord: ModerationDiscordClient = {
+    async deleteMessage() {
+      calls++;
+      if (calls === 1) throw new ActionError('discord_rejected', 'Discord refused the request with 403');
+    },
+    async timeout() {}, async ban() {}, async unban() {}, async kick() {},
+    async purge(_channel, count) { return count; }, async setSlowmode() {},
+    async getEveryoneOverwrite() { return null; }, async putEveryoneOverwrite() {}, async deleteEveryoneOverwrite() {},
+  };
+  const moderationStore = new ModerationStore(testDb.db);
+  const service = new AutomodService(
+    discord,
+    new ModerationService(discord, moderationStore, { owenUserId: OWEN, botUserId: OWEN, protectedRoleIds: new Set() }),
+    moderationStore,
+    new AutomodStore(testDb.db),
+    { target: async () => { throw new Error('not reached'); } },
+    { dryRun: false, owenUserId: OWEN, botHighestRolePosition: 10, policy },
+  );
+  await assert.rejects(() => service.inspect(message({ messageId: 'retry-delete', content: 'very bad' })), /Discord refused/);
+  const retried = await service.inspect(message({ messageId: 'retry-delete', content: 'very bad' }));
+  assert.equal(retried.deleted, true);
+  assert.equal(calls, 2);
   await testDb.cleanup();
 });
 
@@ -193,6 +223,34 @@ test('delayed retry of an older message does not advance the sanctions ledger', 
   assert.equal(await store.recordViolation(GUILD, USER, 'bad_words', 'm2'), 2);
   assert.equal(await store.recordViolation(GUILD, USER, 'bad_words', 'm1'), 2);
   assert.equal((await testDb.db.prepare('SELECT COUNT(*) AS n FROM automod_processed_messages').get<{ n: number }>())?.n, 2);
+  await testDb.cleanup();
+});
+
+test('an in-flight duplicate remains matched for the gateway', async () => {
+  const testDb = await openTestDb(import.meta.filename);
+  const moderationStore = new ModerationStore(testDb.db);
+  const service = new AutomodService(
+    {
+      async deleteMessage() {}, async timeout() {}, async ban() {}, async unban() {}, async kick() {},
+      async purge(_channel, count) { return count; }, async setSlowmode() {},
+      async getEveryoneOverwrite() { return null; }, async putEveryoneOverwrite() {}, async deleteEveryoneOverwrite() {},
+    },
+    {} as ModerationService,
+    moderationStore,
+    new AutomodStore(testDb.db),
+    { target: async () => { throw new Error('not reached'); } },
+    { dryRun: false, owenUserId: OWEN, botHighestRolePosition: 10, policy },
+  );
+  await moderationStore.claim(
+    GUILD,
+    'automod:duplicate',
+    'automod.bad_words',
+    createHash('sha256').update(JSON.stringify({ filter: 'bad_words', authorId: USER, channelId: CHANNEL })).digest('hex'),
+  );
+  await assert.rejects(
+    () => service.inspect(message({ messageId: 'duplicate', content: 'very bad' })),
+    (err: unknown) => err instanceof AutomodProcessingError && err.matched,
+  );
   await testDb.cleanup();
 });
 
