@@ -309,7 +309,7 @@ async function discordMarkerMessageIds(channelId: string, entryId: string, since
     if (result.status !== 200 || !result.body) throw new Error(`Discord marker fetch failed for channel ${channelId}: HTTP ${result.status}`);
     for (const message of result.body) {
       if (Date.parse(message.timestamp) < Date.parse(since)) return matches;
-      if (message.author.id === botId && message.content.includes(marker)) matches.push(message.id);
+      if (message.author.id === botId && message.content.startsWith(`${marker} · `)) matches.push(message.id);
     }
     if (result.body.length < 100) return matches;
     before = result.body.at(-1)?.id ?? '';
