@@ -2,6 +2,25 @@ import { PermissionFlagsBits } from 'discord.js';
 import { ActionError } from '../internal/errors.ts';
 import type { ModerationActionName, ModerationPolicy, ModerationRequest } from './types.ts';
 
+export type ModerationPolicyRefusalReason =
+  | 'actor_missing_permission'
+  | 'target_self'
+  | 'target_guild_owner'
+  | 'target_owen'
+  | 'target_bot'
+  | 'target_staff_role'
+  | 'actor_hierarchy';
+
+const MODERATION_POLICY_REFUSAL_REASONS = new Set<ModerationPolicyRefusalReason>([
+  'actor_missing_permission',
+  'target_self',
+  'target_guild_owner',
+  'target_owen',
+  'target_bot',
+  'target_staff_role',
+  'actor_hierarchy',
+]);
+
 const PERMISSION_FOR: Record<ModerationActionName, bigint> = {
   'moderation.ban': PermissionFlagsBits.BanMembers,
   'moderation.tempban': PermissionFlagsBits.BanMembers,
@@ -49,6 +68,12 @@ export function assertModerationAllowed(request: ModerationRequest, policy: Mode
   }
 }
 
-function refuse(message: string, logReason: string): never {
+export function isModerationPolicyRefusal(err: unknown): err is ActionError & { logReason: ModerationPolicyRefusalReason } {
+  return err instanceof ActionError
+    && err.code === 'action_not_allowed'
+    && MODERATION_POLICY_REFUSAL_REASONS.has(err.logReason as ModerationPolicyRefusalReason);
+}
+
+function refuse(message: string, logReason: ModerationPolicyRefusalReason): never {
   throw new ActionError('action_not_allowed', message, { logReason });
 }
