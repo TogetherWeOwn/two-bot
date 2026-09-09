@@ -63,7 +63,7 @@ const api = new GuildConfigDiscordApi({
 await api.assertIdentity();
 const before = await api.capture();
 const plan = planRestore(snapshot, before);
-if (apply && plan.counts.operations > 0) await api.assertRestorePermissions(before, plan.counts);
+if (apply && plan.counts.operations > 0) await api.assertRestorePermissions(before, plan);
 console.log(`guild-config-restore: ${apply ? 'applying' : 'planned'} ${plan.counts.operations} operation(s)`);
 for (const operation of plan.operations) console.log(`${apply ? 'DID' : 'WOULD'} ${operation.label}`);
 

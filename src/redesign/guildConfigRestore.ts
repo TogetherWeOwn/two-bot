@@ -33,6 +33,7 @@ export type RestoreOperation = {
 export type RestorePlan = {
   counts: { roles: number; channels: number; overwrites: number; settings: number; emojis: number; operations: number };
   knownIds: RestoreIdMap;
+  overwriteRoles: Array<{ id: string; name: string; position: number }>;
   operations: RestoreOperation[];
 };
 
@@ -134,6 +135,8 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
   for (const role of snapshot.roles.filter((item) => item.managed && currentRoleIds.has(item.id))) {
     roleIds.set(role.id, role.id);
   }
+  const snapshotRolesById = new Map(snapshot.roles.map((role) => [role.id, role]));
+  const overwriteRoleIds = new Set<string>();
 
   const currentRolesByName = new Map(current.roles.filter((role) => !role.managed).map((role) => [role.name, role]));
   const sourceRoles = snapshot.roles.filter((item) => !item.managed && item.id !== snapshot.guildId).sort((a, b) => a.position - b.position);
@@ -197,6 +200,9 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
     }));
     const hasUnresolvedRoleReference = expectedOverwrites.some((overwrite) => overwrite.type === 0 && overwrite.id !== snapshot.guildId && !roleIds.has(overwrite.id));
     if ((!actual && expectedOverwrites.length > 0) || hasUnresolvedRoleReference || !same(knownExpectedOverwrites, actual?.permission_overwrites ?? [])) {
+      for (const overwrite of expectedOverwrites) {
+        if (overwrite.type === 0 && overwrite.id !== snapshot.guildId) overwriteRoleIds.add(overwrite.id);
+      }
       overwriteOperations.push({
         label: `restore overwrites ${category.name}`,
         method: 'PATCH',
@@ -247,6 +253,9 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
     }));
     const hasCreatedRoleReference = expectedOverwrites.some((overwrite) => overwrite.type === 0 && overwrite.id !== snapshot.guildId && !roleIds.has(overwrite.id));
     if ((!actual && expectedOverwrites.length > 0) || hasCreatedRoleReference || !same(knownExpectedOverwrites, actual?.permission_overwrites ?? [])) {
+      for (const overwrite of expectedOverwrites) {
+        if (overwrite.type === 0 && overwrite.id !== snapshot.guildId) overwriteRoleIds.add(overwrite.id);
+      }
       overwriteOperations.push({
         label: `restore overwrites ${channel.name}`,
         method: 'PATCH',
@@ -317,6 +326,12 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
     if (actual) emojiIds.set(emoji.id, actual.id);
   }
 
+  const overwriteRoles = [...overwriteRoleIds].map((roleId) => {
+    const role = snapshotRolesById.get(roleId);
+    if (!role) throw new Error(`Snapshot overwrite references unknown role ${roleId}.`);
+    return { id: role.id, name: role.name, position: role.position };
+  });
+
   const operations = [
     ...roleOperations,
     ...rolePositionOperations,
@@ -337,6 +352,7 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
       operations: operations.length,
     },
     knownIds: { roles: Object.fromEntries(roleIds), channels: Object.fromEntries(channelIds), emojis: Object.fromEntries(emojiIds) },
+    overwriteRoles,
     operations,
   };
 }

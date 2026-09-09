@@ -52,8 +52,11 @@ function acceptedState(): State {
   return state;
 }
 
-async function stubDiscord() {
+async function stubDiscord(options: { botPermissions?: bigint; botPosition?: number } = {}) {
   const state = acceptedState();
+  const botRole = state.roles.find((role) => role.id === STAGING_BOT_APPLICATION_ID)!;
+  botRole.permissions = String(options.botPermissions ?? (1n << 3n));
+  botRole.position = options.botPosition ?? botRole.position;
   const writes: Array<{ method: string; path: string; body: unknown }> = [];
   const server = createServer((req, res) => {
     const method = req.method ?? 'GET';
@@ -222,6 +225,60 @@ test('restore that recreates role, category and child channel remaps ids and rea
     assert.notEqual(restoredOwner.id, sourceOwner.id);
     assert.notEqual(restoredCategory.id, sourceCategory.id);
     assert.equal(restoredChild.permission_overwrites.at(-1)!.id, restoredOwner.id);
+  } finally {
+    await stub.close();
+  }
+});
+
+test('overwrite-only restore requires Manage Roles before any write', async () => {
+  const stub = await stubDiscord({ botPermissions: 1n << 4n });
+  const dir = mkdtempSync(join(tmpdir(), 'two-guild-overwrite-permission-'));
+  const source = join(dir, 'source.json');
+  const general = stub.state.channels.find((channel) => channel.name === 'general')!;
+  writeFileSync(source, `${JSON.stringify({
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    applicationId: STAGING_BOT_APPLICATION_ID,
+    guildId: GUILD,
+    ...stub.state,
+    emojis: stub.state.emojis.map((emoji) => ({ ...emoji, image: 'data:image/png;base64,dHdv' })),
+  })}\n`);
+  general.permission_overwrites = [];
+  try {
+    const applied = await run(RESTORE, ['--snapshot', source, '--confirm-staging-guild', '--apply'], { GUILD_CONFIG_API_BASE: stub.base, GUILD_CONFIG_CDN_BASE: stub.base.replace(/\/api\/v10$/, '') });
+    assert.equal(applied.code, 1);
+    assert.match(applied.stderr, /missing Manage Roles/);
+    assert.equal(stub.writes.length, 0);
+  } finally {
+    await stub.close();
+  }
+});
+
+test('overwrite-only restore checks every referenced role against Owen hierarchy before any write', async () => {
+  const stub = await stubDiscord({ botPermissions: (1n << 4n) | (1n << 28n), botPosition: 9 });
+  const dir = mkdtempSync(join(tmpdir(), 'two-guild-overwrite-hierarchy-'));
+  const source = join(dir, 'source.json');
+  const owner = stub.state.roles.find((role) => role.name === 'Owner')!;
+  const moderator = stub.state.roles.find((role) => role.name === 'Moderator')!;
+  const general = stub.state.channels.find((channel) => channel.name === 'general')!;
+  general.permission_overwrites.push(
+    { id: owner.id, type: 0, allow: '1', deny: '0' },
+    { id: moderator.id, type: 0, allow: '2', deny: '0' },
+  );
+  writeFileSync(source, `${JSON.stringify({
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    applicationId: STAGING_BOT_APPLICATION_ID,
+    guildId: GUILD,
+    ...stub.state,
+    emojis: stub.state.emojis.map((emoji) => ({ ...emoji, image: 'data:image/png;base64,dHdv' })),
+  })}\n`);
+  general.permission_overwrites = general.permission_overwrites.filter((overwrite) => overwrite.id === GUILD);
+  try {
+    const applied = await run(RESTORE, ['--snapshot', source, '--confirm-staging-guild', '--apply'], { GUILD_CONFIG_API_BASE: stub.base, GUILD_CONFIG_CDN_BASE: stub.base.replace(/\/api\/v10$/, '') });
+    assert.equal(applied.code, 1);
+    assert.match(applied.stderr, /overwrite target Owner \(10\), Moderator \(9\)/);
+    assert.equal(stub.writes.length, 0);
   } finally {
     await stub.close();
   }
