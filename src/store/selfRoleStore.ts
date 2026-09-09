@@ -19,6 +19,8 @@ export interface SelfRolePanelClaim {
   panelId: string;
   token: string;
   generation: number;
+  latestEventId: string | null;
+  latestOptionKey: string | null;
   renewAfterMs?: number;
 }
 
@@ -103,36 +105,80 @@ export class SelfRoleStore {
   }
 
   /** Try once to claim an exclusive guild/member/panel lane. */
-  async claimPanel(guildId: string, memberId: string, panelId: string): Promise<SelfRolePanelClaim | null> {
+  async claimPanel(
+    guildId: string,
+    memberId: string,
+    panelId: string,
+    supersedingEventId?: string,
+    supersedingOptionKey?: string | null,
+  ): Promise<SelfRolePanelClaim | null> {
     const now = this.now();
     const claimedAt = now.toISOString();
     const expiresAt = this.expiresAt(now);
     const token = randomUUID();
     return this.db.transaction(async (tx) => {
+      const supersedeOlderEvents = async (): Promise<void> => {
+        if (!supersedingEventId) return;
+        // Only the event that actually won the exclusive panel lane may retire
+        // older unfinished intents. A waiter must not fence the current owner.
+        await tx.prepare(
+          `UPDATE self_role_audit
+              SET outcome = 'rejected', code = 'superseded_by_later_event',
+                  reason = 'a later exclusive-panel event was accepted', processing_expires_at = NULL
+            WHERE guild_id = ? AND member_id = ? AND panel_id = ?
+              AND event_id <> ? AND outcome = 'processing'`,
+        ).run(guildId, memberId, panelId, supersedingEventId);
+      };
+
       const inserted = await tx.prepare(
         `INSERT INTO self_role_panel_claims
-           (guild_id, member_id, panel_id, claim_token, claim_generation, processing_expires_at)
-         VALUES (?, ?, ?, ?, 1, ?)
+           (guild_id, member_id, panel_id, claim_token, claim_generation, processing_expires_at,
+            latest_event_id, latest_option_key)
+         VALUES (?, ?, ?, ?, 1, ?, ?, ?)
          ON CONFLICT (guild_id, member_id, panel_id) DO NOTHING
          RETURNING guild_id`,
-      ).get(guildId, memberId, panelId, token, expiresAt);
-      if (inserted) return { guildId, memberId, panelId, token, generation: 1, renewAfterMs: this.renewAfterMs() };
+      ).get(
+        guildId, memberId, panelId, token, expiresAt,
+        supersedingEventId ?? null, supersedingOptionKey ?? null,
+      );
+      if (inserted) {
+        await supersedeOlderEvents();
+        return {
+          guildId, memberId, panelId, token, generation: 1,
+          latestEventId: supersedingEventId ?? null,
+          latestOptionKey: supersedingOptionKey ?? null,
+          renewAfterMs: this.renewAfterMs(),
+        };
+      }
 
       const prior = await tx.prepare(
-        `SELECT claim_generation FROM self_role_panel_claims
+        `SELECT claim_generation, latest_event_id, latest_option_key FROM self_role_panel_claims
           WHERE guild_id = ? AND member_id = ? AND panel_id = ? AND processing_expires_at <= ?`,
-      ).get<{ claim_generation: number }>(guildId, memberId, panelId, claimedAt);
+      ).get<{ claim_generation: number; latest_event_id: string | null; latest_option_key: string | null }>(
+        guildId, memberId, panelId, claimedAt,
+      );
       if (!prior) return null;
       const generation = Number(prior.claim_generation) + 1;
+      const latestEventId = supersedingEventId ?? prior.latest_event_id;
+      const latestOptionKey = supersedingEventId ? (supersedingOptionKey ?? null) : prior.latest_option_key;
       const recovered = await tx.prepare(
         `UPDATE self_role_panel_claims
-            SET claim_token = ?, claim_generation = ?, processing_expires_at = ?
+            SET claim_token = ?, claim_generation = ?, processing_expires_at = ?,
+                latest_event_id = ?, latest_option_key = ?
           WHERE guild_id = ? AND member_id = ? AND panel_id = ?
             AND claim_generation = ? AND processing_expires_at <= ?`,
-      ).run(token, generation, expiresAt, guildId, memberId, panelId, prior.claim_generation, claimedAt);
-      return recovered.changes === 1
-        ? { guildId, memberId, panelId, token, generation, renewAfterMs: this.renewAfterMs() }
-        : null;
+      ).run(
+        token, generation, expiresAt, latestEventId, latestOptionKey,
+        guildId, memberId, panelId, prior.claim_generation, claimedAt,
+      );
+      if (recovered.changes !== 1) return null;
+      await supersedeOlderEvents();
+      return {
+        guildId, memberId, panelId, token, generation,
+        latestEventId,
+        latestOptionKey,
+        renewAfterMs: this.renewAfterMs(),
+      };
     });
   }
 

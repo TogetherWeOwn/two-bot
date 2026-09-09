@@ -39,9 +39,17 @@ export interface Migration {
  */
 const COMPATIBLE_CHECKSUMS = new Map([
   ['0010_leveling:199003b7e199c4f4', 'dce57869e8d97bad'],
-  // PR #84 briefly carried the recovery columns inside 0015. The restored
-  // baseline plus additive 0016 converges that exact schema without data loss.
-  ['0015_self_role_audit:cb0a092fa96c904d', 'bc32090819445847'],
+]);
+
+/**
+ * A previously-applied rewrite cannot safely have its recorded checksum moved:
+ * older binaries only understand the checksum they shipped and must still be
+ * able to start during rollback. Treat the exact known pair as equivalent in
+ * both directions, leaving the stored value untouched.
+ */
+const EQUIVALENT_CHECKSUMS = new Set([
+  '0015_self_role_audit:cb0a092fa96c904d:bc32090819445847',
+  '0015_self_role_audit:bc32090819445847:cb0a092fa96c904d',
 ]);
 
 export function loadMigrations(dir: string = MIGRATIONS_DIR): Migration[] {
@@ -105,7 +113,7 @@ export async function migrate(db: Db, dir: string = MIGRATIONS_DIR): Promise<str
             await tx
               .prepare(`UPDATE schema_migrations SET checksum = ? WHERE id = ?`)
               .run(m.checksum, m.id);
-          } else {
+          } else if (!EQUIVALENT_CHECKSUMS.has(`${m.id}:${seen}:${m.checksum}`)) {
             throw new Error(
               `Migration ${m.id} has changed since it was applied ` +
                 `(recorded ${seen}, file ${m.checksum}). Migrations are immutable - ` +

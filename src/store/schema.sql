@@ -345,6 +345,8 @@ CREATE TABLE IF NOT EXISTS self_role_panel_claims (
   claim_token           TEXT NOT NULL,
   claim_generation      INTEGER NOT NULL,
   processing_expires_at TEXT NOT NULL,
+  latest_event_id       TEXT,
+  latest_option_key     TEXT,
   PRIMARY KEY (guild_id, member_id, panel_id)
 );
 

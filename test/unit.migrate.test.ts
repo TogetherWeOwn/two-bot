@@ -17,17 +17,21 @@ test('self-role audit migration is immutable and recovery stays additive', () =>
   const migrations = loadMigrations();
   const audit = migrations.find((migration) => migration.id === '0015_self_role_audit');
   const recovery = migrations.find((migration) => migration.id === '0016_self_role_recovery');
+  const ordering = migrations.find((migration) => migration.id === '0017_self_role_ordering');
   assert.equal(audit?.checksum, 'bc32090819445847');
   assert.ok(recovery, 'recovery columns and claims belong in the next-free migration');
+  assert.ok(ordering, 'exclusive-panel ordering metadata belongs in a new additive migration');
   assert.ok(migrations.indexOf(recovery) > migrations.indexOf(audit!));
+  assert.ok(migrations.indexOf(ordering) > migrations.indexOf(recovery));
   assert.match(recovery.sql, /ALTER TABLE self_role_audit ADD COLUMN IF NOT EXISTS desired_role_ids/);
   assert.match(recovery.sql, /CREATE TABLE IF NOT EXISTS self_role_panel_claims/);
+  assert.match(ordering.sql, /ADD COLUMN IF NOT EXISTS latest_event_id/);
   assert.equal(migrations.filter((migration) => migration.id === '0015_self_role_audit').length, 1);
   assert.equal(migrations.some((migration) => migration.id === '0013_self_role_audit'), false);
   assert.equal(migrations.some((migration) => migration.id === '0010_self_role_audit'), false);
 });
 
-test('briefly shipped migration rewrites normalize before additive migrations apply', async () => {
+test('briefly shipped migration rewrites remain rollback-compatible while additive migrations apply', async () => {
   const checksums = new Map<string, string | null>([
     ['0010_leveling', '199003b7e199c4f4'],
     ['0015_self_role_audit', 'cb0a092fa96c904d'],
@@ -70,9 +74,14 @@ test('briefly shipped migration rewrites normalize before additive migrations ap
 
   const migrated = await migrate(db);
   assert.equal(checksums.get('0010_leveling'), 'dce57869e8d97bad');
-  assert.equal(checksums.get('0015_self_role_audit'), 'bc32090819445847');
+  assert.equal(
+    checksums.get('0015_self_role_audit'),
+    'cb0a092fa96c904d',
+    'leaving the old checksum intact keeps the prior build rollback-capable',
+  );
   assert.ok(migrated.includes('0011_leveling_xp_ceiling'));
   assert.ok(migrated.includes('0016_self_role_recovery'));
+  assert.ok(migrated.includes('0017_self_role_ordering'));
   assert.deepEqual(applied, ['0011_leveling_xp_ceiling']);
 });
 

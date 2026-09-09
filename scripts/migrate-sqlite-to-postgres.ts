@@ -227,6 +227,19 @@ try {
     console.log(`  ${t.padEnd(26)} read ${copied}`);
   }
 
+  // Source rows copied after the target's additive migrations never passed
+  // through 0016's pre-lease normalization. Finalize those legacy processing
+  // rows here, or their NULL lease can never satisfy claimAudit's recovery
+  // predicate and the event is stranded forever.
+  if (copyableTables.includes('self_role_audit')) {
+    await dst.prepare(
+      `UPDATE self_role_audit
+          SET outcome = 'rejected', code = 'interrupted_before_recovery',
+              reason = 'processing row predates persisted self-role intent'
+        WHERE outcome = 'processing' AND processing_expires_at IS NULL`,
+    ).run();
+  }
+
   // BIGSERIAL does not know about ids we inserted explicitly. Move it past the
   // high-water mark or the next insert collides.
   await dst.exec(

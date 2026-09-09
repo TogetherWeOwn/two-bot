@@ -317,7 +317,13 @@ async function acquirePanelClaim(opts: Parameters<typeof applyRoleDelta>[0]): Pr
   if (!opts.deps.store.claimPanel) return null;
   let delayMs = 10;
   for (;;) {
-    const claim = await opts.deps.store.claimPanel(opts.member.guild.id, opts.member.id, opts.panel.id);
+    const claim = await opts.deps.store.claimPanel(
+      opts.member.guild.id,
+      opts.member.id,
+      opts.panel.id,
+      opts.eventId,
+      opts.optionKey,
+    );
     if (claim) return claim;
     await new Promise((resolve) => setTimeout(resolve, delayMs));
     delayMs = Math.min(delayMs * 2, 250);
@@ -418,6 +424,36 @@ async function applyClaimedRoleDelta(
       }
     } catch (err) {
       if (err instanceof StaleSelfRoleClaimError) {
+        // A panel lease can only expire after its renewal failed. The stale
+        // worker may still have completed the Discord mutation before learning
+        // that; serialize behind the successor, then remove only the stale
+        // event's intended additions. Never restore the pre-mutation snapshot:
+        // it may predate a newer completed selection.
+        if (panelClaim) {
+          const repair = await acquirePanelClaim(opts);
+          if (repair) {
+            try {
+              for (const roleId of claimToken.desiredRoleIds) {
+                try {
+                  const current = await member.guild.members.fetch({ user: member.id, force: true });
+                  if (current.roles.cache.has(roleId)) {
+                    await member.roles.remove(roleId, `${reason} stale reconcile`);
+                  }
+                } catch (repairErr) {
+                  log.error('self_role_stale_reconcile_failed', {
+                    eventId: opts.eventId,
+                    panelId: panel.id,
+                    memberId: member.id,
+                    roleId,
+                    err: String(repairErr),
+                  });
+                }
+              }
+            } finally {
+              await opts.deps.store.releasePanelClaim?.(repair);
+            }
+          }
+        }
         log.error('self_role_stale_claim_stopped', {
           eventId: opts.eventId,
           panelId: panel.id,

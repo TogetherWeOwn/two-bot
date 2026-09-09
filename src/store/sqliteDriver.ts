@@ -170,6 +170,50 @@ function ensureLevelingXpCeiling(raw: DatabaseSync): void {
   }
 }
 
+/** Apply every additive self-role SQLite upgrade under one write lock. */
+function ensureSelfRoleRecovery(raw: DatabaseSync): void {
+  const id = '0017_self_role_ordering';
+  if (raw.prepare(`SELECT 1 FROM schema_migrations WHERE id = ?`).get(id)) return;
+  raw.exec('BEGIN IMMEDIATE');
+  try {
+    if (raw.prepare(`SELECT 1 FROM schema_migrations WHERE id = ?`).get(id)) {
+      raw.exec('COMMIT');
+      return;
+    }
+    ensureColumn(raw, 'self_role_audit', 'attempted_added_role_ids', `TEXT NOT NULL DEFAULT '[]'`);
+    ensureColumn(raw, 'self_role_audit', 'attempted_removed_role_ids', `TEXT NOT NULL DEFAULT '[]'`);
+    ensureColumn(raw, 'self_role_audit', 'compensated_added_role_ids', `TEXT NOT NULL DEFAULT '[]'`);
+    ensureColumn(raw, 'self_role_audit', 'compensated_removed_role_ids', `TEXT NOT NULL DEFAULT '[]'`);
+    ensureColumn(raw, 'self_role_audit', 'unresolved_added_role_ids', `TEXT NOT NULL DEFAULT '[]'`);
+    ensureColumn(raw, 'self_role_audit', 'unresolved_removed_role_ids', `TEXT NOT NULL DEFAULT '[]'`);
+    ensureColumn(raw, 'self_role_audit', 'desired_role_ids', `TEXT NOT NULL DEFAULT '[]'`);
+    ensureColumn(raw, 'self_role_audit', 'pre_mutation_role_ids', `TEXT NOT NULL DEFAULT '[]'`);
+    ensureColumn(raw, 'self_role_audit', 'claim_token', 'TEXT');
+    ensureColumn(raw, 'self_role_audit', 'claim_generation', 'INTEGER NOT NULL DEFAULT 0');
+    ensureColumn(raw, 'self_role_audit', 'processing_expires_at', 'TEXT');
+    ensureColumn(raw, 'self_role_panel_claims', 'latest_event_id', 'TEXT');
+    ensureColumn(raw, 'self_role_panel_claims', 'latest_option_key', 'TEXT');
+    raw.prepare(`UPDATE self_role_audit
+      SET outcome = 'rejected', code = 'interrupted_before_recovery',
+          reason = 'processing row predates persisted self-role intent'
+      WHERE outcome = 'processing' AND processing_expires_at IS NULL`).run();
+    raw.exec(`CREATE INDEX IF NOT EXISTS idx_self_role_audit_processing_lease
+      ON self_role_audit (outcome, processing_expires_at)`);
+    raw.prepare(`INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?, ?)`).run(
+      id,
+      new Date().toISOString(),
+    );
+    raw.exec('COMMIT');
+  } catch (err) {
+    try {
+      raw.exec('ROLLBACK');
+    } catch {
+      /* already unwound */
+    }
+    throw err;
+  }
+}
+
 /** Open a SQLite database. `:memory:` gives an ephemeral one. */
 function reconcilePendingUnbans(raw: DatabaseSync): void {
   const duplicates = raw.prepare(
@@ -236,25 +280,7 @@ export async function openSqlite(path: string): Promise<Db> {
   // Mirrors migrations/0014_ticket_safety.sql for rollback databases that
   // created their ticket tables before the close-transition timestamp existed.
   ensureColumn(raw, 'tickets', 'closing_started_at', 'TEXT');
-  // Existing SQLite databases predate the recoverable self-role claim lease and
-  // the per-effect reconciliation evidence added to the audit ledger.
-  ensureColumn(raw, 'self_role_audit', 'attempted_added_role_ids', `TEXT NOT NULL DEFAULT '[]'`);
-  ensureColumn(raw, 'self_role_audit', 'attempted_removed_role_ids', `TEXT NOT NULL DEFAULT '[]'`);
-  ensureColumn(raw, 'self_role_audit', 'compensated_added_role_ids', `TEXT NOT NULL DEFAULT '[]'`);
-  ensureColumn(raw, 'self_role_audit', 'compensated_removed_role_ids', `TEXT NOT NULL DEFAULT '[]'`);
-  ensureColumn(raw, 'self_role_audit', 'unresolved_added_role_ids', `TEXT NOT NULL DEFAULT '[]'`);
-  ensureColumn(raw, 'self_role_audit', 'unresolved_removed_role_ids', `TEXT NOT NULL DEFAULT '[]'`);
-  ensureColumn(raw, 'self_role_audit', 'desired_role_ids', `TEXT NOT NULL DEFAULT '[]'`);
-  ensureColumn(raw, 'self_role_audit', 'pre_mutation_role_ids', `TEXT NOT NULL DEFAULT '[]'`);
-  ensureColumn(raw, 'self_role_audit', 'claim_token', 'TEXT');
-  ensureColumn(raw, 'self_role_audit', 'claim_generation', 'INTEGER NOT NULL DEFAULT 0');
-  ensureColumn(raw, 'self_role_audit', 'processing_expires_at', 'TEXT');
-  raw.prepare(`UPDATE self_role_audit
-    SET outcome = 'rejected', code = 'interrupted_before_recovery',
-        reason = 'processing row predates persisted self-role intent'
-    WHERE outcome = 'processing' AND processing_expires_at IS NULL`).run();
-  raw.exec(`CREATE INDEX IF NOT EXISTS idx_self_role_audit_processing_lease
-    ON self_role_audit (outcome, processing_expires_at)`);
+  ensureSelfRoleRecovery(raw);
   // schema.sql is the whole schema, so every migration whose tables it already
   // contains is recorded as applied. Adding a migration means adding its
   // tables above and its id here, or a database that is later moved to
@@ -277,6 +303,7 @@ export async function openSqlite(path: string): Promise<Db> {
     '0017_scheduled_occurrence_nonce',
     '0015_self_role_audit',
     '0016_self_role_recovery',
+    '0017_self_role_ordering',
   ]) {
     stamp.run(id, new Date().toISOString());
   }
