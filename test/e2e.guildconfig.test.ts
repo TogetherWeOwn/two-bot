@@ -497,6 +497,48 @@ test('child overwrite preflight uses the desired parent state changed by the sam
   }
 });
 
+test('overwrite ordering does not hide a synced child from projected parent preflight', async () => {
+  const managePermissions = (1n << 4n) | (1n << 28n);
+  const grantRoleId = id(3);
+  const stub = await stubDiscord({ botPermissions: 0n, botRoleIds: [STAGING_BOT_APPLICATION_ID, grantRoleId] });
+  const dir = mkdtempSync(join(tmpdir(), 'two-guild-reordered-overwrites-'));
+  const source = join(dir, 'source.json');
+  const grantRole: Role = { id: grantRoleId, name: 'Owen Restore', managed: false, color: 0, hoist: false, permissions: String(managePermissions), mentionable: false, position: 8 };
+  stub.state.roles.push(grantRole);
+  const sourceState = structuredClone(stub.state);
+  const parent = sourceState.channels.find((channel) => channel.type === 4 && channel.name === CATEGORIES[0]!.name)!;
+  const currentParent = stub.state.channels.find((channel) => channel.id === parent.id)!;
+  const child = sourceState.channels.find((channel) => channel.parent_id === parent.id)!;
+  const currentChild = stub.state.channels.find((channel) => channel.id === child.id)!;
+  const currentOverwrites = [
+    { id: GUILD, type: 0, allow: '0', deny: '0' },
+    { id: grantRoleId, type: 0, allow: String(managePermissions), deny: '0' },
+  ];
+  currentParent.permission_overwrites = structuredClone(currentOverwrites);
+  currentChild.permission_overwrites = structuredClone(currentOverwrites).reverse();
+  parent.permission_overwrites = [
+    { id: GUILD, type: 0, allow: '0', deny: String(managePermissions) },
+    { id: grantRoleId, type: 0, allow: '0', deny: String(managePermissions) },
+  ];
+  child.permission_overwrites.push({ id: GUILD, type: 0, allow: '1', deny: '0' });
+  writeFileSync(source, `${JSON.stringify({
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    applicationId: STAGING_BOT_APPLICATION_ID,
+    guildId: GUILD,
+    ...sourceState,
+    emojis: sourceState.emojis.map((emoji) => ({ ...emoji, image: 'data:image/png;base64,dHdv' })),
+  })}\n`);
+  try {
+    const applied = await run(RESTORE, ['--snapshot', source, '--confirm-staging-guild', '--apply'], { GUILD_CONFIG_API_BASE: stub.base, GUILD_CONFIG_CDN_BASE: stub.base.replace(/\/api\/v10$/, '') });
+    assert.equal(applied.code, 1);
+    assert.match(applied.stderr, new RegExp(`channel permission preflight failed: ${child.name} \\(missing Manage Channels, Manage Roles; unowned mask`));
+    assert.equal(stub.writes.length, 0);
+  } finally {
+    await stub.close();
+  }
+});
+
 test('desired parent permission ceilings remap source role ids before preflight', async () => {
   const managePermissions = (1n << 4n) | (1n << 28n);
   const currentGrantRoleId = id(3);
