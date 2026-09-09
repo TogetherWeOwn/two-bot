@@ -1,10 +1,12 @@
 import { openDb } from '../src/store/db.ts';
 import { LevelingService, type LevelRoleReward } from '../src/leveling/service.ts';
+import { LIVE_GUILD_ID } from '../src/staging/spec.ts';
 
 function usage(): never {
   console.error(
-    'Usage: node scripts/levels-role-rewards.ts --guild <snowflake> [--set <level:roleId,...>]\n' +
-      'Without --set, prints the current rewards. --set replaces the full configuration.',
+    'Usage: node scripts/levels-role-rewards.ts --guild <snowflake> [--set <level:roleId,...>] [--allow-live-guild]\n' +
+      'Without --set, prints the current rewards. --set replaces the full configuration.\n' +
+      '--allow-live-guild is only for an owner-approved rollout.',
   );
   process.exit(2);
 }
@@ -26,6 +28,13 @@ function parseRewards(spec: string): LevelRoleReward[] {
 
 const guildId = arg('--guild') ?? usage();
 if (!/^\d{17,20}$/.test(guildId)) usage();
+if (guildId === LIVE_GUILD_ID && !process.argv.includes('--allow-live-guild')) {
+  console.error(
+    `Refusing live guild ${LIVE_GUILD_ID}. ` +
+      'Use --allow-live-guild only for an owner-approved rollout.',
+  );
+  process.exit(2);
+}
 const set = arg('--set');
 const dbSpec = process.env.TWO_DATABASE_URL?.trim() || process.env.TWO_DB_PATH || './data/two.db';
 const db = await openDb(dbSpec, { poolMax: Number(process.env.TWO_DB_POOL_MAX ?? 5) });

@@ -88,6 +88,89 @@ function ensureColumn(raw: DatabaseSync, table: string, column: string, type: st
   raw.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
 }
 
+/** Mirrors migrations/0011_leveling_xp_ceiling.sql for existing SQLite files. */
+function ensureLevelingXpCeiling(raw: DatabaseSync): void {
+  const id = '0011_leveling_xp_ceiling';
+  const applied = raw.prepare(`SELECT 1 FROM schema_migrations WHERE id = ?`).get(id);
+  if (applied) return;
+
+  raw.exec('BEGIN IMMEDIATE');
+  try {
+    // Another opener may have completed the rebuild while this connection
+    // waited for the write lock. Recheck inside the transaction.
+    if (raw.prepare(`SELECT 1 FROM schema_migrations WHERE id = ?`).get(id)) {
+      raw.exec('COMMIT');
+      return;
+    }
+    const importRunSequence = Number(
+      (raw.prepare(`SELECT seq FROM sqlite_sequence WHERE name = 'level_import_runs'`).get() as
+        | { seq: number }
+        | undefined)?.seq ?? 0,
+    );
+    raw.exec(`
+      CREATE TABLE member_levels_with_xp_ceiling (
+        guild_id    TEXT    NOT NULL,
+        member_id   TEXT    NOT NULL,
+        xp          INTEGER NOT NULL CHECK (xp BETWEEN 0 AND 9007199254740991),
+        message_xp  INTEGER NOT NULL DEFAULT 0 CHECK (message_xp BETWEEN 0 AND 9007199254740991),
+        voice_xp    INTEGER NOT NULL DEFAULT 0 CHECK (voice_xp BETWEEN 0 AND 9007199254740991),
+        imported_xp INTEGER NOT NULL DEFAULT 0 CHECK (imported_xp BETWEEN 0 AND 9007199254740991),
+        updated_at  TEXT    NOT NULL,
+        PRIMARY KEY (guild_id, member_id),
+        CHECK (xp = message_xp + voice_xp + imported_xp)
+      );
+      INSERT INTO member_levels_with_xp_ceiling
+        (guild_id, member_id, xp, message_xp, voice_xp, imported_xp, updated_at)
+      SELECT guild_id, member_id, xp, message_xp, voice_xp, imported_xp, updated_at
+        FROM member_levels;
+      DROP TABLE member_levels;
+      ALTER TABLE member_levels_with_xp_ceiling RENAME TO member_levels;
+      CREATE INDEX idx_member_levels_rank
+        ON member_levels (guild_id, xp DESC, member_id ASC);
+
+      CREATE TABLE level_import_runs_with_xp_ceiling (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id          TEXT    NOT NULL,
+        source            TEXT    NOT NULL CHECK (source = 'mee6'),
+        source_rows       INTEGER NOT NULL,
+        unique_members    INTEGER NOT NULL,
+        inserted          INTEGER NOT NULL,
+        updated           INTEGER NOT NULL,
+        unchanged         INTEGER NOT NULL,
+        duplicate_rows    INTEGER NOT NULL,
+        total_imported_xp INTEGER NOT NULL CHECK (total_imported_xp BETWEEN 0 AND 9007199254740991),
+        imported_at       TEXT    NOT NULL
+      );
+      INSERT INTO level_import_runs_with_xp_ceiling
+        (id, guild_id, source, source_rows, unique_members, inserted, updated,
+         unchanged, duplicate_rows, total_imported_xp, imported_at)
+      SELECT id, guild_id, source, source_rows, unique_members, inserted, updated,
+             unchanged, duplicate_rows, total_imported_xp, imported_at
+        FROM level_import_runs;
+      DROP TABLE level_import_runs;
+      ALTER TABLE level_import_runs_with_xp_ceiling RENAME TO level_import_runs;
+    `);
+    if (importRunSequence > 0) {
+      raw.prepare(`UPDATE sqlite_sequence SET seq = MAX(seq, ?) WHERE name = 'level_import_runs'`).run(
+        importRunSequence,
+      );
+    }
+    raw.prepare(`INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)`).run(
+      id,
+      new Date().toISOString(),
+    );
+    raw.exec('COMMIT');
+  } catch (err) {
+    try {
+      raw.exec('ROLLBACK');
+    } catch {
+      /* already unwound */
+    }
+    throw err;
+  }
+}
+
+/** Open a SQLite database. `:memory:` gives an ephemeral one. */
 function reconcilePendingUnbans(raw: DatabaseSync): void {
   const duplicates = raw.prepare(
     `SELECT guild_id, user_id
@@ -114,6 +197,7 @@ function reconcilePendingUnbans(raw: DatabaseSync): void {
 }
 
 /** Open a SQLite database. `:memory:` gives an ephemeral one. */
+
 export async function openSqlite(path: string): Promise<Db> {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
   const raw = new DatabaseSync(path);
@@ -145,6 +229,7 @@ export async function openSqlite(path: string): Promise<Db> {
   ensureColumn(raw, 'operational_audit_log', 'delivery_nonce', 'TEXT');
   ensureColumn(raw, 'operational_audit_log', 'mirror_message_id', 'TEXT');
   ensureColumn(raw, 'operational_audit_log', 'mirrored_at', 'TEXT');
+  ensureLevelingXpCeiling(raw);
   // Existing SQLite databases already have the 0010 table, so schema.sql's
   // CREATE TABLE IF NOT EXISTS cannot add the 0011/0012 claim columns.
   ensureColumn(raw, 'moderation_scheduled_unbans', 'claimed_at', 'TEXT');
@@ -165,6 +250,7 @@ export async function openSqlite(path: string): Promise<Db> {
     '0011_operational_audit',
     '0012_operational_audit_delivery',
     '0013_operational_audit_delivery_message',
+    '0011_leveling_xp_ceiling',
     '0010_moderation',
     '0011_moderation_durability',
     '0012_moderation_recovery',
