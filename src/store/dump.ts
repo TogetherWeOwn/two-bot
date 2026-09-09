@@ -37,8 +37,24 @@ import { once } from 'node:events';
 import { pipeline } from 'node:stream/promises';
 import type { Db } from './driver.ts';
 
-/** Everything the bot owns. The website's own tables are not ours to back up. */
-export const DUMP_TABLES = ['events', 'members', 'invite_snapshots', 'operational_audit_log'] as const;
+/**
+ * Everything the bot owns. The website's own tables are not ours to back up.
+ *
+ * The moderation tables are here because losing them is not cosmetic: a lost
+ * scheduled unban is a tempban that became permanent, and a lost warn ledger
+ * is a moderation history the staff cannot see (TOG-1659 High 5).
+ */
+export const DUMP_TABLES = [
+  'events',
+  'members',
+  'invite_snapshots',
+  'operational_audit_log',
+  'moderation_warnings',
+  'moderation_scheduled_unbans',
+  'moderation_audit',
+  'moderation_lockdowns',
+  'moderation_idempotency',
+] as const;
 export type DumpTable = (typeof DUMP_TABLES)[number];
 
 /**
@@ -60,7 +76,7 @@ function assertDumpTable(name: unknown, where: string): asserts name is DumpTabl
   }
 }
 
-export const DUMP_VERSION = 2;
+export const DUMP_VERSION = 1;
 
 export interface DumpTableInfo {
   name: DumpTable;
@@ -106,6 +122,11 @@ function orderFor(table: DumpTable, columns: string[]): string {
   if (table === 'members') return 'guild_id, member_id';
   if (table === 'invite_snapshots') return 'guild_id, code';
   if (table === 'operational_audit_log') return 'entry_id';
+  if (table === 'moderation_warnings') return 'created_at, id';
+  if (table === 'moderation_scheduled_unbans') return 'execute_at, request_id';
+  if (table === 'moderation_audit') return 'created_at, request_id';
+  if (table === 'moderation_lockdowns') return 'guild_id, channel_id';
+  if (table === 'moderation_idempotency') return 'guild_id, idempotency_key';
   return columns.slice(0, 1).join(', ');
 }
 

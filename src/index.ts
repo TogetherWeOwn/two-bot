@@ -32,6 +32,12 @@ import { InternalActionStore } from './internal/store.ts';
 import { startHealthServer, type HealthServer } from './core/health.ts';
 import { LevelingService } from './leveling/service.ts';
 import { registerLeveling } from './leveling/discord.ts';
+import { loadModerationConfig } from './moderation/config.ts';
+import { ModerationDiscord } from './moderation/discord.ts';
+import { RestModerationResolver } from './moderation/resolver.ts';
+import { ModerationService } from './moderation/service.ts';
+import { ModerationStore } from './moderation/store.ts';
+import { registerModerationCommands, registerModerationHandler } from './moderation/commands.ts';
 import { OperationalAuditStore } from './audit/store.ts';
 import { makeOperationalAudit } from './audit/service.ts';
 
@@ -79,6 +85,26 @@ const leveling = new LevelingService(db);
 const handlers = new FunnelHandlers(store, leveling);
 
 const client = createClient();
+const moderationCfg = loadModerationConfig();
+const moderationStore = new ModerationStore(db);
+const moderationDiscord = new ModerationDiscord({
+  token: cfg.discordToken,
+  base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+});
+const moderationResolver = cfg.guildId && moderationCfg.enabled
+  ? new RestModerationResolver({
+      token: cfg.discordToken,
+      botUserId: moderationCfg.owenUserId,
+      base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+    })
+  : null;
+const moderationService = moderationResolver
+  ? new ModerationService(moderationDiscord, moderationStore, {
+      owenUserId: moderationCfg.owenUserId,
+      botUserId: moderationCfg.owenUserId,
+      protectedRoleIds: moderationCfg.protectedRoleIds,
+    })
+  : null;
 
 // Point discord.js at a different API host. Only used by tools/mock-discord.
 if (cfg.apiBase) {
@@ -121,6 +147,24 @@ log.info('operational_audit_enabled', {
 
 registerHandlers(client, { handlers, invites, raid, expectedJoins, leveling, audit });
 registerLeveling(client, { service: leveling, guildId: cfg.guildId });
+if (cfg.guildId && moderationResolver && moderationService) {
+  registerModerationHandler(client, {
+    guildId: cfg.guildId,
+    resolver: moderationResolver,
+    service: moderationService,
+  });
+  client.once('ready', async () => {
+    await registerModerationCommands(client, {
+      guildId: cfg.guildId!,
+      resolver: moderationResolver,
+      service: moderationService,
+    });
+    log.info('moderation_enabled', {
+      guildId: cfg.guildId,
+      protectedRoles: moderationCfg.protectedRoleIds.size,
+    });
+  });
+}
 
 // Onboarding (TWO-7). Skipped entirely if no landing channel is configured -
 // better to run the funnel with onboarding off than to post into a guessed
@@ -186,6 +230,9 @@ if (internalCfg) {
     // database as everything else, so it is covered by the same backups.
     store: new InternalActionStore(db),
     expectedJoins,
+    moderation: moderationResolver && moderationService
+      ? { resolver: moderationResolver, service: moderationService }
+      : null,
   });
 }
 
@@ -256,6 +303,15 @@ if (!cfg.guildId) {
   });
 }
 
+const moderationSweep = moderationService
+  ? setInterval(() => {
+      void moderationService.runDueUnbans().catch((err: unknown) => {
+        log.error('moderation_unban_sweep_failed', { err: String(err) });
+      });
+    }, 30_000)
+  : null;
+moderationSweep?.unref();
+
 // Retry durable audit mirrors after transient Discord failures. The row itself
 // is the queue, so a restart resumes exactly where the prior process stopped.
 const auditDeliverySweep = setInterval(
@@ -315,6 +371,7 @@ async function shutdown(signal: string) {
   log.info('shutdown', { signal });
   clearInterval(sweep);
   clearInterval(auditDeliverySweep);
+  if (moderationSweep) clearInterval(moderationSweep);
   presenceProbe?.stop();
   communitySnapshots?.stop();
   scheduledEvents?.stop();

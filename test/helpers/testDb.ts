@@ -57,6 +57,14 @@ const TABLES = [
   'level_import_runs',
   'member_levels',
   'operational_audit_log',
+  // TOG-1642 moderation state. Same treatment as any other test data: the
+  // moderation suites and the backup round trip seed these directly, and a
+  // leftover row from one fixture would collide with the next one's PKs.
+  'moderation_warnings',
+  'moderation_scheduled_unbans',
+  'moderation_audit',
+  'moderation_lockdowns',
+  'moderation_idempotency',
 ];
 
 /**
@@ -74,6 +82,11 @@ const SQLITE_TABLES = [
   'level_import_runs',
   'member_levels',
   'operational_audit_log',
+  'moderation_warnings',
+  'moderation_scheduled_unbans',
+  'moderation_audit',
+  'moderation_lockdowns',
+  'moderation_idempotency',
 ];
 
 export interface TestDb {
