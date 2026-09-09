@@ -1,7 +1,7 @@
 # What we store about members, and what we don't
 
-Short version: **Discord user IDs, timestamps, and channel IDs. No names, no
-message content, no email, nothing else.**
+Short version: **Discord user IDs, timestamps, and channel IDs. Private support
+tickets additionally retain a staff-only text transcript for 90 days. No email.**
 
 ## What is in the database
 
@@ -15,9 +15,10 @@ message content, no email, nothing else.**
 
 ## What is deliberately not stored
 
-- **Message content.** The `MessageContent` intent is not requested. We record
-  that a member posted, never what they posted.
-- **Usernames, nicknames, avatars.** Not needed to count anything. A user ID is
+- **Public-channel message content.** `MessageContent` is requested for ticket
+  parity, but bodies are read only when staff closes a bot-created private ticket.
+  Funnel handlers still record that a public message happened, never what it said.
+- **Usernames, nicknames, avatars outside ticket transcripts.** Not needed to count anything. A user ID is
   enough, and it is what Discord itself treats as the identifier. If the
   community team needs names for a re-engagement list, the list of IDs can be
   resolved to names at the moment it is used, and thrown away after.
@@ -50,18 +51,25 @@ Events are kept indefinitely today, because retention analysis needs history.
 Once we have a year of data past the backfill, revisit: aggregate counts older
 than ~18 months and drop the per-member rows behind them.
 
+Private ticket transcripts are retained for **90 days after close**. Startup
+deletes rows whose `purge_after` has passed. Attachment URLs are references to
+Discord's copy, not retained attachment bytes, and may expire sooner.
+
 ## Deletion
 
 If a member asks to be removed:
 
 ```sql
-DELETE FROM xp_awards   WHERE member_id = '<id>';
-DELETE FROM xp_cooldowns WHERE member_id = '<id>';
-DELETE FROM member_levels WHERE member_id = '<id>';
-DELETE FROM events      WHERE member_id = '<id>';
-DELETE FROM members     WHERE member_id = '<id>';
+DELETE FROM ticket_transcripts WHERE opener_id = '<id>' OR claimed_by = '<id>';
+DELETE FROM tickets            WHERE opener_id = '<id>' OR claimed_by = '<id>';
+DELETE FROM xp_awards          WHERE member_id = '<id>';
+DELETE FROM xp_cooldowns       WHERE member_id = '<id>';
+DELETE FROM member_levels      WHERE member_id = '<id>';
+DELETE FROM events             WHERE member_id = '<id>';
+DELETE FROM members            WHERE member_id = '<id>';
 ```
 
+`TicketStore.eraseMember()` performs the ticket-table portion in one transaction.
 This makes historical counts drop slightly, which is correct.
 
 ## Boundaries this codebase enforces
@@ -73,8 +81,10 @@ This makes historical counts drop slightly, which is correct.
   `data/rules-gate-timeout-audit.jsonl` records one member ID and outcome per
   target. `data/*` is gitignored, so this per-member moderation record must not
   be committed or copied into an issue. Report aggregate counts there instead.
-- **Nothing here reads a channel members talk in.** Not the live bot, not the
-  backfill.
+- **Public-channel bodies are never persisted.** The ticket closer reads only a
+  bot-created private support channel, stores its transcript in the bot database,
+  and deletes it after 90 days. The historical backfill still never reads a
+  channel members talk in.
 - **No presence intent.** `src/discord/client.ts` requests five intents and
   `GuildPresences` is not one of them, so we never see a member's online
   status. The bot does record the guild's `approximate_presence_count` hourly
