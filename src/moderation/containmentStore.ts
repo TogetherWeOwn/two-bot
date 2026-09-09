@@ -41,7 +41,15 @@ export class ContainmentStore {
         const low = lock.readInt32BE(4);
         await tx.prepare('SELECT pg_advisory_xact_lock(?, ?)').get(high, low);
       }
-      const observedAt = iso(this.now());
+      const observedMs = this.now();
+      const observedAt = iso(observedMs);
+      const occurredMs = Date.parse(row.occurredAt);
+      const futureLimitMs = observedMs + 5_000;
+      const rejectedFuture = row.state === 'observe' && occurredMs > futureLimitMs;
+      const state = rejectedFuture ? 'ignored' : row.state;
+      const reason = rejectedFuture
+        ? 'audit entry is more than 5 seconds in the future; refusing to count it'
+        : row.reason;
       const inserted = await tx.prepare(
         `INSERT INTO containment_events
            (audit_entry_id, guild_id, executor_id, action, target_id, weight,
@@ -56,16 +64,13 @@ export class ContainmentStore {
         row.targetId,
         row.weight,
         row.occurredAt,
-        row.state,
-        row.reason,
+        state,
+        reason,
         observedAt,
       );
       if (inserted.changes !== 1) return { claimed: false, heat: 0 };
-      if (!row.executorId || row.state !== 'observe') return { claimed: true, heat: 0 };
-      const occurredMs = Date.parse(row.occurredAt);
+      if (!row.executorId || state !== 'observe') return { claimed: true, heat: 0 };
       const windowMs = windowSeconds * 1000;
-      const futureLimitMs = this.now() + 5_000;
-      if (occurredMs > futureLimitMs) return { claimed: true, heat: 0 };
       const events = await tx.prepare(
         `SELECT audit_entry_id, weight, occurred_at
            FROM containment_events
@@ -110,7 +115,7 @@ export class ContainmentStore {
       const active = await tx.prepare(
         `SELECT id FROM containment_incidents
           WHERE guild_id = ? AND executor_id = ?
-            AND (state IN ('containing', 'uncertain') OR cooldown_until > ?)
+            AND (state = 'uncertain' OR cooldown_until > ?)
           LIMIT 1`,
       ).get<{ id: string }>(guildId, executorId, now);
       if (active) return false;

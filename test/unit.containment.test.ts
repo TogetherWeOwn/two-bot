@@ -195,19 +195,26 @@ describe('destructive-action containment', () => {
     assert.equal(calls, 1);
   });
 
-  test('future audit entries are recorded but cannot contribute heat', async () => {
+  test('future audit entries are permanently excluded from heat', async () => {
     let calls = 0;
+    let clock = NOW;
     const containment = new DestructiveContainment({
-      store,
+      store: new ContainmentStore(db, () => clock),
       discord: { quarantine: async () => (calls++, { removedRoleIds: [], skippedRoleIds: [] }) },
       config: config({ heatThreshold: 5, windowSeconds: 60 }),
       announce: async () => undefined,
-      now: () => NOW,
+      now: () => clock,
     });
     await containment.observe(destructive('future', 'channel.delete', NOW + 6_000));
-    await containment.observe(destructive('fresh-a', 'member.kick', NOW));
-    await containment.observe(destructive('fresh-b', 'member.kick', NOW - 1_000));
+    clock += 1_001;
+    await containment.observe(destructive('fresh-a', 'member.kick', clock));
+    await containment.observe(destructive('fresh-b', 'member.kick', clock - 1_000));
     assert.equal(calls, 0);
+    const row = await db.prepare(
+      'SELECT state, reason FROM containment_events WHERE audit_entry_id = ?',
+    ).get<{ state: string; reason: string }>('future');
+    assert.equal(row?.state, 'ignored');
+    assert.match(row?.reason ?? '', /more than 5 seconds in the future/);
   });
 
   test('timeout is uncertain and never automatically retried', async () => {
@@ -247,6 +254,43 @@ describe('destructive-action containment', () => {
     clock += 2_000;
     await containment.observe(destructive('later', 'channel.delete', clock));
     assert.equal(calls, 2);
+  });
+
+  test('a stranded containing incident can be retried after its bounded lease expires', async () => {
+    let clock = NOW;
+    const leaseStore = new ContainmentStore(db, () => clock);
+    await leaseStore.claimEvent({
+      ...destructive('first', 'channel.delete', clock),
+      state: 'observe',
+      reason: 'counted toward destructive-action heat',
+    }, 1);
+    assert.equal(await leaseStore.beginIncident(GUILD, EXECUTOR, 'first', 3, 1), true);
+    clock += 2_000;
+    await leaseStore.claimEvent({
+      ...destructive('later', 'channel.delete', clock),
+      state: 'observe',
+      reason: 'counted toward destructive-action heat',
+    }, 1);
+    assert.equal(await leaseStore.beginIncident(GUILD, EXECUTOR, 'later', 3, 1), true);
+  });
+
+  test('an uncertain incident keeps its durable lockout after the cooldown', async () => {
+    let clock = NOW;
+    const leaseStore = new ContainmentStore(db, () => clock);
+    await leaseStore.claimEvent({
+      ...destructive('first', 'channel.delete', clock),
+      state: 'observe',
+      reason: 'counted toward destructive-action heat',
+    }, 1);
+    assert.equal(await leaseStore.beginIncident(GUILD, EXECUTOR, 'first', 3, 1), true);
+    await leaseStore.completeIncident('first', 'uncertain', { error: 'unknown delivery outcome' });
+    clock += 2_000;
+    await leaseStore.claimEvent({
+      ...destructive('later', 'channel.delete', clock),
+      state: 'observe',
+      reason: 'counted toward destructive-action heat',
+    }, 1);
+    assert.equal(await leaseStore.beginIncident(GUILD, EXECUTOR, 'later', 3, 1), false);
   });
 
   test('gateway wiring normalizes only destructive audit entries', async () => {
