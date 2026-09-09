@@ -224,7 +224,12 @@ if (weOwnIt) {
   warn('could not resolve the bot\'s effective permissions', `HTTP ${self.status}`);
 }
 
-// 6. Server Members Intent - the fixture suite is meaningless without it
+// 6. Audit-log access - anti-nuke cannot identify executors without it.
+const audit = await api<unknown>(`/guilds/${guildId}/audit-logs?limit=1`);
+if (audit.status === 200) pass('View Audit Log works', 'destructive executors are observable');
+else fail('cannot read the Discord audit log', `HTTP ${audit.status}; anti-nuke would refuse to guess an executor`);
+
+// 7. Server Members Intent - the fixture suite is meaningless without it
 const app = await api<{ flags?: number }>('/applications/@me');
 if (app.status === 200 && app.body) {
   const GUILD_MEMBERS_LIMITED = 1 << 14;

@@ -7,6 +7,9 @@ export type MigrationTable =
   | 'moderation_audit'
   | 'moderation_lockdowns'
   | 'moderation_idempotency'
+  | 'containment_events'
+  | 'containment_incidents'
+  | 'join_risk_flags'
   | 'tickets'
   | 'ticket_transcripts'
   | 'automod_violations'
@@ -20,7 +23,8 @@ export function migrationValuesMatch(
 ): boolean {
   const sqliteBoolean =
     (table === 'members' && column === 'is_bot') ||
-    (table === 'moderation_lockdowns' && column === 'prior_exists');
+    (table === 'moderation_lockdowns' && column === 'prior_exists') ||
+    (table === 'join_risk_flags' && ['bulk_join_window', 'flagged'].includes(column));
   if (sqliteBoolean) {
     if (source === 0) return target === false;
     if (source === 1) return target === true;

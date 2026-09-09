@@ -114,6 +114,30 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
       .run(G, 'mod-key-1', 'moderation.ban', 'deadbeef', '2026-08-01T10:00:00.000Z', '2026-08-01T10:00:01.000Z');
     await harness.db
       .prepare(
+        `INSERT INTO containment_events
+           (audit_entry_id, guild_id, executor_id, action, target_id, weight,
+            occurred_at, state, reason, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('audit-1', G, 'staff', 'channel.delete', 'channel-1', 3, '2026-08-01T12:00:00.000Z', 'contain', 'threshold crossed', '2026-08-01T12:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO containment_incidents
+           (id, guild_id, executor_id, trigger_audit_entry_id, heat, state,
+            result_json, started_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('incident-1', G, 'staff', 'audit-1', 5, 'contained', '{"removedRoleIds":["danger"]}', '2026-08-01T12:00:00.000Z', '2026-08-01T12:00:01.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO join_risk_flags
+           (event_id, guild_id, member_id, account_created_at, joined_at, source, score,
+            reasons_json, bulk_join_window, flagged, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('join-risk-1', G, 'm-risk', '2026-08-01T11:59:00.000Z', '2026-08-01T12:00:00.000Z', 'unknown', 3, '["new account"]', false, true, '2026-08-01T12:00:00.000Z');
+    await harness.db
+      .prepare(
         `INSERT INTO tickets (id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closed_at)
          VALUES (?, ?, ?, ?, ?, 'closed', ?, ?)`,
       )
@@ -165,6 +189,9 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
     assert.equal(manifest.tables.find((t) => t.name === 'ticket_transcripts')?.count, 1);
     assert.equal(manifest.tables.find((t) => t.name === 'automod_violations')?.count, 1);
     assert.equal(manifest.tables.find((t) => t.name === 'automod_processed_messages')?.count, 3);
+    assert.equal(manifest.tables.find((t) => t.name === 'containment_events')?.count, 1);
+    assert.equal(manifest.tables.find((t) => t.name === 'containment_incidents')?.count, 1);
+    assert.equal(manifest.tables.find((t) => t.name === 'join_risk_flags')?.count, 1);
 
     // Lose everything, exactly as a dead disk would.
     await harness.db.exec(`TRUNCATE ${DUMP_TABLES.join(', ')} RESTART IDENTITY`);

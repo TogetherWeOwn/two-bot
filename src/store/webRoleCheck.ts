@@ -69,6 +69,19 @@ export const BOT_TABLES = [
   'moderation_idempotency',
   'automod_violations',
   'automod_processed_messages',
+  // 0015 — destructive-action evidence and private member risk flags.
+  'containment_events',
+  'containment_incidents',
+  'join_risk_flags',
+  // 0013/0014 — private support tickets and transcript bodies.
+  'tickets',
+  'ticket_transcripts',
+  // 0010 — member-level XP and staff-configured role rewards.
+  'member_levels',
+  'xp_cooldowns',
+  'xp_awards',
+  'level_role_rewards',
+  'level_import_runs',
   // 0003 — the tables behind this contract. The website reads the views over
   // them, never these.
   'web_contract_meta',

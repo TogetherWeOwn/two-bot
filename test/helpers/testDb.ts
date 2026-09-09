@@ -64,6 +64,9 @@ const TABLES = [
   'moderation_audit',
   'moderation_lockdowns',
   'moderation_idempotency',
+  'containment_events',
+  'containment_incidents',
+  'join_risk_flags',
   'ticket_transcripts',
   'tickets',
   'automod_violations',
@@ -84,6 +87,14 @@ const SQLITE_TABLES = [
   'level_role_rewards',
   'level_import_runs',
   'member_levels',
+  'moderation_warnings',
+  'moderation_scheduled_unbans',
+  'moderation_audit',
+  'moderation_lockdowns',
+  'moderation_idempotency',
+  'containment_events',
+  'containment_incidents',
+  'join_risk_flags',
   'ticket_transcripts',
   'tickets',
   'automod_violations',
@@ -140,7 +151,7 @@ export async function openTestDb(label: string): Promise<TestDb> {
     schema,
     webSchema,
     async reset() {
-      await db.exec(`TRUNCATE ${TABLES.join(', ')} RESTART IDENTITY`);
+      await db.exec(`TRUNCATE ${TABLES.join(', ')} RESTART IDENTITY CASCADE`);
     },
     async cleanup() {
       // Views first: they depend on the tables, and CASCADE on the bot schema
