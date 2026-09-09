@@ -51,15 +51,24 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
   const deliver = async (stored: StoredOperationalAudit): Promise<void> => {
     const channelId = stored.mirrorChannelId;
     if (!channelId) return;
+    const claimToken = stored.deliveryClaimToken;
+    if (options.store && !claimToken) {
+      log.error('operational_audit_claim_missing', {
+        entryId: stored.event.entryId,
+        channelId,
+        classification: 'audit_delivery_claim_missing',
+      });
+      return;
+    }
     if (options.dryRun) {
-      await options.store?.markDeliveryFailed(stored.event.entryId, 'dry_run');
+      await options.store?.markDeliveryFailed(stored.event.entryId, claimToken!, 'dry_run');
       log.info('operational_audit_dry_run', { entryId: stored.event.entryId, channelId });
       return;
     }
 
     const channel = await botCanPost(client, channelId, stored.event.guildId);
     if (!channel) {
-      await options.store?.markDeliveryFailed(stored.event.entryId, 'channel_unavailable');
+      await options.store?.markDeliveryFailed(stored.event.entryId, claimToken!, 'channel_unavailable');
       log.error('operational_audit_undeliverable', {
         entryId: stored.event.entryId,
         channelId,
@@ -76,7 +85,7 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
         stored.event.entryId,
         stored.deliverySearchBefore,
         stored.deliverySearchBefore && options.store
-          ? () => options.store!.extendDeliveryLease(stored.event.entryId)
+          ? () => options.store!.extendDeliveryLease(stored.event.entryId, claimToken!)
           : undefined,
       );
       if (existing) {
@@ -85,7 +94,7 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
         // Once the recovery boundary is durable, the Discord post may have
         // succeeded. A missing or edited marker is ambiguous forever: resending
         // could duplicate an accepted message, so every retry must fail closed.
-        await options.store?.markDeliveryFailed(stored.event.entryId, 'discord_marker_missing');
+        await options.store?.markDeliveryFailed(stored.event.entryId, claimToken!, 'discord_marker_missing');
         log.error('operational_audit_marker_missing', {
           entryId: stored.event.entryId,
           channelId,
@@ -94,7 +103,10 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
         return;
       } else {
         const searchBefore = await newestMessageCursor(channel);
-        await options.store?.saveDeliverySearchBefore(stored.event.entryId, searchBefore);
+        await options.store?.saveDeliverySearchBefore(stored.event.entryId, claimToken!, searchBefore);
+        if (options.store && !await options.store.ownsDeliveryClaim(stored.event.entryId, claimToken!)) {
+          return;
+        }
         sendStarted = true;
         const message = await channel.send({
           content: formatAuditEvent(stored.event),
@@ -107,7 +119,7 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
     } catch {
       if (sendStarted) {
         try {
-          await options.store?.markAcknowledgementFailed(stored.event.entryId);
+          await options.store?.markAcknowledgementFailed(stored.event.entryId, claimToken!);
         } catch {
           // Preserve the lease after an accepted send if the store is unavailable.
         }
@@ -117,7 +129,7 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
           classification: 'discord_post_ambiguous',
         });
       } else {
-        await options.store?.markDeliveryFailed(stored.event.entryId, 'discord_send_failed');
+        await options.store?.markDeliveryFailed(stored.event.entryId, claimToken!, 'discord_send_failed');
         log.error('operational_audit_post_failed', {
           entryId: stored.event.entryId,
           channelId,
@@ -128,13 +140,13 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
     }
 
     try {
-      await options.store?.markDelivered(stored.event.entryId, messageId);
+      await options.store?.markDelivered(stored.event.entryId, claimToken!, messageId);
       log.info('operational_audit_posted', { entryId: stored.event.entryId, channelId, messageId });
     } catch {
       // The durable marker remains visible in Discord even after the nonce
       // uniqueness window expires. A later retry scans for it before sending.
       try {
-        await options.store?.markAcknowledgementFailed(stored.event.entryId);
+        await options.store?.markAcknowledgementFailed(stored.event.entryId, claimToken!);
       } catch {
         // The original acknowledgement write already proved the store may be
         // unavailable. Keep the lease for marker reconciliation on retry.
@@ -195,6 +207,7 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
           mirrorChannelId,
           deliveryState: 'delivering',
           deliveryAttempts: 0,
+          deliveryClaimToken: null,
           deliveryNonce: deliveryNonce(event.entryId),
           deliverySearchBefore: null,
           mirrorMessageId: null,
@@ -221,7 +234,7 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
 async function newestMessageCursor(channel: GuildTextBasedChannel): Promise<string> {
   const messages = await channel.messages.fetch({ limit: 1, cache: false });
   const newestId = messages.first()?.id;
-  return newestId ? nextSnowflake(newestId) : currentDiscordSnowflake();
+  return newestId ? nextSnowflake(newestId) : '0';
 }
 
 async function findMirror(
@@ -255,11 +268,6 @@ async function findMirror(
 
 function nextSnowflake(messageId: string): string {
   return (BigInt(messageId) + 1n).toString();
-}
-
-function currentDiscordSnowflake(): string {
-  const discordEpoch = 1_420_070_400_000n;
-  return ((BigInt(Date.now()) - discordEpoch) << 22n).toString();
 }
 
 function channelFor(channels: AuditChannelIds, type: AuditChannel): string | null {

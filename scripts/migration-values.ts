@@ -7,6 +7,7 @@ export type MigrationTable =
   | 'moderation_audit'
   | 'moderation_lockdowns'
   | 'moderation_idempotency'
+  | 'operational_audit_log'
   | 'tickets'
   | 'ticket_transcripts';
 
