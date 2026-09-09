@@ -52,6 +52,8 @@ export const STAGING_BOT_APPLICATION_NAME = 'Owen QA Test';
  */
 export const LIVE_BOT_APPLICATION_ID = '1539711683898118154';
 export const STAGING_BOT_APPLICATION_ID = '1469137636663758888';
+/** The staging guild fixed by TOG-1309 for every parity slice. */
+export const TWO_STAGING_GUILD_ID = '1545644954272137297';
 
 /**
  * The application that held the staging role until 2026-09-05. Kept so that a
@@ -164,6 +166,7 @@ export const STAGING_ROLES = ['Moderator', 'Member', 'Game: Test'] as const;
  */
 export const STAGING_PERMISSIONS =
   (1 << 6) | // Add Reactions
+  (1 << 7) | // View Audit Log
   (1 << 10) | // View Channels
   (1 << 11) | // Send Messages
   (1 << 14) | // Embed Links
@@ -200,6 +203,7 @@ export const STAGING_INVITE_PERMISSIONS: bigint =
 /** Decoded, so a mismatch reads as English instead of arithmetic. */
 export const PERMISSION_BITS: ReadonlyArray<{ name: string; bit: bigint }> = [
   { name: 'Add Reactions', bit: 1n << 6n },
+  { name: 'View Audit Log', bit: 1n << 7n },
   { name: 'View Channels', bit: 1n << 10n },
   { name: 'Send Messages', bit: 1n << 11n },
   { name: 'Manage Messages', bit: 1n << 13n },

@@ -357,14 +357,14 @@ test('the invite never asks for Administrator', () => {
 
 test('the invite is the low-bit set plus events and timeout permissions', () => {
   // Pins the relationship rather than the number, so widening the invite is a
-  // deliberate edit here and not a silently larger grant. Manage Messages is
-  // low-bit; timeout needs the high Moderate Members bit.
+  // deliberate edit here and not a silently larger grant. Manage Messages and
+  // View Audit Log are low-bit; timeout needs the high Moderate Members bit.
   assert.equal(
     STAGING_INVITE_PERMISSIONS,
     BigInt(STAGING_PERMISSIONS) | (1n << 33n) | (1n << 40n) | (1n << 44n),
   );
-  assert.equal(STAGING_PERMISSIONS, 268528704, 'the low-bit set adds only Manage Messages');
-  assert.equal(STAGING_INVITE_PERMISSIONS, 18700556135488n);
+  assert.equal(STAGING_PERMISSIONS, 268528832, 'low-bit set adds Manage Messages and View Audit Log');
+  assert.equal(STAGING_INVITE_PERMISSIONS, 18700556135616n);
 });
 
 test('the invite url carries the wider set, not the onboarding one', () => {
