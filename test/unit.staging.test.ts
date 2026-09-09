@@ -367,8 +367,8 @@ test('staging marker verification requires the leading audit identity field', ()
     verifier.indexOf('async function discordMarkerMessageIds'),
     verifier.indexOf('// 7. Reconcile'),
   );
-  assert.match(markerScanner, /message\.content\.startsWith\(`\$\{marker\} · `\)/);
-  assert.doesNotMatch(markerScanner, /message\.content\.includes\(marker\)/);
+  assert.match(markerScanner, /hasAuditEventIdentity\(message\.content, entryId\)/);
+  assert.doesNotMatch(markerScanner, /message\.content\.includes\(/);
 });
 
 test('the invite is the operational set plus exactly the two events bits', () => {

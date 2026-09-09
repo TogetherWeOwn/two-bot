@@ -1,6 +1,12 @@
 import { PermissionsBitField, type Client, type GuildTextBasedChannel, type Message } from 'discord.js';
 import { log } from '../core/log.ts';
-import { auditEventFields, formatAuditEvent, type AuditChannel, type OperationalAuditEvent } from './events.ts';
+import {
+  auditEventFields,
+  formatAuditEvent,
+  hasAuditEventIdentity,
+  type AuditChannel,
+  type OperationalAuditEvent,
+} from './events.ts';
 import { deliveryNonce, type OperationalAuditStore, type StoredOperationalAudit } from './store.ts';
 
 export interface AuditChannelIds {
@@ -65,12 +71,20 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
     let messageId: string | null = null;
     let sendStarted = false;
     try {
-      const existing = await findMirror(channel, stored.event.entryId, stored.deliverySearchBefore);
+      const existing = await findMirror(
+        channel,
+        stored.event.entryId,
+        stored.deliverySearchBefore,
+        stored.deliverySearchBefore && options.store
+          ? () => options.store!.extendDeliveryLease(stored.event.entryId)
+          : undefined,
+      );
       if (existing) {
         messageId = existing.id;
-      } else if (stored.deliverySearchBefore && stored.deliveryLastError === 'delivery_ack_failed') {
-        // Discord returned a message but the acknowledgement failed. If its
-        // durable marker was deleted or edited, resending would duplicate it.
+      } else if (stored.deliverySearchBefore) {
+        // Once the recovery boundary is durable, the Discord post may have
+        // succeeded. A missing or edited marker is ambiguous forever: resending
+        // could duplicate an accepted message, so every retry must fail closed.
         await options.store?.markDeliveryFailed(stored.event.entryId, 'discord_marker_missing');
         log.error('operational_audit_marker_missing', {
           entryId: stored.event.entryId,
@@ -214,19 +228,27 @@ async function findMirror(
   channel: GuildTextBasedChannel,
   entryId: string,
   searchBefore: string | null,
+  renewLease?: () => Promise<void>,
 ): Promise<Message<true> | null> {
-  const marker = `audit-event:${entryId}; · `;
-  let before = searchBefore ?? undefined;
-  const pageLimit = searchBefore ? 20 : 5;
-  for (let page = 0; page < pageLimit; page++) {
+  let before: string | undefined;
+  let page = 0;
+  while (searchBefore || page < 5) {
+    await renewLease?.();
     const messages = await channel.messages.fetch({ limit: 100, before, cache: false });
     const match = messages.find(
-      (message) => message.author.id === channel.client.user?.id && message.content.startsWith(marker),
+      (message) =>
+        (!searchBefore || BigInt(message.id) >= BigInt(searchBefore)) &&
+        message.author.id === channel.client.user?.id &&
+        hasAuditEventIdentity(message.content, entryId),
     );
     if (match) return match;
+
+    const oldestId = messages.last()?.id;
+    if (!oldestId) return null;
+    if (searchBefore && BigInt(oldestId) < BigInt(searchBefore)) return null;
     if (messages.size < 100) return null;
-    before = messages.last()?.id;
-    if (!before) return null;
+    before = oldestId;
+    page++;
   }
   return null;
 }
