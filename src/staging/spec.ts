@@ -121,9 +121,14 @@ export function checkStagingToken(token: string): { ok: boolean; message: string
     };
   }
   if (appId === null) {
-    return { ok: true, message: 'token shape not recognised - continuing, Discord will judge it' };
+    return { ok: false, message: 'Token shape not recognised; refusing to contact Discord.' };
   }
-  return { ok: true, message: `token is application ${appId}, which is neither the live nor the expected staging bot` };
+  return {
+    ok: false,
+    message:
+      `This token belongs to application ${appId}, not ${STAGING_BOT_APPLICATION_NAME} ` +
+      `(${STAGING_BOT_APPLICATION_ID}). Refusing to contact Discord.`,
+  };
 }
 
 /** Text channels the fixtures and the integration suite expect to find. */

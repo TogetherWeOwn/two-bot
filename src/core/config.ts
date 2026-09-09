@@ -53,6 +53,10 @@ export interface Config {
   onboardingMode: 'legacy' | 'session';
   /** Where session-mode goodbyes go. Empty = goodbyes are log-only. */
   goodbyeChannelIds: string[];
+  /** Session-mode destination for "Find people to play with". */
+  sessionLookingToPlayChannelId: string | null;
+  /** Session-mode destination for "Join voice now". */
+  sessionLobbyVoiceChannelId: string | null;
   /**
    * Staff channel for join-burst alerts (TWO-56). Null = alerts go to the log
    * only. Never a member-facing channel: this posts member IDs.
@@ -124,6 +128,8 @@ export function loadConfig(): Config {
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean),
+    sessionLookingToPlayChannelId: process.env.DISCORD_SESSION_LOOKING_TO_PLAY_CHANNEL_ID || null,
+    sessionLobbyVoiceChannelId: process.env.DISCORD_SESSION_LOBBY_VOICE_CHANNEL_ID || null,
     staffAlertChannelId: process.env.DISCORD_STAFF_ALERT_CHANNEL_ID || null,
     raidJoinThreshold: Number(process.env.TWO_RAID_JOIN_THRESHOLD ?? 5),
     raidWindowSeconds: Number(process.env.TWO_RAID_WINDOW_SECONDS ?? 60),

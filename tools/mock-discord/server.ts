@@ -75,15 +75,15 @@ export interface MockDiscord {
   /** Every non-GET the bot made. Assert on what it actually sent. */
   captured: CapturedRequest[];
   /** Join behind the rules gate: present in the guild, unable to interact. */
-  memberJoinPending(memberId: string, username: string): void;
+  memberJoinPending(memberId: string, username: string, guildId?: string): void;
   /** Rules accepted - pending flips false. This is the real onboarding trigger. */
-  memberAcceptRules(memberId: string, username: string): void;
+  memberAcceptRules(memberId: string, username: string, guildId?: string): void;
   /** Simulate the member choosing games in the picker. */
   selectGames(memberId: string, username: string, keys: string[], heldRoleIds?: string[]): void;
   /** Simulate the member using the session picker (TOG-1644). */
-  selectSession(memberId: string, username: string, keys: string[]): void;
+  selectSession(memberId: string, username: string, keys: string[], guildId?: string): void;
   /** Simulate the member leaving the guild (triggers goodbye, TOG-1644). */
-  memberRemove(memberId: string, username: string): void;
+  memberRemove(memberId: string, username: string, guildId?: string): void;
 
   // --- internal actions endpoint (TWO-59) -----------------------------------
   /** Seed the roles GET /guilds/x/members/y reports, so already_held is reachable. */
@@ -688,9 +688,9 @@ export async function startMockDiscord(
     },
     captured,
 
-    memberJoinPending(memberId, username) {
+    memberJoinPending(memberId, username, guildId = GUILD_ID) {
       dispatch('GUILD_MEMBER_ADD', {
-        guild_id: GUILD_ID,
+        guild_id: guildId,
         user: userPayload(memberId, username),
         roles: [],
         joined_at: new Date().toISOString(),
@@ -702,11 +702,11 @@ export async function startMockDiscord(
       });
     },
 
-    memberAcceptRules(memberId, username) {
+    memberAcceptRules(memberId, username, guildId = GUILD_ID) {
       // discord.js compares against its cached copy, so the "before" state has
       // to have been dispatched first via memberJoinPending.
       dispatch('GUILD_MEMBER_UPDATE', {
-        guild_id: GUILD_ID,
+        guild_id: guildId,
         user: userPayload(memberId, username),
         roles: [MEMBER_ROLE],
         joined_at: new Date().toISOString(),
@@ -773,14 +773,14 @@ export async function startMockDiscord(
       memberRoles.set(memberId, roleIds);
     },
 
-    selectSession(memberId, username, keys) {
+    selectSession(memberId, username, keys, guildId = GUILD_ID) {
       dispatch('INTERACTION_CREATE', {
         id: snowflake(),
         application_id: BOT_ID,
         type: 3, // MESSAGE_COMPONENT
         token: 'mock-interaction-token',
         version: 1,
-        guild_id: GUILD_ID,
+        guild_id: guildId,
         channel_id: TEXT_CHANNEL,
         channel: { id: TEXT_CHANNEL, type: 0 },
         data: {
@@ -822,9 +822,9 @@ export async function startMockDiscord(
       });
     },
 
-    memberRemove(memberId, username) {
+    memberRemove(memberId, username, guildId = GUILD_ID) {
       dispatch('GUILD_MEMBER_REMOVE', {
-        guild_id: GUILD_ID,
+        guild_id: guildId,
         user: userPayload(memberId, username),
       });
     },
