@@ -193,9 +193,10 @@ export class ModerationService {
    * pre-lock masks with the already-locked masks.
    */
   private async lockChannel(channelId: string, request: ModerationExecution): Promise<string> {
+    const existing = await this.store.getLockdown(channelId);
     const current = await this.discord.getEveryoneOverwrite(channelId, request.guildId);
     const prior = current ?? { allow: '0', deny: '0' };
-    const recorded = await this.store.recordLockdown({
+    await this.store.recordLockdown({
       channelId,
       guildId: request.guildId,
       priorAllow: prior.allow,
@@ -207,7 +208,14 @@ export class ModerationService {
     // The durable record is only for the eventual unlock.
     const denied = setBit(prior.deny, SEND_MESSAGES_BIT);
     const allowed = clearBit(prior.allow, SEND_MESSAGES_BIT);
-    await this.discord.putEveryoneOverwrite(channelId, request.guildId, { allow: allowed, deny: denied }, request.reason);
+    try {
+      await this.discord.putEveryoneOverwrite(channelId, request.guildId, { allow: allowed, deny: denied }, request.reason);
+    } catch (err) {
+      if (!existing && isSafePreMutationFailure(err)) {
+        await this.store.clearLockdown(channelId).catch(() => undefined);
+      }
+      throw err;
+    }
     return 'locked_down';
   }
 
