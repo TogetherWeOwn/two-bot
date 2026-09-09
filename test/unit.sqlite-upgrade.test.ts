@@ -252,6 +252,7 @@ test('opening a pre-delivery SQLite audit database adds columns before the deliv
   const db = await openSqlite(path);
   const columns = await db.prepare(`PRAGMA table_info(operational_audit_log)`).all<{ name: string }>();
   assert.ok(columns.some((column) => column.name === 'delivery_state'));
+  assert.ok(columns.some((column) => column.name === 'delivery_claim_token'));
   const indexes = await db.prepare(`PRAGMA index_list(operational_audit_log)`).all<{ name: string }>();
   assert.ok(indexes.some((index) => index.name === 'idx_operational_audit_delivery'));
   await db.close();

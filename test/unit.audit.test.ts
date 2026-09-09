@@ -367,10 +367,10 @@ test('failed audit delivery is retryable without duplicating the durable row', a
   };
   const realSaveDeliverySearchBefore = store.saveDeliverySearchBefore.bind(store);
   let boundaryWrites = 0;
-  store.saveDeliverySearchBefore = async (entryId, before) => {
+  store.saveDeliverySearchBefore = async (entryId, claimToken, before) => {
     boundaryWrites++;
     if (boundaryWrites === 1) throw new Error('transient database failure before send');
-    await realSaveDeliverySearchBefore(entryId, before);
+    await realSaveDeliverySearchBefore(entryId, claimToken, before);
   };
   assert.equal(await sink.record(event), true);
   assert.equal((await store.get(event.entryId))?.deliveryState, 'pending');
@@ -445,10 +445,10 @@ test('post-send acknowledgement retries reconcile beyond 500 newer Discord messa
 
   const realMarkDelivered = store.markDelivered.bind(store);
   let acknowledgements = 0;
-  store.markDelivered = async (entryId, messageId) => {
+  store.markDelivered = async (entryId, claimToken, messageId) => {
     acknowledgements++;
     if (acknowledgements === 1) throw new Error('database disconnected after Discord accepted the post');
-    await realMarkDelivered(entryId, messageId);
+    await realMarkDelivered(entryId, claimToken, messageId);
   };
 
   assert.equal(await sink.record(event), true);
@@ -470,6 +470,156 @@ test('post-send acknowledgement retries reconcile beyond 500 newer Discord messa
   const row = await store.get(event.entryId);
   assert.equal(row?.deliveryState, 'delivered');
   assert.equal(row?.mirrorMessageId, acceptedMessageId);
+  await db.close();
+});
+
+test('stale audit delivery claims cannot mutate replacement ownership', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  const event: OperationalAuditEvent = {
+    entryId: 'stale-claim', kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
+  };
+  await store.record(event, CHANNEL_A);
+
+  const first = await store.claim(event.entryId, 1);
+  assert.ok(first?.deliveryClaimToken);
+  await db.prepare(`UPDATE operational_audit_log SET delivery_lease_until = ? WHERE entry_id = ?`).run(
+    '2000-01-01T00:00:00.000Z', event.entryId,
+  );
+  const replacement = await store.claim(event.entryId);
+  assert.ok(replacement?.deliveryClaimToken);
+  assert.notEqual(first.deliveryClaimToken, replacement.deliveryClaimToken);
+
+  assert.equal(await store.ownsDeliveryClaim(event.entryId, first.deliveryClaimToken), false);
+  assert.equal(await store.ownsDeliveryClaim(event.entryId, replacement.deliveryClaimToken), true);
+  await assert.rejects(
+    store.saveDeliverySearchBefore(event.entryId, first.deliveryClaimToken, '10'),
+    /audit_delivery_search_bound_not_persisted/,
+  );
+  await assert.rejects(
+    store.extendDeliveryLease(event.entryId, first.deliveryClaimToken),
+    /audit_delivery_lease_not_extended/,
+  );
+  await assert.rejects(
+    store.markDelivered(event.entryId, first.deliveryClaimToken, '20'),
+    /audit_delivery_ack_not_persisted/,
+  );
+  await assert.rejects(
+    store.markAcknowledgementFailed(event.entryId, first.deliveryClaimToken),
+    /audit_delivery_ack_failure_not_persisted/,
+  );
+  await assert.rejects(
+    store.markDeliveryFailed(event.entryId, first.deliveryClaimToken, 'stale'),
+    /audit_delivery_failure_not_persisted/,
+  );
+
+  const claimed = await store.get(event.entryId);
+  assert.equal(claimed?.deliveryState, 'delivering');
+  assert.equal(claimed?.deliveryClaimToken, replacement.deliveryClaimToken);
+  assert.equal(claimed?.deliveryAttempts, 0);
+  assert.equal(claimed?.deliverySearchBefore, null);
+  await store.markDeliveryFailed(event.entryId, replacement.deliveryClaimToken, 'replacement_done');
+  const pending = await store.get(event.entryId);
+  assert.equal(pending?.deliveryState, 'pending');
+  assert.equal(pending?.deliveryClaimToken, null);
+  assert.equal(pending?.deliveryLastError, 'replacement_done');
+  await db.close();
+});
+
+test('a reclaimed delivery cannot send from the stale worker', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  let sends = 0;
+  let replacementToken: string | null = null;
+  const channel = {
+    id: CHANNEL_A,
+    guild: { id: GUILD, members: { me: { id: 'bot' } } },
+    isTextBased: () => true,
+    isDMBased: () => false,
+    permissionsFor: () => ({ has: () => true }),
+    messages: { fetch: async () => new Collection() },
+    client: { user: { id: 'bot' } },
+    send: async () => { sends++; return { id: '1' }; },
+  };
+  const client = { channels: { cache: new Map([[CHANNEL_A, channel]]), fetch: async () => channel } } as unknown as Client;
+  const sink = makeOperationalAudit(client, {
+    guildId: GUILD, channels: { audit: CHANNEL_A, voice: null, moderation: null }, store,
+  });
+  const realSave = store.saveDeliverySearchBefore.bind(store);
+  store.saveDeliverySearchBefore = async (entryId, claimToken, before) => {
+    await realSave(entryId, claimToken, before);
+    await db.prepare(`UPDATE operational_audit_log SET delivery_lease_until = ? WHERE entry_id = ?`).run(
+      '2000-01-01T00:00:00.000Z', entryId,
+    );
+    replacementToken = (await store.claim(entryId))?.deliveryClaimToken ?? null;
+  };
+
+  await sink.record({
+    entryId: 'reclaimed-before-send', kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
+  });
+  assert.ok(replacementToken);
+  assert.equal(sends, 0);
+  const row = await store.get('reclaimed-before-send');
+  assert.equal(row?.deliveryState, 'delivering');
+  assert.equal(row?.deliveryClaimToken, replacementToken);
+  await db.close();
+});
+
+test('an empty-channel acknowledgement retry does not trust the host clock', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  const sends: string[] = [];
+  let acceptedMessage: { id: string; author: { id: string }; content: string } | null = null;
+  const acceptedMessageId = '1';
+  const newerMessages = Array.from({ length: 550 }, (_, index) => ({
+    id: String(551 - index), author: { id: 'other' }, content: `newer-${index}`,
+  }));
+  const channel = {
+    id: CHANNEL_A,
+    guild: { id: GUILD, members: { me: { id: 'bot' } } },
+    isTextBased: () => true,
+    isDMBased: () => false,
+    permissionsFor: () => ({ has: () => true }),
+    messages: {
+      fetch: async ({ limit = 50, before }: { limit?: number; before?: string }) => {
+        const history = acceptedMessage ? [...newerMessages, acceptedMessage] : [];
+        const page = history.filter((message) => !before || BigInt(message.id) < BigInt(before)).slice(0, limit);
+        return new Collection(page.map((message) => [message.id, message]));
+      },
+    },
+    client: { user: { id: 'bot' } },
+    send: async (body: { content?: string }) => {
+      sends.push(body.content ?? '');
+      acceptedMessage = { id: acceptedMessageId, author: { id: 'bot' }, content: body.content ?? '' };
+      return { id: acceptedMessageId };
+    },
+  };
+  const client = { channels: { cache: new Map([[CHANNEL_A, channel]]), fetch: async () => channel } } as unknown as Client;
+  const sink = makeOperationalAudit(client, {
+    guildId: GUILD, channels: { audit: CHANNEL_A, voice: null, moderation: null }, store,
+  });
+  const realMarkDelivered = store.markDelivered.bind(store);
+  let acknowledgements = 0;
+  store.markDelivered = async (entryId, claimToken, messageId) => {
+    acknowledgements++;
+    if (acknowledgements === 1) throw new Error('database disconnected after Discord accepted the post');
+    await realMarkDelivered(entryId, claimToken, messageId);
+  };
+
+  await sink.record({
+    entryId: 'empty-channel', kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
+  });
+  assert.equal((await store.get('empty-channel'))?.deliverySearchBefore, '0');
+  await db.prepare(`UPDATE operational_audit_log SET delivery_lease_until = ? WHERE entry_id = ?`).run(
+    '2000-01-01T00:00:00.000Z', 'empty-channel',
+  );
+  assert.equal(await sink.retryPending(), 1);
+  assert.equal(sends.length, 1);
+  assert.equal((await store.get('empty-channel'))?.deliveryState, 'delivered');
+  assert.equal((await store.get('empty-channel'))?.mirrorMessageId, acceptedMessageId);
   await db.close();
 });
 
@@ -651,10 +801,10 @@ test('an edited ambiguous marker fails closed through a long scan and overlappin
   };
   const realMarkDelivered = store.markDelivered.bind(store);
   let acknowledgements = 0;
-  store.markDelivered = async (entryId, messageId) => {
+  store.markDelivered = async (entryId, claimToken, messageId) => {
     acknowledgements++;
     if (acknowledgements === 1) throw new Error('database disconnected after Discord accepted the post');
-    await realMarkDelivered(entryId, messageId);
+    await realMarkDelivered(entryId, claimToken, messageId);
   };
 
   assert.equal(await sink.record(event), true);
@@ -670,8 +820,8 @@ test('an edited ambiguous marker fails closed through a long scan and overlappin
   const realExtendLease = store.extendDeliveryLease.bind(store);
   let leaseExtensions = 0;
   let overlappingRetry: Promise<number> | null = null;
-  store.extendDeliveryLease = async (entryId, leaseMs) => {
-    await realExtendLease(entryId, leaseMs);
+  store.extendDeliveryLease = async (entryId, claimToken, leaseMs) => {
+    await realExtendLease(entryId, claimToken, leaseMs);
     leaseExtensions++;
     if (leaseExtensions === 2) overlappingRetry = sink.retryPending();
   };

@@ -49,6 +49,7 @@ const OPTIONAL_TABLES = [
   'moderation_audit',
   'moderation_lockdowns',
   'moderation_idempotency',
+  'operational_audit_log',
   'tickets',
   'ticket_transcripts',
 ] as const;
@@ -64,6 +65,7 @@ const PRIMARY_KEYS: Record<Table, readonly string[]> = {
   moderation_audit: ['request_id'],
   moderation_lockdowns: ['channel_id'],
   moderation_idempotency: ['guild_id', 'idempotency_key'],
+  operational_audit_log: ['entry_id'],
   tickets: ['id'],
   ticket_transcripts: ['ticket_id'],
 };

@@ -229,6 +229,7 @@ export async function openSqlite(path: string): Promise<Db> {
   ensureColumn(raw, 'operational_audit_log', 'delivery_attempted_at', 'TEXT');
   ensureColumn(raw, 'operational_audit_log', 'delivery_last_error', 'TEXT');
   ensureColumn(raw, 'operational_audit_log', 'delivery_lease_until', 'TEXT');
+  ensureColumn(raw, 'operational_audit_log', 'delivery_claim_token', 'TEXT');
   ensureColumn(raw, 'operational_audit_log', 'delivery_nonce', 'TEXT');
   ensureColumn(raw, 'operational_audit_log', 'delivery_search_before', 'TEXT');
   ensureColumn(raw, 'operational_audit_log', 'mirror_message_id', 'TEXT');
