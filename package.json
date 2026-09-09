@@ -59,7 +59,8 @@
     "verify:web-role": "node scripts/verify-web-role.ts",
     "presence:trend": "node scripts/presence-trend.ts",
     "levels:import:mee6": "node scripts/levels-import-mee6.ts",
-    "levels:roles": "node scripts/levels-role-rewards.ts"
+    "levels:roles": "node scripts/levels-role-rewards.ts",
+    "automod:export": "node scripts/automod-export.ts"
   },
   "dependencies": {
     "discord.js": "^14.27.0",

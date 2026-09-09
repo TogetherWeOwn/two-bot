@@ -1,4 +1,4 @@
-import { Client, GatewayIntentBits, Events, type Guild } from 'discord.js';
+import { Client, GatewayIntentBits, Events, Options, Partials, type Guild } from 'discord.js';
 import { nowIso } from '../core/events.ts';
 import type { FunnelHandlers } from '../core/handlers.ts';
 import type { InviteTracker, InviteState } from '../core/inviteTracker.ts';
@@ -8,6 +8,8 @@ import type { RaidAnnouncer } from './raidAlert.ts';
 import { log } from '../core/log.ts';
 import { applyLevelRoles } from '../leveling/discord.ts';
 import type { LevelingService } from '../leveling/service.ts';
+import type { AutomodService } from '../automod/service.ts';
+import { AutomodProcessingError } from '../automod/types.ts';
 
 /**
  * Intents we ask Discord for, and why. Keep this list minimal - each one is a
@@ -15,16 +17,16 @@ import type { LevelingService } from '../leveling/service.ts';
  *
  *   Guilds              - required for any guild event at all
  *   GuildMembers        - member_join / member_leave        (PRIVILEGED)
- *   GuildMessages       - first_message + private ticket transcripts
- *   MessageContent      - ticket transcript bodies only      (PRIVILEGED)
+ *   GuildMessages       - first_message + tickets + automod events
+ *   MessageContent      - ticket transcripts and enabled automod (PRIVILEGED)
  *   GuildVoiceStates    - first_voice_session + voice_session_start/end
  *   GuildInvites        - invite create/delete for attribution
  *
- * MessageContent is required for MEE6-equivalent ticket export. The bot only
- * reads bodies while a staff member closes a bot-created private ticket; the
- * bounded retention and erasure controls are documented in docs/PRIVACY.md.
+ * MessageContent is required for MEE6-equivalent ticket export. Enabled automod
+ * also inspects public messages in memory but never stores or logs their content.
+ * Ticket retention and both erasure boundaries are documented in docs/PRIVACY.md.
  */
-export const INTENTS = [
+const BASE_INTENTS = [
   GatewayIntentBits.Guilds,
   GatewayIntentBits.GuildMembers,
   GatewayIntentBits.GuildMessages,
@@ -32,6 +34,12 @@ export const INTENTS = [
   GatewayIntentBits.GuildVoiceStates,
   GatewayIntentBits.GuildInvites,
 ];
+
+export function intents(_automodEnabled = process.env.TWO_AUTOMOD === '1'): GatewayIntentBits[] {
+  return [...BASE_INTENTS];
+}
+
+export const INTENTS = intents();
 
 export interface BotDeps {
   handlers: FunnelHandlers;
@@ -49,10 +57,21 @@ export interface BotDeps {
    */
   expectedJoins?: ExpectedJoins;
   leveling?: LevelingService;
+  automod?: { service: AutomodService; guildId: string };
 }
 
-export function createClient(): Client {
-  return new Client({ intents: INTENTS });
+export function createClient(automodEnabled = process.env.TWO_AUTOMOD === '1'): Client {
+  return new Client({
+    intents: intents(automodEnabled),
+    ...(automodEnabled
+      ? {
+          partials: [Partials.Message, Partials.Channel],
+          // Message content must not survive the event handler in discord.js's
+          // default 200-message-per-channel cache.
+          makeCache: Options.cacheWithLimits({ MessageManager: 0 }),
+        }
+      : {}),
+  });
 }
 
 async function snapshotInvites(guild: Guild, invites: InviteTracker): Promise<string[]> {
@@ -80,7 +99,7 @@ async function snapshotInvites(guild: Guild, invites: InviteTracker): Promise<st
 
 /** Wire gateway events to the framework-free handlers. */
 export function registerHandlers(client: Client, deps: BotDeps): void {
-  const { handlers, invites, raid, expectedJoins, leveling } = deps;
+  const { handlers, invites, raid, expectedJoins, leveling, automod } = deps;
 
   client.once(Events.ClientReady, async (c) => {
     log.info('ready', { user: c.user.tag, guilds: c.guilds.cache.size });
@@ -161,8 +180,46 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     await handlers.onLeave(member.guild.id, member.id);
   });
 
+  const inspectAutomod = async (msg: {
+    guildId: string | null;
+    channelId: string;
+    id: string;
+    author: { id: string; bot: boolean } | null;
+    member: { roles: { cache: Map<string, unknown> } } | null;
+    content: string;
+    mentions: { users: { keys(): IterableIterator<string> } };
+    attachments: { values(): IterableIterator<{ name: string | null }> };
+    createdTimestamp: number;
+  }): Promise<boolean> => {
+    if (!automod || !msg.guildId || msg.guildId !== automod.guildId || !msg.author) return false;
+    try {
+      const result = await automod.service.inspect({
+        guildId: msg.guildId,
+        channelId: msg.channelId,
+        messageId: msg.id,
+        authorId: msg.author.id,
+        authorIsBot: msg.author.bot,
+        roleIds: msg.member ? [...msg.member.roles.cache.keys()] : [],
+        content: msg.content,
+        mentionedUserIds: [...msg.mentions.users.keys()],
+        attachmentNames: [...msg.attachments.values()].flatMap((item) => item.name ? [item.name] : []),
+        createdTimestamp: msg.createdTimestamp,
+      });
+      return result.matched;
+    } catch (err) {
+      log.error('automod_inspection_failed', {
+        guildId: msg.guildId,
+        channelId: msg.channelId,
+        messageId: msg.id,
+        err: String(err),
+      });
+      return err instanceof AutomodProcessingError && err.matched;
+    }
+  };
+
   client.on(Events.MessageCreate, async (msg) => {
     if (!msg.guildId) return; // ignore DMs
+    if (await inspectAutomod(msg)) return;
     await handlers.onMessage({
       guildId: msg.guildId,
       memberId: msg.author.id,
@@ -174,6 +231,22 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
           ? (level) => applyLevelRoles(msg.member!, leveling, level)
           : undefined,
     });
+  });
+
+  client.on(Events.MessageUpdate, async (_old, partial) => {
+    if (!partial.guildId) return;
+    try {
+      const msg = partial.partial ? await partial.fetch() : partial;
+      if (!msg.author) return;
+      await inspectAutomod(msg);
+    } catch (err) {
+      log.error('automod_edit_fetch_failed', {
+        guildId: partial.guildId,
+        channelId: partial.channelId,
+        messageId: partial.id,
+        err: String(err),
+      });
+    }
   });
 
   client.on(Events.VoiceStateUpdate, async (oldState, newState) => {

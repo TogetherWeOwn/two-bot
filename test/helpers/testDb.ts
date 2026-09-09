@@ -66,6 +66,7 @@ const TABLES = [
   'moderation_idempotency',
   'ticket_transcripts',
   'tickets',
+  'automod_violations',
 ];
 
 /**
@@ -84,6 +85,7 @@ const SQLITE_TABLES = [
   'member_levels',
   'ticket_transcripts',
   'tickets',
+  'automod_violations',
 ];
 
 export interface TestDb {

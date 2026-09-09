@@ -167,6 +167,7 @@ export const STAGING_PERMISSIONS =
   (1 << 10) | // View Channels
   (1 << 11) | // Send Messages
   (1 << 14) | // Embed Links
+  (1 << 13) | // Manage Messages
   (1 << 16) | // Read Message History
   (1 << 28); // Manage Roles
 
@@ -201,6 +202,7 @@ export const PERMISSION_BITS: ReadonlyArray<{ name: string; bit: bigint }> = [
   { name: 'Add Reactions', bit: 1n << 6n },
   { name: 'View Channels', bit: 1n << 10n },
   { name: 'Send Messages', bit: 1n << 11n },
+  { name: 'Manage Messages', bit: 1n << 13n },
   { name: 'Embed Links', bit: 1n << 14n },
   { name: 'Read Message History', bit: 1n << 16n },
   { name: 'Manage Roles', bit: 1n << 28n },

@@ -16,6 +16,7 @@ export interface ModerationDiscordClient {
   unban(guildId: string, userId: string, reason: string): Promise<void>;
   kick(guildId: string, userId: string, reason: string): Promise<void>;
   timeout(guildId: string, userId: string, until: string | null, reason: string): Promise<void>;
+  deleteMessage?(channelId: string, messageId: string, reason: string): Promise<void>;
   purge(channelId: string, count: number, reason: string): Promise<number>;
   setSlowmode(channelId: string, seconds: number, reason: string): Promise<void>;
   /** Read the channel's current @everyone overwrite. Null when none exists. */
@@ -66,6 +67,10 @@ export class ModerationDiscord implements ModerationDiscordClient {
       reason,
       [200],
     );
+  }
+
+  async deleteMessage(channelId: string, messageId: string, reason: string): Promise<void> {
+    await this.call('DELETE', `/channels/${channelId}/messages/${messageId}`, undefined, reason, [200, 204, 404]);
   }
 
   async purge(channelId: string, count: number, reason: string): Promise<number> {

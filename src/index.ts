@@ -39,6 +39,9 @@ import { RestModerationResolver } from './moderation/resolver.ts';
 import { ModerationService } from './moderation/service.ts';
 import { ModerationStore } from './moderation/store.ts';
 import { registerModerationCommands, registerModerationHandler } from './moderation/commands.ts';
+import { loadAutomodConfig } from './automod/config.ts';
+import { AutomodService } from './automod/service.ts';
+import { AutomodStore } from './automod/store.ts';
 
 const cfg = loadConfig();
 setLogLevel(cfg.logLevel);
@@ -104,6 +107,25 @@ const moderationService = moderationResolver
       protectedRoleIds: moderationCfg.protectedRoleIds,
     })
   : null;
+const automodCfg = loadAutomodConfig();
+if (automodCfg.enabled && !moderationService) {
+  throw new Error('TWO_AUTOMOD=1 requires TWO_MODERATION=1 so sanctions use the reviewed moderation path.');
+}
+const automodService = cfg.guildId && automodCfg.enabled && moderationResolver && moderationService
+  ? new AutomodService(
+      moderationDiscord,
+      moderationService,
+      moderationStore,
+      new AutomodStore(db),
+      moderationResolver,
+      {
+        dryRun: automodCfg.dryRun,
+        owenUserId: moderationCfg.owenUserId,
+        botHighestRolePosition: await moderationResolver.botHighestRolePosition(cfg.guildId),
+        policy: automodCfg.policy,
+      },
+    )
+  : null;
 
 // Point discord.js at a different API host. Only used by tools/mock-discord.
 if (cfg.apiBase) {
@@ -128,7 +150,14 @@ log.info('raid_watch_enabled', {
   alertTarget: cfg.staffAlertChannelId ?? 'log only (DISCORD_STAFF_ALERT_CHANNEL_ID unset)',
 });
 
-registerHandlers(client, { handlers, invites, raid, expectedJoins, leveling });
+registerHandlers(client, {
+  handlers,
+  invites,
+  raid,
+  expectedJoins,
+  leveling,
+  automod: automodService && cfg.guildId ? { service: automodService, guildId: cfg.guildId } : undefined,
+});
 
 if (cfg.ticketCategoryId && cfg.ticketStaffRoleId && cfg.ticketPanelChannelId) {
   registerTickets(client, {
@@ -150,6 +179,15 @@ if (cfg.ticketCategoryId && cfg.ticketStaffRoleId && cfg.ticketPanelChannelId) {
   log.info('tickets_disabled', { reason: 'ticket channel, category, and staff role are not all configured' });
 }
 registerLeveling(client, { service: leveling, guildId: cfg.guildId });
+if (automodService) {
+  log.info('automod_enabled', {
+    guildId: cfg.guildId,
+    dryRun: automodCfg.dryRun,
+    badWords: automodCfg.policy.badWords.length,
+    bypassRoles: automodCfg.policy.bypassRoleIds.size,
+    exemptChannels: automodCfg.policy.exemptChannelIds.size,
+  });
+}
 if (cfg.guildId && moderationResolver && moderationService) {
   registerModerationHandler(client, {
     guildId: cfg.guildId,
