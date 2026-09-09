@@ -86,8 +86,8 @@ describe('presence probe containment', () => {
 
     // Ticket transcripts and automod reuse MessageContent; self roles add
     // reaction metadata, but none of these features adds GuildPresences.
-    assert.equal(intents(false).length, 7, 'the default intent list changed - see client.ts');
-    assert.equal(intents(true).length, 7, 'automod must reuse the existing MessageContent intent');
+    assert.equal(intents(false).length, 8, 'the default intent list changed - see client.ts');
+    assert.equal(intents(true).length, 8, 'automod must reuse the existing MessageContent intent');
     assert.deepEqual(INTENTS, [
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildMembers,
@@ -96,6 +96,7 @@ describe('presence probe containment', () => {
       GatewayIntentBits.GuildMessageReactions,
       GatewayIntentBits.GuildVoiceStates,
       GatewayIntentBits.GuildInvites,
+      GatewayIntentBits.GuildModeration,
     ]);
     assert.deepEqual(PARTIALS, [Partials.Message, Partials.Reaction, Partials.User]);
   });

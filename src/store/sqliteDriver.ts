@@ -211,10 +211,12 @@ export async function openSqlite(path: string): Promise<Db> {
   let schema = readFileSync(join(here, 'schema.sql'), 'utf8');
   const pendingIndex = `CREATE UNIQUE INDEX IF NOT EXISTS uq_moderation_pending_unban
   ON moderation_scheduled_unbans (guild_id, user_id) WHERE state = 'pending';`;
-  // Old databases may contain duplicates that were legal before 0011. Defer
-  // this one index until the rows are reconciled below; all other bootstrap SQL
-  // remains unchanged.
-  schema = schema.replace(pendingIndex, '');
+  const selfRoleLeaseIndex = `CREATE INDEX IF NOT EXISTS idx_self_role_audit_processing_lease
+  ON self_role_audit (outcome, processing_expires_at);`;
+  // Old databases may contain duplicates that were legal before 0011, and the
+  // self-role lease column may not exist yet. Defer both indexes until their
+  // prerequisite data/column upgrades finish below.
+  schema = schema.replace(pendingIndex, '').replace(selfRoleLeaseIndex, '');
   raw.exec(schema);
   // Mirrors migrations/0008_members_third_message_at.sql (TWO-95).
   ensureColumn(raw, 'members', 'third_message_at', 'TEXT');
@@ -247,6 +249,12 @@ export async function openSqlite(path: string): Promise<Db> {
   ensureColumn(raw, 'self_role_audit', 'claim_token', 'TEXT');
   ensureColumn(raw, 'self_role_audit', 'claim_generation', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(raw, 'self_role_audit', 'processing_expires_at', 'TEXT');
+  raw.prepare(`UPDATE self_role_audit
+    SET outcome = 'rejected', code = 'interrupted_before_recovery',
+        reason = 'processing row predates persisted self-role intent'
+    WHERE outcome = 'processing' AND processing_expires_at IS NULL`).run();
+  raw.exec(`CREATE INDEX IF NOT EXISTS idx_self_role_audit_processing_lease
+    ON self_role_audit (outcome, processing_expires_at)`);
   // schema.sql is the whole schema, so every migration whose tables it already
   // contains is recorded as applied. Adding a migration means adding its
   // tables above and its id here, or a database that is later moved to
@@ -268,6 +276,7 @@ export async function openSqlite(path: string): Promise<Db> {
     '0016_automation_claims',
     '0017_scheduled_occurrence_nonce',
     '0015_self_role_audit',
+    '0016_self_role_recovery',
   ]) {
     stamp.run(id, new Date().toISOString());
   }

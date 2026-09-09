@@ -27,7 +27,7 @@ import {
   type SelfRoleChannelPermissions,
 } from '../selfRoles/permissions.ts';
 import type { SelfRoleAuditRow, SelfRolePanel, SelfRolePanelMode } from '../selfRoles/types.ts';
-import type { SelfRoleClaim, SelfRoleStore } from '../store/selfRoleStore.ts';
+import type { SelfRoleClaim, SelfRolePanelClaim, SelfRoleStore } from '../store/selfRoleStore.ts';
 
 export interface SelfRoleDeps {
   panels: SelfRolePanel[];
@@ -264,42 +264,71 @@ export async function applyRoleDelta(opts: {
   deps: SelfRoleDeps;
   reply?: ButtonInteraction | StringSelectMenuInteraction;
 }): Promise<void> {
-  await withPanelMemberLock(opts.member.guild.id, opts.member.id, opts.panel.id, async () => {
-    let authoritativeMember: GuildMember;
+  const run = async () => {
+    const panelClaim = opts.panel.exclusive ? await acquirePanelClaim(opts) : null;
     try {
-      authoritativeMember = await opts.member.guild.members.fetch({ user: opts.member.id, force: true });
-    } catch (err) {
-      log.error('self_role_member_fetch_failed', { panelId: opts.panel.id, memberId: opts.member.id, err: String(err) });
-      await auditRejected(opts, 'member_fetch_failed', String(err));
-      if (opts.reply) await opts.reply.editReply({ content: 'I could not verify your current roles. Staff have been notified in the logs.' });
-      return;
+      let authoritativeMember: GuildMember;
+      try {
+        authoritativeMember = await opts.member.guild.members.fetch({ user: opts.member.id, force: true });
+      } catch (err) {
+        log.error('self_role_member_fetch_failed', { panelId: opts.panel.id, memberId: opts.member.id, err: String(err) });
+        await auditRejected(opts, 'member_fetch_failed', String(err));
+        if (opts.reply) await opts.reply.editReply({ content: 'I could not verify your current roles. Staff have been notified in the logs.' });
+        return;
+      }
+      const heldRoleIds = new Set(authoritativeMember.roles.cache.keys());
+      const initialPlan = recomputeDelta(opts, heldRoleIds);
+      if (!initialPlan.ok) {
+        if (opts.reply) await opts.reply.editReply({ content: 'That role control is invalid.' });
+        return;
+      }
+      const intended = new Set(heldRoleIds);
+      for (const roleId of initialPlan.removeRoleIds) intended.delete(roleId);
+      for (const roleId of initialPlan.addRoleIds) intended.add(roleId);
+      const claimed = await claim({
+        ...opts,
+        desiredRoleIds: [...intended].filter((id) => opts.panel.options.some((option) => option.roleId === id)),
+        preMutationRoleIds: [...heldRoleIds].filter((id) => opts.panel.options.some((option) => option.roleId === id)),
+      });
+      if (!claimed) {
+        if (opts.reply) await opts.reply.editReply({ content: 'This role request was already handled.' });
+        return;
+      }
+      if (claimed.recovered) {
+        log.info('self_role_dispatch_recovered', {
+          eventId: opts.eventId,
+          panelId: opts.panel.id,
+          memberId: opts.member.id,
+          generation: claimed.generation,
+        });
+      }
+      await applyClaimedRoleDelta({ ...opts, desiredRoleIds: claimed.desiredRoleIds }, claimed, authoritativeMember, panelClaim);
+    } finally {
+      if (panelClaim && opts.deps.store.releasePanelClaim) {
+        await opts.deps.store.releasePanelClaim(panelClaim);
+      }
     }
-    const heldRoleIds = new Set(authoritativeMember.roles.cache.keys());
-    const initialPlan = recomputeDelta(opts, heldRoleIds);
-    if (!initialPlan.ok) {
-      if (opts.reply) await opts.reply.editReply({ content: 'That role control is invalid.' });
-      return;
-    }
-    const intended = new Set(heldRoleIds);
-    for (const roleId of initialPlan.removeRoleIds) intended.delete(roleId);
-    for (const roleId of initialPlan.addRoleIds) intended.add(roleId);
-    const claimed = await claim({
-      ...opts,
-      desiredRoleIds: [...intended].filter((id) => opts.panel.options.some((option) => option.roleId === id)),
-      preMutationRoleIds: [...heldRoleIds].filter((id) => opts.panel.options.some((option) => option.roleId === id)),
-    });
-    if (!claimed) {
-      if (opts.reply) await opts.reply.editReply({ content: 'This role request was already handled.' });
-      return;
-    }
-    await applyClaimedRoleDelta({ ...opts, desiredRoleIds: claimed.desiredRoleIds }, claimed, authoritativeMember);
-  });
+  };
+  if (opts.panel.exclusive && typeof opts.deps.store.claimPanel === 'function') await run();
+  else await withPanelMemberLock(opts.member.guild.id, opts.member.id, opts.panel.id, run);
+}
+
+async function acquirePanelClaim(opts: Parameters<typeof applyRoleDelta>[0]): Promise<SelfRolePanelClaim | null> {
+  if (!opts.deps.store.claimPanel) return null;
+  let delayMs = 10;
+  for (;;) {
+    const claim = await opts.deps.store.claimPanel(opts.member.guild.id, opts.member.id, opts.panel.id);
+    if (claim) return claim;
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    delayMs = Math.min(delayMs * 2, 250);
+  }
 }
 
 async function applyClaimedRoleDelta(
   opts: Parameters<typeof applyRoleDelta>[0],
   claimToken: SelfRoleClaim,
   authoritativeMember: GuildMember,
+  panelClaim: SelfRolePanelClaim | null,
 ): Promise<void> {
   const { panel, member } = opts;
   const reason = `TWO self-role panel ${panel.id}`;
@@ -328,7 +357,7 @@ async function applyClaimedRoleDelta(
       member.guild.channels.fetch(),
     ]);
     roles = new Map();
-    for (const roleId of roleIds) {
+    for (const roleId of new Set([...roleIds, member.guild.id])) {
       const role = fetchedRoles.get(roleId);
       if (role) roles.set(roleId, role);
     }
@@ -369,71 +398,94 @@ async function applyClaimedRoleDelta(
   }
 
   const effects = emptyEffects();
+  const ownership = startOwnershipGuard(opts, claimToken, panelClaim);
   try {
-    // Remove first for exclusive panels, and only use singular endpoints. The
-    // per-panel/member lock plus the force-fetched plan makes the invariant
-    // atomic within this bot process without replacing unrelated role state.
-    for (const roleId of planned.removeRoleIds) {
-      if (opts.deps.store.ownsClaim && !await opts.deps.store.ownsClaim(opts.eventId, claimToken)) throw new Error('self-role claim was superseded');
-      effects.attemptedRemovedRoleIds.push(roleId);
-      await member.roles.remove(roleId, reason);
-      effects.removedRoleIds.push(roleId);
+    try {
+      // Remove first for exclusive panels, and only use singular endpoints. The
+      // shared fenced panel claim plus force-fetched plan keeps the invariant
+      // atomic across bot processes without replacing unrelated role state.
+      for (const roleId of planned.removeRoleIds) {
+        await ownership.assert();
+        effects.attemptedRemovedRoleIds.push(roleId);
+        await member.roles.remove(roleId, reason);
+        await ownership.assert();
+      }
+      for (const roleId of planned.addRoleIds) {
+        await ownership.assert();
+        effects.attemptedAddedRoleIds.push(roleId);
+        await member.roles.add(roleId, reason);
+        await ownership.assert();
+      }
+    } catch (err) {
+      if (err instanceof StaleSelfRoleClaimError) {
+        log.error('self_role_stale_claim_stopped', {
+          eventId: opts.eventId,
+          panelId: panel.id,
+          memberId: member.id,
+          generation: claimToken.generation,
+        });
+        return;
+      }
+      await ownership.assert();
+      const reconciliation = await reconcileToSnapshot(
+        member,
+        panel,
+        new Set(claimToken.preMutationRoleIds),
+        reason,
+        ownership.assert,
+      );
+      Object.assign(effects, reconciliation.effects);
+      if (reconciliation.finalRoleIds) {
+        applyWholeEventEffects(effects, panel, claimToken.preMutationRoleIds, reconciliation.finalRoleIds);
+      }
+      const unresolved = effects.unresolvedAddedRoleIds.length || effects.unresolvedRemovedRoleIds.length;
+      const code = unresolved ? 'discord_rejected_reconcile_failed' : 'discord_rejected';
+      const failure = unresolved
+        ? `${String(err)}; unresolved added=${effects.unresolvedAddedRoleIds.join(',') || 'none'} removed=${effects.unresolvedRemovedRoleIds.join(',') || 'none'}`
+        : String(err);
+      await ownership.assert();
+      await auditClaimed({ ...effectiveOpts, effects }, claimToken, 'rejected', code, failure);
+      log.error('self_role_change_failed', {
+        panelId: panel.id,
+        memberId: member.id,
+        err: String(err),
+        effects,
+      });
+      if (opts.reply) {
+        await opts.reply.editReply({ content: 'I could not change that role. Staff have been notified in the logs.' });
+      }
+      return;
     }
-    for (const roleId of planned.addRoleIds) {
-      if (opts.deps.store.ownsClaim && !await opts.deps.store.ownsClaim(opts.eventId, claimToken)) throw new Error('self-role claim was superseded');
-      effects.attemptedAddedRoleIds.push(roleId);
-      await member.roles.add(roleId, reason);
-      effects.addedRoleIds.push(roleId);
-    }
-  } catch (err) {
-    const reconciliation = await reconcileToSnapshot(member, panel, heldRoleIds, reason);
-    Object.assign(effects, { ...effects, ...reconciliation });
-    const unresolved = effects.unresolvedAddedRoleIds.length || effects.unresolvedRemovedRoleIds.length;
-    const code = unresolved ? 'discord_rejected_reconcile_failed' : 'discord_rejected';
-    const failure = unresolved
-      ? `${String(err)}; unresolved added=${effects.unresolvedAddedRoleIds.join(',') || 'none'} removed=${effects.unresolvedRemovedRoleIds.join(',') || 'none'}`
-      : String(err);
-    await auditClaimed({ ...effectiveOpts, effects }, claimToken, 'rejected', code, failure);
-    log.error('self_role_change_failed', {
-      panelId: panel.id,
-      memberId: member.id,
-      err: String(err),
-      effects,
-    });
-    if (opts.reply) {
-      await opts.reply.editReply({ content: 'I could not change that role. Staff have been notified in the logs.' });
-    }
-    return;
-  }
 
-  const outcome =
-    planned.addRoleIds.length && planned.removeRoleIds.length
-      ? 'switched'
-      : planned.addRoleIds.length
-        ? 'assigned'
-        : planned.removeRoleIds.length
-          ? 'removed'
-          : planned.operation === 'remove'
-            ? 'already_absent'
-            : 'already_held';
-  await auditClaimed({ ...effectiveOpts, effects }, claimToken, outcome, null, null);
-  if (opts.reply) {
-    const final = new Set(heldRoleIds);
-    for (const roleId of planned.removeRoleIds) final.delete(roleId);
-    for (const roleId of planned.addRoleIds) final.add(roleId);
-    await opts.reply.editReply({
-      content:
-        outcome === 'assigned'
-          ? 'Role added.'
-          : outcome === 'removed'
-            ? 'Role removed.'
-            : outcome === 'switched'
-              ? panel.color
-                ? 'Color updated.'
-                : 'Role updated.'
-              : 'No role changes were needed.',
-      components: buildSelfRoleComponents(panel, [...final]),
-    });
+    applyWholeEventEffects(effects, panel, claimToken.preMutationRoleIds, claimToken.desiredRoleIds);
+    const outcome =
+      effects.addedRoleIds.length && effects.removedRoleIds.length
+        ? 'switched'
+        : effects.addedRoleIds.length
+          ? 'assigned'
+          : effects.removedRoleIds.length
+            ? 'removed'
+            : planned.operation === 'remove'
+              ? 'already_absent'
+              : 'already_held';
+    await auditClaimed({ ...effectiveOpts, effects }, claimToken, outcome, null, null);
+    if (opts.reply) {
+      await opts.reply.editReply({
+        content:
+          outcome === 'assigned'
+            ? 'Role added.'
+            : outcome === 'removed'
+              ? 'Role removed.'
+              : outcome === 'switched'
+                ? panel.color
+                  ? 'Color updated.'
+                  : 'Role updated.'
+                : 'No role changes were needed.',
+        components: buildSelfRoleComponents(panel, claimToken.desiredRoleIds),
+      });
+    }
+  } finally {
+    ownership.stop();
   }
 }
 
@@ -443,6 +495,27 @@ function recomputeDelta(
 ):
   | { ok: true; optionKey: string | null; roleId: string | null; operation: 'add' | 'remove' | 'replace'; addRoleIds: string[]; removeRoleIds: string[] }
   | { ok: false; code: string; reason: string } {
+  if (opts.desiredRoleIds) {
+    const offered = new Set(opts.panel.options.map((option) => option.roleId));
+    const desired = new Set(opts.desiredRoleIds);
+    if ([...desired].some((roleId) => !offered.has(roleId)) || (opts.panel.exclusive && desired.size > 1)) {
+      return { ok: false, code: 'invalid_selection', reason: 'selection contains an unconfigured or non-exclusive role' };
+    }
+    const current = new Set([...heldRoleIds].filter((roleId) => offered.has(roleId)));
+    const addRoleIds = [...desired].filter((roleId) => !current.has(roleId));
+    const removeRoleIds = [...current].filter((roleId) => !desired.has(roleId));
+    return {
+      ok: true,
+      optionKey: opts.optionKey,
+      roleId: addRoleIds[0] ?? removeRoleIds[0] ?? opts.roleId,
+      operation: opts.panel.exclusive || (addRoleIds.length && removeRoleIds.length)
+        ? 'replace'
+        : addRoleIds.length ? 'add' : 'remove',
+      addRoleIds,
+      removeRoleIds,
+    };
+  }
+
   if (opts.requestedOptionKey) {
     const option = opts.panel.options.find((candidate) => candidate.key === opts.requestedOptionKey);
     const remove = opts.requestedToggle && option
@@ -466,27 +539,6 @@ function recomputeDelta(
     };
   }
 
-  if (opts.desiredRoleIds) {
-    const offered = new Set(opts.panel.options.map((option) => option.roleId));
-    const desired = new Set(opts.desiredRoleIds);
-    if ([...desired].some((roleId) => !offered.has(roleId)) || (opts.panel.exclusive && desired.size > 1)) {
-      return { ok: false, code: 'invalid_selection', reason: 'selection contains an unconfigured or non-exclusive role' };
-    }
-    const current = new Set([...heldRoleIds].filter((roleId) => offered.has(roleId)));
-    const addRoleIds = [...desired].filter((roleId) => !current.has(roleId));
-    const removeRoleIds = [...current].filter((roleId) => !desired.has(roleId));
-    return {
-      ok: true,
-      optionKey: opts.optionKey,
-      roleId: addRoleIds[0] ?? removeRoleIds[0] ?? opts.roleId,
-      operation: opts.panel.exclusive || (addRoleIds.length && removeRoleIds.length)
-        ? 'replace'
-        : addRoleIds.length ? 'add' : 'remove',
-      addRoleIds,
-      removeRoleIds,
-    };
-  }
-
   return {
     ok: true,
     optionKey: opts.optionKey,
@@ -502,23 +554,30 @@ async function reconcileToSnapshot(
   panel: SelfRolePanel,
   before: ReadonlySet<string>,
   reason: string,
-): Promise<Pick<MutationEffects,
-  'compensatedAddedRoleIds' | 'compensatedRemovedRoleIds' | 'unresolvedAddedRoleIds' | 'unresolvedRemovedRoleIds'>> {
+  assertOwnership: () => Promise<void>,
+): Promise<{
+  effects: Pick<MutationEffects,
+    'compensatedAddedRoleIds' | 'compensatedRemovedRoleIds' | 'unresolvedAddedRoleIds' | 'unresolvedRemovedRoleIds'>;
+  finalRoleIds: Iterable<string> | null;
+}> {
   const panelRoleIds = panel.options.map((option) => option.roleId);
   const compensatedAddedRoleIds: string[] = [];
   const compensatedRemovedRoleIds: string[] = [];
   let current: GuildMember;
+  await assertOwnership();
   try {
     current = await member.guild.members.fetch({ user: member.id, force: true });
-  } catch {
+    await assertOwnership();
+  } catch (err) {
+    if (err instanceof StaleSelfRoleClaimError) throw err;
     return {
-      compensatedAddedRoleIds,
-      compensatedRemovedRoleIds,
-      // The current Discord state is unknown. Record every panel role as
-      // unresolved rather than claiming a successful compensation without an
-      // authoritative observation.
-      unresolvedAddedRoleIds: panelRoleIds.filter((roleId) => !before.has(roleId)),
-      unresolvedRemovedRoleIds: panelRoleIds.filter((roleId) => before.has(roleId)),
+      effects: {
+        compensatedAddedRoleIds,
+        compensatedRemovedRoleIds,
+        unresolvedAddedRoleIds: panelRoleIds.filter((roleId) => !before.has(roleId)),
+        unresolvedRemovedRoleIds: panelRoleIds.filter((roleId) => before.has(roleId)),
+      },
+      finalRoleIds: null,
     };
   }
 
@@ -527,33 +586,112 @@ async function reconcileToSnapshot(
     const has = current.roles.cache.has(roleId);
     if (had === has) continue;
     try {
+      await assertOwnership();
       if (had) {
         await member.roles.add(roleId, `${reason} reconcile`);
+        await assertOwnership();
         compensatedAddedRoleIds.push(roleId);
       } else {
         await member.roles.remove(roleId, `${reason} reconcile`);
+        await assertOwnership();
         compensatedRemovedRoleIds.push(roleId);
       }
-    } catch {
+    } catch (err) {
+      if (err instanceof StaleSelfRoleClaimError) throw err;
       // The final authoritative fetch below records what remains unresolved.
     }
   }
 
+  await assertOwnership();
   try {
     current = await member.guild.members.fetch({ user: member.id, force: true });
-  } catch {
+    await assertOwnership();
+  } catch (err) {
+    if (err instanceof StaleSelfRoleClaimError) throw err;
     return {
-      compensatedAddedRoleIds,
-      compensatedRemovedRoleIds,
-      unresolvedAddedRoleIds: panelRoleIds.filter((roleId) => !before.has(roleId)),
-      unresolvedRemovedRoleIds: panelRoleIds.filter((roleId) => before.has(roleId)),
+      effects: {
+        compensatedAddedRoleIds,
+        compensatedRemovedRoleIds,
+        unresolvedAddedRoleIds: panelRoleIds.filter((roleId) => !before.has(roleId)),
+        unresolvedRemovedRoleIds: panelRoleIds.filter((roleId) => before.has(roleId)),
+      },
+      finalRoleIds: null,
     };
   }
   return {
-    compensatedAddedRoleIds,
-    compensatedRemovedRoleIds,
-    unresolvedAddedRoleIds: panelRoleIds.filter((roleId) => !before.has(roleId) && current.roles.cache.has(roleId)),
-    unresolvedRemovedRoleIds: panelRoleIds.filter((roleId) => before.has(roleId) && !current.roles.cache.has(roleId)),
+    effects: {
+      compensatedAddedRoleIds,
+      compensatedRemovedRoleIds,
+      unresolvedAddedRoleIds: panelRoleIds.filter((roleId) => !before.has(roleId) && current.roles.cache.has(roleId)),
+      unresolvedRemovedRoleIds: panelRoleIds.filter((roleId) => before.has(roleId) && !current.roles.cache.has(roleId)),
+    },
+    finalRoleIds: current.roles.cache.keys(),
+  };
+}
+
+function applyWholeEventEffects(
+  effects: MutationEffects,
+  panel: SelfRolePanel,
+  beforeRoleIds: Iterable<string>,
+  finalRoleIds: Iterable<string>,
+): void {
+  const offered = new Set(panel.options.map((option) => option.roleId));
+  const before = new Set([...beforeRoleIds].filter((roleId) => offered.has(roleId)));
+  const final = new Set([...finalRoleIds].filter((roleId) => offered.has(roleId)));
+  effects.addedRoleIds = [...final].filter((roleId) => !before.has(roleId));
+  effects.removedRoleIds = [...before].filter((roleId) => !final.has(roleId));
+}
+
+class StaleSelfRoleClaimError extends Error {}
+
+function startOwnershipGuard(
+  opts: Parameters<typeof applyRoleDelta>[0],
+  eventClaim: SelfRoleClaim,
+  panelClaim: SelfRolePanelClaim | null,
+): { assert: () => Promise<void>; stop: () => void } {
+  let stale = false;
+  let stopped = false;
+  let renewing: Promise<void> | null = null;
+  const renewAfterMs = Math.max(1, Math.min(
+    eventClaim.renewAfterMs ?? 60_000,
+    panelClaim?.renewAfterMs ?? Number.MAX_SAFE_INTEGER,
+  ));
+
+  const owns = async (): Promise<boolean> => {
+    const checks = [opts.deps.store.ownsClaim?.(opts.eventId, eventClaim) ?? true];
+    if (panelClaim) checks.push(opts.deps.store.ownsPanelClaim?.(panelClaim) ?? true);
+    return (await Promise.all(checks)).every(Boolean);
+  };
+  const renew = async (): Promise<void> => {
+    if (stopped || stale) return;
+    if (opts.deps.store.renewClaim && !await opts.deps.store.renewClaim(opts.eventId, eventClaim)) stale = true;
+    if (!stale && panelClaim && opts.deps.store.renewPanelClaim && !await opts.deps.store.renewPanelClaim(panelClaim)) stale = true;
+  };
+  const schedule = (): void => {
+    const timer = setTimeout(() => {
+      renewing = renew().finally(() => {
+        renewing = null;
+        if (!stopped && !stale) schedule();
+      });
+    }, renewAfterMs);
+    timer.unref?.();
+    stopTimer = () => clearTimeout(timer);
+  };
+  let stopTimer = () => {};
+  schedule();
+
+  return {
+    assert: async () => {
+      if (renewing) await renewing;
+      if (stale || !await owns()) {
+        stale = true;
+        throw new StaleSelfRoleClaimError('self-role claim was superseded');
+      }
+    },
+    stop: () => {
+      stopped = true;
+      stopTimer();
+    },
   };
 }
 
