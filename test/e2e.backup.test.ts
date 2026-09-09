@@ -139,6 +139,19 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
         'audit-backup-1',
         null,
       );
+    await harness.db
+      .prepare(
+        `INSERT INTO tickets (id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closed_at)
+         VALUES (?, ?, ?, ?, ?, 'closed', ?, ?)`,
+      )
+      .run('ticket-1', G, 'ticket-channel', 'm0', 'staff', '2026-08-09T01:00:00.000Z', '2026-08-09T02:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO ticket_transcripts
+           (ticket_id, guild_id, channel_id, opener_id, claimed_by, content, message_count, created_at, purge_after)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('ticket-1', G, 'ticket-channel', 'm0', 'staff', 'member asked for help', 1, '2026-08-09T02:00:00.000Z', '2026-11-07T02:00:00.000Z');
   }
 
   async function counts(): Promise<Record<string, number>> {
@@ -165,11 +178,26 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
            FROM operational_audit_log ORDER BY entry_id`,
       )
       .all();
+    const tickets = await harness.db
+      .prepare(
+        `SELECT id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closed_at
+           FROM tickets ORDER BY id`,
+      )
+      .all();
+    const transcripts = await harness.db
+      .prepare(
+        `SELECT ticket_id, guild_id, channel_id, opener_id, claimed_by, content,
+                message_count, created_at, purge_after
+           FROM ticket_transcripts ORDER BY ticket_id`,
+      )
+      .all();
 
     const file = join(dir, 'roundtrip.ndjson.gz');
     const manifest = await dump(harness.db, file);
     assert.equal(manifest.tables.find((t) => t.name === 'events')?.count, before.events);
     assert.equal(manifest.tables.find((t) => t.name === 'operational_audit_log')?.count, 1);
+    assert.equal(manifest.tables.find((t) => t.name === 'tickets')?.count, 1);
+    assert.equal(manifest.tables.find((t) => t.name === 'ticket_transcripts')?.count, 1);
 
     // Lose everything, exactly as a dead disk would.
     await harness.db.exec(`TRUNCATE ${DUMP_TABLES.join(', ')} RESTART IDENTITY`);
@@ -194,6 +222,21 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
       )
       .all();
     assert.deepEqual(restoredAudit, audit);
+    const restoredTickets = await harness.db
+      .prepare(
+        `SELECT id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closed_at
+           FROM tickets ORDER BY id`,
+      )
+      .all();
+    assert.deepEqual(restoredTickets, tickets);
+    const restoredTranscripts = await harness.db
+      .prepare(
+        `SELECT ticket_id, guild_id, channel_id, opener_id, claimed_by, content,
+                message_count, created_at, purge_after
+           FROM ticket_transcripts ORDER BY ticket_id`,
+      )
+      .all();
+    assert.deepEqual(restoredTranscripts, transcripts);
   });
 
   test('the id sequence resumes past the restored rows', async () => {

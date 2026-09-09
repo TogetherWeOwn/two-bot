@@ -43,7 +43,9 @@ test('the briefly shipped constrained 0010 checksum is normalized before 0011 ap
       };
     },
     async exec(sql: string): Promise<void> {
-      if (sql.includes('ADD CONSTRAINT')) applied.push('0011_leveling_xp_ceiling');
+      if (sql.includes('ADD CONSTRAINT member_levels_xp_js_safe')) {
+        applied.push('0011_leveling_xp_ceiling');
+      }
     },
     async transaction<T>(fn: (tx: Db) => Promise<T>): Promise<T> {
       return fn(this);

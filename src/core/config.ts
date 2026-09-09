@@ -56,6 +56,11 @@ export interface Config {
   auditLogChannelId: string | null;
   voiceLogChannelId: string | null;
   moderationLogChannelId: string | null;
+  /** Ticket support is enabled only when all three Discord ids are configured. */
+  ticketCategoryId: string | null;
+  ticketStaffRoleId: string | null;
+  ticketPanelChannelId: string | null;
+  ticketCooldownSeconds: number;
   /**
    * The internal presence instrument (TOG-469). On by default, because a
    * trend instrument that nobody remembered to switch on collects nothing and
@@ -120,6 +125,10 @@ export function loadConfig(): Config {
     auditLogChannelId: process.env.DISCORD_AUDIT_LOG_CHANNEL_ID || null,
     voiceLogChannelId: process.env.DISCORD_VOICE_LOG_CHANNEL_ID || null,
     moderationLogChannelId: process.env.DISCORD_MODERATION_LOG_CHANNEL_ID || null,
+    ticketCategoryId: process.env.DISCORD_TICKET_CATEGORY_ID || null,
+    ticketStaffRoleId: process.env.DISCORD_TICKET_STAFF_ROLE_ID || null,
+    ticketPanelChannelId: process.env.DISCORD_TICKET_PANEL_CHANNEL_ID || null,
+    ticketCooldownSeconds: Number(process.env.TWO_TICKET_COOLDOWN_SECONDS ?? 300),
     presenceProbe: process.env.TWO_PRESENCE_PROBE !== '0',
     dbPath: resolveDbSpec(),
     dbPoolMax: Number(process.env.TWO_DB_POOL_MAX ?? 5),

@@ -29,6 +29,7 @@ import { startInternalActions, type InternalServer } from './internal/server.ts'
 import { KeyRing } from './internal/signing.ts';
 import { DiscordActions } from './internal/discordActions.ts';
 import { InternalActionStore } from './internal/store.ts';
+import { registerTickets } from './discord/tickets.ts';
 import { startHealthServer, type HealthServer } from './core/health.ts';
 import { LevelingService } from './leveling/service.ts';
 import { registerLeveling } from './leveling/discord.ts';
@@ -147,6 +148,26 @@ if (moderationResolver) {
 }
 
 registerHandlers(client, { handlers, invites, raid, expectedJoins, leveling, audit });
+
+if (cfg.ticketCategoryId && cfg.ticketStaffRoleId && cfg.ticketPanelChannelId) {
+  registerTickets(client, {
+    db,
+    guildId: cfg.guildId,
+    categoryId: cfg.ticketCategoryId,
+    staffRoleId: cfg.ticketStaffRoleId,
+    panelChannelId: cfg.ticketPanelChannelId,
+    cooldownSeconds: cfg.ticketCooldownSeconds,
+  });
+  log.info('tickets_enabled', {
+    guildId: cfg.guildId ?? 'all',
+    panelChannelId: cfg.ticketPanelChannelId,
+    categoryId: cfg.ticketCategoryId,
+    staffRoleId: cfg.ticketStaffRoleId,
+    cooldownSeconds: cfg.ticketCooldownSeconds,
+  });
+} else {
+  log.info('tickets_disabled', { reason: 'ticket channel, category, and staff role are not all configured' });
+}
 registerLeveling(client, { service: leveling, guildId: cfg.guildId });
 if (cfg.guildId && moderationResolver && moderationService) {
   registerModerationHandler(client, {
