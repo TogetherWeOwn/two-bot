@@ -177,13 +177,16 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     const nicknameChanged = oldMember.nickname !== newMember.nickname;
     if (!nicknameChanged && addedRoleIds.length === 0 && removedRoleIds.length === 0) return;
 
+    const occurredAt = nowIso();
     const stableChange = JSON.stringify({ nicknameChanged, addedRoleIds, removedRoleIds });
     auditSafely({
-      entryId: `member-update:${newMember.guild.id}:${newMember.id}:${stableChange}`,
+      // Discord supplies no id for this gateway event. The occurrence timestamp
+      // preserves a later identical transition instead of collapsing it forever.
+      entryId: `member-update:${newMember.guild.id}:${newMember.id}:${occurredAt}:${stableChange}`,
       kind: 'member_update',
       channel: 'audit',
       guildId: newMember.guild.id,
-      occurredAt: nowIso(),
+      occurredAt,
       targetId: newMember.id,
       metadata: {
         nicknameChanged,
@@ -266,9 +269,9 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
         : 'voice_leave'
       : 'voice_join';
     auditSafely({
-      // Discord supplies no voice-event id. This deterministic state transition
-      // key suppresses duplicate gateway delivery while preserving later moves.
-      entryId: `${voiceKind}:${guild.id}:${memberId}:${oldState.channelId ?? 'none'}:${newState.channelId ?? 'none'}`,
+      // Discord supplies no voice-event id. The occurrence timestamp preserves
+      // a later identical transition instead of collapsing it forever.
+      entryId: `${voiceKind}:${guild.id}:${memberId}:${oldState.channelId ?? 'none'}:${newState.channelId ?? 'none'}:${at}`,
       kind: voiceKind,
       channel: 'voice',
       guildId: guild.id,

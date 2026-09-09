@@ -159,7 +159,7 @@ test('partial old members are not reported as role or nickname changes', async (
   assert.deepEqual(events, []);
 });
 
-test('member and voice replay keys are stable for identical transitions', async () => {
+test('member and voice occurrence keys preserve identical transitions separated in time', async () => {
   const events: OperationalAuditEvent[] = [];
   const bus = new EventEmitter();
   registerHandlers(bus as unknown as Client, deps(events));
@@ -167,13 +167,16 @@ test('member and voice replay keys are stable for identical transitions', async 
   const newMember = { id: MEMBER, guild: { id: GUILD }, nickname: 'b', roles: roles([GUILD]), user: { bot: false } };
   const oldVoice = { id: MEMBER, guild: { id: GUILD }, channelId: CHANNEL_A, member: { user: { bot: false } } };
   const newVoice = { id: MEMBER, guild: { id: GUILD }, channelId: CHANNEL_B, member: { user: { bot: false } } };
-  bus.emit(Events.GuildMemberUpdate, oldMember, newMember);
+
   bus.emit(Events.GuildMemberUpdate, oldMember, newMember);
   bus.emit(Events.VoiceStateUpdate, oldVoice, newVoice);
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  bus.emit(Events.GuildMemberUpdate, oldMember, newMember);
   bus.emit(Events.VoiceStateUpdate, oldVoice, newVoice);
   await settle();
-  assert.equal(events[0].entryId, events[1].entryId);
-  assert.equal(events[2].entryId, events[3].entryId);
+
+  assert.notEqual(events[0].entryId, events[2].entryId);
+  assert.notEqual(events[1].entryId, events[3].entryId);
 });
 
 test('durable audit is idempotent by entry id', async () => {
@@ -220,7 +223,7 @@ test('Discord moderation entries discard free-text reasons', () => {
   assert.deepEqual(event.metadata, { auditLogEntryId: 'audit-1', count: 3 });
 });
 
-test('mirror text suppresses raw message content and keeps stable ids', () => {
+test('mirror text suppresses raw message content and carries a detectable event marker', () => {
   const text = formatAuditEvent({
     entryId: 'one',
     kind: 'message_delete',
@@ -231,6 +234,7 @@ test('mirror text suppresses raw message content and keeps stable ids', () => {
     sourceChannelId: CHANNEL_A,
     messageId: 'message-2',
   });
+  assert.match(text, /audit-event:one/);
   assert.match(text, new RegExp(MEMBER));
   assert.match(text, /message-2/);
   assert.doesNotMatch(text, /content|username|nickname|reason/);
@@ -246,7 +250,7 @@ test('audit-sink message tampering is stored but never remirrored', async () => 
     isTextBased: () => true,
     isDMBased: () => false,
     permissionsFor: () => ({ has: () => true }),
-    send: async () => { sent++; },
+    send: async () => { sent++; return { id: 'mirror-message' }; },
   };
   const client = { channels: { cache: new Map([[CHANNEL_A, channel]]), fetch: async () => channel } } as unknown as Client;
   const sink = makeOperationalAudit(client, {
@@ -283,6 +287,7 @@ test('failed audit delivery is retryable without duplicating the durable row', a
     send: async () => {
       attempts++;
       if (attempts === 1) throw new Error('transient Discord failure');
+      return { id: 'mirror-message-1' };
     },
   };
   const client = { channels: { cache: new Map([[CHANNEL_A, channel]]), fetch: async () => channel } } as unknown as Client;
@@ -307,8 +312,111 @@ test('failed audit delivery is retryable without duplicating the durable row', a
   const row = await store.get(event.entryId);
   assert.equal(row?.deliveryState, 'delivered');
   assert.equal(row?.deliveryAttempts, 2);
+  assert.equal(row?.deliveryNonce, event.entryId);
+  assert.equal(row?.mirrorMessageId, 'mirror-message-1');
   const count = await db.prepare(`SELECT COUNT(*) AS n FROM operational_audit_log`).get<{ n: number }>();
   assert.equal(Number(count?.n), 1);
+  await db.close();
+});
+
+test('post-send acknowledgement retries reuse the durable Discord nonce', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  const sends: Array<{ nonce?: string | number; enforceNonce?: boolean }> = [];
+  const channel = {
+    id: CHANNEL_A,
+    guild: { id: GUILD, members: { me: { id: 'bot' } } },
+    isTextBased: () => true,
+    isDMBased: () => false,
+    permissionsFor: () => ({ has: () => true }),
+    send: async (body: { nonce?: string | number; enforceNonce?: boolean }) => {
+      sends.push(body);
+      return { id: 'same-discord-message' };
+    },
+  };
+  const client = { channels: { cache: new Map([[CHANNEL_A, channel]]), fetch: async () => channel } } as unknown as Client;
+  const sink = makeOperationalAudit(client, {
+    guildId: GUILD,
+    channels: { audit: CHANNEL_A, voice: null, moderation: null },
+    store,
+  });
+  const event: OperationalAuditEvent = {
+    entryId: 'ack-window',
+    kind: 'message_delete',
+    channel: 'audit',
+    guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z',
+    sourceChannelId: CHANNEL_B,
+    messageId: 'message-2',
+  };
+
+  const realMarkDelivered = store.markDelivered.bind(store);
+  let acknowledgements = 0;
+  store.markDelivered = async (entryId, messageId) => {
+    acknowledgements++;
+    if (acknowledgements === 1) throw new Error('database disconnected after Discord accepted the post');
+    await realMarkDelivered(entryId, messageId);
+  };
+
+  assert.equal(await sink.record(event), true);
+  const ambiguous = await store.get(event.entryId);
+  assert.equal(ambiguous?.deliveryState, 'delivering');
+  assert.equal(ambiguous?.deliveryAttempts, 1);
+  await db.prepare(`UPDATE operational_audit_log SET delivery_lease_until = ? WHERE entry_id = ?`).run(
+    '2000-01-01T00:00:00.000Z',
+    event.entryId,
+  );
+  assert.equal(await sink.retryPending(), 1);
+
+  assert.equal(sends.length, 2);
+  assert.deepEqual(sends.map((body) => body.nonce), [event.entryId, event.entryId]);
+  assert.deepEqual(sends.map((body) => body.enforceNonce), [true, true]);
+  const row = await store.get(event.entryId);
+  assert.equal(row?.deliveryState, 'delivered');
+  assert.equal(row?.mirrorMessageId, 'same-discord-message');
+  await db.close();
+});
+
+test('audit delivery failures redact thrown error text from process logs', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  const sentinel = 'SENTINEL_AUDIT_SECRET_DO_NOT_LOG';
+  const channel = {
+    id: CHANNEL_A,
+    guild: { id: GUILD, members: { me: { id: 'bot' } } },
+    isTextBased: () => true,
+    isDMBased: () => false,
+    permissionsFor: () => ({ has: () => true }),
+    send: async () => { throw new Error(sentinel); },
+  };
+  const client = { channels: { cache: new Map([[CHANNEL_A, channel]]), fetch: async () => channel } } as unknown as Client;
+  const sink = makeOperationalAudit(client, {
+    guildId: GUILD,
+    channels: { audit: CHANNEL_A, voice: null, moderation: null },
+    store,
+  });
+  let stderr = '';
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+  try {
+    await sink.record({
+      entryId: 'redacted-send-failure',
+      kind: 'message_delete',
+      channel: 'audit',
+      guildId: GUILD,
+      occurredAt: '2026-09-09T00:00:00.000Z',
+      sourceChannelId: CHANNEL_B,
+      messageId: 'message-2',
+    });
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+
+  assert.doesNotMatch(stderr, new RegExp(sentinel));
+  assert.match(stderr, /discord_send_failed/);
   await db.close();
 });
 
@@ -323,7 +431,7 @@ test('Discord mirror refuses a configured channel from another guild', async () 
     isTextBased: () => true,
     isDMBased: () => false,
     permissionsFor: () => ({ has: () => true }),
-    send: async () => { sent++; },
+    send: async () => { sent++; return { id: 'mirror-message' }; },
   };
   const client = {
     channels: {

@@ -298,7 +298,7 @@ try {
   for (const kind of AUDIT_ACCEPTANCE_KINDS) {
     if (evidence.missing.includes(kind)) fail(`${kind} durable evidence is missing`, `since ${auditSince}`);
     else if (evidence.duplicates.includes(kind)) fail(`${kind} contains duplicate entry ids`, 'rows must equal distinct entry_id count');
-    else if (evidence.pendingDeliveries.includes(kind)) fail(`${kind} has a pending audit mirror`, 'retry delivery before acceptance');
+    else if (evidence.pendingDeliveries.includes(kind)) fail(`${kind} has an incomplete audit mirror`, 'delivery_state must be delivered');
     else pass(`${kind} evidence`, `durable and delivered since ${auditSince}`);
   }
 } catch (err) {

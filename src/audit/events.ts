@@ -43,6 +43,7 @@ export function auditEventFields(event: OperationalAuditEvent): Record<string, u
 /** Metadata only: no message bodies, usernames or nicknames. */
 export function formatAuditEvent(event: OperationalAuditEvent): string {
   const fields = [
+    `audit-event:${event.entryId}`,
     `**${event.kind.replaceAll('_', ' ')}**`,
     `at ${event.occurredAt}`,
     `target \`${event.targetId ?? 'unknown'}\``,
