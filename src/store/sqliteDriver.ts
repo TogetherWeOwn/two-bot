@@ -93,14 +93,20 @@ function ensureLevelingXpCeiling(raw: DatabaseSync): void {
   const id = '0011_leveling_xp_ceiling';
   const applied = raw.prepare(`SELECT 1 FROM schema_migrations WHERE id = ?`).get(id);
   if (applied) return;
-  const importRunSequence = Number(
-    (raw.prepare(`SELECT seq FROM sqlite_sequence WHERE name = 'level_import_runs'`).get() as
-      | { seq: number }
-      | undefined)?.seq ?? 0,
-  );
 
   raw.exec('BEGIN IMMEDIATE');
   try {
+    // Another opener may have completed the rebuild while this connection
+    // waited for the write lock. Recheck inside the transaction.
+    if (raw.prepare(`SELECT 1 FROM schema_migrations WHERE id = ?`).get(id)) {
+      raw.exec('COMMIT');
+      return;
+    }
+    const importRunSequence = Number(
+      (raw.prepare(`SELECT seq FROM sqlite_sequence WHERE name = 'level_import_runs'`).get() as
+        | { seq: number }
+        | undefined)?.seq ?? 0,
+    );
     raw.exec(`
       CREATE TABLE member_levels_with_xp_ceiling (
         guild_id    TEXT    NOT NULL,
