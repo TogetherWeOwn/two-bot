@@ -128,7 +128,7 @@ export class GuildConfigDiscordApi {
       };
       const blockedTargets = plan.overwriteTargets.flatMap((target) => {
         const permissionCeiling = effectivePermissions(target.permissionCeilingOverwrites);
-        const actionPermissions = target.currentId ? effectivePermissions(target.currentOverwrites) : permissionCeiling;
+        const actionPermissions = effectivePermissions(target.actionPermissionOverwrites);
         const missingChannelPermissions = [
           { name: 'Manage Channels', bit: 1n << 4n },
           { name: 'Manage Roles', bit: 1n << 28n },

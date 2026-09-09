@@ -466,7 +466,6 @@ test('new child overwrite preflight uses the desired parent permission ceiling b
 
 test('child overwrite preflight uses the desired parent state changed by the same restore', async () => {
   const managePermissions = (1n << 4n) | (1n << 28n);
-  const sendMessages = 1n << 11n;
   const grantRoleId = id(3);
   const stub = await stubDiscord({ botPermissions: 0n, botRoleIds: [STAGING_BOT_APPLICATION_ID, grantRoleId] });
   const dir = mkdtempSync(join(tmpdir(), 'two-guild-stale-parent-ceiling-'));
@@ -476,9 +475,10 @@ test('child overwrite preflight uses the desired parent state changed by the sam
   const sourceState = structuredClone(stub.state);
   const parent = sourceState.channels.find((channel) => channel.type === 4 && channel.name === CATEGORIES[0]!.name)!;
   const currentParent = stub.state.channels.find((channel) => channel.id === parent.id)!;
-  currentParent.permission_overwrites = [{ id: STAGING_BOT_APPLICATION_ID, type: 1, allow: String(sendMessages), deny: '0' }];
-  parent.permission_overwrites = [];
-  sourceState.channels.find((channel) => channel.parent_id === parent.id)!.permission_overwrites.push({ id: GUILD, type: 0, allow: String(sendMessages), deny: '0' });
+  currentParent.permission_overwrites = [];
+  parent.permission_overwrites = [{ id: GUILD, type: 0, allow: '0', deny: String(managePermissions) }];
+  const child = sourceState.channels.find((channel) => channel.parent_id === parent.id)!;
+  child.permission_overwrites.push({ id: GUILD, type: 0, allow: '1', deny: '0' });
   writeFileSync(source, `${JSON.stringify({
     version: 1,
     generatedAt: new Date().toISOString(),
@@ -490,8 +490,40 @@ test('child overwrite preflight uses the desired parent state changed by the sam
   try {
     const applied = await run(RESTORE, ['--snapshot', source, '--confirm-staging-guild', '--apply'], { GUILD_CONFIG_API_BASE: stub.base, GUILD_CONFIG_CDN_BASE: stub.base.replace(/\/api\/v10$/, '') });
     assert.equal(applied.code, 1);
-    assert.match(applied.stderr, /channel permission preflight failed/);
-    assert.match(applied.stderr, /unowned mask [1-9]\d*/);
+    assert.match(applied.stderr, new RegExp(`channel permission preflight failed: ${child.name} \\(missing none; unowned mask [1-9]\\d*`));
+    assert.equal(stub.writes.length, 0);
+  } finally {
+    await stub.close();
+  }
+});
+
+test('desired parent permission ceilings remap source role ids before preflight', async () => {
+  const managePermissions = (1n << 4n) | (1n << 28n);
+  const currentGrantRoleId = id(3);
+  const sourceGrantRoleId = id(103);
+  const stub = await stubDiscord({ botPermissions: 0n, botRoleIds: [STAGING_BOT_APPLICATION_ID, currentGrantRoleId] });
+  const dir = mkdtempSync(join(tmpdir(), 'two-guild-remapped-parent-role-'));
+  const source = join(dir, 'source.json');
+  const grantRole: Role = { id: currentGrantRoleId, name: 'Owen Restore', managed: false, color: 0, hoist: false, permissions: String(managePermissions), mentionable: false, position: 8 };
+  stub.state.roles.push(grantRole);
+  const sourceState = structuredClone(stub.state);
+  sourceState.roles.find((role) => role.id === currentGrantRoleId)!.id = sourceGrantRoleId;
+  const parent = sourceState.channels.find((channel) => channel.type === 4 && channel.name === CATEGORIES[0]!.name)!;
+  parent.permission_overwrites = [{ id: sourceGrantRoleId, type: 0, allow: '0', deny: String(managePermissions) }];
+  const child = sourceState.channels.find((channel) => channel.parent_id === parent.id)!;
+  child.permission_overwrites.push({ id: GUILD, type: 0, allow: '1', deny: '0' });
+  writeFileSync(source, `${JSON.stringify({
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    applicationId: STAGING_BOT_APPLICATION_ID,
+    guildId: GUILD,
+    ...sourceState,
+    emojis: sourceState.emojis.map((emoji) => ({ ...emoji, image: 'data:image/png;base64,dHdv' })),
+  })}\n`);
+  try {
+    const applied = await run(RESTORE, ['--snapshot', source, '--confirm-staging-guild', '--apply'], { GUILD_CONFIG_API_BASE: stub.base, GUILD_CONFIG_CDN_BASE: stub.base.replace(/\/api\/v10$/, '') });
+    assert.equal(applied.code, 1);
+    assert.match(applied.stderr, new RegExp(`channel permission preflight failed: ${child.name} \\(missing none; unowned mask [1-9]\\d*`));
     assert.equal(stub.writes.length, 0);
   } finally {
     await stub.close();
