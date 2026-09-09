@@ -37,8 +37,22 @@ const args = new Set(process.argv.slice(2));
 const dryRun = args.has('--dry-run');
 const allowNonempty = args.has('--allow-nonempty');
 
-/** Order matters only for readability; there are no FKs between these. */
-const TABLES = ['events', 'members', 'invite_snapshots'] as const;
+/**
+ * Order matters only for readability; there are no FKs between these.
+ *
+ * The moderation tables are optional in the source: this script predates
+ * them, and an old SQLite file has no moderation tables to copy. A missing
+ * source table is reported and skipped, not fatal - the same as zero rows.
+ */
+const REQUIRED_TABLES = ['events', 'members', 'invite_snapshots'] as const;
+const OPTIONAL_TABLES = [
+  'moderation_warnings',
+  'moderation_scheduled_unbans',
+  'moderation_audit',
+  'moderation_lockdowns',
+  'moderation_idempotency',
+] as const;
+const TABLES = [...REQUIRED_TABLES, ...OPTIONAL_TABLES] as const;
 type Table = (typeof TABLES)[number];
 
 const sqlitePath = process.env.TWO_SQLITE_PATH || process.env.TWO_DB_PATH || './data/two.db';
@@ -56,13 +70,22 @@ function sourceCount(table: Table): number {
   return Number((src.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n);
 }
 
-const srcCounts = Object.fromEntries(TABLES.map((t) => [t, sourceCount(t)])) as Record<
+/** A moderation table this old SQLite file never had. Copied as zero rows. */
+const absentFromSource = new Set<Table>(
+  TABLES.filter((t) => (src.prepare(
+    `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`,
+  ).get(t) as { name: string } | undefined) === undefined),
+);
+for (const t of absentFromSource) console.log(`  ${t}: not in source, skipped`);
+
+const copyableTables = TABLES.filter((t) => !absentFromSource.has(t)) as Table[];
+const srcCounts = Object.fromEntries(copyableTables.map((t) => [t, sourceCount(t)])) as Record<
   Table,
   number
 >;
 
 console.log(`source: ${sqlitePath}`);
-for (const t of TABLES) console.log(`  ${t.padEnd(17)} ${srcCounts[t]}`);
+for (const t of copyableTables) console.log(`  ${t.padEnd(26)} ${srcCounts[t]}`);
 
 if (dryRun) {
   console.log('\n--dry-run: nothing written.');
@@ -103,8 +126,8 @@ try {
   await migrate(dst);
 
   const before = {} as Record<Table, number>;
-  for (const t of TABLES) before[t] = await targetCount(dst, t);
-  const occupied = TABLES.filter((t) => before[t] > 0);
+  for (const t of copyableTables) before[t] = await targetCount(dst, t);
+  const occupied = copyableTables.filter((t) => before[t] > 0);
   if (occupied.length > 0 && !allowNonempty) {
     console.error(
       `\nmigrate-data: target already has rows (${occupied
@@ -117,7 +140,7 @@ try {
 
   console.log(`\ntarget: ${url.replace(/\/\/[^@]*@/, '//***@')}`);
 
-  for (const t of TABLES) {
+  for (const t of copyableTables) {
     const cols = sourceColumns(t).filter((c) => c !== 'rowid');
     const tCols = await targetColumns(dst, t);
     const shared = cols.filter((c) => tCols.includes(c));
@@ -163,7 +186,7 @@ try {
       copied += rows.length;
       offset += rows.length;
     }
-    console.log(`  ${t.padEnd(17)} read ${copied}`);
+    console.log(`  ${t.padEnd(26)} read ${copied}`);
   }
 
   // BIGSERIAL does not know about ids we inserted explicitly. Move it past the
@@ -175,7 +198,7 @@ try {
   );
 
   console.log('\nverifying...');
-  for (const t of TABLES) {
+  for (const t of copyableTables) {
     const got = await targetCount(dst, t);
 
     // The copy uses ON CONFLICT DO NOTHING, so the target ends up holding the
@@ -192,7 +215,7 @@ try {
     const ok = got >= low && got <= high;
     const range = before[t] > 0 ? `  had ${before[t]}  expect ${low}..${high}` : '';
     console.log(
-      `  ${t.padEnd(17)} source ${srcCounts[t]}  target ${got}${range}  ${ok ? 'ok' : 'MISMATCH'}`,
+      `  ${t.padEnd(26)} source ${srcCounts[t]}  target ${got}${range}  ${ok ? 'ok' : 'MISMATCH'}`,
     );
     if (!ok) failed = true;
   }

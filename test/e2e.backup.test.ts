@@ -69,6 +69,49 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
          VALUES (?, ?, ?, ?, ?, ?)`,
       )
       .run(G, 'abc', 12, 'owner', 'c1', '2026-08-09T00:00:00.000Z');
+    // TOG-1659 High 5: the moderation state must survive backup/restore the
+    // same way the funnel does - a lost pending unban is a tempban that
+    // became permanent.
+    for (let i = 0; i < members; i++) {
+      const req = `mod-seed-${i}`;
+      await harness.db
+        .prepare(
+          `INSERT INTO moderation_audit
+             (request_id, guild_id, actor_id, action, target_id, channel_id, reason,
+              outcome, idempotency_key, metadata_json, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(req, G, 'staff', 'moderation.warn', `m${i}`, null, 'seed', 'warned', req, '{}', '2026-08-01T10:00:00.000Z');
+      await harness.db
+        .prepare(
+          `INSERT INTO moderation_warnings
+             (id, guild_id, user_id, actor_id, reason, request_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(`warn-${i}`, G, `m${i}`, 'staff', 'seed warn', req, '2026-08-01T10:00:00.000Z');
+    }
+    await harness.db
+      .prepare(
+        `INSERT INTO moderation_scheduled_unbans
+           (guild_id, user_id, execute_at, reason, request_id, state, created_at, claimed_at)
+         VALUES (?, ?, ?, ?, ?, 'pending', ?, NULL)`,
+      )
+      .run(G, 'm1', '2026-08-02T10:00:00.000Z', 'expiry', 'mod-seed-unban-1', '2026-08-01T10:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO moderation_lockdowns
+           (channel_id, guild_id, prior_allow, prior_deny, reason, locked_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run('chan-1', G, '1024', '8192', 'raid lockdown', '2026-08-01T11:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO moderation_idempotency
+           (guild_id, idempotency_key, action, request_hash, state, outcome, result_json,
+            claimed_at, completed_at)
+         VALUES (?, ?, ?, ?, 'done', 'banned', '{}', ?, ?)`,
+      )
+      .run(G, 'mod-key-1', 'moderation.ban', 'deadbeef', '2026-08-01T10:00:00.000Z', '2026-08-01T10:00:01.000Z');
   }
 
   async function counts(): Promise<Record<string, number>> {
@@ -148,6 +191,41 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
     });
     assert.equal(again.inserted, false, 'a restored event was not recognised as already present');
     assert.equal((await counts()).events, before);
+  });
+
+  test('moderation durability survives the round trip: pending unbans, warn ledger, lockdown masks (TOG-1659 High 5)', async () => {
+    await seed();
+    const file = join(dir, 'moderation.ndjson.gz');
+    const manifest = await dump(harness.db, file);
+    const named = new Set(manifest.tables.map((t) => t.name));
+    for (const t of [
+      'moderation_warnings', 'moderation_scheduled_unbans', 'moderation_audit',
+      'moderation_lockdowns', 'moderation_idempotency',
+    ]) {
+      assert.ok(named.has(t as never), `${t} is not in the dump manifest - losing it strands tempbans`);
+    }
+
+    await harness.db.exec(`TRUNCATE ${DUMP_TABLES.join(', ')} RESTART IDENTITY`);
+    await restore(harness.db, file);
+
+    const after = await counts();
+    assert.equal(after.moderation_warnings, 5);
+    assert.equal(after.moderation_audit, 5);
+    assert.equal(after.moderation_scheduled_unbans, 1, 'the pending unban did not survive the restore');
+    assert.equal(after.moderation_lockdowns, 1);
+    assert.equal(after.moderation_idempotency, 1);
+
+    const unban = await harness.db
+      .prepare(`SELECT guild_id, user_id, execute_at, state FROM moderation_scheduled_unbans`)
+      .get();
+    assert.equal(unban?.state, 'pending');
+    assert.equal(unban?.execute_at, '2026-08-02T10:00:00.000Z');
+
+    const lockdown = await harness.db
+      .prepare(`SELECT prior_allow, prior_deny FROM moderation_lockdowns WHERE channel_id = 'chan-1'`)
+      .get();
+    assert.equal(lockdown?.prior_allow, '1024');
+    assert.equal(lockdown?.prior_deny, '8192');
   });
 
   test('a truncated dump is refused rather than half-restored', async () => {

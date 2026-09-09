@@ -53,6 +53,19 @@ export function loadInternalActionsConfig(env: NodeJS.ProcessEnv = process.env):
   // address, so an unconfigured bot refuses every post by key lookup.
   const enabled = new Set<ActionName>(['role.assign', 'announcement.post', 'event.upsert']);
   if (env.TWO_INTERNAL_ALLOW_ADD_MEMBER === '1') enabled.add('guild.add_member');
+  if (env.TWO_INTERNAL_ALLOW_MODERATION === '1' && env.TWO_MODERATION === '1') {
+    for (const action of [
+      'moderation.ban',
+      'moderation.tempban',
+      'moderation.kick',
+      'moderation.timeout',
+      'moderation.warn',
+      'moderation.purge',
+      'moderation.slowmode',
+      'moderation.lockdown',
+      'moderation.unlock',
+    ] as const) enabled.add(action);
+  }
 
   return {
     host: env.TWO_INTERNAL_BIND_HOST || '127.0.0.1',
