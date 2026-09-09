@@ -252,6 +252,53 @@ CREATE INDEX IF NOT EXISTS idx_automod_processed_user
 CREATE UNIQUE INDEX IF NOT EXISTS uq_moderation_pending_unban
   ON moderation_scheduled_unbans (guild_id, user_id) WHERE state = 'pending';
 
+-- Durable anti-nuke detection and flag-only join risk (TOG-1650).
+CREATE TABLE IF NOT EXISTS containment_events (
+  audit_entry_id TEXT PRIMARY KEY,
+  guild_id       TEXT NOT NULL,
+  executor_id    TEXT,
+  action         TEXT NOT NULL,
+  target_id      TEXT,
+  weight         INTEGER NOT NULL CHECK (weight > 0),
+  occurred_at    TEXT NOT NULL,
+  state          TEXT NOT NULL CHECK (state IN ('observe', 'contain', 'ignored', 'stale')),
+  reason         TEXT NOT NULL,
+  created_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_containment_events_heat
+  ON containment_events (guild_id, executor_id, occurred_at);
+
+CREATE TABLE IF NOT EXISTS containment_incidents (
+  id                     TEXT PRIMARY KEY,
+  guild_id               TEXT NOT NULL,
+  executor_id            TEXT NOT NULL,
+  trigger_audit_entry_id TEXT NOT NULL UNIQUE REFERENCES containment_events(audit_entry_id),
+  heat                    INTEGER NOT NULL CHECK (heat > 0),
+  state                   TEXT NOT NULL CHECK (state IN ('containing', 'contained', 'dry_run', 'refused', 'uncertain', 'failed')),
+  result_json             TEXT,
+  started_at              TEXT NOT NULL,
+  cooldown_until          TEXT,
+  completed_at            TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_containment_incident_executor
+  ON containment_incidents (guild_id, executor_id, started_at);
+
+CREATE TABLE IF NOT EXISTS join_risk_flags (
+  event_id           TEXT PRIMARY KEY,
+  guild_id           TEXT NOT NULL,
+  member_id          TEXT NOT NULL,
+  account_created_at TEXT NOT NULL,
+  joined_at          TEXT NOT NULL,
+  source             TEXT NOT NULL,
+  score              INTEGER NOT NULL CHECK (score >= 0),
+  reasons_json       TEXT NOT NULL,
+  bulk_join_window   INTEGER NOT NULL,
+  flagged            INTEGER NOT NULL,
+  created_at         TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_join_risk_flags_time
+  ON join_risk_flags (guild_id, joined_at);
+
 -- The website's event_key -> Discord's scheduled event id. This is what makes
 -- event.upsert an upsert.
 CREATE TABLE IF NOT EXISTS internal_discord_events (

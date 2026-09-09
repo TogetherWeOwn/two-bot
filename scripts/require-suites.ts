@@ -71,6 +71,11 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     minTests: 4,
     why: 'two writer processes against one database; SQLite cannot express it',
   },
+  {
+    file: 'test/e2e.containment.test.ts',
+    minTests: 2,
+    why: 'parallel Discord audit entries must serialize before destructive containment',
+  },
 ];
 
 /**

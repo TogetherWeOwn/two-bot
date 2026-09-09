@@ -243,6 +243,7 @@ export async function openSqlite(path: string): Promise<Db> {
     '0010_moderation',
     '0011_moderation_durability',
     '0012_moderation_recovery',
+    '0015_anti_nuke_containment',
     '0013_tickets',
     '0014_ticket_safety',
   ]) {

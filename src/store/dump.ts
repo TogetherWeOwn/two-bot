@@ -53,6 +53,9 @@ export const DUMP_TABLES = [
   'moderation_audit',
   'moderation_lockdowns',
   'moderation_idempotency',
+  'containment_events',
+  'containment_incidents',
+  'join_risk_flags',
   'tickets',
   'ticket_transcripts',
   'automod_violations',
@@ -129,6 +132,9 @@ function orderFor(table: DumpTable, columns: string[]): string {
   if (table === 'moderation_audit') return 'created_at, request_id';
   if (table === 'moderation_lockdowns') return 'guild_id, channel_id';
   if (table === 'moderation_idempotency') return 'guild_id, idempotency_key';
+  if (table === 'containment_events') return 'occurred_at, audit_entry_id';
+  if (table === 'containment_incidents') return 'started_at, id';
+  if (table === 'join_risk_flags') return 'joined_at, event_id';
   if (table === 'tickets') return 'created_at, id';
   if (table === 'ticket_transcripts') return 'created_at, ticket_id';
   if (table === 'automod_violations') return 'guild_id, user_id';

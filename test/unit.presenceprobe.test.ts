@@ -84,10 +84,10 @@ describe('presence probe containment', () => {
     );
 
     // And the value check: ticket transcripts require MessageContent, while
-    // automod must not add a duplicate intent or introduce GuildPresences.
-    assert.equal(intents(false).length, 6, 'the default intent list changed - see client.ts');
-    assert.equal(intents(true).length, 6, 'automod must reuse the existing MessageContent intent');
-    assert.equal(INTENTS.length, 6, 'the intent list changed - see client.ts intent rationale');
+    // automod reuses it and anti-nuke adds only GuildModeration.
+    assert.equal(intents(false).length, 7, 'the default intent list changed - see client.ts');
+    assert.equal(intents(true).length, 7, 'automod must reuse the existing MessageContent intent');
+    assert.equal(INTENTS.length, 7, 'the intent list changed - see client.ts intent rationale');
   });
 
   test('the table is not readable through the web_v1 contract', () => {

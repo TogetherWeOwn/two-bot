@@ -10,6 +10,7 @@ import { applyLevelRoles } from '../leveling/discord.ts';
 import type { LevelingService } from '../leveling/service.ts';
 import type { AutomodService } from '../automod/service.ts';
 import { AutomodProcessingError } from '../automod/types.ts';
+import type { JoinRiskScorer } from '../moderation/containment.ts';
 
 /**
  * Intents we ask Discord for, and why. Keep this list minimal - each one is a
@@ -21,6 +22,7 @@ import { AutomodProcessingError } from '../automod/types.ts';
  *   MessageContent      - ticket transcripts and enabled automod (PRIVILEGED)
  *   GuildVoiceStates    - first_voice_session + voice_session_start/end
  *   GuildInvites        - invite create/delete for attribution
+ *   GuildModeration     - authoritative destructive-action audit entries
  *
  * MessageContent is required for MEE6-equivalent ticket export. Enabled automod
  * also inspects public messages in memory but never stores or logs their content.
@@ -33,6 +35,7 @@ const BASE_INTENTS = [
   GatewayIntentBits.MessageContent,
   GatewayIntentBits.GuildVoiceStates,
   GatewayIntentBits.GuildInvites,
+  GatewayIntentBits.GuildModeration,
 ];
 
 export function intents(_automodEnabled = process.env.TWO_AUTOMOD === '1'): GatewayIntentBits[] {
@@ -58,6 +61,8 @@ export interface BotDeps {
   expectedJoins?: ExpectedJoins;
   leveling?: LevelingService;
   automod?: { service: AutomodService; guildId: string };
+  /** Flag-only join risk scoring. It never changes or removes the member. */
+  joinRisk?: JoinRiskScorer;
 }
 
 export function createClient(automodEnabled = process.env.TWO_AUTOMOD === '1'): Client {
@@ -99,7 +104,7 @@ async function snapshotInvites(guild: Guild, invites: InviteTracker): Promise<st
 
 /** Wire gateway events to the framework-free handlers. */
 export function registerHandlers(client: Client, deps: BotDeps): void {
-  const { handlers, invites, raid, expectedJoins, leveling, automod } = deps;
+  const { handlers, invites, raid, expectedJoins, leveling, automod, joinRisk } = deps;
 
   client.once(Events.ClientReady, async (c) => {
     log.info('ready', { user: c.user.tag, guilds: c.guilds.cache.size });
@@ -155,6 +160,13 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
         if (alert) await raid.announce(alert);
       } catch (err) {
         log.error('raid_watch_failed', { guildId: member.guild.id, err: String(err) });
+      }
+    }
+    if (joinRisk && !member.user?.bot) {
+      try {
+        await joinRisk.observe(member, source);
+      } catch (err) {
+        log.error('join_risk_failed', { guildId: member.guild.id, memberId: member.id, err: String(err) });
       }
     }
   });

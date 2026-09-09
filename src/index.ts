@@ -42,6 +42,20 @@ import { registerModerationCommands, registerModerationHandler } from './moderat
 import { loadAutomodConfig } from './automod/config.ts';
 import { AutomodService } from './automod/service.ts';
 import { AutomodStore } from './automod/store.ts';
+import { loadContainmentConfig } from './moderation/containmentConfig.ts';
+import { ContainmentStore } from './moderation/containmentStore.ts';
+import { ContainmentDiscord } from './moderation/containmentDiscord.ts';
+import {
+  DestructiveContainment,
+  JoinRiskScorer,
+  SnapshotRestoreAdvisor,
+  registerContainment,
+} from './moderation/containment.ts';
+import { makeContainmentAnnouncer, makeJoinRiskAnnouncer } from './discord/containmentAlert.ts';
+import { GuildConfigDiscordApi } from './discord/guildConfigApi.ts';
+import type { GuildConfigSnapshot } from './redesign/guildConfig.ts';
+import { readFileSync } from 'node:fs';
+import { STAGING_BOT_APPLICATION_ID, TWO_STAGING_GUILD_ID } from './staging/spec.ts';
 
 const cfg = loadConfig();
 setLogLevel(cfg.logLevel);
@@ -150,6 +164,16 @@ log.info('raid_watch_enabled', {
   alertTarget: cfg.staffAlertChannelId ?? 'log only (DISCORD_STAFF_ALERT_CHANNEL_ID unset)',
 });
 
+const containmentCfg = loadContainmentConfig();
+const containmentStore = new ContainmentStore(db);
+const joinRisk = containmentCfg.enabled
+  ? new JoinRiskScorer({
+      store: containmentStore,
+      config: containmentCfg,
+      announce: makeJoinRiskAnnouncer(client, containmentCfg.alertChannelId),
+    })
+  : undefined;
+
 registerHandlers(client, {
   handlers,
   invites,
@@ -157,7 +181,48 @@ registerHandlers(client, {
   expectedJoins,
   leveling,
   automod: automodService && cfg.guildId ? { service: automodService, guildId: cfg.guildId } : undefined,
+  joinRisk,
 });
+
+if (containmentCfg.enabled && containmentCfg.guildId) {
+  if (containmentCfg.guildId !== TWO_STAGING_GUILD_ID || containmentCfg.botUserId !== STAGING_BOT_APPLICATION_ID) {
+    throw new Error(
+      `TOG-1650 is staging-only: expected guild ${TWO_STAGING_GUILD_ID} and application ${STAGING_BOT_APPLICATION_ID}.`,
+    );
+  }
+  const guildConfigApi = new GuildConfigDiscordApi({
+    token: cfg.discordToken,
+    applicationId: STAGING_BOT_APPLICATION_ID,
+    guildId: TWO_STAGING_GUILD_ID,
+    apiBase: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+  });
+  await guildConfigApi.assertIdentity();
+  const restore = containmentCfg.snapshotPath
+    ? new SnapshotRestoreAdvisor(
+        JSON.parse(readFileSync(containmentCfg.snapshotPath, 'utf8')) as GuildConfigSnapshot,
+        async () => guildConfigApi.capture(),
+      )
+    : null;
+  const containment = new DestructiveContainment({
+    store: containmentStore,
+    discord: new ContainmentDiscord({
+      token: cfg.discordToken,
+      botUserId: containmentCfg.botUserId,
+      base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+    }),
+    config: containmentCfg,
+    announce: makeContainmentAnnouncer(client, containmentCfg.alertChannelId),
+    restore,
+  });
+  registerContainment(client, containment, containmentCfg.guildId);
+  log.info('anti_nuke_enabled', {
+    guildId: containmentCfg.guildId,
+    dryRun: containmentCfg.dryRun,
+    heatThreshold: containmentCfg.heatThreshold,
+    windowSeconds: containmentCfg.windowSeconds,
+    snapshot: containmentCfg.snapshotPath ? 'configured' : 'not configured',
+  });
+}
 
 if (cfg.ticketCategoryId && cfg.ticketStaffRoleId && cfg.ticketPanelChannelId) {
   registerTickets(client, {
