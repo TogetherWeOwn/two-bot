@@ -40,10 +40,18 @@ export function auditEventFields(event: OperationalAuditEvent): Record<string, u
   };
 }
 
+export function auditEventIdentity(entryId: string): string {
+  return `audit-event:${entryId};`;
+}
+
+export function hasAuditEventIdentity(content: string, entryId: string): boolean {
+  return content.startsWith(`${auditEventIdentity(entryId)} · `);
+}
+
 /** Metadata only: no message bodies, usernames or nicknames. */
 export function formatAuditEvent(event: OperationalAuditEvent): string {
   const fields = [
-    `audit-event:${event.entryId};`,
+    auditEventIdentity(event.entryId),
     `**${event.kind.replaceAll('_', ' ')}**`,
     `at ${event.occurredAt}`,
     `target \`${event.targetId ?? 'unknown'}\``,
@@ -62,8 +70,23 @@ export function formatAuditEvent(event: OperationalAuditEvent): string {
 }
 
 function formatMetadata(value: unknown): string {
-  if (Array.isArray(value)) return value.map(String).join(',').slice(0, 300) || 'none';
-  return String(value).slice(0, 300);
+  if (!Array.isArray(value)) return String(value).slice(0, 300);
+  if (value.length === 0) return 'none';
+
+  const items = value.map(String);
+  const included: string[] = [];
+  for (let index = 0; index < items.length; index++) {
+    const candidate = [...included, items[index]].join(',');
+    const omitted = items.length - index - 1;
+    const indicator = omitted > 0 ? ` (+${omitted} omitted)` : '';
+    if (`${candidate}${indicator}`.length > 300) break;
+    included.push(items[index]);
+  }
+
+  const omitted = items.length - included.length;
+  if (omitted === 0) return included.join(',');
+  const indicator = `+${omitted} omitted`;
+  return included.length ? `${included.join(',')} (${indicator})` : indicator;
 }
 
 function truncateDiscordContent(content: string): string {

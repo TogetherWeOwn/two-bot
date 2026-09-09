@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { AuditLogEvent, ChannelType, Collection, Events, GatewayIntentBits, Partials, type Client } from 'discord.js';
 import { createClient, INTENTS, registerHandlers } from '../src/discord/client.ts';
 import { moderationAuditEvent } from '../src/audit/discordEvents.ts';
-import { formatAuditEvent, type OperationalAuditEvent } from '../src/audit/events.ts';
+import { formatAuditEvent, hasAuditEventIdentity, type OperationalAuditEvent } from '../src/audit/events.ts';
 import { makeOperationalAudit } from '../src/audit/service.ts';
 import { deliveryNonce, OperationalAuditStore } from '../src/audit/store.ts';
 import { openDb } from '../src/store/db.ts';
@@ -260,7 +260,17 @@ test('mirror text suppresses raw message content and carries a delimited event m
   assert.doesNotMatch(text, /content|username|nickname|reason/);
 });
 
-test('role-heavy member updates stay within Discord message limits', () => {
+test('marker identity accepts only the exact leading formatAuditEvent field', () => {
+  assert.equal(hasAuditEventIdentity(formatAuditEvent({
+    entryId: 'one', kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-08T16:00:00.000Z', targetId: MEMBER,
+  }), 'one'), true);
+  assert.equal(hasAuditEventIdentity('audit-event:other; · metadata=`audit-event:one; · `', 'one'), false);
+  assert.equal(hasAuditEventIdentity('prefix audit-event:one; · **message delete**', 'one'), false);
+  assert.equal(hasAuditEventIdentity('audit-event:one; metadata only', 'one'), false);
+});
+
+test('role-heavy member updates truncate metadata at complete role ids with an exact omitted count', () => {
   const roleIds = Array.from({ length: 60 }, (_, index) => String(9_000_000_000_000_000n + BigInt(index)));
   const text = formatAuditEvent({
     entryId: 'member-update:bounded',
@@ -273,6 +283,18 @@ test('role-heavy member updates stay within Discord message limits', () => {
   });
   assert.ok(text.length <= 2_000);
   assert.match(text, /^audit-event:member-update:bounded;/);
+
+  for (const key of ['addedRoleIds', 'removedRoleIds']) {
+    const value = text.match(new RegExp(key + '=`([^`]*)`'))?.[1];
+    assert.ok(value);
+    const match = value.match(/^(.*) \(\+(\d+) omitted\)$/);
+    assert.ok(match);
+    const emitted = match[1].split(',');
+    assert.ok(emitted.length > 0);
+    assert.ok(emitted.every((roleId) => /^\d{16}$/.test(roleId)));
+    assert.ok(emitted.every((roleId) => roleIds.includes(roleId)));
+    assert.equal(Number(match[2]), roleIds.length - emitted.length);
+  }
 });
 
 test('audit-sink message tampering is stored but never remirrored', async () => {
@@ -369,10 +391,11 @@ test('post-send acknowledgement retries reconcile beyond 500 newer Discord messa
   const db = await openDb(':memory:');
   const store = new OperationalAuditStore(db);
   const sends: Array<{ nonce?: string | number; enforceNonce?: boolean }> = [];
-  const acceptedMessageId = '900000000000000000';
-  const preSendMessageId = '899999999999999999';
-  const searchBefore = (BigInt(preSendMessageId) + 1n).toString();
+  const preSendMessageId = '900000000000000000';
+  const acceptedMessageId = (BigInt(preSendMessageId) + 1n).toString();
+  const searchBefore = acceptedMessageId;
   let existingMessage: { id: string; author: { id: string }; content: string } | null = null;
+  const preSendMessage = { id: preSendMessageId, author: { id: 'other' }, content: 'pre-send' };
   const newerMessages = Array.from({ length: 550 }, (_, index) => ({
     id: (BigInt(acceptedMessageId) + 550n - BigInt(index)).toString(),
     author: { id: 'other' },
@@ -386,16 +409,15 @@ test('post-send acknowledgement retries reconcile beyond 500 newer Discord messa
     isDMBased: () => false,
     permissionsFor: () => ({ has: () => true }),
     messages: {
-      fetch: async ({ limit, before }: { limit?: number; before?: string }) => {
+      fetch: async ({ limit = 50, before }: { limit?: number; before?: string }) => {
         fetchedBefore.push(before);
-        if (limit === 1) {
-          const message = { id: preSendMessageId, author: { id: 'other' }, content: 'pre-send' };
-          return new Collection([[message.id, message]]);
-        }
-        if (before === searchBefore && existingMessage) {
-          return new Collection([[existingMessage.id, existingMessage]]);
-        }
-        return new Collection(newerMessages.slice(0, 100).map((message) => [message.id, message]));
+        const history = existingMessage
+          ? [...newerMessages, existingMessage, preSendMessage]
+          : [preSendMessage];
+        const page = history
+          .filter((message) => !before || BigInt(message.id) < BigInt(before))
+          .slice(0, limit);
+        return new Collection(page.map((message) => [message.id, message]));
       },
     },
     client: { user: { id: 'bot' } },
@@ -443,7 +465,8 @@ test('post-send acknowledgement retries reconcile beyond 500 newer Discord messa
   assert.equal(sends.length, 1);
   assert.deepEqual(sends.map((body) => body.nonce), [deliveryNonce(event.entryId)]);
   assert.deepEqual(sends.map((body) => body.enforceNonce), [true]);
-  assert.equal(fetchedBefore.at(-1), searchBefore);
+  assert.ok(fetchedBefore.length > 6);
+  assert.ok(fetchedBefore.includes((BigInt(acceptedMessageId) + 51n).toString()));
   const row = await store.get(event.entryId);
   assert.equal(row?.deliveryState, 'delivered');
   assert.equal(row?.mirrorMessageId, acceptedMessageId);
@@ -546,7 +569,7 @@ test('marker reconciliation requires the marker as the leading identity field', 
     {
       id: '900000000000000099',
       author: { id: 'bot' },
-      content: 'metadata=`audit-event:abc;` · audit-event:other;',
+      content: 'audit-event:other; · metadata=`audit-event:abc; · **message delete**`',
     },
   ];
   const channel = {
@@ -579,19 +602,42 @@ test('marker reconciliation requires the marker as the leading identity field', 
 });
 
 
-test('a persisted acknowledged send fails closed when its marker was deleted or edited', async () => {
+test('an edited ambiguous marker fails closed through a long scan and overlapping retry', async () => {
   const db = await openDb(':memory:');
   const store = new OperationalAuditStore(db);
   let sends = 0;
+  const preSendMessageId = '900000000000000000';
+  const acceptedMessageId = (BigInt(preSendMessageId) + 1n).toString();
+  const newerMessages = Array.from({ length: 550 }, (_, index) => ({
+    id: (BigInt(acceptedMessageId) + 550n - BigInt(index)).toString(),
+    author: { id: 'other' },
+    content: `newer-${index}`,
+  }));
+  let acceptedMessage: { id: string; author: { id: string }; content: string } | null = null;
+  const preSendMessage = { id: preSendMessageId, author: { id: 'other' }, content: 'pre-send' };
   const channel = {
     id: CHANNEL_A,
     guild: { id: GUILD, members: { me: { id: 'bot' } } },
     isTextBased: () => true,
     isDMBased: () => false,
     permissionsFor: () => ({ has: () => true }),
-    messages: { fetch: async () => new Collection() },
+    messages: {
+      fetch: async ({ limit = 50, before }: { limit?: number; before?: string }) => {
+        const history = acceptedMessage
+          ? [...newerMessages, acceptedMessage, preSendMessage]
+          : [preSendMessage];
+        const page = history
+          .filter((message) => !before || BigInt(message.id) < BigInt(before))
+          .slice(0, limit);
+        return new Collection(page.map((message) => [message.id, message]));
+      },
+    },
     client: { user: { id: 'bot' } },
-    send: async () => { sends++; return { id: '900000000000000200' }; },
+    send: async (body: { content?: string }) => {
+      sends++;
+      acceptedMessage = { id: acceptedMessageId, author: { id: 'bot' }, content: body.content ?? '' };
+      return { id: acceptedMessageId };
+    },
   };
   const client = { channels: { cache: new Map([[CHANNEL_A, channel]]), fetch: async () => channel } } as unknown as Client;
   const sink = makeOperationalAudit(client, {
@@ -600,25 +646,44 @@ test('a persisted acknowledged send fails closed when its marker was deleted or 
     store,
   });
   const event: OperationalAuditEvent = {
-    entryId: 'missing-marker', kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    entryId: 'edited-marker', kind: 'message_delete', channel: 'audit', guildId: GUILD,
     occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
   };
+  const realMarkDelivered = store.markDelivered.bind(store);
+  let acknowledgements = 0;
+  store.markDelivered = async (entryId, messageId) => {
+    acknowledgements++;
+    if (acknowledgements === 1) throw new Error('database disconnected after Discord accepted the post');
+    await realMarkDelivered(entryId, messageId);
+  };
 
-  await store.record(event, CHANNEL_A);
-  const claimed = await store.claim(event.entryId);
-  assert.ok(claimed);
-  await store.saveDeliverySearchBefore(event.entryId, '900000000000000300');
-  await store.markAcknowledgementFailed(event.entryId);
+  assert.equal(await sink.record(event), true);
+  assert.equal(sends, 1);
+  assert.ok(acceptedMessage);
+  (acceptedMessage as { content: string }).content =
+    `audit-event:other; · metadata=\`audit-event:${event.entryId}; · \``;
   await db.prepare(`UPDATE operational_audit_log SET delivery_lease_until = ? WHERE entry_id = ?`).run(
     '2000-01-01T00:00:00.000Z',
     event.entryId,
   );
 
+  const realExtendLease = store.extendDeliveryLease.bind(store);
+  let leaseExtensions = 0;
+  let overlappingRetry: Promise<number> | null = null;
+  store.extendDeliveryLease = async (entryId, leaseMs) => {
+    await realExtendLease(entryId, leaseMs);
+    leaseExtensions++;
+    if (leaseExtensions === 2) overlappingRetry = sink.retryPending();
+  };
+
   assert.equal(await sink.retryPending(), 1);
-  assert.equal(sends, 0);
+  assert.equal(await overlappingRetry, 0);
+  assert.ok(leaseExtensions >= 6);
+  assert.equal(sends, 1);
   const row = await store.get(event.entryId);
   assert.equal(row?.deliveryState, 'pending');
-  assert.equal(row?.deliverySearchBefore, '900000000000000300');
+  assert.equal(row?.deliveryLastError, 'discord_marker_missing');
+  assert.equal(row?.deliverySearchBefore, acceptedMessageId);
   assert.equal(row?.deliveryAttempts, 2);
   await db.close();
 });

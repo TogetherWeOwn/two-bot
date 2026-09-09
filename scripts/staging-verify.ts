@@ -54,6 +54,7 @@ import {
   type AuditMarkerCount,
 } from '../src/staging/auditAcceptance.ts';
 import { openDb } from '../src/store/db.ts';
+import { hasAuditEventIdentity } from '../src/audit/events.ts';
 
 const API = 'https://discord.com/api/v10';
 
@@ -297,10 +298,9 @@ if (app.status === 200 && app.body) {
 
 
 async function discordMarkerMessageIds(channelId: string, entryId: string, since: string): Promise<string[]> {
-  const marker = `audit-event:${entryId};`;
   const matches: string[] = [];
   let before = '';
-  for (let page = 0; page < 20; page++) {
+  while (true) {
     const query = new URLSearchParams({ limit: '100' });
     if (before) query.set('before', before);
     const result = await api<Array<{ id: string; content: string; timestamp: string; author: { id: string } }>>(
@@ -309,13 +309,12 @@ async function discordMarkerMessageIds(channelId: string, entryId: string, since
     if (result.status !== 200 || !result.body) throw new Error(`Discord marker fetch failed for channel ${channelId}: HTTP ${result.status}`);
     for (const message of result.body) {
       if (Date.parse(message.timestamp) < Date.parse(since)) return matches;
-      if (message.author.id === botId && message.content.startsWith(`${marker} · `)) matches.push(message.id);
+      if (message.author.id === botId && hasAuditEventIdentity(message.content, entryId)) matches.push(message.id);
     }
     if (result.body.length < 100) return matches;
     before = result.body.at(-1)?.id ?? '';
     if (!before) return matches;
   }
-  throw new Error(`Discord marker scan exceeded 2000 messages for channel ${channelId}`);
 }
 
 // 7. Reconcile the controlled live scenarios against the staging database.

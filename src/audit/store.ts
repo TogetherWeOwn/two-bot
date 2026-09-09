@@ -106,6 +106,18 @@ export class OperationalAuditStore {
     if (result.changes !== 1) throw new Error('audit_delivery_search_bound_not_persisted');
   }
 
+  async extendDeliveryLease(entryId: string, leaseMs = AUDIT_DELIVERY_LEASE_MS): Promise<void> {
+    const leaseUntil = new Date(Date.now() + leaseMs).toISOString();
+    const result = await this.db
+      .prepare(
+        `UPDATE operational_audit_log
+            SET delivery_lease_until = ?
+          WHERE entry_id = ? AND delivery_state = 'delivering'`,
+      )
+      .run(leaseUntil, entryId);
+    if (result.changes !== 1) throw new Error('audit_delivery_lease_not_extended');
+  }
+
   async markDelivered(entryId: string, messageId: string): Promise<void> {
     const now = new Date().toISOString();
     const result = await this.db
