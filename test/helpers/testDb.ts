@@ -87,6 +87,7 @@ const SQLITE_TABLES = [
   'ticket_transcripts',
   'tickets',
   'automod_violations',
+  'automod_processed_messages',
 ];
 
 export interface TestDb {

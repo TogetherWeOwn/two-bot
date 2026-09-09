@@ -69,6 +69,7 @@ const PRIMARY_KEYS: Record<Table, readonly string[]> = {
   tickets: ['id'],
   ticket_transcripts: ['ticket_id'],
   automod_violations: ['guild_id', 'user_id'],
+  automod_processed_messages: ['guild_id', 'message_id'],
 };
 
 const sqlitePath = process.env.TWO_SQLITE_PATH || process.env.TWO_DB_PATH || './data/two.db';

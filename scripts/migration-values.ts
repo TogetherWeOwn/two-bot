@@ -8,7 +8,9 @@ export type MigrationTable =
   | 'moderation_lockdowns'
   | 'moderation_idempotency'
   | 'tickets'
-  | 'ticket_transcripts';
+  | 'ticket_transcripts'
+  | 'automod_violations'
+  | 'automod_processed_messages';
 
 export function migrationValuesMatch(
   table: MigrationTable,
