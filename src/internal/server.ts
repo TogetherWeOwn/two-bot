@@ -39,6 +39,8 @@ import {
 import type { ActionDiscord } from './discordActions.ts';
 import type { ExpectedJoins } from '../core/expectedJoins.ts';
 import { requestHash, type InternalActionStore } from './store.ts';
+import type { ModerationResolver } from '../moderation/resolver.ts';
+import type { ModerationService } from '../moderation/service.ts';
 
 /** Anything larger than this is a bug on the caller, not a request. */
 const MAX_BODY_BYTES = 64 * 1024;
@@ -78,6 +80,7 @@ export interface InternalServerOptions {
    * `unknown`, exactly as before.
    */
   expectedJoins?: ExpectedJoins | null;
+  moderation?: { resolver: ModerationResolver; service: ModerationService } | null;
   skewSeconds?: number;
   nonceTtlSeconds?: number;
   maxBodyBytes?: number;
@@ -305,6 +308,8 @@ async function authoriseAndRun(
     expectedJoins: opts.expectedJoins ?? null,
     enabled: opts.enabled,
     store,
+    moderation: opts.moderation ?? null,
+    idempotencyKey: null,
   };
 
   if (!NEEDS_IDEMPOTENCY_KEY.has(action)) {
@@ -366,18 +371,29 @@ async function runIdempotently(
     });
   }
 
+  ctx.idempotencyKey = idempotencyKey;
+  let outcome: ActionOutcome;
   try {
-    const outcome = await runAction(action, body, ctx);
-    await store.complete(keyId, idempotencyKey, { outcome: outcome.outcome, result: outcome.result });
-    return { ...outcome, replayed: false };
+    outcome = await runAction(action, body, ctx);
   } catch (err) {
-    // Give the key back, so a retry of a retryable failure is a real second
-    // attempt rather than a cached error. See store.release().
+    // Moderation owns a second, guild-scoped idempotency row. If its inner
+    // action completed but our outer completion failed, a retry returns that
+    // stored result here and repairs the outer row instead of conflicting.
     await store.release(keyId, idempotencyKey).catch((releaseErr: unknown) => {
       log.error('internal_idempotency_release_failed', { err: String(releaseErr) });
     });
     throw err;
   }
+
+  try {
+    await store.complete(keyId, idempotencyKey, { outcome: outcome.outcome, result: outcome.result });
+  } catch (err) {
+    await store.release(keyId, idempotencyKey).catch((releaseErr: unknown) => {
+      log.error('internal_idempotency_release_failed', { err: String(releaseErr) });
+    });
+    throw err;
+  }
+  return { ...outcome, replayed: outcome.innerReplayed === true };
 }
 
 function parseBody(req: IncomingMessage, raw: Buffer): Record<string, unknown> {
