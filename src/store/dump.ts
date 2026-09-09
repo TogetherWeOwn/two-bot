@@ -53,6 +53,8 @@ export const DUMP_TABLES = [
   'moderation_audit',
   'moderation_lockdowns',
   'moderation_idempotency',
+  'tickets',
+  'ticket_transcripts',
 ] as const;
 export type DumpTable = (typeof DUMP_TABLES)[number];
 
@@ -125,6 +127,8 @@ function orderFor(table: DumpTable, columns: string[]): string {
   if (table === 'moderation_audit') return 'created_at, request_id';
   if (table === 'moderation_lockdowns') return 'guild_id, channel_id';
   if (table === 'moderation_idempotency') return 'guild_id, idempotency_key';
+  if (table === 'tickets') return 'created_at, id';
+  if (table === 'ticket_transcripts') return 'created_at, ticket_id';
   return columns.slice(0, 1).join(', ');
 }
 

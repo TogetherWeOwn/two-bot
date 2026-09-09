@@ -83,9 +83,9 @@ describe('presence probe containment', () => {
         'If this instrument seems to need it, the issue has been misread.',
     );
 
-    // And the value check: still exactly the five documented intents, so
-    // adding a sixth of any kind is a conversation rather than a diff.
-    assert.equal(INTENTS.length, 5, 'the intent list changed - see client.ts:22-28');
+    // And the value check: ticket transcripts add MessageContent, but the
+    // presence probe still must not add GuildPresences.
+    assert.equal(INTENTS.length, 6, 'the intent list changed - see client.ts intent rationale');
   });
 
   test('the table is not readable through the web_v1 contract', () => {
