@@ -88,7 +88,10 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
   const auditSafely = (event: Parameters<NonNullable<BotDeps['audit']>['record']>[0]) => {
     if (!audit) return;
     void audit.record(event).catch((err: unknown) => {
-      log.error('operational_audit_failed', { entryId: event.entryId, err: String(err) });
+      log.error('operational_audit_failed', {
+        entryId: event.entryId,
+        classification: 'audit_record_failed',
+      });
     });
   };
 

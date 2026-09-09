@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 import {
   AUDIT_ACCEPTANCE_KINDS,
   auditAcceptanceSql,
+  auditMarkerRowsSql,
   evaluateAuditChannels,
   evaluateAuditEvidence,
+  evaluateAuditMarkers,
 } from '../src/staging/auditAcceptance.ts';
 import { staffLogOverwrites } from '../src/staging/provision.ts';
 
@@ -107,8 +109,11 @@ test('acceptance evidence requires every kind, unique entry ids and completed mi
     rows: 1,
     distinct_entries: 1,
     incomplete_deliveries: 0,
+    sink_tamper_rows: event_kind === 'message_delete' ? 1 : 0,
   }));
-  assert.deepEqual(evaluateAuditEvidence(rows), { missing: [], duplicates: [], pendingDeliveries: [] });
+  assert.deepEqual(evaluateAuditEvidence(rows), {
+    missing: [], duplicates: [], pendingDeliveries: [], missingSinkTamper: false,
+  });
 
   assert.deepEqual(evaluateAuditEvidence(rows.slice(1)).missing, ['message_edit']);
   const duplicate = rows.map((row) => row.event_kind === 'message_delete' ? { ...row, rows: 2 } : row);
@@ -128,4 +133,17 @@ test('acceptance SQL enumerates every logging parity event and the staging guild
   assert.match(sql, /COUNT\(DISTINCT entry_id\)/);
   assert.match(sql, /delivery_state <> 'delivered'/);
   assert.match(sql, /incomplete_deliveries/);
+  assert.match(sql, /sink_tamper_rows/);
+  const markerSql = auditMarkerRowsSql(GUILD, since);
+  assert.match(markerSql, /mirror_channel_id IS NOT NULL/);
+  assert.match(markerSql, /mirror_message_id/);
+});
+
+test('Discord marker reconciliation requires exactly one message matching the persisted id', () => {
+  assert.deepEqual(evaluateAuditMarkers([
+    { entryId: 'ok', mirrorMessageId: 'm1', channelId: 'c', messageIds: ['m1'] },
+    { entryId: 'missing', mirrorMessageId: 'm2', channelId: 'c', messageIds: [] },
+    { entryId: 'duplicate', mirrorMessageId: 'm3', channelId: 'c', messageIds: ['m3', 'm4'] },
+    { entryId: 'wrong-id', mirrorMessageId: 'm5', channelId: 'c', messageIds: ['m6'] },
+  ]), { missing: ['missing'], duplicates: ['duplicate'], messageIdMismatches: ['wrong-id'] });
 });

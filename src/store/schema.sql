@@ -181,9 +181,6 @@ CREATE INDEX IF NOT EXISTS idx_operational_audit_kind
   ON operational_audit_log (guild_id, event_kind, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_operational_audit_target
   ON operational_audit_log (guild_id, target_id, occurred_at);
-CREATE INDEX IF NOT EXISTS idx_operational_audit_delivery
-  ON operational_audit_log (delivery_state, created_at);
-
 CREATE TABLE IF NOT EXISTS moderation_warnings (
   id         TEXT PRIMARY KEY,
   guild_id   TEXT NOT NULL,

@@ -1,12 +1,12 @@
 import { EventEmitter } from 'node:events';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { AuditLogEvent, ChannelType, Events, GatewayIntentBits, Partials, type Client } from 'discord.js';
+import { AuditLogEvent, ChannelType, Collection, Events, GatewayIntentBits, Partials, type Client } from 'discord.js';
 import { createClient, INTENTS, registerHandlers } from '../src/discord/client.ts';
 import { moderationAuditEvent } from '../src/audit/discordEvents.ts';
 import { formatAuditEvent, type OperationalAuditEvent } from '../src/audit/events.ts';
 import { makeOperationalAudit } from '../src/audit/service.ts';
-import { OperationalAuditStore } from '../src/audit/store.ts';
+import { deliveryNonce, OperationalAuditStore } from '../src/audit/store.ts';
 import { openDb } from '../src/store/db.ts';
 import type { FunnelHandlers } from '../src/core/handlers.ts';
 import type { InviteTracker } from '../src/core/inviteTracker.ts';
@@ -250,6 +250,8 @@ test('audit-sink message tampering is stored but never remirrored', async () => 
     isTextBased: () => true,
     isDMBased: () => false,
     permissionsFor: () => ({ has: () => true }),
+    messages: { fetch: async () => new Collection() },
+    client: { user: { id: 'bot' } },
     send: async () => { sent++; return { id: 'mirror-message' }; },
   };
   const client = { channels: { cache: new Map([[CHANNEL_A, channel]]), fetch: async () => channel } } as unknown as Client;
@@ -284,6 +286,8 @@ test('failed audit delivery is retryable without duplicating the durable row', a
     isTextBased: () => true,
     isDMBased: () => false,
     permissionsFor: () => ({ has: () => true }),
+    messages: { fetch: async () => new Collection() },
+    client: { user: { id: 'bot' } },
     send: async () => {
       attempts++;
       if (attempts === 1) throw new Error('transient Discord failure');
@@ -312,25 +316,32 @@ test('failed audit delivery is retryable without duplicating the durable row', a
   const row = await store.get(event.entryId);
   assert.equal(row?.deliveryState, 'delivered');
   assert.equal(row?.deliveryAttempts, 2);
-  assert.equal(row?.deliveryNonce, event.entryId);
+  assert.equal(row?.deliveryNonce, deliveryNonce(event.entryId));
+  assert.ok((row?.deliveryNonce.length ?? 26) <= 25);
   assert.equal(row?.mirrorMessageId, 'mirror-message-1');
   const count = await db.prepare(`SELECT COUNT(*) AS n FROM operational_audit_log`).get<{ n: number }>();
   assert.equal(Number(count?.n), 1);
   await db.close();
 });
 
-test('post-send acknowledgement retries reuse the durable Discord nonce', async () => {
+test('post-send acknowledgement retries reconcile the durable Discord marker', async () => {
   const db = await openDb(':memory:');
   const store = new OperationalAuditStore(db);
   const sends: Array<{ nonce?: string | number; enforceNonce?: boolean }> = [];
+  let existingMessage: { id: string; author: { id: string }; content: string } | null = null;
   const channel = {
     id: CHANNEL_A,
     guild: { id: GUILD, members: { me: { id: 'bot' } } },
     isTextBased: () => true,
     isDMBased: () => false,
     permissionsFor: () => ({ has: () => true }),
-    send: async (body: { nonce?: string | number; enforceNonce?: boolean }) => {
+    messages: {
+      fetch: async () => new Collection(existingMessage ? [[existingMessage.id, existingMessage]] : []),
+    },
+    client: { user: { id: 'bot' } },
+    send: async (body: { nonce?: string | number; enforceNonce?: boolean; content?: string }) => {
       sends.push(body);
+      existingMessage = { id: 'same-discord-message', author: { id: 'bot' }, content: body.content ?? '' };
       return { id: 'same-discord-message' };
     },
   };
@@ -368,9 +379,9 @@ test('post-send acknowledgement retries reuse the durable Discord nonce', async 
   );
   assert.equal(await sink.retryPending(), 1);
 
-  assert.equal(sends.length, 2);
-  assert.deepEqual(sends.map((body) => body.nonce), [event.entryId, event.entryId]);
-  assert.deepEqual(sends.map((body) => body.enforceNonce), [true, true]);
+  assert.equal(sends.length, 1);
+  assert.deepEqual(sends.map((body) => body.nonce), [deliveryNonce(event.entryId)]);
+  assert.deepEqual(sends.map((body) => body.enforceNonce), [true]);
   const row = await store.get(event.entryId);
   assert.equal(row?.deliveryState, 'delivered');
   assert.equal(row?.mirrorMessageId, 'same-discord-message');
@@ -387,6 +398,8 @@ test('audit delivery failures redact thrown error text from process logs', async
     isTextBased: () => true,
     isDMBased: () => false,
     permissionsFor: () => ({ has: () => true }),
+    messages: { fetch: async () => new Collection() },
+    client: { user: { id: 'bot' } },
     send: async () => { throw new Error(sentinel); },
   };
   const client = { channels: { cache: new Map([[CHANNEL_A, channel]]), fetch: async () => channel } } as unknown as Client;
@@ -420,6 +433,45 @@ test('audit delivery failures redact thrown error text from process logs', async
   await db.close();
 });
 
+
+
+
+
+test('audit database write errors redact thrown text from process logs', async () => {
+  const sentinel = 'SENTINEL_DB_PASSWORD_FROM_DRIVER';
+  const store = {
+    async record() { throw new Error(sentinel); },
+    async claim() { return null; },
+    async claimPending() { return []; },
+    async markDeliveryFailed() {},
+    async markDelivered() {},
+    async markAcknowledgementFailed() {},
+  } as unknown as OperationalAuditStore;
+  const client = { channels: { cache: new Map(), fetch: async () => null } } as unknown as Client;
+  const sink = makeOperationalAudit(client, {
+    guildId: GUILD, channels: { audit: CHANNEL_A, voice: null, moderation: null }, store,
+  });
+  let stderr = '';
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string | Uint8Array) => { stderr += String(chunk); return true; }) as typeof process.stderr.write;
+  try {
+    assert.equal(await sink.record({
+      entryId: 'redacted-store-failure', kind: 'message_delete', channel: 'audit',
+      guildId: GUILD, occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
+    }), false);
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+  assert.doesNotMatch(stderr, new RegExp(sentinel));
+  assert.match(stderr, /audit_store_write_failed/);
+});
+test('delivery nonces are deterministic and fit Discord production bounds', () => {
+  const entryId = 'member-update:1545644954272137297:900000000000000001:2026-09-09T07:00:00.000Z:' + 'x'.repeat(120);
+  assert.equal(deliveryNonce(entryId), deliveryNonce(entryId));
+  assert.match(deliveryNonce(entryId), /^oa_[A-Za-z0-9_-]+$/);
+  assert.ok(deliveryNonce(entryId).length <= 25);
+  assert.notEqual(deliveryNonce(entryId), deliveryNonce(entryId + ':different'));
+});
 test('Discord mirror refuses a configured channel from another guild', async () => {
   let sent = 0;
   const channel = {
@@ -431,6 +483,8 @@ test('Discord mirror refuses a configured channel from another guild', async () 
     isTextBased: () => true,
     isDMBased: () => false,
     permissionsFor: () => ({ has: () => true }),
+    messages: { fetch: async () => new Collection() },
+    client: { user: { id: 'bot' } },
     send: async () => { sent++; return { id: 'mirror-message' }; },
   };
   const client = {

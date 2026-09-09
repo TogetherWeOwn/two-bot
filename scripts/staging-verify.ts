@@ -46,9 +46,12 @@ import { evaluateHierarchy, type PartialRole } from '../src/staging/provision.ts
 import {
   AUDIT_ACCEPTANCE_KINDS,
   auditAcceptanceSql,
+  auditMarkerRowsSql,
   evaluateAuditChannels,
   evaluateAuditEvidence,
+  evaluateAuditMarkers,
   type AuditAcceptanceRow,
+  type AuditMarkerCount,
 } from '../src/staging/auditAcceptance.ts';
 import { openDb } from '../src/store/db.ts';
 
@@ -100,6 +103,7 @@ try {
 let fails = 0;
 let warns = 0;
 const pass = (m: string, d = '') => console.log(`  PASS  ${m}${d && `  ${d}`}`);
+let stagingChannels: Array<{ id: string; name: string; type: number; permission_overwrites?: Array<{ id: string; type?: number; allow?: string; deny: string }> }> = [];
 const warn = (m: string, d = '') => (warns++, console.log(`  WARN  ${m}${d && `  ${d}`}`));
 const fail = (m: string, d = '') => (fails++, console.log(`  FAIL  ${m}${d && `  ${d}`}`));
 
@@ -174,12 +178,13 @@ const channels = await api<
     id: string;
     name: string;
     type: number;
-    permission_overwrites?: Array<{ id: string; deny: string }>;
+    permission_overwrites?: Array<{ id: string; type?: number; allow?: string; deny: string }>;
   }>
 >(`/guilds/${guildId}/channels`);
 if (channels.status !== 200 || !channels.body) {
   fail('cannot read channels', `HTTP ${channels.status}`);
 } else {
+  stagingChannels = channels.body;
   const text = new Set(channels.body.filter((c) => c.type === 0).map((c) => c.name));
   const voice = new Set(channels.body.filter((c) => c.type === 2).map((c) => c.name));
   for (const name of STAGING_TEXT_CHANNELS) {
@@ -286,6 +291,29 @@ if (app.status === 200 && app.body) {
   warn('could not read the application flags', `HTTP ${app.status}`);
 }
 
+
+async function discordMarkerMessageIds(channelId: string, entryId: string, since: string): Promise<string[]> {
+  const marker = `audit-event:${entryId}`;
+  const matches: string[] = [];
+  let before = '';
+  for (let page = 0; page < 20; page++) {
+    const query = new URLSearchParams({ limit: '100' });
+    if (before) query.set('before', before);
+    const result = await api<Array<{ id: string; content: string; timestamp: string; author: { id: string } }>>(
+      `/channels/${channelId}/messages?${query}`,
+    );
+    if (result.status !== 200 || !result.body) throw new Error(`Discord marker fetch failed for channel ${channelId}: HTTP ${result.status}`);
+    for (const message of result.body) {
+      if (Date.parse(message.timestamp) < Date.parse(since)) return matches;
+      if (message.author.id === botId && message.content.includes(marker)) matches.push(message.id);
+    }
+    if (result.body.length < 100) return matches;
+    before = result.body.at(-1)?.id ?? '';
+    if (!before) return matches;
+  }
+  throw new Error(`Discord marker scan exceeded 2000 messages for channel ${channelId}`);
+}
+
 // 7. Reconcile the controlled live scenarios against the staging database.
 // The explicit lower bound prevents yesterday's evidence hiding a dead gateway
 // listener today.
@@ -300,6 +328,37 @@ try {
     else if (evidence.duplicates.includes(kind)) fail(`${kind} contains duplicate entry ids`, 'rows must equal distinct entry_id count');
     else if (evidence.pendingDeliveries.includes(kind)) fail(`${kind} has an incomplete audit mirror`, 'delivery_state must be delivered');
     else pass(`${kind} evidence`, `durable and delivered since ${auditSince}`);
+  }
+  if (evidence.missingSinkTamper) {
+    fail('audit-sink tamper evidence is missing', 'delete or edit one controlled mirror after the lower bound');
+  } else {
+    pass('audit-sink tamper evidence', 'durable with delivery_state=none and no recursive mirror');
+  }
+
+  const markerRows = await auditDb.prepare(auditMarkerRowsSql(guildId, auditSince)).all<{
+    entry_id: string; mirror_channel_id: string; mirror_message_id: string | null;
+  }>();
+  const channelById = new Map(stagingChannels.map((channel) => [channel.id, channel]));
+  const markerCounts: AuditMarkerCount[] = [];
+  for (const row of markerRows) {
+    const channel = channelById.get(row.mirror_channel_id);
+    if (!channel) {
+      markerCounts.push({ entryId: row.entry_id, mirrorMessageId: row.mirror_message_id, channelId: row.mirror_channel_id, messageIds: [] });
+      continue;
+    }
+    markerCounts.push({
+      entryId: row.entry_id,
+      mirrorMessageId: row.mirror_message_id,
+      channelId: row.mirror_channel_id,
+      messageIds: await discordMarkerMessageIds(row.mirror_channel_id, row.entry_id, auditSince),
+    });
+  }
+  const markers = evaluateAuditMarkers(markerCounts);
+  for (const entryId of markers.missing) fail('audit mirror marker is missing', entryId);
+  for (const entryId of markers.duplicates) fail('audit mirror marker is duplicated', entryId);
+  for (const entryId of markers.messageIdMismatches) fail('audit mirror message id does not match Discord', entryId);
+  if (!markers.missing.length && !markers.duplicates.length && !markers.messageIdMismatches.length) {
+    pass('Discord audit mirror reconciliation', `${markerCounts.length} durable rows each have exactly one matching marker`);
   }
 } catch (err) {
   fail('audit evidence query failed', String(err));
