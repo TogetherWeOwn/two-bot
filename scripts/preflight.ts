@@ -100,11 +100,13 @@ const CONTENT = (flags >> 18) & 1 || (flags >> 19) & 1;
 if (MEMBERS) pass('Server Members Intent ON', 'joins and leaves will be received');
 else fail('Server Members Intent OFF', 'no join tracking at all - portal > Bot > Privileged Gateway Intents');
 
-// We never request this intent in code, so it cannot leak into the database.
-// Having it enabled anyway widens what the application is capable of reading,
-// which is a claim we make to members in docs/PRIVACY.md.
-if (CONTENT) warn('Message Content Intent ON', 'we never request it in code; turn it OFF to match our privacy stance');
-else pass('Message Content Intent OFF', 'matches docs/PRIVACY.md');
+// Automod alone requests this intent. Its message cache is disabled and content
+// is never written, but the portal toggle must match the configured runtime.
+const automodEnabled = process.env.TWO_AUTOMOD === '1';
+if (automodEnabled && CONTENT) pass('Message Content Intent ON', 'required by TWO_AUTOMOD=1');
+else if (automodEnabled) fail('Message Content Intent OFF', 'automod cannot inspect messages - enable the portal toggle');
+else if (CONTENT) warn('Message Content Intent ON', 'TWO_AUTOMOD is off; turn the unused capability OFF');
+else pass('Message Content Intent OFF', 'automod is off; matches docs/PRIVACY.md');
 
 // 3. Which servers, and with what permissions?
 const guilds = await api('/users/@me/guilds');
