@@ -152,6 +152,10 @@ test('SQLite schema metadata records the self-role audit migration at its unique
     1,
   );
   assert.equal(
+    Number((await db.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE id = '0016_self_role_recovery'`).get<{ count: number }>())?.count),
+    1,
+  );
+  assert.equal(
     Number((await db.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE id = '0013_self_role_audit'`).get<{ count: number }>())?.count),
     0,
   );
@@ -160,6 +164,67 @@ test('SQLite schema metadata records the self-role audit migration at its unique
     0,
   );
   await db.close();
+});
+
+test('opening a baseline self-role SQLite database adds recovery columns and claims idempotently', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'two-bot-self-role-upgrade-'));
+  const path = join(dir, 'two.db');
+  const raw = new DatabaseSync(path);
+  raw.exec(`
+    CREATE TABLE self_role_audit (
+      event_id TEXT PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      panel_id TEXT NOT NULL,
+      member_id TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      option_key TEXT,
+      role_id TEXT,
+      source TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      code TEXT,
+      reason TEXT,
+      added_role_ids TEXT NOT NULL,
+      removed_role_ids TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    INSERT INTO self_role_audit VALUES
+      ('old-event', 'g', 'p', 'm', 's', 'red', 'r', 'button', 'add',
+       'assigned', NULL, NULL, '["r"]', '[]', '2026-09-09T00:00:00.000Z');
+    INSERT INTO self_role_audit VALUES
+      ('interrupted-event', 'g', 'p', 'm', 's', 'blue', 'b', 'button', 'add',
+       'processing', NULL, NULL, '[]', '[]', '2026-09-09T00:01:00.000Z');
+  `);
+  raw.close();
+
+  const db = await openSqlite(path);
+  const columns = await db.prepare(`PRAGMA table_info(self_role_audit)`).all<{ name: string }>();
+  for (const name of [
+    'attempted_added_role_ids', 'compensated_added_role_ids', 'desired_role_ids',
+    'pre_mutation_role_ids', 'claim_token', 'claim_generation', 'processing_expires_at',
+  ]) assert.ok(columns.some((column) => column.name === name), name);
+  assert.equal(
+    Number((await db.prepare(`SELECT COUNT(*) AS count FROM self_role_panel_claims`).get<{ count: number }>())?.count),
+    0,
+  );
+  const preserved = await db.prepare(`SELECT outcome, added_role_ids FROM self_role_audit WHERE event_id = 'old-event'`).get();
+  assert.deepEqual({ ...preserved }, { outcome: 'assigned', added_role_ids: '["r"]' });
+  const interrupted = await db.prepare(
+    `SELECT outcome, code FROM self_role_audit WHERE event_id = 'interrupted-event'`,
+  ).get();
+  assert.deepEqual({ ...interrupted }, {
+    outcome: 'rejected',
+    code: 'interrupted_before_recovery',
+  });
+  await db.close();
+
+  const reopened = await openSqlite(path);
+  assert.equal(
+    Number((await reopened.prepare(`SELECT COUNT(*) AS count FROM self_role_audit`).get<{ count: number }>())?.count),
+    2,
+  );
+  await reopened.close();
+  await rm(dir, { recursive: true, force: true });
 });
 
 test('concurrent SQLite opens perform the leveling rebuild once', async () => {

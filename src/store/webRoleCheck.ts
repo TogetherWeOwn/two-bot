@@ -69,6 +69,8 @@ export const BOT_TABLES = [
   'moderation_idempotency',
   'automod_violations',
   'automod_processed_messages',
+  'self_role_audit',
+  'self_role_panel_claims',
   // 0003 — the tables behind this contract. The website reads the views over
   // them, never these.
   'web_contract_meta',

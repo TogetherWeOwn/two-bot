@@ -13,28 +13,15 @@ CREATE TABLE IF NOT EXISTS self_role_audit (
   role_id           TEXT,
   source            TEXT NOT NULL,
   operation         TEXT NOT NULL,
-  outcome                       TEXT NOT NULL,
-  code                          TEXT,
-  reason                        TEXT,
-  added_role_ids                TEXT NOT NULL,
-  removed_role_ids              TEXT NOT NULL,
-  attempted_added_role_ids      TEXT NOT NULL DEFAULT '[]',
-  attempted_removed_role_ids    TEXT NOT NULL DEFAULT '[]',
-  compensated_added_role_ids    TEXT NOT NULL DEFAULT '[]',
-  compensated_removed_role_ids  TEXT NOT NULL DEFAULT '[]',
-  unresolved_added_role_ids     TEXT NOT NULL DEFAULT '[]',
-  unresolved_removed_role_ids   TEXT NOT NULL DEFAULT '[]',
-  desired_role_ids              TEXT NOT NULL DEFAULT '[]',
-  pre_mutation_role_ids         TEXT NOT NULL DEFAULT '[]',
-  claim_token                   TEXT,
-  claim_generation              INTEGER NOT NULL DEFAULT 0,
-  processing_expires_at         TIMESTAMPTZ,
-  created_at                    TEXT NOT NULL
+  outcome           TEXT NOT NULL,
+  code              TEXT,
+  reason            TEXT,
+  added_role_ids    TEXT NOT NULL,
+  removed_role_ids  TEXT NOT NULL,
+  created_at        TEXT NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_self_role_audit_panel_time
   ON self_role_audit (guild_id, panel_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_self_role_audit_member_time
   ON self_role_audit (guild_id, member_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_self_role_audit_processing_lease
-  ON self_role_audit (outcome, processing_expires_at);

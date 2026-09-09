@@ -39,6 +39,9 @@ export interface Migration {
  */
 const COMPATIBLE_CHECKSUMS = new Map([
   ['0010_leveling:199003b7e199c4f4', 'dce57869e8d97bad'],
+  // PR #84 briefly carried the recovery columns inside 0015. The restored
+  // baseline plus additive 0016 converges that exact schema without data loss.
+  ['0015_self_role_audit:cb0a092fa96c904d', 'bc32090819445847'],
 ]);
 
 export function loadMigrations(dir: string = MIGRATIONS_DIR): Migration[] {

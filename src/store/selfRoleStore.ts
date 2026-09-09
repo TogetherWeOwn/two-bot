@@ -10,6 +10,16 @@ export interface SelfRoleClaim {
   recovered: boolean;
   desiredRoleIds: string[];
   preMutationRoleIds: string[];
+  renewAfterMs?: number;
+}
+
+export interface SelfRolePanelClaim {
+  guildId: string;
+  memberId: string;
+  panelId: string;
+  token: string;
+  generation: number;
+  renewAfterMs?: number;
 }
 
 export class SelfRoleStore {
@@ -27,7 +37,7 @@ export class SelfRoleStore {
   async claimAudit(row: SelfRoleAuditRow): Promise<SelfRoleClaim | null> {
     const now = this.now();
     const claimedAt = now.toISOString();
-    const expiresAt = new Date(now.getTime() + this.leaseMs).toISOString();
+    const expiresAt = this.expiresAt(now);
     const token = randomUUID();
     return this.db.transaction(async (tx) => {
       const inserted = await tx.prepare(
@@ -48,7 +58,7 @@ export class SelfRoleStore {
         JSON.stringify(row.desiredRoleIds ?? []), JSON.stringify(row.preMutationRoleIds ?? []), token,
         expiresAt, claimedAt,
       );
-      if (inserted) return claim(token, 1, false, row);
+      if (inserted) return claim(token, 1, false, row, this.renewAfterMs());
 
       const prior = await tx.prepare(
         `SELECT claim_generation, desired_role_ids, pre_mutation_role_ids
@@ -68,6 +78,7 @@ export class SelfRoleStore {
         recovered: true,
         desiredRoleIds: parseIds(prior.desired_role_ids),
         preMutationRoleIds: parseIds(prior.pre_mutation_role_ids),
+        renewAfterMs: this.renewAfterMs(),
       };
     });
   }
@@ -75,9 +86,87 @@ export class SelfRoleStore {
   async ownsClaim(eventId: string, claim: SelfRoleClaim): Promise<boolean> {
     const row = await this.db.prepare(
       `SELECT event_id FROM self_role_audit
-        WHERE event_id = ? AND outcome = 'processing' AND claim_token = ? AND claim_generation = ?`,
-    ).get(eventId, claim.token, claim.generation);
+        WHERE event_id = ? AND outcome = 'processing' AND claim_token = ? AND claim_generation = ?
+          AND processing_expires_at > ?`,
+    ).get(eventId, claim.token, claim.generation, this.now().toISOString());
     return !!row;
+  }
+
+  async renewClaim(eventId: string, claim: SelfRoleClaim): Promise<boolean> {
+    const now = this.now();
+    const result = await this.db.prepare(
+      `UPDATE self_role_audit SET processing_expires_at = ?
+        WHERE event_id = ? AND outcome = 'processing' AND claim_token = ? AND claim_generation = ?
+          AND processing_expires_at > ?`,
+    ).run(this.expiresAt(now), eventId, claim.token, claim.generation, now.toISOString());
+    return result.changes === 1;
+  }
+
+  /** Try once to claim an exclusive guild/member/panel lane. */
+  async claimPanel(guildId: string, memberId: string, panelId: string): Promise<SelfRolePanelClaim | null> {
+    const now = this.now();
+    const claimedAt = now.toISOString();
+    const expiresAt = this.expiresAt(now);
+    const token = randomUUID();
+    return this.db.transaction(async (tx) => {
+      const inserted = await tx.prepare(
+        `INSERT INTO self_role_panel_claims
+           (guild_id, member_id, panel_id, claim_token, claim_generation, processing_expires_at)
+         VALUES (?, ?, ?, ?, 1, ?)
+         ON CONFLICT (guild_id, member_id, panel_id) DO NOTHING
+         RETURNING guild_id`,
+      ).get(guildId, memberId, panelId, token, expiresAt);
+      if (inserted) return { guildId, memberId, panelId, token, generation: 1, renewAfterMs: this.renewAfterMs() };
+
+      const prior = await tx.prepare(
+        `SELECT claim_generation FROM self_role_panel_claims
+          WHERE guild_id = ? AND member_id = ? AND panel_id = ? AND processing_expires_at <= ?`,
+      ).get<{ claim_generation: number }>(guildId, memberId, panelId, claimedAt);
+      if (!prior) return null;
+      const generation = Number(prior.claim_generation) + 1;
+      const recovered = await tx.prepare(
+        `UPDATE self_role_panel_claims
+            SET claim_token = ?, claim_generation = ?, processing_expires_at = ?
+          WHERE guild_id = ? AND member_id = ? AND panel_id = ?
+            AND claim_generation = ? AND processing_expires_at <= ?`,
+      ).run(token, generation, expiresAt, guildId, memberId, panelId, prior.claim_generation, claimedAt);
+      return recovered.changes === 1
+        ? { guildId, memberId, panelId, token, generation, renewAfterMs: this.renewAfterMs() }
+        : null;
+    });
+  }
+
+  async ownsPanelClaim(claim: SelfRolePanelClaim): Promise<boolean> {
+    const row = await this.db.prepare(
+      `SELECT guild_id FROM self_role_panel_claims
+        WHERE guild_id = ? AND member_id = ? AND panel_id = ?
+          AND claim_token = ? AND claim_generation = ? AND processing_expires_at > ?`,
+    ).get(
+      claim.guildId, claim.memberId, claim.panelId, claim.token, claim.generation,
+      this.now().toISOString(),
+    );
+    return !!row;
+  }
+
+  async renewPanelClaim(claim: SelfRolePanelClaim): Promise<boolean> {
+    const now = this.now();
+    const result = await this.db.prepare(
+      `UPDATE self_role_panel_claims SET processing_expires_at = ?
+        WHERE guild_id = ? AND member_id = ? AND panel_id = ?
+          AND claim_token = ? AND claim_generation = ? AND processing_expires_at > ?`,
+    ).run(
+      this.expiresAt(now), claim.guildId, claim.memberId, claim.panelId,
+      claim.token, claim.generation, now.toISOString(),
+    );
+    return result.changes === 1;
+  }
+
+  async releasePanelClaim(claim: SelfRolePanelClaim): Promise<void> {
+    await this.db.prepare(
+      `DELETE FROM self_role_panel_claims
+        WHERE guild_id = ? AND member_id = ? AND panel_id = ?
+          AND claim_token = ? AND claim_generation = ?`,
+    ).run(claim.guildId, claim.memberId, claim.panelId, claim.token, claim.generation);
   }
 
   async finishAudit(row: SelfRoleAuditRow, claim?: SelfRoleClaim): Promise<void> {
@@ -93,6 +182,7 @@ export class SelfRoleStore {
         recovered: false,
         desiredRoleIds: parseIds(current.desired_role_ids),
         preMutationRoleIds: parseIds(current.pre_mutation_role_ids),
+        renewAfterMs: this.renewAfterMs(),
       };
     }
     const result = await this.db.prepare(
@@ -112,15 +202,30 @@ export class SelfRoleStore {
     );
     if (result.changes !== 1) throw new Error(`self-role audit ${row.eventId} claim is stale`);
   }
+
+  private expiresAt(now: Date): string {
+    return new Date(now.getTime() + this.leaseMs).toISOString();
+  }
+
+  private renewAfterMs(): number {
+    return Math.max(1, Math.floor(this.leaseMs / 3));
+  }
 }
 
-function claim(token: string, generation: number, recovered: boolean, row: SelfRoleAuditRow): SelfRoleClaim {
+function claim(
+  token: string,
+  generation: number,
+  recovered: boolean,
+  row: SelfRoleAuditRow,
+  renewAfterMs: number,
+): SelfRoleClaim {
   return {
     token,
     generation,
     recovered,
     desiredRoleIds: row.desiredRoleIds ?? [],
     preMutationRoleIds: row.preMutationRoleIds ?? [],
+    renewAfterMs,
   };
 }
 

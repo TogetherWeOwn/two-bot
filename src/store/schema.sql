@@ -289,6 +289,16 @@ CREATE INDEX IF NOT EXISTS idx_self_role_audit_panel_time
 CREATE INDEX IF NOT EXISTS idx_self_role_audit_member_time
   ON self_role_audit (guild_id, member_id, created_at);
 
+CREATE TABLE IF NOT EXISTS self_role_panel_claims (
+  guild_id              TEXT NOT NULL,
+  member_id             TEXT NOT NULL,
+  panel_id              TEXT NOT NULL,
+  claim_token           TEXT NOT NULL,
+  claim_generation      INTEGER NOT NULL,
+  processing_expires_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, member_id, panel_id)
+);
+
 -- The website's event_key -> Discord's scheduled event id. This is what makes
 -- event.upsert an upsert.
 CREATE TABLE IF NOT EXISTS internal_discord_events (

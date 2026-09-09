@@ -823,6 +823,208 @@ test('concurrent exclusive selections serialize and recompute from forced member
   assert.ok(fetchArgs.every((args) => JSON.stringify(args) === JSON.stringify({ user: C, force: true })));
 });
 
+test('recovered button converges to persisted desired roles after the first add succeeded', async () => {
+  let now = new Date('2026-09-09T00:00:00.000Z');
+  const store = new SelfRoleStore(harness.db, { now: () => now, leaseMs: 1_000 });
+  const roleState = new Set([A]);
+  const removed: string[] = [];
+  const roles = new Map([
+    [A, { id: A, managed: false, editable: true, permissions: { bitfield: 0n } }],
+    [B, { id: B, managed: false, editable: true, permissions: { bitfield: 0n } }],
+  ]);
+  const row = {
+    eventId: 'recovered-button', guildId: C, panelId: panel.id, memberId: B, sourceId: panel.messageId,
+    optionKey: 'red', roleId: A, source: 'button' as const, operation: 'replace' as const,
+    desiredRoleIds: [A], preMutationRoleIds: [], outcome: 'processing' as const, code: null, reason: null,
+    addedRoleIds: [], removedRoleIds: [], attemptedAddedRoleIds: [], attemptedRemovedRoleIds: [],
+    compensatedAddedRoleIds: [], compensatedRemovedRoleIds: [], unresolvedAddedRoleIds: [], unresolvedRemovedRoleIds: [],
+  };
+  assert.ok(await store.claimAudit(row));
+  now = new Date('2026-09-09T00:00:01.001Z');
+  const member = {
+    id: B,
+    guild: {
+      id: C,
+      members: {
+        me: { permissions: { has: () => true } },
+        fetch: async () => ({ ...member, roles: { ...member.roles, cache: new Map([...roleState].map((id) => [id, { id }])) } }),
+      },
+      roles: { fetch: async () => roles },
+      channels: { fetch: async () => new Map() },
+    },
+    roles: {
+      cache: new Map([...roleState].map((id) => [id, { id }])),
+      add: async (roleId: string) => { roleState.add(roleId); },
+      remove: async (roleId: string) => { removed.push(roleId); roleState.delete(roleId); },
+    },
+  };
+
+  await applyRoleDelta({
+    panel, member: member as never, source: 'button', sourceId: panel.messageId,
+    eventId: row.eventId, optionKey: 'red', roleId: A, operation: 'replace',
+    addRoleIds: [], removeRoleIds: [], requestedOptionKey: 'red', requestedToggle: true,
+    deps: { panels: [panel], store },
+  });
+
+  assert.deepEqual(removed, []);
+  assert.deepEqual([...roleState], [A]);
+  const stored = await harness.db.prepare(
+    `SELECT outcome, desired_role_ids, pre_mutation_role_ids, added_role_ids, removed_role_ids
+       FROM self_role_audit WHERE event_id = ?`,
+  ).get<Record<string, unknown>>(row.eventId);
+  assert.deepEqual({ ...stored }, {
+    outcome: 'assigned',
+    desired_role_ids: '["111111111111111111"]',
+    pre_mutation_role_ids: '[]',
+    added_role_ids: '["111111111111111111"]',
+    removed_role_ids: '[]',
+  });
+});
+
+test('dispatch keeps fetched @everyone for effective channel permission validation', async () => {
+  const roleState = new Set<string>();
+  const added: string[] = [];
+  const safePanel = { ...panel, options: [{ ...panel.options[0] }] };
+  const roles = new Map([
+    [A, { id: A, managed: false, editable: true, permissions: { bitfield: 0n } }],
+    [C, { id: C, managed: false, editable: false, permissions: { bitfield: 0n } }],
+  ]);
+  const channel = { id: B, name: 'general', permissionOverwrites: { cache: new Map() } };
+  const member = {
+    id: B,
+    guild: {
+      id: C,
+      members: {
+        me: { permissions: { has: () => true } },
+        fetch: async () => ({ ...member, roles: { ...member.roles, cache: new Map([...roleState].map((id) => [id, { id }])) } }),
+      },
+      roles: { fetch: async () => roles },
+      channels: { fetch: async () => new Map([[B, channel]]) },
+    },
+    roles: {
+      cache: new Map(),
+      add: async (roleId: string) => { added.push(roleId); roleState.add(roleId); },
+      remove: async (roleId: string) => { roleState.delete(roleId); },
+    },
+  };
+  const store = { claimAudit: async (row: { desiredRoleIds?: string[]; preMutationRoleIds?: string[] }) => ({ token: 'test', generation: 1, recovered: false, desiredRoleIds: row.desiredRoleIds ?? [], preMutationRoleIds: row.preMutationRoleIds ?? [] }), finishAudit: async () => {} };
+
+  await applyRoleDelta({
+    panel: safePanel, member: member as never, source: 'button', sourceId: safePanel.messageId,
+    eventId: 'everyone-dispatch', optionKey: 'red', roleId: A, operation: 'add',
+    addRoleIds: [A], removeRoleIds: [], deps: { panels: [safePanel], store: store as never },
+  });
+
+  assert.deepEqual(added, [A]);
+});
+
+test('independent stores serialize exclusive changes through the shared database', async () => {
+  const firstStore = new SelfRoleStore(harness.db, { leaseMs: 2_000 });
+  const secondStore = new SelfRoleStore(harness.db, { leaseMs: 2_000 });
+  const roleState = new Set<string>();
+  let firstStarted!: () => void;
+  const started = new Promise<void>((resolve) => { firstStarted = resolve; });
+  let releaseFirst!: () => void;
+  const blocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const roles = new Map(panel.options.map((option) => [
+    option.roleId,
+    { id: option.roleId, managed: false, editable: true, permissions: { bitfield: 0n } },
+  ]));
+  const makeMember = () => {
+    const member = {
+      id: C,
+      guild: {
+        id: A,
+        members: {
+          me: { permissions: { has: () => true } },
+          fetch: async () => ({ ...member, roles: { ...member.roles, cache: new Map([...roleState].map((id) => [id, { id }])) } }),
+        },
+        roles: { fetch: async () => roles },
+        channels: { fetch: async () => new Map() },
+      },
+      roles: {
+        cache: new Map(),
+        remove: async (roleId: string) => { roleState.delete(roleId); },
+        add: async (roleId: string) => {
+          if (roleId === A) { firstStarted(); await blocked; }
+          roleState.add(roleId);
+        },
+      },
+    };
+    return member;
+  };
+  const red = applyRoleDelta({
+    panel, member: makeMember() as never, source: 'button', sourceId: panel.messageId,
+    eventId: 'shared-red', optionKey: 'red', roleId: A, operation: 'replace', addRoleIds: [], removeRoleIds: [],
+    requestedOptionKey: 'red', deps: { panels: [panel], store: firstStore },
+  });
+  await started;
+  const blue = applyRoleDelta({
+    panel, member: makeMember() as never, source: 'button', sourceId: panel.messageId,
+    eventId: 'shared-blue', optionKey: 'blue', roleId: B, operation: 'replace', addRoleIds: [], removeRoleIds: [],
+    requestedOptionKey: 'blue', deps: { panels: [panel], store: secondStore },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.deepEqual([...roleState], []);
+  releaseFirst();
+  await Promise.all([red, blue]);
+  assert.deepEqual([...roleState], [B]);
+});
+
+test('stale in-flight claimant stops before audit or compensation after REST returns', async () => {
+  let owns = true;
+  let releaseAdd!: () => void;
+  const blocked = new Promise<void>((resolve) => { releaseAdd = resolve; });
+  let addStarted!: () => void;
+  const started = new Promise<void>((resolve) => { addStarted = resolve; });
+  let finishes = 0;
+  let compensations = 0;
+  const roleState = new Set<string>();
+  const roles = new Map(panel.options.map((option) => [
+    option.roleId,
+    { id: option.roleId, managed: false, editable: true, permissions: { bitfield: 0n } },
+  ]));
+  const member = {
+    id: C,
+    guild: {
+      id: A,
+      members: {
+        me: { permissions: { has: () => true } },
+        fetch: async () => ({ ...member, roles: { ...member.roles, cache: new Map([...roleState].map((id) => [id, { id }])) } }),
+      },
+      roles: { fetch: async () => roles },
+      channels: { fetch: async () => new Map() },
+    },
+    roles: {
+      cache: new Map(),
+      add: async (roleId: string, reason: string) => {
+        if (reason.endsWith('reconcile')) compensations++;
+        addStarted();
+        await blocked;
+        roleState.add(roleId);
+      },
+      remove: async (_roleId: string, reason: string) => { if (reason.endsWith('reconcile')) compensations++; },
+    },
+  };
+  const store = {
+    claimAudit: async (row: { desiredRoleIds?: string[]; preMutationRoleIds?: string[] }) => ({ token: 'old', generation: 1, recovered: false, desiredRoleIds: row.desiredRoleIds ?? [], preMutationRoleIds: row.preMutationRoleIds ?? [] }),
+    finishAudit: async () => { finishes++; },
+    ownsClaim: async () => owns,
+  };
+  const running = applyRoleDelta({
+    panel: { ...panel, exclusive: false }, member: member as never, source: 'button', sourceId: panel.messageId,
+    eventId: 'stale-in-flight', optionKey: 'red', roleId: A, operation: 'add', addRoleIds: [A], removeRoleIds: [],
+    deps: { panels: [panel], store: store as never },
+  });
+  await started;
+  owns = false;
+  releaseAdd();
+  await running;
+  assert.equal(finishes, 0);
+  assert.equal(compensations, 0);
+  assert.deepEqual([...roleState], [A]);
+});
+
 test('audit claims dedupe gateway deliveries before the final outcome is stored', async () => {
   const store = new SelfRoleStore(harness.db);
   const row = {
