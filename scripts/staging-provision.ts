@@ -27,7 +27,7 @@
  *
  *   text   #welcome #general #events #bot-log
  *   voice  Voice 1
- *   roles  Moderator, Member, Game: Test
+ *   roles  Moderator, Member, Game: Test, Game: Test 2, Color: Red, Color: Blue
  *
  * exactly as named in src/staging/spec.ts, because the integration suite
  * asserts on those names.

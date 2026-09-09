@@ -13,6 +13,16 @@ test('the applied leveling migration stays immutable and the XP ceiling is addit
   assert.ok(migrations.indexOf(ceiling) > migrations.indexOf(leveling!));
 });
 
+test('self-role audit keeps the reserved 0015 migration id', () => {
+  const migrations = loadMigrations();
+  const audit = migrations.find((migration) => migration.id === '0015_self_role_audit');
+  assert.ok(audit, 'self-role audit belongs after the ticket and automod migrations');
+  assert.equal(migrations.filter((migration) => migration.id === '0015_self_role_audit').length, 1);
+  assert.equal(migrations.some((migration) => migration.id === '0016_self_role_recovery'), false);
+  assert.equal(migrations.some((migration) => migration.id === '0013_self_role_audit'), false);
+  assert.equal(migrations.some((migration) => migration.id === '0010_self_role_audit'), false);
+});
+
 test('the briefly shipped constrained 0010 checksum is normalized before 0011 applies', async () => {
   const checksums = new Map<string, string | null>([
     ['0010_leveling', '199003b7e199c4f4'],

@@ -10,7 +10,8 @@ export type MigrationTable =
   | 'tickets'
   | 'ticket_transcripts'
   | 'automod_violations'
-  | 'automod_processed_messages';
+  | 'automod_processed_messages'
+  | 'self_role_audit';
 
 export function migrationValuesMatch(
   table: MigrationTable,

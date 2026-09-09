@@ -145,6 +145,23 @@ test('existing SQLite leveling tables gain the XP ceiling without losing data', 
   await reopened.close();
 });
 
+test('SQLite schema metadata records the self-role audit migration at its unique id', async () => {
+  const db = await openSqlite(':memory:');
+  assert.equal(
+    Number((await db.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE id = '0015_self_role_audit'`).get<{ count: number }>())?.count),
+    1,
+  );
+  assert.equal(
+    Number((await db.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE id = '0013_self_role_audit'`).get<{ count: number }>())?.count),
+    0,
+  );
+  assert.equal(
+    Number((await db.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE id = '0010_self_role_audit'`).get<{ count: number }>())?.count),
+    0,
+  );
+  await db.close();
+});
+
 test('concurrent SQLite opens perform the leveling rebuild once', async () => {
   const { path, raw } = legacyLevelingDb();
   raw.exec('PRAGMA journal_mode = WAL');

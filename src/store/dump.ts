@@ -57,6 +57,7 @@ export const DUMP_TABLES = [
   'ticket_transcripts',
   'automod_violations',
   'automod_processed_messages',
+  'self_role_audit',
 ] as const;
 export type DumpTable = (typeof DUMP_TABLES)[number];
 
@@ -133,6 +134,7 @@ function orderFor(table: DumpTable, columns: string[]): string {
   if (table === 'ticket_transcripts') return 'created_at, ticket_id';
   if (table === 'automod_violations') return 'guild_id, user_id';
   if (table === 'automod_processed_messages') return 'guild_id, message_id';
+  if (table === 'self_role_audit') return 'created_at, event_id';
   return columns.slice(0, 1).join(', ');
 }
 

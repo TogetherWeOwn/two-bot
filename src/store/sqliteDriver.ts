@@ -229,6 +229,19 @@ export async function openSqlite(path: string): Promise<Db> {
   // Mirrors migrations/0014_ticket_safety.sql for rollback databases that
   // created their ticket tables before the close-transition timestamp existed.
   ensureColumn(raw, 'tickets', 'closing_started_at', 'TEXT');
+  // Existing SQLite databases predate the recoverable self-role claim lease and
+  // the per-effect reconciliation evidence added to the audit ledger.
+  ensureColumn(raw, 'self_role_audit', 'attempted_added_role_ids', `TEXT NOT NULL DEFAULT '[]'`);
+  ensureColumn(raw, 'self_role_audit', 'attempted_removed_role_ids', `TEXT NOT NULL DEFAULT '[]'`);
+  ensureColumn(raw, 'self_role_audit', 'compensated_added_role_ids', `TEXT NOT NULL DEFAULT '[]'`);
+  ensureColumn(raw, 'self_role_audit', 'compensated_removed_role_ids', `TEXT NOT NULL DEFAULT '[]'`);
+  ensureColumn(raw, 'self_role_audit', 'unresolved_added_role_ids', `TEXT NOT NULL DEFAULT '[]'`);
+  ensureColumn(raw, 'self_role_audit', 'unresolved_removed_role_ids', `TEXT NOT NULL DEFAULT '[]'`);
+  ensureColumn(raw, 'self_role_audit', 'desired_role_ids', `TEXT NOT NULL DEFAULT '[]'`);
+  ensureColumn(raw, 'self_role_audit', 'pre_mutation_role_ids', `TEXT NOT NULL DEFAULT '[]'`);
+  ensureColumn(raw, 'self_role_audit', 'claim_token', 'TEXT');
+  ensureColumn(raw, 'self_role_audit', 'claim_generation', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(raw, 'self_role_audit', 'processing_expires_at', 'TEXT');
   // schema.sql is the whole schema, so every migration whose tables it already
   // contains is recorded as applied. Adding a migration means adding its
   // tables above and its id here, or a database that is later moved to
@@ -245,6 +258,7 @@ export async function openSqlite(path: string): Promise<Db> {
     '0012_moderation_recovery',
     '0013_tickets',
     '0014_ticket_safety',
+    '0015_self_role_audit',
   ]) {
     stamp.run(id, new Date().toISOString());
   }
