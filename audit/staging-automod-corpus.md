@@ -10,11 +10,11 @@ The custom engine is default-off. Before a live-guild rollout, run this corpus o
 | Row | Trigger | Expected filter | Expected action | False-positive control |
 |---|---|---|---|---|
 | 1 | Ordinary sentence | none | message remains | baseline |
-| 2 | Configured test bad phrase as whole words | `bad_words` | delete | phrase embedded inside a larger word remains |
+| 2 | Configured test bad phrase as whole words, including zero-width splitting | `bad_words` | delete | phrase embedded inside a larger word remains |
 | 3 | Same non-empty message three times inside 30 seconds | `repeated_message` | delete/warn/timeout by count | two repeats remain |
-| 4 | Five distinct user mentions | `mention_spam` | ladder action | four mentions remain |
+| 4 | Five explicit user mentions, including five repeats of one user | `mention_spam` | ladder action | four mentions remain; an implicit reply reference does not count |
 | 5 | Discord invite URL | `invite_link` | ladder action | plain text `discord` remains |
-| 6 | URL outside allowlist | `external_link` | ladder action | `https://two.gg/...` remains |
+| 6 | URL outside allowlist, including `www.example.net` | `external_link` | ladder action | allowed `<https://two.gg/...>` and `https://two.gg/... .` remain |
 | 7 | Attachment ending in configured blocked extension | `attachment_type` | ladder action | `.png` remains |
 | 8 | Any trigger from bypass role | none | message remains | same trigger without role is blocked |
 | 9 | Any trigger in exempt channel | none | message remains | same trigger in general is blocked |

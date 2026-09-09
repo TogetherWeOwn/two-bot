@@ -18,11 +18,13 @@ inspects public messages in memory but stores no content. No email.**
 
 - **Public-channel message content.** `MessageContent` is required for ticket
   parity and is also used by explicitly enabled automod. Automod inspects public
-  messages in memory for configured filters, then discards the content; it is
-  never written to the database, audit metadata, or process log. Ticket bodies
-  are read only when staff closes a bot-created private ticket and are retained
-  as a staff-only transcript for 90 days. Funnel handlers record only that a
-  public message happened, never what it said.
+  messages in memory for configured filters and never writes their content to
+  the database, audit metadata, or process log. Repeat detection retains only a
+  process-random keyed digest and message ID for the configured repeat window,
+  then deletes both automatically. Ticket bodies are read only when staff closes
+  a bot-created private ticket and are retained as a staff-only transcript for
+  90 days. Funnel handlers record only that a public message happened, never
+  what it said.
 - **Usernames, nicknames, avatars outside ticket transcripts.** Not needed to count anything. A user ID is
   enough, and it is what Discord itself treats as the identifier. If the
   community team needs names for a re-engagement list, the list of IDs can be
@@ -65,14 +67,17 @@ Discord's copy, not retained attachment bytes, and may expire sooner.
 If a member asks to be removed:
 
 ```sql
-DELETE FROM ticket_transcripts WHERE opener_id = '<id>' OR claimed_by = '<id>';
-DELETE FROM tickets            WHERE opener_id = '<id>' OR claimed_by = '<id>';
-DELETE FROM xp_awards          WHERE member_id = '<id>';
-DELETE FROM xp_cooldowns       WHERE member_id = '<id>';
-DELETE FROM member_levels      WHERE member_id = '<id>';
-DELETE FROM events             WHERE member_id = '<id>';
-DELETE FROM members            WHERE member_id = '<id>';
-DELETE FROM automod_violations WHERE user_id = '<id>';
+DELETE FROM ticket_transcripts         WHERE opener_id = '<id>' OR claimed_by = '<id>';
+DELETE FROM tickets                    WHERE opener_id = '<id>' OR claimed_by = '<id>';
+DELETE FROM xp_awards                  WHERE member_id = '<id>';
+DELETE FROM xp_cooldowns               WHERE member_id = '<id>';
+DELETE FROM member_levels              WHERE member_id = '<id>';
+DELETE FROM events                     WHERE member_id = '<id>';
+DELETE FROM members                    WHERE member_id = '<id>';
+DELETE FROM automod_violations         WHERE user_id = '<id>';
+DELETE FROM automod_processed_messages WHERE user_id = '<id>';
+DELETE FROM moderation_warnings        WHERE user_id = '<id>';
+DELETE FROM moderation_audit           WHERE target_id = '<id>' OR actor_id = '<id>';
 ```
 
 `TicketStore.eraseMember()` performs the ticket-table portion in one transaction.
@@ -92,7 +97,7 @@ This makes historical counts drop slightly, which is correct.
   private support channel, stores its transcript in the bot database, and deletes
   it after 90 days. The historical backfill still never reads a channel members
   talk in.
-- **No presence intent.** `src/discord/client.ts` requests five intents and
+- **No presence intent.** `src/discord/client.ts` requests six intents and
   `GuildPresences` is not one of them, so we never see a member's online
   status. The bot does record the guild's `approximate_presence_count` hourly
   (TOG-469) — but that is a single number for the whole server from a REST

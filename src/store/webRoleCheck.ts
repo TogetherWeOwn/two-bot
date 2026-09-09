@@ -68,6 +68,7 @@ export const BOT_TABLES = [
   'moderation_lockdowns',
   'moderation_idempotency',
   'automod_violations',
+  'automod_processed_messages',
   // 0003 — the tables behind this contract. The website reads the views over
   // them, never these.
   'web_contract_meta',

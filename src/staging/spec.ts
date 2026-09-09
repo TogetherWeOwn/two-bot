@@ -177,7 +177,7 @@ export const STAGING_PERMISSIONS =
  * BigInt and combined separately. Getting this wrong is silent: you produce a
  * plausible-looking permission integer that grants the wrong things.
  */
-const HIGH_BITS = (1n << 33n) | (1n << 44n); // Manage Events, Create Events
+const HIGH_BITS = (1n << 33n) | (1n << 40n) | (1n << 44n); // Manage Events, Moderate Members, Create Events
 
 /**
  * What the invite link actually asks for.
@@ -192,7 +192,7 @@ const HIGH_BITS = (1n << 33n) | (1n << 44n); // Manage Events, Create Events
  *
  * Since an invited bot can never exceed its invite, shipping the narrow set
  * guarantees a second round-trip to a human to fix a permission we already
- * know is needed. So the invite carries the events bits too.
+ * know is needed. So the invite carries the events and timeout bits too.
  */
 export const STAGING_INVITE_PERMISSIONS: bigint =
   BigInt(STAGING_PERMISSIONS) | HIGH_BITS;
@@ -207,6 +207,7 @@ export const PERMISSION_BITS: ReadonlyArray<{ name: string; bit: bigint }> = [
   { name: 'Read Message History', bit: 1n << 16n },
   { name: 'Manage Roles', bit: 1n << 28n },
   { name: 'Manage Events', bit: 1n << 33n },
+  { name: 'Moderate Members', bit: 1n << 40n },
   { name: 'Create Events', bit: 1n << 44n },
 ];
 

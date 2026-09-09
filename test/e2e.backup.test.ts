@@ -125,6 +125,21 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run('ticket-1', G, 'ticket-channel', 'm0', 'staff', 'member asked for help', 1, '2026-08-09T02:00:00.000Z', '2026-11-07T02:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO automod_violations
+           (guild_id, user_id, violation_count, last_filter, last_message_id, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(G, 'm1', 3, 'bad_words', 'automod-message-3', '2026-08-01T10:02:00.000Z');
+    for (let i = 1; i <= 3; i++) {
+      await harness.db
+        .prepare(
+          `INSERT INTO automod_processed_messages (guild_id, message_id, user_id, processed_at)
+           VALUES (?, ?, ?, ?)`,
+        )
+        .run(G, `automod-message-${i}`, 'm1', `2026-08-01T10:0${i}:00.000Z`);
+    }
   }
 
   async function counts(): Promise<Record<string, number>> {
@@ -148,6 +163,8 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
     assert.equal(manifest.tables.find((t) => t.name === 'events')?.count, before.events);
     assert.equal(manifest.tables.find((t) => t.name === 'tickets')?.count, 1);
     assert.equal(manifest.tables.find((t) => t.name === 'ticket_transcripts')?.count, 1);
+    assert.equal(manifest.tables.find((t) => t.name === 'automod_violations')?.count, 1);
+    assert.equal(manifest.tables.find((t) => t.name === 'automod_processed_messages')?.count, 3);
 
     // Lose everything, exactly as a dead disk would.
     await harness.db.exec(`TRUNCATE ${DUMP_TABLES.join(', ')} RESTART IDENTITY`);
@@ -162,6 +179,16 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
       .prepare(`SELECT id, event_type, occurred_at, idempotency_key FROM events ORDER BY id`)
       .all();
     assert.deepEqual(after, events);
+    const automod = await harness.db
+      .prepare(`SELECT user_id, violation_count, last_message_id FROM automod_violations WHERE guild_id = ?`)
+      .get(G);
+    assert.deepEqual(automod, { user_id: 'm1', violation_count: 3, last_message_id: 'automod-message-3' });
+    const processed = await harness.db
+      .prepare(`SELECT message_id FROM automod_processed_messages WHERE guild_id = ? ORDER BY message_id`)
+      .all<{ message_id: string }>(G);
+    assert.deepEqual(processed.map((row) => row.message_id), [
+      'automod-message-1', 'automod-message-2', 'automod-message-3',
+    ]);
   });
 
   test('the id sequence resumes past the restored rows', async () => {

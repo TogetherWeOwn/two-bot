@@ -1,6 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { PermissionFlagsBits } from 'discord.js';
 import { loadAutomodConfig } from '../src/automod/config.ts';
 import { matchAutomod, MemoryRepeatTracker } from '../src/automod/matcher.ts';
 import { AutomodService } from '../src/automod/service.ts';
@@ -54,6 +53,10 @@ test('loads default-off configuration and validates the sanction ladder', () => 
   assert.equal(loadAutomodConfig({}).enabled, false);
   assert.equal(loadAutomodConfig({ TWO_AUTOMOD: '1' }).dryRun, true);
   assert.equal(loadAutomodConfig({ TWO_AUTOMOD: '1', TWO_AUTOMOD_ENFORCE: '1' }).dryRun, false);
+  assert.throws(
+    () => loadAutomodConfig({ TWO_AUTOMOD: '1', DISCORD_GUILD_ID: '326474832151838730' }),
+    /staging-only.*live TWO guild/i,
+  );
   const cfg = loadAutomodConfig({
     TWO_AUTOMOD: '1',
     TWO_AUTOMOD_BAD_WORDS: 'one,two',
@@ -70,11 +73,15 @@ test('loads default-off configuration and validates the sanction ladder', () => 
 test('matches every configured filter and avoids common false positives', () => {
   const cases: Array<[string, Partial<AutomodMessage>, string | null]> = [
     ['whole bad phrase', { content: 'that was VERY   BAD.' }, 'bad_words'],
+    ['zero-width bad phrase', { content: 'that was very​bad' }, 'bad_words'],
     ['bad phrase boundary', { content: 'very badly written' }, null],
-    ['mention spam', { mentionedUserIds: ['1', '2', '3'] }, 'mention_spam'],
+    ['mention spam', { mentionedUserIds: ['1', '1', '1'] }, 'mention_spam'],
     ['invite', { content: 'join https://discord.gg/example' }, 'invite_link'],
     ['allowed domain', { content: 'read https://www.two.gg/rules' }, null],
+    ['allowed angle link', { content: 'read <https://two.gg/rules>' }, null],
+    ['allowed punctuated link', { content: 'read https://two.gg/rules.' }, null],
     ['external link', { content: 'read https://example.net/rules' }, 'external_link'],
+    ['scheme-less external link', { content: 'read www.evil.example/path' }, 'external_link'],
     ['blocked attachment', { attachmentNames: ['payload.EXE'] }, 'attachment_type'],
     ['safe attachment', { attachmentNames: ['screenshot.png'] }, null],
   ];
@@ -134,6 +141,81 @@ test('deletes, warns, then times out through the reviewed moderation service', a
   await testDb.cleanup();
 });
 
+test('dry-run matches do not advance the enforceable sanctions ledger', async () => {
+  const testDb = await openTestDb(import.meta.filename);
+  const calls: string[] = [];
+  const discord: ModerationDiscordClient = {
+    async deleteMessage(_channel, id) { calls.push(`delete:${id}`); }, async timeout() { calls.push('timeout'); },
+    async ban() {}, async unban() {}, async kick() {}, async purge(_channel, count) { return count; },
+    async setSlowmode() {}, async getEveryoneOverwrite() { return null; }, async putEveryoneOverwrite() {}, async deleteEveryoneOverwrite() {},
+  };
+  const moderationStore = new ModerationStore(testDb.db);
+  const dryRun = new AutomodService(
+    discord,
+    new ModerationService(discord, moderationStore, { owenUserId: OWEN, botUserId: OWEN, protectedRoleIds: new Set() }),
+    moderationStore,
+    new AutomodStore(testDb.db),
+    { target: async () => { throw new Error('not reached'); } },
+    { dryRun: true, owenUserId: OWEN, botHighestRolePosition: 10, policy },
+  );
+  await dryRun.inspect(message({ messageId: 'dry-1', content: 'very bad' }));
+  await dryRun.inspect(message({ messageId: 'dry-2', content: 'very bad' }));
+  assert.equal((await testDb.db.prepare('SELECT COUNT(*) AS n FROM automod_violations').get<{ n: number }>())?.n, 0);
+
+  const enforce = new AutomodService(
+    discord,
+    new ModerationService(discord, moderationStore, { owenUserId: OWEN, botUserId: OWEN, protectedRoleIds: new Set() }),
+    moderationStore,
+    new AutomodStore(testDb.db),
+    { target: async () => { throw new Error('not reached'); } },
+    { dryRun: false, owenUserId: OWEN, botHighestRolePosition: 10, policy },
+  );
+  const first = await enforce.inspect(message({ messageId: 'enforce-1', content: 'very bad' }));
+  assert.equal(first.sanction, 'delete');
+  assert.deepEqual(calls, ['delete:enforce-1']);
+  await testDb.cleanup();
+});
+
+test('delayed retry of an older message does not advance the sanctions ledger', async () => {
+  const testDb = await openTestDb(import.meta.filename);
+  const store = new AutomodStore(testDb.db);
+  assert.equal(await store.recordViolation(GUILD, USER, 'bad_words', 'm1'), 1);
+  assert.equal(await store.recordViolation(GUILD, USER, 'bad_words', 'm2'), 2);
+  assert.equal(await store.recordViolation(GUILD, USER, 'bad_words', 'm1'), 2);
+  assert.equal((await testDb.db.prepare('SELECT COUNT(*) AS n FROM automod_processed_messages').get<{ n: number }>())?.n, 2);
+  await testDb.cleanup();
+});
+
+test('uncertain post-mutation failure keeps the outer claim in flight', async () => {
+  const testDb = await openTestDb(import.meta.filename);
+  const discord: ModerationDiscordClient = {
+    async deleteMessage() {}, async timeout() {}, async ban() {}, async unban() {}, async kick() {},
+    async purge(_channel, count) { return count; }, async setSlowmode() {},
+    async getEveryoneOverwrite() { return null; }, async putEveryoneOverwrite() {}, async deleteEveryoneOverwrite() {},
+  };
+  const moderationStore = new ModerationStore(testDb.db);
+  const realComplete = moderationStore.complete.bind(moderationStore);
+  let failOuterComplete = true;
+  moderationStore.complete = async (guildId, key, stored) => {
+    if (key === 'automod:uncertain' && failOuterComplete) {
+      failOuterComplete = false;
+      throw new Error('completion unavailable');
+    }
+    await realComplete(guildId, key, stored);
+  };
+  const service = new AutomodService(
+    discord,
+    new ModerationService(discord, moderationStore, { owenUserId: OWEN, botUserId: OWEN, protectedRoleIds: new Set() }),
+    moderationStore,
+    new AutomodStore(testDb.db),
+    { target: async () => { throw new Error('not reached'); } },
+    { dryRun: false, owenUserId: OWEN, botHighestRolePosition: 10, policy },
+  );
+  await assert.rejects(() => service.inspect(message({ messageId: 'uncertain', content: 'very bad' })), /completion unavailable/);
+  await assert.rejects(() => service.inspect(message({ messageId: 'uncertain', content: 'very bad' })), /uncertain outcome/);
+  await testDb.cleanup();
+});
+
 test('bypass roles, channel exceptions, bots, and dry-run make no Discord mutation', async () => {
   const testDb = await openTestDb(import.meta.filename);
   let calls = 0;
@@ -179,5 +261,3 @@ test('sanction hierarchy and protected-target checks come from moderation primit
   await assert.rejects(() => service.inspect(message({ content: 'very bad' })), /Staff roles are protected/);
   await testDb.cleanup();
 });
-
-void PermissionFlagsBits.ManageMessages;

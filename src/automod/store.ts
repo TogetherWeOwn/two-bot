@@ -18,8 +18,11 @@ export class AutomodStore {
   ): Promise<number> {
     return this.db.transaction(async (tx) => {
       const existing = await tx.prepare(
-        `SELECT user_id, violation_count FROM automod_violations
-          WHERE guild_id = ? AND last_message_id = ?`,
+        `SELECT v.user_id, v.violation_count
+           FROM automod_processed_messages p
+           JOIN automod_violations v
+             ON v.guild_id = p.guild_id AND v.user_id = p.user_id
+          WHERE p.guild_id = ? AND p.message_id = ?`,
       ).get<{ user_id: string; violation_count: number }>(guildId, messageId);
       if (existing) {
         if (existing.user_id !== userId) throw new Error('automod message id belongs to another user');
@@ -44,6 +47,10 @@ export class AutomodStore {
         new Date(this.now()).toISOString(),
       );
       if (!row) throw new Error('automod violation row was not returned');
+      await tx.prepare(
+        `INSERT INTO automod_processed_messages (guild_id, message_id, user_id, processed_at)
+         VALUES (?, ?, ?, ?)`,
+      ).run(guildId, messageId, userId, new Date(this.now()).toISOString());
       return Number(row.violation_count);
     });
   }

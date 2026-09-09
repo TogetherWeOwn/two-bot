@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { PermissionFlagsBits } from 'discord.js';
 import { ActionError } from '../internal/errors.ts';
 import type { ModerationDiscordClient } from '../moderation/discord.ts';
 import type { ModerationExecution } from '../moderation/service.ts';
@@ -86,10 +85,9 @@ export class AutomodService {
     try {
       return await this.runClaimed(message, filter, idempotencyKey);
     } catch (err) {
-      // Exact deletion treats 404 as success, and violation writes are idempotent
-      // by message id. Releasing lets a replay resume the durable work after any
-      // failed phase without making a second destructive change.
-      await this.moderationStore.release(message.guildId, idempotencyKey).catch(() => undefined);
+      // Keep the outer claim after work begins. A warn/timeout may have succeeded
+      // even when the response or the later completion write failed; releasing
+      // here would let a gateway retry repeat the sanction.
       throw new AutomodProcessingError(err, true);
     }
   }
@@ -107,13 +105,15 @@ export class AutomodService {
       deleted = true;
     }
 
-    const count = await this.automodStore.recordViolation(
-      message.guildId,
-      message.authorId,
-      filter,
-      message.messageId,
-    );
-    const sanction = sanctionFor(count, this.options.policy.sanctions);
+    const count = this.options.dryRun
+      ? 0
+      : await this.automodStore.recordViolation(
+          message.guildId,
+          message.authorId,
+          filter,
+          message.messageId,
+        );
+    const sanction = sanctionFor(Math.max(1, count), this.options.policy.sanctions);
     if (!this.options.dryRun && sanction.action !== 'delete') {
       const target = await this.resolver.target(message.guildId, message.authorId);
       await this.moderation.execute(this.moderationRequest(message, target, sanction, count, reason));
@@ -133,7 +133,7 @@ export class AutomodService {
       idempotencyKey,
       metadata: {
         message_id: message.messageId,
-        violation_count: count,
+        violation_count: this.options.dryRun ? null : count,
         sanction: sanction.action,
         timeout_seconds: sanction.timeoutSeconds,
         dry_run: this.options.dryRun,

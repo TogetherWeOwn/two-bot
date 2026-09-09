@@ -201,7 +201,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
         authorIsBot: msg.author.bot,
         roleIds: msg.member ? [...msg.member.roles.cache.keys()] : [],
         content: msg.content,
-        mentionedUserIds: [...msg.mentions.users.keys()],
+        mentionedUserIds: [...msg.content.matchAll(/<@!?(\d{17,20})>/g)].map((match) => match[1]),
         attachmentNames: [...msg.attachments.values()].flatMap((item) => item.name ? [item.name] : []),
         createdTimestamp: msg.createdTimestamp,
       });

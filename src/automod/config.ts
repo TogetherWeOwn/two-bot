@@ -1,3 +1,4 @@
+import { LIVE_GUILD_ID } from '../staging/spec.ts';
 import type { AutomodPolicy, AutomodSanction } from './types.ts';
 
 const DEFAULT_BLOCKED_ATTACHMENTS = ['bat', 'cmd', 'com', 'exe', 'js', 'jse', 'msi', 'ps1', 'scr', 'vbs', 'wsf'];
@@ -15,6 +16,12 @@ export interface AutomodConfig {
 
 export function loadAutomodConfig(env: NodeJS.ProcessEnv = process.env): AutomodConfig {
   const enabled = env.TWO_AUTOMOD === '1';
+  if (enabled && env.DISCORD_GUILD_ID?.trim() === LIVE_GUILD_ID) {
+    throw new Error(
+      `TWO_AUTOMOD=1 is staging-only and refuses the live TWO guild (${LIVE_GUILD_ID}). ` +
+      'Live rollout requires a separately reviewed operator change.',
+    );
+  }
   const dryRun = env.TWO_AUTOMOD_ENFORCE !== '1';
   const policy: AutomodPolicy = {
     badWords: csv(env.TWO_AUTOMOD_BAD_WORDS).map(normalize).filter(Boolean),
