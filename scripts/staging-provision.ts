@@ -62,6 +62,7 @@
 import {
   CHANNEL_TYPE_TEXT,
   CHANNEL_TYPE_VOICE,
+  auditChannelExports,
   channelCreateBody,
   ROLE_PERMISSIONS,
   chooseGuild,
@@ -330,7 +331,16 @@ if (!APPLY) {
   process.exit(0);
 }
 console.log(`Done, ${failures} error(s).`);
+const channelsAfter = (await api<PartialChannel[]>('GET', `/guilds/${guildId}/channels`)).body ?? [];
+let auditExports: string[] = [];
+try {
+  auditExports = auditChannelExports(channelsAfter);
+} catch (err) {
+  console.log(`  ERROR  cannot generate audit channel configuration: ${String(err)}`);
+  failures++;
+}
 console.log(`\n  export DISCORD_STAGING_GUILD_ID=${guildId}`);
+for (const line of auditExports) console.log(`  ${line}`);
 console.log('  node scripts/staging-verify.ts     # confirm it against the spec');
 console.log('  node scripts/staging-reset.ts      # seed the fixtures\n');
 process.exit(failures ? 1 : 0);
