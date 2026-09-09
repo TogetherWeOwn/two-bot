@@ -258,6 +258,29 @@ CREATE TABLE IF NOT EXISTS moderation_idempotency (
 CREATE INDEX IF NOT EXISTS idx_moderation_idem_state
   ON moderation_idempotency (state, claimed_at);
 
+CREATE TABLE IF NOT EXISTS automod_violations (
+  guild_id         TEXT NOT NULL,
+  user_id          TEXT NOT NULL,
+  violation_count  INTEGER NOT NULL,
+  last_filter      TEXT NOT NULL,
+  last_message_id  TEXT NOT NULL,
+  updated_at       TEXT NOT NULL,
+  PRIMARY KEY (guild_id, user_id),
+  UNIQUE (guild_id, last_message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_automod_violations_updated
+  ON automod_violations (guild_id, updated_at);
+
+CREATE TABLE IF NOT EXISTS automod_processed_messages (
+  guild_id     TEXT NOT NULL,
+  message_id   TEXT NOT NULL,
+  user_id      TEXT NOT NULL,
+  processed_at TEXT NOT NULL,
+  PRIMARY KEY (guild_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_automod_processed_user
+  ON automod_processed_messages (guild_id, user_id, processed_at);
+
 -- At most one pending unban per (guild, user). Partial so a completed job
 -- does not block the next tempban of the same user.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_moderation_pending_unban

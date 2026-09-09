@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { Client, GatewayIntentBits, Events, Partials, type Guild } from 'discord.js';
+import { Client, GatewayIntentBits, Events, Options, Partials, type Guild } from 'discord.js';
 import { nowIso } from '../core/events.ts';
 import type { FunnelHandlers } from '../core/handlers.ts';
 import type { InviteTracker, InviteState } from '../core/inviteTracker.ts';
@@ -9,6 +9,8 @@ import type { RaidAnnouncer } from './raidAlert.ts';
 import { log } from '../core/log.ts';
 import { applyLevelRoles } from '../leveling/discord.ts';
 import type { LevelingService } from '../leveling/service.ts';
+import type { AutomodService } from '../automod/service.ts';
+import { AutomodProcessingError } from '../automod/types.ts';
 import type { AuditSink } from '../audit/service.ts';
 import { moderationAuditEvent } from '../audit/discordEvents.ts';
 
@@ -19,16 +21,16 @@ import { moderationAuditEvent } from '../audit/discordEvents.ts';
  *   Guilds              - required for any guild event at all
  *   GuildModeration     - GuildAuditLogEntryCreate for moderation mirrors
  *   GuildMembers        - member_join / member_leave        (PRIVILEGED)
- *   GuildMessages       - first_message + private ticket transcripts
- *   MessageContent      - ticket transcript bodies only      (PRIVILEGED)
+ *   GuildMessages       - first_message + tickets + automod events
+ *   MessageContent      - ticket transcripts and enabled automod (PRIVILEGED)
  *   GuildVoiceStates    - first_voice_session + voice_session_start/end
  *   GuildInvites        - invite create/delete for attribution
  *
- * MessageContent is required for MEE6-equivalent ticket export. The bot only
- * reads bodies while a staff member closes a bot-created private ticket; the
- * bounded retention and erasure controls are documented in docs/PRIVACY.md.
+ * MessageContent is required for MEE6-equivalent ticket export. Enabled automod
+ * also inspects public messages in memory but never stores or logs their content.
+ * Ticket retention and both erasure boundaries are documented in docs/PRIVACY.md.
  */
-export const INTENTS = [
+const BASE_INTENTS = [
   GatewayIntentBits.Guilds,
   GatewayIntentBits.GuildModeration,
   GatewayIntentBits.GuildMembers,
@@ -37,6 +39,12 @@ export const INTENTS = [
   GatewayIntentBits.GuildVoiceStates,
   GatewayIntentBits.GuildInvites,
 ];
+
+export function intents(_automodEnabled = process.env.TWO_AUTOMOD === '1'): GatewayIntentBits[] {
+  return [...BASE_INTENTS];
+}
+
+export const INTENTS = intents();
 
 export interface BotDeps {
   handlers: FunnelHandlers;
@@ -54,12 +62,23 @@ export interface BotDeps {
    */
   expectedJoins?: ExpectedJoins;
   leveling?: LevelingService;
+  automod?: { service: AutomodService; guildId: string };
   /** Metadata-only staff audit. Optional so the funnel remains independently usable. */
   audit?: AuditSink;
 }
 
-export function createClient(): Client {
-  return new Client({ intents: INTENTS, partials: [Partials.Message] });
+export function createClient(automodEnabled = process.env.TWO_AUTOMOD === '1'): Client {
+  return new Client({
+    intents: intents(automodEnabled),
+    ...(automodEnabled
+      ? {
+          partials: [Partials.Message, Partials.Channel],
+          // Message content must not survive the event handler in discord.js's
+          // default 200-message-per-channel cache.
+          makeCache: Options.cacheWithLimits({ MessageManager: 0 }),
+        }
+      : { partials: [Partials.Message] }),
+  });
 }
 
 async function snapshotInvites(guild: Guild, invites: InviteTracker): Promise<string[]> {
@@ -87,11 +106,11 @@ async function snapshotInvites(guild: Guild, invites: InviteTracker): Promise<st
 
 /** Wire gateway events to the framework-free handlers. */
 export function registerHandlers(client: Client, deps: BotDeps): void {
-  const { handlers, invites, raid, expectedJoins, leveling, audit } = deps;
+  const { handlers, invites, raid, expectedJoins, leveling, automod, audit } = deps;
 
   const auditSafely = (event: Parameters<NonNullable<BotDeps['audit']>['record']>[0]) => {
     if (!audit) return;
-    void audit.record(event).catch((err: unknown) => {
+    void audit.record(event).catch(() => {
       log.error('operational_audit_failed', {
         entryId: event.entryId,
         classification: 'audit_record_failed',
@@ -199,11 +218,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
       guildId: newMember.guild.id,
       occurredAt,
       targetId: newMember.id,
-      metadata: {
-        nicknameChanged,
-        addedRoleIds,
-        removedRoleIds,
-      },
+      metadata: { nicknameChanged, addedRoleIds, removedRoleIds },
     });
   });
 
@@ -211,8 +226,45 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     await handlers.onLeave(member.guild.id, member.id);
   });
 
+  const inspectAutomod = async (msg: {
+    guildId: string | null;
+    channelId: string;
+    id: string;
+    author: { id: string; bot: boolean } | null;
+    member: { roles: { cache: Map<string, unknown> } } | null;
+    content: string;
+    mentions: { users: { keys(): IterableIterator<string> } };
+    attachments: { values(): IterableIterator<{ name: string | null }> };
+  }, observedTimestamp: number): Promise<boolean> => {
+    if (!automod || !msg.guildId || msg.guildId !== automod.guildId || !msg.author) return false;
+    try {
+      const result = await automod.service.inspect({
+        guildId: msg.guildId,
+        channelId: msg.channelId,
+        messageId: msg.id,
+        authorId: msg.author.id,
+        authorIsBot: msg.author.bot,
+        roleIds: msg.member ? [...msg.member.roles.cache.keys()] : [],
+        content: msg.content,
+        mentionedUserIds: [...msg.content.matchAll(/<@!?(\d{17,20})>/g)].map((match) => match[1]),
+        attachmentNames: [...msg.attachments.values()].flatMap((item) => item.name ? [item.name] : []),
+        observedTimestamp,
+      });
+      return result.matched;
+    } catch (err) {
+      log.error('automod_inspection_failed', {
+        guildId: msg.guildId,
+        channelId: msg.channelId,
+        messageId: msg.id,
+        err: String(err),
+      });
+      return err instanceof AutomodProcessingError && err.matched;
+    }
+  };
+
   client.on(Events.MessageCreate, async (msg) => {
     if (!msg.guildId) return; // ignore DMs
+    if (await inspectAutomod(msg, msg.createdTimestamp)) return;
     await handlers.onMessage({
       guildId: msg.guildId,
       memberId: msg.author.id,
@@ -226,10 +278,10 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     });
   });
 
-  client.on(Events.MessageUpdate, (oldMessage, newMessage) => {
+  client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
     if (!newMessage.guildId) return;
-    // Without MessageContent this is deliberately metadata-only. Discord can
-    // send duplicate updates; the message id + edited timestamp is the key.
+    // Audit before fetching a partial so metadata logging does not depend on the
+    // MessageContent read that automod needs for edited messages.
     const occurredAt = newMessage.editedAt?.toISOString() ?? nowIso();
     auditSafely({
       entryId: `message-edit:${newMessage.guildId}:${newMessage.id}:${newMessage.editedTimestamp ?? occurredAt}`,
@@ -237,12 +289,24 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
       channel: 'audit',
       guildId: newMessage.guildId,
       occurredAt,
-      actorId: newMessage.author?.id ?? oldMessage.author?.id ?? null,
-      targetId: newMessage.author?.id ?? oldMessage.author?.id ?? null,
+      actorId: newMessage.author?.id ?? oldMessage?.author?.id ?? null,
+      targetId: newMessage.author?.id ?? oldMessage?.author?.id ?? null,
       sourceChannelId: newMessage.channelId,
       messageId: newMessage.id,
-      metadata: { cachedBefore: !oldMessage.partial },
+      metadata: { cachedBefore: oldMessage ? !oldMessage.partial : false },
     });
+    try {
+      const msg = newMessage.partial ? await newMessage.fetch() : newMessage;
+      if (!msg.author) return;
+      await inspectAutomod(msg, Date.now());
+    } catch (err) {
+      log.error('automod_edit_fetch_failed', {
+        guildId: newMessage.guildId,
+        channelId: newMessage.channelId,
+        messageId: newMessage.id,
+        err: String(err),
+      });
+    }
   });
 
   client.on(Events.MessageDelete, (message) => {
@@ -280,8 +344,6 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
         : 'voice_leave'
       : 'voice_join';
     auditSafely({
-      // Discord supplies no voice-event id. The occurrence timestamp preserves
-      // a later identical transition instead of collapsing it forever.
       entryId: `${voiceKind}:${guild.id}:${memberId}:${oldState.channelId ?? 'none'}:${newState.channelId ?? 'none'}:${at}`,
       kind: voiceKind,
       channel: 'voice',

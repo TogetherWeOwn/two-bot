@@ -39,6 +39,9 @@ import { RestModerationResolver } from './moderation/resolver.ts';
 import { ModerationService } from './moderation/service.ts';
 import { ModerationStore } from './moderation/store.ts';
 import { registerModerationCommands, registerModerationHandler } from './moderation/commands.ts';
+import { loadAutomodConfig } from './automod/config.ts';
+import { AutomodService } from './automod/service.ts';
+import { AutomodStore } from './automod/store.ts';
 import { OperationalAuditStore } from './audit/store.ts';
 import { makeOperationalAudit } from './audit/service.ts';
 
@@ -85,7 +88,7 @@ const expectedJoins = new ExpectedJoins();
 const leveling = new LevelingService(db);
 const handlers = new FunnelHandlers(store, leveling);
 
-const client = createClient();
+const client = createClient(process.env.TWO_AUTOMOD === '1');
 const moderationCfg = loadModerationConfig();
 const moderationStore = new ModerationStore(db);
 const moderationDiscord = new ModerationDiscord({
@@ -99,7 +102,47 @@ const moderationResolver = cfg.guildId && moderationCfg.enabled
       base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
     })
   : null;
-let moderationService: ModerationService | null = null;
+const audit = makeOperationalAudit(client, {
+  guildId: cfg.guildId,
+  channels: {
+    audit: cfg.auditLogChannelId,
+    voice: cfg.voiceLogChannelId,
+    moderation: cfg.moderationLogChannelId,
+  },
+  store: new OperationalAuditStore(db),
+});
+log.info('operational_audit_enabled', {
+  guildId: cfg.guildId ?? 'all joined guilds (Discord mirrors disabled)',
+  auditTarget: cfg.auditLogChannelId ?? 'durable/process log only',
+  voiceTarget: cfg.voiceLogChannelId ?? cfg.auditLogChannelId ?? 'durable/process log only',
+  moderationTarget: cfg.moderationLogChannelId ?? cfg.auditLogChannelId ?? 'durable/process log only',
+});
+const moderationService = moderationResolver
+  ? new ModerationService(moderationDiscord, moderationStore, {
+      owenUserId: moderationCfg.owenUserId,
+      botUserId: moderationCfg.owenUserId,
+      protectedRoleIds: moderationCfg.protectedRoleIds,
+    }, Date.now, audit)
+  : null;
+const automodCfg = loadAutomodConfig();
+if (automodCfg.enabled && !moderationService) {
+  throw new Error('TWO_AUTOMOD=1 requires TWO_MODERATION=1 so sanctions use the reviewed moderation path.');
+}
+const automodService = cfg.guildId && automodCfg.enabled && moderationResolver && moderationService
+  ? new AutomodService(
+      moderationDiscord,
+      moderationService,
+      moderationStore,
+      new AutomodStore(db),
+      moderationResolver,
+      {
+        dryRun: automodCfg.dryRun,
+        owenUserId: moderationCfg.owenUserId,
+        botHighestRolePosition: await moderationResolver.botHighestRolePosition(cfg.guildId),
+        policy: automodCfg.policy,
+      },
+    )
+  : null;
 
 // Point discord.js at a different API host. Only used by tools/mock-discord.
 if (cfg.apiBase) {
@@ -124,30 +167,15 @@ log.info('raid_watch_enabled', {
   alertTarget: cfg.staffAlertChannelId ?? 'log only (DISCORD_STAFF_ALERT_CHANNEL_ID unset)',
 });
 
-const audit = makeOperationalAudit(client, {
-  guildId: cfg.guildId,
-  channels: {
-    audit: cfg.auditLogChannelId,
-    voice: cfg.voiceLogChannelId,
-    moderation: cfg.moderationLogChannelId,
-  },
-  store: new OperationalAuditStore(db),
+registerHandlers(client, {
+  handlers,
+  invites,
+  raid,
+  expectedJoins,
+  leveling,
+  automod: automodService && cfg.guildId ? { service: automodService, guildId: cfg.guildId } : undefined,
+  audit,
 });
-log.info('operational_audit_enabled', {
-  guildId: cfg.guildId ?? 'all joined guilds (Discord mirrors disabled)',
-  auditTarget: cfg.auditLogChannelId ?? 'durable/process log only',
-  voiceTarget: cfg.voiceLogChannelId ?? cfg.auditLogChannelId ?? 'durable/process log only',
-  moderationTarget: cfg.moderationLogChannelId ?? cfg.auditLogChannelId ?? 'durable/process log only',
-});
-if (moderationResolver) {
-  moderationService = new ModerationService(moderationDiscord, moderationStore, {
-    owenUserId: moderationCfg.owenUserId,
-    botUserId: moderationCfg.owenUserId,
-    protectedRoleIds: moderationCfg.protectedRoleIds,
-  }, Date.now, audit);
-}
-
-registerHandlers(client, { handlers, invites, raid, expectedJoins, leveling, audit });
 
 if (cfg.ticketCategoryId && cfg.ticketStaffRoleId && cfg.ticketPanelChannelId) {
   registerTickets(client, {
@@ -169,6 +197,15 @@ if (cfg.ticketCategoryId && cfg.ticketStaffRoleId && cfg.ticketPanelChannelId) {
   log.info('tickets_disabled', { reason: 'ticket channel, category, and staff role are not all configured' });
 }
 registerLeveling(client, { service: leveling, guildId: cfg.guildId });
+if (automodService) {
+  log.info('automod_enabled', {
+    guildId: cfg.guildId,
+    dryRun: automodCfg.dryRun,
+    badWords: automodCfg.policy.badWords.length,
+    bypassRoles: automodCfg.policy.bypassRoleIds.size,
+    exemptChannels: automodCfg.policy.exemptChannelIds.size,
+  });
+}
 if (cfg.guildId && moderationResolver && moderationService) {
   registerModerationHandler(client, {
     guildId: cfg.guildId,
@@ -334,21 +371,6 @@ const moderationSweep = moderationService
   : null;
 moderationSweep?.unref();
 
-// Retry durable audit mirrors after transient Discord failures. The row itself
-// is the queue, so a restart resumes exactly where the prior process stopped.
-const auditDeliverySweep = setInterval(
-  () => {
-    void audit.retryPending().catch((err: unknown) => {
-      log.error('operational_audit_retry_failed', { classification: 'audit_retry_failed' });
-    });
-  },
-  60 * 1000,
-);
-auditDeliverySweep.unref();
-void audit.retryPending().catch((err: unknown) => {
-  log.error('operational_audit_retry_failed', { classification: 'audit_retry_failed' });
-});
-
 // Inactivity sweep once an hour. Cheap query; no outbound messages.
 const sweep = setInterval(
   () => {
@@ -392,7 +414,6 @@ if (healthPort > 0) {
 async function shutdown(signal: string) {
   log.info('shutdown', { signal });
   clearInterval(sweep);
-  clearInterval(auditDeliverySweep);
   if (moderationSweep) clearInterval(moderationSweep);
   presenceProbe?.stop();
   communitySnapshots?.stop();
