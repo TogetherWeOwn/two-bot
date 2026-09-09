@@ -7,10 +7,10 @@
 CREATE TABLE member_levels (
   guild_id    TEXT        NOT NULL,
   member_id   TEXT        NOT NULL,
-  xp          BIGINT      NOT NULL CHECK (xp BETWEEN 0 AND 9007199254740991),
-  message_xp  BIGINT      NOT NULL DEFAULT 0 CHECK (message_xp BETWEEN 0 AND 9007199254740991),
-  voice_xp    BIGINT      NOT NULL DEFAULT 0 CHECK (voice_xp BETWEEN 0 AND 9007199254740991),
-  imported_xp BIGINT      NOT NULL DEFAULT 0 CHECK (imported_xp BETWEEN 0 AND 9007199254740991),
+  xp          BIGINT      NOT NULL CHECK (xp >= 0),
+  message_xp  BIGINT      NOT NULL DEFAULT 0 CHECK (message_xp >= 0),
+  voice_xp    BIGINT      NOT NULL DEFAULT 0 CHECK (voice_xp >= 0),
+  imported_xp BIGINT      NOT NULL DEFAULT 0 CHECK (imported_xp >= 0),
   updated_at  timestamptz NOT NULL,
   PRIMARY KEY (guild_id, member_id),
   CHECK (xp = message_xp + voice_xp + imported_xp)
@@ -58,6 +58,6 @@ CREATE TABLE level_import_runs (
   updated           INTEGER     NOT NULL,
   unchanged         INTEGER     NOT NULL,
   duplicate_rows    INTEGER     NOT NULL,
-  total_imported_xp BIGINT      NOT NULL CHECK (total_imported_xp BETWEEN 0 AND 9007199254740991),
+  total_imported_xp BIGINT      NOT NULL,
   imported_at       timestamptz NOT NULL
 );
