@@ -64,6 +64,10 @@ export const BOT_TABLES = [
   // 0011 — Discord operational metadata. Staff-only and never exposed through
   // web_v1, even though message bodies and names are deliberately absent.
   'operational_audit_log',
+  // 0010 — private moderation history and scheduled tempban expiry.
+  'moderation_warnings',
+  'moderation_scheduled_unbans',
+  'moderation_audit',
   // 0003 — the tables behind this contract. The website reads the views over
   // them, never these.
   'web_contract_meta',
