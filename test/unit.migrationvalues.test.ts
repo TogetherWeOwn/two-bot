@@ -2,18 +2,25 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { migrationValuesMatch } from '../scripts/migration-values.ts';
 
-test('SQLite members.is_bot accepts only canonical integer booleans', () => {
-  assert.equal(migrationValuesMatch('members', 'is_bot', 0, false), true);
-  assert.equal(migrationValuesMatch('members', 'is_bot', 1, true), true);
-  assert.equal(migrationValuesMatch('members', 'is_bot', 0, true), false);
-  assert.equal(migrationValuesMatch('members', 'is_bot', 1, false), false);
+test('SQLite boolean columns accept only canonical integer booleans', () => {
+  const columns = [
+    ['members', 'is_bot'],
+    ['moderation_lockdowns', 'prior_exists'],
+  ] as const;
 
-  for (const invalid of ['true', 'false', '1', '0', 2, -1, null]) {
-    assert.equal(
-      migrationValuesMatch('members', 'is_bot', invalid, Boolean(invalid)),
-      false,
-      `accepted non-canonical SQLite value ${String(invalid)}`,
-    );
+  for (const [table, column] of columns) {
+    assert.equal(migrationValuesMatch(table, column, 0, false), true);
+    assert.equal(migrationValuesMatch(table, column, 1, true), true);
+    assert.equal(migrationValuesMatch(table, column, 0, true), false);
+    assert.equal(migrationValuesMatch(table, column, 1, false), false);
+
+    for (const invalid of ['true', 'false', '1', '0', 2, -1, null]) {
+      assert.equal(
+        migrationValuesMatch(table, column, invalid, Boolean(invalid)),
+        false,
+        `accepted non-canonical SQLite value ${String(invalid)} for ${table}.${column}`,
+      );
+    }
   }
 });
 

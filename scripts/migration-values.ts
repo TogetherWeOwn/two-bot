@@ -16,7 +16,10 @@ export function migrationValuesMatch(
   source: unknown,
   target: unknown,
 ): boolean {
-  if (table === 'members' && column === 'is_bot') {
+  const sqliteBoolean =
+    (table === 'members' && column === 'is_bot') ||
+    (table === 'moderation_lockdowns' && column === 'prior_exists');
+  if (sqliteBoolean) {
     if (source === 0) return target === false;
     if (source === 1) return target === true;
     return false;
