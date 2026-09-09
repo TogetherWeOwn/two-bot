@@ -19,8 +19,10 @@ import type { AutomationService } from './service.ts';
 import { renderTemplate } from './template.ts';
 import type { AutomationCommandRow } from './store.ts';
 import { log } from '../core/log.ts';
+import { BUILTIN_COMMAND_NAMES } from '../discord/commandNames.ts';
 
 export interface GatewayOptions {
+  guildId: string;
   service: AutomationService;
   /** Content processing stays off unless the privileged feature is explicitly enabled. */
   textCommandsEnabled: boolean;
@@ -36,12 +38,13 @@ export function triggerWord(content: string): string | null {
 }
 
 export function registerAutomationGateway(client: Client, opts: GatewayOptions): void {
-  client.on('messageCreate' as never, async (msg: { guildId?: string | null; author?: { bot?: boolean; id?: string }; channelId?: string | null; content?: string; createdTimestamp?: number }) => {
+  client.on('automationMessageAccepted' as never, async (msg: { guildId?: string | null; author?: { bot?: boolean; id?: string }; channelId?: string | null; content?: string; createdTimestamp?: number }) => {
     const guildId = msg.guildId;
-    if (!guildId || !msg.channelId) return;
+    if (!guildId || guildId !== opts.guildId || !msg.channelId) return;
     if (msg.author?.bot) return; // our own sticky re-posts must not re-trigger anything
 
-    // The sticky check is metadata-only and always on when a sticky exists.
+    // The sticky check is metadata-only and runs only after the primary gateway
+    // handler has accepted the message through automod.
     try {
       const stickyOutcome = await opts.service.onChannelActivity(
         guildId,
@@ -61,7 +64,7 @@ export function registerAutomationGateway(client: Client, opts: GatewayOptions):
     const content = typeof msg.content === 'string' ? msg.content : '';
     if (!content.startsWith('!')) return;
     const word = triggerWord(content);
-    if (!word) return;
+    if (!word || BUILTIN_COMMAND_NAMES.has(word.slice(1))) return;
     try {
       const command = await opts.findTrigger(guildId, word);
       if (!command) return;

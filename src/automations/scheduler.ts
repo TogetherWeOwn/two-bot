@@ -24,6 +24,7 @@ export interface SchedulerHandle {
 
 export function startScheduler(
   service: AutomationService,
+  guildId: string,
   opts: { intervalMs?: number; now?: () => string } = {},
 ): SchedulerHandle {
   const intervalMs = opts.intervalMs ?? SCHEDULER_TICK_MS;
@@ -35,7 +36,7 @@ export function startScheduler(
     if (running) return 0;
     running = true;
     try {
-      const fired = await service.runDueScheduled(opts.now?.());
+      const fired = await service.runDueScheduled(guildId, opts.now?.());
       if (fired > 0) log.info('scheduled_messages_fired', { count: fired });
       return fired;
     } catch (err) {

@@ -13,6 +13,8 @@
  *
  * The channel is #bot-log - not member-facing, already the bot's own dump.
  */
+import { EventEmitter } from 'node:events';
+import { PermissionFlagsBits, type Client } from 'discord.js';
 import { openDb } from '../src/store/db.ts';
 import {
   AutomationStore,
@@ -21,8 +23,12 @@ import {
   type StickyMessageRow,
 } from '../src/automations/store.ts';
 import { AutomationService } from '../src/automations/service.ts';
-import { AutomationDiscord } from '../src/automations/discord.ts';
-import { restoredStickyRow } from './staging-automations-proof-state.ts';
+import {
+  AutomationDiscord,
+  registerAutomationCommands,
+} from '../src/automations/discord.ts';
+import { registerAutomationGateway } from '../src/automations/gateway.ts';
+import { cleanupDecision, restoredStickyRow } from './staging-automations-proof-state.ts';
 
 const GUILD = '1545644954272137297'; // TWO Staging
 const CHANNEL = '1546451670500642826'; // #bot-log
@@ -66,8 +72,11 @@ for (const name of commandNames) {
   const prior = await store.getCommand(GUILD, name);
   if (prior) priorCommands.set(name, prior);
 }
-const priorScheduled = await store.getScheduled('tog-1648-proof-sched');
+const priorScheduled = await store.getScheduled(GUILD, 'tog-1648-proof-sched');
 const priorSticky = await store.getSticky(GUILD, CHANNEL);
+const proofCommands = new Map<string, AutomationCommandRow | null>();
+let proofScheduled: ScheduledMessageRow | null = null;
+let proofSticky: StickyMessageRow | null = null;
 const createdMessageIds = new Set<string>();
 let priorStickyMessageReplaced = false;
 const rememberMessage = (messageId: string | null | undefined) => {
@@ -96,6 +105,36 @@ try {
   );
   rememberMessage(reply);
   check('command.fire', /^\d{17,}$/.test(reply), `posted message ${reply}`);
+
+  // Exercise the production gateway listener seam, after its automod-accepted
+  // handoff, against the real Discord REST client.
+  const gatewayBus = new EventEmitter();
+  registerAutomationGateway(gatewayBus as unknown as Client, {
+    guildId: GUILD,
+    service: {
+      onChannelActivity: async () => 'none',
+      postTextReply: async (...args: Parameters<AutomationService['postTextReply']>) => {
+        const messageId = await svc.postTextReply(...args);
+        rememberMessage(messageId);
+        return messageId;
+      },
+    } as unknown as AutomationService,
+    textCommandsEnabled: true,
+    findTrigger: (guildId, word) => store.findTextTrigger(guildId, word),
+  });
+  await Promise.all(gatewayBus.listeners('automationMessageAccepted').map((listener) => listener({
+    guildId: GUILD,
+    channelId: CHANNEL,
+    author: { id: ACTOR, bot: false },
+    content: '!tog1648proof',
+    createdTimestamp: Date.now(),
+  })));
+  const gatewayMessage = (await db.prepare(
+    `SELECT target_key FROM automation_audit_log
+      WHERE guild_id = ? AND actor_id = ? AND action = 'command.run'
+      ORDER BY created_at DESC LIMIT 1`,
+  ).get<{ target_key: string }>(GUILD, ACTOR))?.target_key;
+  check('gateway.production-seam', gatewayMessage === 'tog1648proof', 'accepted gateway event ran the custom command');
 
   // --- 2. MEE6 import/export round trip --------------------------------
   const imp = await svc.importMee6(GUILD, [
@@ -146,13 +185,33 @@ try {
   } catch { badNameRejected = true; }
   check('name.validation', badNameRejected, 'invalid command name rejected');
 
+  // Exercise the production interaction listener and its permission bit, not
+  // only the service's validation seam.
+  const permissionBus = new EventEmitter();
+  registerAutomationCommands(permissionBus as unknown as Client, { guildId: GUILD, service: svc, store });
+  const permissionReplies: unknown[] = [];
+  await Promise.all(permissionBus.listeners('interactionCreate').map((listener) => listener({
+    isChatInputCommand: () => true,
+    commandName: 'command-list',
+    inGuild: () => true,
+    guildId: GUILD,
+    user: { id: ACTOR },
+    memberPermissions: { has: (permission: bigint) => permission === PermissionFlagsBits.ManageMessages },
+    reply: async (replyBody: unknown) => { permissionReplies.push(replyBody); },
+  })));
+  check(
+    'permission.listener-refusal',
+    JSON.stringify(permissionReplies).includes('Manage Server permission is required'),
+    'production interaction listener rejects a non-ManageGuild permission mask',
+  );
+
   // --- 4. scheduled message: one-shot fires once ------------------------
   const soon = new Date(Date.now() - 1000).toISOString();
   await svc.putScheduled({ guildId: GUILD, id: 'tog-1648-proof-sched', channelId: CHANNEL,
     body: 'TOG-1648 scheduled-message staging proof', nextRunAt: soon, intervalSeconds: null, actorId: ACTOR });
-  const fired1 = await svc.runDueScheduled();
-  const fired2 = await svc.runDueScheduled();
-  const schedRow = await store.getScheduled('tog-1648-proof-sched');
+  const fired1 = await svc.runDueScheduled(GUILD);
+  const fired2 = await svc.runDueScheduled(GUILD);
+  const schedRow = await store.getScheduled(GUILD, 'tog-1648-proof-sched');
   rememberMessage(schedRow?.lastMessageId);
   check('scheduled.oneshot', fired1 === 1 && fired2 === 0 && schedRow?.enabled === false,
     `fired=${fired1} then ${fired2}, enabled=${schedRow?.enabled} (disables itself)`);
@@ -173,6 +232,10 @@ try {
   check('sticky.after-debounce', again === 'reposted', 'activity after debounce reposts again');
 
   // --- 6. audit trail ----------------------------------------------------
+  for (const name of commandNames) proofCommands.set(name, await store.getCommand(GUILD, name));
+  proofScheduled = await store.getScheduled(GUILD, 'tog-1648-proof-sched');
+  proofSticky = await store.getSticky(GUILD, CHANNEL);
+
   const audit = (await db
     .prepare(`SELECT action FROM automation_audit_log WHERE guild_id = ? ORDER BY created_at DESC LIMIT 200`)
     .all(GUILD)) as { action: string }[];
@@ -184,84 +247,93 @@ try {
   // --- cleanup: restore exact pre-proof definitions ---------------------
   for (const name of commandNames) {
     try {
-      await store.deleteCommand(GUILD, name);
-    } catch (error) {
-      recordCleanupFailure(`command.${name}.delete`, error);
-    }
-  }
-  for (const [name, prior] of priorCommands) {
-    try {
-      await store.putCommand(prior);
-    } catch (error) {
-      recordCleanupFailure(`command.${name}.restore`, error);
-    }
-  }
-  for (const name of commandNames) {
-    try {
       const prior = priorCommands.get(name) ?? null;
+      const current = await store.getCommand(GUILD, name);
+      const proof = proofCommands.has(name)
+        ? proofCommands.get(name) ?? null
+        : current?.updatedBy === ACTOR ? current : null;
+      if (cleanupDecision(current, { before: prior, proof }) === 'skip') {
+        check(`cleanup.command.${name}.concurrent`, true, 'left a concurrent admin change untouched');
+        continue;
+      }
+      await store.deleteCommand(GUILD, name);
+      if (prior) await store.putCommand(prior);
       const restored = await store.getCommand(GUILD, name);
       check(`cleanup.command.${name}`, sameCommand(restored, prior),
         prior ? 'restored prior definition' : 'removed proof definition');
     } catch (error) {
-      recordCleanupFailure(`command.${name}.readback`, error);
+      recordCleanupFailure(`command.${name}`, error);
     }
   }
   try {
-    await store.deleteScheduled(GUILD, 'tog-1648-proof-sched');
-    if (priorScheduled) {
-      await db.prepare(
-        `INSERT INTO scheduled_messages
-           (id, guild_id, channel_id, body, next_run_at, interval_seconds, enabled,
-            last_run_at, last_message_id, created_by, created_at, updated_by, updated_at,
-            claim_token, claimed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
-        priorScheduled.id, priorScheduled.guildId, priorScheduled.channelId, priorScheduled.body,
-        priorScheduled.nextRunAt, priorScheduled.intervalSeconds, priorScheduled.enabled ? 1 : 0,
-        priorScheduled.lastRunAt, priorScheduled.lastMessageId, priorScheduled.createdBy,
-        priorScheduled.createdAt, priorScheduled.updatedBy, priorScheduled.updatedAt,
-        priorScheduled.claimToken, priorScheduled.claimedAt,
-      );
+    const currentScheduled = await store.getScheduled(GUILD, 'tog-1648-proof-sched');
+    const scheduledProof = proofScheduled ?? (currentScheduled?.updatedBy === ACTOR ? currentScheduled : null);
+    if (cleanupDecision(currentScheduled, { before: priorScheduled, proof: scheduledProof }) === 'skip') {
+      check('cleanup.scheduled.concurrent', true, 'left a concurrent admin change untouched');
+    } else {
+      await store.deleteScheduled(GUILD, 'tog-1648-proof-sched');
+      if (priorScheduled) {
+        await db.prepare(
+          `INSERT INTO scheduled_messages
+             (id, guild_id, channel_id, body, next_run_at, interval_seconds, enabled,
+              last_run_at, last_message_id, created_by, created_at, updated_by, updated_at,
+              claim_token, claimed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          priorScheduled.id, priorScheduled.guildId, priorScheduled.channelId, priorScheduled.body,
+          priorScheduled.nextRunAt, priorScheduled.intervalSeconds, priorScheduled.enabled ? 1 : 0,
+          priorScheduled.lastRunAt, priorScheduled.lastMessageId, priorScheduled.createdBy,
+          priorScheduled.createdAt, priorScheduled.updatedBy, priorScheduled.updatedAt,
+          priorScheduled.claimToken, priorScheduled.claimedAt,
+        );
+      }
+      const restored = await store.getScheduled(GUILD, 'tog-1648-proof-sched');
+      check('cleanup.scheduled', sameScheduled(restored, priorScheduled),
+        priorScheduled ? 'restored prior definition' : 'removed proof definition');
     }
-    const restored = await store.getScheduled('tog-1648-proof-sched');
-    check('cleanup.scheduled', sameScheduled(restored, priorScheduled),
-      priorScheduled ? 'restored prior definition' : 'removed proof definition');
   } catch (error) {
     recordCleanupFailure('scheduled', error);
   }
   try {
-    await store.deleteSticky(GUILD, CHANNEL);
-    let restoredSticky: StickyMessageRow | null = priorSticky;
-    if (priorSticky) {
-      let restoredStickyMessageId: string | null = null;
-      const restoredAt = new Date().toISOString();
-      if (priorSticky.enabled && priorStickyMessageReplaced) {
-        restoredStickyMessageId = await discord.postMessage(CHANNEL, priorSticky.body);
-        rememberMessage(restoredStickyMessageId);
+    const currentSticky = await store.getSticky(GUILD, CHANNEL);
+    const stickyProof = proofSticky ?? (currentSticky?.updatedBy === ACTOR ? currentSticky : null);
+    if (cleanupDecision(currentSticky, { before: priorSticky, proof: stickyProof }) === 'skip') {
+      check('cleanup.sticky.concurrent', true, 'left a concurrent admin change untouched');
+      if (currentSticky?.lastMessageId) createdMessageIds.delete(currentSticky.lastMessageId);
+    } else {
+      await store.deleteSticky(GUILD, CHANNEL);
+      let restoredSticky: StickyMessageRow | null = priorSticky;
+      if (priorSticky) {
+        let restoredStickyMessageId: string | null = null;
+        const restoredAt = new Date().toISOString();
+        if (priorSticky.enabled && priorStickyMessageReplaced) {
+          restoredStickyMessageId = await discord.postMessage(CHANNEL, priorSticky.body);
+          rememberMessage(restoredStickyMessageId);
+        }
+        const rowToRestore = restoredStickyRow(
+          priorSticky,
+          priorStickyMessageReplaced,
+          restoredStickyMessageId,
+          restoredAt,
+        );
+        restoredSticky = rowToRestore;
+        await db.prepare(
+          `INSERT INTO sticky_messages
+             (guild_id, channel_id, body, debounce_seconds, enabled, last_message_id,
+              last_posted_at, created_by, created_at, updated_by, updated_at, claim_token, claimed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          rowToRestore.guildId, rowToRestore.channelId, rowToRestore.body, rowToRestore.debounceSeconds,
+          rowToRestore.enabled ? 1 : 0, rowToRestore.lastMessageId, rowToRestore.lastPostedAt,
+          rowToRestore.createdBy, rowToRestore.createdAt, rowToRestore.updatedBy, rowToRestore.updatedAt,
+          rowToRestore.claimToken, rowToRestore.claimedAt,
+        );
+        if (restoredStickyMessageId) createdMessageIds.delete(restoredStickyMessageId);
       }
-      const rowToRestore = restoredStickyRow(
-        priorSticky,
-        priorStickyMessageReplaced,
-        restoredStickyMessageId,
-        restoredAt,
-      );
-      restoredSticky = rowToRestore;
-      await db.prepare(
-        `INSERT INTO sticky_messages
-           (guild_id, channel_id, body, debounce_seconds, enabled, last_message_id,
-            last_posted_at, created_by, created_at, updated_by, updated_at, claim_token, claimed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
-        rowToRestore.guildId, rowToRestore.channelId, rowToRestore.body, rowToRestore.debounceSeconds,
-        rowToRestore.enabled ? 1 : 0, rowToRestore.lastMessageId, rowToRestore.lastPostedAt,
-        rowToRestore.createdBy, rowToRestore.createdAt, rowToRestore.updatedBy, rowToRestore.updatedAt,
-        rowToRestore.claimToken, rowToRestore.claimedAt,
-      );
-      if (restoredStickyMessageId) createdMessageIds.delete(restoredStickyMessageId);
+      const restored = await store.getSticky(GUILD, CHANNEL);
+      check('cleanup.sticky', sameSticky(restored, restoredSticky),
+        priorSticky ? 'restored prior definition with a coherent live message' : 'removed proof definition');
     }
-    const restored = await store.getSticky(GUILD, CHANNEL);
-    check('cleanup.sticky', sameSticky(restored, restoredSticky),
-      priorSticky ? 'restored prior definition with a coherent live message' : 'removed proof definition');
   } catch (error) {
     recordCleanupFailure('sticky', error);
   }

@@ -206,7 +206,7 @@ export class AutomationService {
     const now = this.now();
     let existing: Awaited<ReturnType<AutomationStore['getScheduled']>> = null;
     try {
-      existing = await this.store.getScheduled(input.id);
+      existing = await this.store.getScheduled(input.guildId, input.id);
       requireBody(input.body, 'Message body');
       if (input.intervalSeconds != null) {
         if (input.intervalSeconds < 60 || input.intervalSeconds > 31_536_000) {
@@ -217,12 +217,13 @@ export class AutomationService {
       if (Number.isNaN(at)) {
         throw new Error('nextRunAt must be an ISO-8601 timestamp.');
       }
-      await this.store.putScheduled({
+      const nextRunAt = new Date(at).toISOString();
+      const written = await this.store.putScheduled({
         id: input.id,
         guildId: input.guildId,
         channelId: input.channelId,
         body: input.body,
-        nextRunAt: input.nextRunAt,
+        nextRunAt,
         intervalSeconds: input.intervalSeconds ?? null,
         enabled: input.enabled ?? true,
         lastRunAt: existing?.lastRunAt ?? null,
@@ -234,6 +235,9 @@ export class AutomationService {
         claimToken: existing?.claimToken ?? null,
         claimedAt: existing?.claimedAt ?? null,
       });
+      if (!written) {
+        throw new Error('Scheduled message id belongs to another guild.');
+      }
     } catch (err) {
       await this.store.audit(
         {
@@ -284,7 +288,7 @@ export class AutomationService {
    * permanent failures advance/disable it so a deleted channel cannot wedge the
    * queue forever.
    */
-  async runDueScheduled(nowIsoValue?: string): Promise<number> {
+  async runDueScheduled(guildId: string, nowIsoValue?: string): Promise<number> {
     let fired = 0;
     for (let attempted = 0; attempted < 10; attempted++) {
       const now = nowIsoValue ?? this.now();
@@ -292,13 +296,17 @@ export class AutomationService {
       // Discord requests abort after 15 seconds; one minute leaves ample margin
       // for this one outbound call while still recovering after a process crash.
       const leaseUntil = new Date(Date.parse(now) + 60_000).toISOString();
-      const [row] = await this.store.claimDueScheduled(now, claimToken, leaseUntil, 1);
+      const [row] = await this.store.claimDueScheduled(guildId, now, claimToken, leaseUntil, 1);
       if (!row) break;
 
       try {
         const messageId = await this.discord.postMessage(row.channelId, row.body);
-        const completed = await this.store.markScheduledRun(row.id, now, messageId, claimToken);
+        const completed = await this.store.markScheduledRun(guildId, row.id, now, messageId, claimToken);
         if (!completed) {
+          // The definition was changed or cancelled while Discord was posting.
+          // Its completion no longer owns the row, so remove the now-orphaned
+          // message rather than letting a cancelled/stale occurrence survive.
+          await this.discord.deleteMessage(row.channelId, messageId).catch(() => {});
           await this.store.audit(
             {
               guildId: row.guildId, actorId: null, action: 'scheduled.run',
@@ -317,7 +325,7 @@ export class AutomationService {
         const retryAfterMs = retryDelayMs(err);
         if (retryAfterMs !== null) {
           const retryAt = new Date(Date.parse(now) + retryAfterMs).toISOString();
-          const retained = await this.store.retryScheduled(row.id, claimToken, retryAt);
+          const retained = await this.store.retryScheduled(guildId, row.id, claimToken, retryAt);
           if (!retained) continue;
           await this.store.audit(
             {
@@ -332,7 +340,7 @@ export class AutomationService {
           );
           continue;
         }
-        const completed = await this.store.markScheduledRun(row.id, now, null, claimToken);
+        const completed = await this.store.markScheduledRun(guildId, row.id, now, null, claimToken);
         if (!completed) continue;
         await this.store.audit(
           {
@@ -451,13 +459,14 @@ export class AutomationService {
       guildId, channelId, claimToken, postedAt, cutoff, expiredClaimCutoff,
     );
     if (!sticky) return 'held';
+    let replacementMessageId: string | null = null;
     try {
-      const messageId = await this.discord.postMessage(channelId, sticky.body);
+      replacementMessageId = await this.discord.postMessage(channelId, sticky.body);
       const recorded = await this.store.recordStickyPost(
-        guildId, channelId, messageId, postedAt, claimToken,
+        guildId, channelId, replacementMessageId, postedAt, claimToken,
       );
       if (!recorded) {
-        await this.discord.deleteMessage(channelId, messageId).catch(() => {});
+        await this.discord.deleteMessage(channelId, replacementMessageId).catch(() => {});
         return 'held';
       }
       if (sticky.lastMessageId) {
@@ -469,6 +478,11 @@ export class AutomationService {
       );
       return 'reposted';
     } catch (err) {
+      // If Discord accepted the replacement but persistence failed or threw, it
+      // is not the durable sticky and must not be left as an orphan post.
+      if (replacementMessageId) {
+        await this.discord.deleteMessage(channelId, replacementMessageId).catch(() => {});
+      }
       await this.store.releaseStickyPost(guildId, channelId, claimToken);
       await this.store.audit(
         {
@@ -576,15 +590,31 @@ export class AutomationService {
     try {
       await this.store.withCommandCapacity(guildId, async (locked) => {
         const existingRows = await locked.listCommands(guildId);
+        const validCommands = translated.commands.filter((command) => {
+          try {
+            validateCommandInput({
+              guildId,
+              name: command.name,
+              description: command.description,
+              template: command.template,
+              textTrigger: command.textTrigger,
+              actorId,
+            });
+            return true;
+          } catch {
+            skipped++;
+            return false;
+          }
+        });
         const existingNames = new Set(existingRows.map((command) => command.name));
-        for (const command of translated.commands) existingNames.add(command.name);
+        for (const command of validCommands) existingNames.add(command.name);
         if (existingNames.size > maxCommands) {
           throw new CommandCapacityError(
             `Import would define ${existingNames.size} custom commands, but the guild limit is ${maxCommands}.`,
           );
         }
 
-        for (const command of translated.commands) {
+        for (const command of validCommands) {
           const at = this.now();
           const input: PutCommandInput = {
             guildId,
@@ -594,12 +624,7 @@ export class AutomationService {
             textTrigger: command.textTrigger,
             actorId,
           };
-          try {
-            validateCommandInput(input);
-          } catch {
-            skipped++;
-            continue;
-          }
+          validateCommandInput(input);
 
           const existing = await locked.getCommand(guildId, command.name);
           const sameImport =
