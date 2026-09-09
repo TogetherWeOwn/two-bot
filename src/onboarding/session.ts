@@ -13,8 +13,8 @@
  * the TOG-1654 acceptance ("both options, zero role delta, idempotent
  * re-selection, invalid selection retried") is testable with no token.
  *
- * Channel ids come from src/redesign/clean-slate.ts via the catalog below, not
- * from this file, so provisioning and routing can never drift apart.
+ * Runtime channel ids come from environment-backed config. The staging fixture
+ * ids below exist only so the demo and pure unit suite pin the current guild.
  */
 
 import { nowIso, type FunnelEvent } from '../core/events.ts';
@@ -23,10 +23,9 @@ import { log } from '../core/log.ts';
 
 /**
  * Where each picker option sends you. Ids are the TWO Staging clean-slate
- * channels (src/redesign/clean-slate.ts); `looking-to-play` and the Lobby are
- * the two active destinations the accepted brief names. The same constants are
- * reused by the main-guild rollout when it comes, so the demo and production
- * answer "where does this send me" identically.
+ * channels at the time of the staging proof. Runtime handlers build the same
+ * two-option catalog from environment-backed, per-guild channel ids so a
+ * recreated staging channel or later live rollout cannot inherit stale snowflakes.
  *
  * KEYS ARE STABLE: they go in the select-menu value and in event metadata, and
  * a panel posted in a channel outlives every bot restart.
@@ -43,25 +42,36 @@ export interface SessionPick {
 export const LOOKING_TO_PLAY_CHANNEL_ID = '1546211377847337020';
 export const LOBBY_VOICE_CHANNEL_ID = '1546211378430345286';
 
-export const SESSION_PICKS: SessionPick[] = [
-  {
-    key: 'find-players',
-    label: 'Find people to play with',
-    description: 'Post the game, your platform and a start time.',
-    emoji: '🎲',
-    channelId: LOOKING_TO_PLAY_CHANNEL_ID,
-  },
-  {
-    key: 'join-voice',
-    label: 'Join voice now',
-    description: 'The Lobby is open - see who is around.',
-    emoji: '🔊',
-    channelId: LOBBY_VOICE_CHANNEL_ID,
-  },
-];
+export function buildSessionPicks(channelIds: {
+  lookingToPlay: string;
+  lobbyVoice: string;
+}): SessionPick[] {
+  return [
+    {
+      key: 'find-players',
+      label: 'Find people to play with',
+      description: 'Post the game, your platform and a start time.',
+      emoji: '🎲',
+      channelId: channelIds.lookingToPlay,
+    },
+    {
+      key: 'join-voice',
+      label: 'Join voice now',
+      description: 'The Lobby is open - see who is around.',
+      emoji: '🔊',
+      channelId: channelIds.lobbyVoice,
+    },
+  ];
+}
 
-export function pickByKey(key: string): SessionPick | undefined {
-  return SESSION_PICKS.find((p) => p.key === key);
+/** Staging fixture values. Runtime handlers receive per-guild ids from config. */
+export const SESSION_PICKS = buildSessionPicks({
+  lookingToPlay: LOOKING_TO_PLAY_CHANNEL_ID,
+  lobbyVoice: LOBBY_VOICE_CHANNEL_ID,
+});
+
+export function pickByKey(key: string, picks: SessionPick[] = SESSION_PICKS): SessionPick | undefined {
+  return picks.find((p) => p.key === key);
 }
 
 /** The select-menu custom id. Static: the panel outlives every restart. */
@@ -98,12 +108,13 @@ export interface SessionPlan {
 export function planSession(
   keys: string[],
   visible: (channelId: string) => boolean,
+  catalog: SessionPick[] = SESSION_PICKS,
 ): SessionPlan {
   const picks: SessionPick[] = [];
   const unknownKeys: string[] = [];
   const seen = new Set<string>();
   for (const k of keys) {
-    const p = pickByKey(k);
+    const p = pickByKey(k, catalog);
     if (!p) {
       unknownKeys.push(k);
       continue;
@@ -115,11 +126,13 @@ export function planSession(
 
   const channelIds: string[] = [];
   const unavailable: SessionPick[] = [];
-  for (const p of picks) {
-    if (visible(p.channelId)) {
-      if (!channelIds.includes(p.channelId)) channelIds.push(p.channelId);
-    } else {
-      unavailable.push(p);
+  if (unknownKeys.length === 0) {
+    for (const p of picks) {
+      if (visible(p.channelId)) {
+        if (!channelIds.includes(p.channelId)) channelIds.push(p.channelId);
+      } else {
+        unavailable.push(p);
+      }
     }
   }
   return { picks, channelIds, unavailable, unknownKeys };
@@ -133,7 +146,7 @@ export function planSession(
  * handler.
  */
 export function sessionAckText(plan: SessionPlan): string {
-  if (plan.unknownKeys.length && plan.picks.length === 0) {
+  if (plan.unknownKeys.length) {
     return [
       "That option is gone or stale - the panel was probably replaced by a newer one.",
       'Nothing was changed. Open the picker again and choose afresh.',

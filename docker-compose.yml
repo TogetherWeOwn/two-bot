@@ -38,6 +38,11 @@ services:
       # Onboarding does not run at all while this is empty - the bot will never
       # guess a channel to post into on a live server. See docs/ROUTING.md.
       DISCORD_LANDING_CHANNEL_IDS: ${DISCORD_LANDING_CHANNEL_IDS:-}
+      # legacy = game-role picker; session = roleless, guild-scoped routing.
+      TWO_ONBOARDING_MODE: ${TWO_ONBOARDING_MODE:-legacy}
+      DISCORD_GOODBYE_CHANNEL_IDS: ${DISCORD_GOODBYE_CHANNEL_IDS:-}
+      DISCORD_SESSION_LOOKING_TO_PLAY_CHANNEL_ID: ${DISCORD_SESSION_LOOKING_TO_PLAY_CHANNEL_ID:-}
+      DISCORD_SESSION_LOBBY_VOICE_CHANNEL_ID: ${DISCORD_SESSION_LOBBY_VOICE_CHANNEL_ID:-}
       # 1 = onboarding observes and records but grants no roles. Recommended for
       # the first deploy against the live server.
       TWO_ONBOARDING_DRY_RUN: ${TWO_ONBOARDING_DRY_RUN:-1}

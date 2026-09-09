@@ -284,12 +284,11 @@ test('the superseded test-two token is refused, not waved through as unknown', (
   assert.match(r.message, new RegExp(STAGING_BOT_APPLICATION_ID));
 });
 
-test('an unrecognised or unparseable token is allowed through to Discord, not hard-failed', () => {
-  // A token reset changes the secret but never the application id, so a reset
-  // staging token still passes above. This covers a THIRD app someone makes
-  // later: we warn, we do not block a setup that may be correct.
-  assert.equal(checkStagingToken(tokenFor('123456789012345678')).ok, true);
-  assert.equal(checkStagingToken('garbage').ok, true);
+test('an unrecognised or unparseable token is refused before Discord is contacted', () => {
+  // A token reset changes the secret but never the application id, so the real
+  // staging token still passes above. Every other identity is a wrong token.
+  assert.equal(checkStagingToken(tokenFor('123456789012345678')).ok, false);
+  assert.equal(checkStagingToken('garbage').ok, false);
 });
 
 /**

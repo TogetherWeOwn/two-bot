@@ -96,6 +96,8 @@ async function startHarness(t: { after: (fn: () => Promise<void>) => void }): Pr
       DISCORD_API_BASE: mock.apiBase,
       DISCORD_LANDING_CHANNEL_IDS: mock.textChannelId,
       DISCORD_GOODBYE_CHANNEL_IDS: mock.textChannelId,
+      DISCORD_SESSION_LOOKING_TO_PLAY_CHANNEL_ID: LOOKING_TO_PLAY_CHANNEL_ID,
+      DISCORD_SESSION_LOBBY_VOICE_CHANNEL_ID: LOBBY_VOICE_CHANNEL_ID,
       TWO_ONBOARDING_MODE: 'session',
       ...botDbEnv,
       LOG_LEVEL: 'debug',
@@ -287,3 +289,58 @@ test(
     assert.match(bye.content, /stay on the books/);
   },
 );
+
+test(
+  'session mode ignores member and picker events from every other guild',
+  { timeout: 90_000 },
+  async (t) => {
+    const { mock, reader, botLog } = await startHarness(t);
+    const foreignGuildId = '999999999999999999';
+
+    await waitFor(
+      () => (botLog.join('').includes('session_onboarding_enabled') ? true : undefined),
+      'session_onboarding_enabled boot line',
+    );
+
+    mock.memberJoinPending(NEWBIE, 'newbie', foreignGuildId);
+    mock.memberAcceptRules(NEWBIE, 'newbie', foreignGuildId);
+    mock.selectSession(NEWBIE, 'newbie', ['find-players'], foreignGuildId);
+    mock.memberRemove(NEWBIE, 'newbie', foreignGuildId);
+    await sleep(1200);
+
+    assert.equal(postedMessages(mock).length, 0, 'foreign-guild member events must not post');
+    assert.equal(ephemeralReplies(mock).length, 0, 'foreign-guild picker must not be acknowledged');
+    assert.equal(roleWrites(mock).length, 0, 'foreign-guild events must never write roles');
+
+    const rows = await queryDb(reader, (db) =>
+      db.prepare(`SELECT COUNT(*) AS n FROM events WHERE member_id=?`).get(NEWBIE),
+    ) as { n: number } | null;
+    assert.equal(Number(rows?.n ?? 0), 0, 'foreign-guild events must not be recorded');
+  },
+);
+
+test('session mode refuses to start without DISCORD_GUILD_ID', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'two-session-missing-guild-'));
+  const bot = spawn(process.execPath, ['src/index.ts'], {
+    cwd: ROOT,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      DISCORD_TOKEN: 'mock-token',
+      DISCORD_BOT_TOKEN: 'mock-token',
+      DISCORD_GUILD_ID: '',
+      DISCORD_SESSION_LOOKING_TO_PLAY_CHANNEL_ID: LOOKING_TO_PLAY_CHANNEL_ID,
+      DISCORD_SESSION_LOBBY_VOICE_CHANNEL_ID: LOBBY_VOICE_CHANNEL_ID,
+      TWO_ONBOARDING_MODE: 'session',
+      TWO_DB_PATH: join(dir, 'two.db'),
+    },
+  });
+  let output = '';
+  bot.stdout?.on('data', (d) => (output += String(d)));
+  bot.stderr?.on('data', (d) => (output += String(d)));
+  const code = await new Promise<number | null>((resolve) => bot.once('exit', resolve));
+  rmSync(dir, { recursive: true, force: true });
+
+  assert.notEqual(code, 0);
+  assert.match(output, /session requires DISCORD_GUILD_ID/);
+});

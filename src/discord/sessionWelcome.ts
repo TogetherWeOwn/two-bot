@@ -35,9 +35,9 @@ import {
 import { log } from '../core/log.ts';
 import { EventStore } from '../store/eventStore.ts';
 import {
-  SESSION_PICKS,
   SESSION_SELECT_ID,
   SessionRecorder,
+  type SessionPick,
   daysInGuild,
   goodbyeText,
   planSession,
@@ -48,22 +48,26 @@ import {
 export interface SessionWelcomeDeps {
   recorder: SessionRecorder;
   store: EventStore;
+  /** Session mode is intentionally restricted to exactly one guild. */
+  guildId: string;
   /** Welcome goes to the first of these the bot can post in. */
   landingChannelIds: string[];
   /** Where goodbyes go. Same rule: first postable channel wins. */
   goodbyeChannelIds: string[];
+  /** Per-guild picker destinations; channel ids must never be shared across guilds. */
+  picks: SessionPick[];
   /** True = record events, send nothing. Used by preflight and staging rehearsal. */
   dryRun?: boolean;
 }
 
-export function buildSessionMenu(): ActionRowBuilder<StringSelectMenuBuilder> {
+export function buildSessionMenu(picks: SessionPick[]): ActionRowBuilder<StringSelectMenuBuilder> {
   const menu = new StringSelectMenuBuilder()
     .setCustomId(SESSION_SELECT_ID)
     .setPlaceholder('What do you want to do right now?')
     .setMinValues(1)
-    .setMaxValues(SESSION_PICKS.length)
+    .setMaxValues(picks.length)
     .addOptions(
-      SESSION_PICKS.map((p) =>
+      picks.map((p) =>
         new StringSelectMenuOptionBuilder()
           .setLabel(p.label)
           .setValue(p.key)
@@ -82,9 +86,9 @@ function memberCanView(member: GuildMember, channelId: string): boolean {
   return !!perms?.has(PermissionsBitField.Flags.ViewChannel);
 }
 
-function botCanPost(client: Client, channelId: string): GuildTextBasedChannel | null {
+function botCanPost(client: Client, channelId: string, guildId: string): GuildTextBasedChannel | null {
   const ch = client.channels.cache.get(channelId);
-  if (!ch || !ch.isTextBased() || ch.isDMBased()) return null;
+  if (!ch || !ch.isTextBased() || ch.isDMBased() || ch.guild.id !== guildId) return null;
   const botId = client.user?.id;
   if (!botId) return null;
   const perms = ch.permissionsFor(botId);
@@ -98,13 +102,14 @@ export function registerSessionWelcome(client: Client, deps: SessionWelcomeDeps)
   const { recorder } = deps;
 
   async function promptMember(member: GuildMember): Promise<void> {
+    if (member.guild.id !== deps.guildId) return;
     if (member.user.bot) return;
     // Idempotency half one: a member who has already been welcomed is not
     // welcomed again, no matter how many times pending flips.
     if (await deps.store.hasEvent(member.guild.id, member.id, 'onboarding_prompted')) return;
 
     const target =
-      deps.landingChannelIds.map((id) => botCanPost(client, id)).find(Boolean) ?? null;
+      deps.landingChannelIds.map((id) => botCanPost(client, id, deps.guildId)).find(Boolean) ?? null;
     if (!target) {
       log.error('session_welcome_no_channel', {
         tried: deps.landingChannelIds,
@@ -122,7 +127,7 @@ export function registerSessionWelcome(client: Client, deps: SessionWelcomeDeps)
     try {
       await target.send({
         content: sessionWelcomeText(`<@${member.id}>`),
-        components: [buildSessionMenu()],
+        components: [buildSessionMenu(deps.picks)],
         allowedMentions: { users: [member.id] },
       });
       await recorder.prompted(member.guild.id, member.id, target.id);
@@ -141,11 +146,12 @@ export function registerSessionWelcome(client: Client, deps: SessionWelcomeDeps)
   });
 
   client.on(Events.GuildMemberRemove, async (member) => {
+    if (member.guild.id !== deps.guildId) return;
     // The funnel row is recorded by the core handlers; this is the
     // human-visible half. Joined-at survives on the member object Discord
     // hands us even as they leave.
     const target =
-      deps.goodbyeChannelIds.map((id) => botCanPost(client, id)).find(Boolean) ?? null;
+      deps.goodbyeChannelIds.map((id) => botCanPost(client, id, deps.guildId)).find(Boolean) ?? null;
     if (!target) return;
     if (deps.dryRun) {
       log.info('session_goodbye_dry_run', { memberId: member.id });
@@ -189,12 +195,12 @@ export async function handleSessionSelect(interaction: unknown, deps: SessionWel
     editReply(o: { content: string }): Promise<unknown>;
   };
   const member = i.member;
-  if (!member || !i.guild) return;
+  if (!member || !i.guild || i.guild.id !== deps.guildId || member.guild.id !== deps.guildId) return;
 
   // Ephemeral: only the clicker sees the result.
   await i.deferReply({ flags: MessageFlags.Ephemeral });
 
-  const plan = planSession(i.values, (id) => memberCanView(member, id));
+  const plan = planSession(i.values, (id) => memberCanView(member, id), deps.picks);
   if (plan.unknownKeys.length) {
     log.error('session_picker_unknown_keys', { keys: plan.unknownKeys });
   }

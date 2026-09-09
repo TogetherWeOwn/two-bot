@@ -14,6 +14,7 @@ import {
   SESSION_PICKS,
   goodbyeText,
   daysInGuild,
+  buildSessionPicks,
   planSession,
   pickByKey,
   sessionAckText,
@@ -45,6 +46,11 @@ test('no pick carries a role - the structure forbids it', () => {
   }
 });
 
+test('runtime session picks use the configured guild channel ids', () => {
+  const picks = buildSessionPicks({ lookingToPlay: '111111111111111111', lobbyVoice: '222222222222222222' });
+  assert.deepEqual(picks.map((p) => p.channelId), ['111111111111111111', '222222222222222222']);
+});
+
 test('planSession: both keys -> both destinations, deduped and ordered', () => {
   const plan = planSession(['find-players', 'join-voice'], anyVisible);
   assert.deepEqual(plan.channelIds, [LOOKING_TO_PLAY_CHANNEL_ID, LOBBY_VOICE_CHANNEL_ID]);
@@ -71,7 +77,9 @@ test('planSession: unknown and stale keys are reported, never routed', () => {
   // A stale panel from before an option was renamed or removed.
   const plan = planSession(['survival', 'find-players'], anyVisible);
   assert.deepEqual(plan.unknownKeys, ['survival']);
-  assert.deepEqual(plan.channelIds, [LOOKING_TO_PLAY_CHANNEL_ID]);
+  assert.deepEqual(plan.channelIds, [], 'any stale key invalidates the whole submission');
+  assert.match(sessionAckText(plan), /stale/i);
+  assert.doesNotMatch(sessionAckText(plan), new RegExp(LOOKING_TO_PLAY_CHANNEL_ID));
 
   // Entirely unknown: nothing routed at all.
   const none = planSession(['nonsense'], anyVisible);

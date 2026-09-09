@@ -77,6 +77,10 @@ silently writes real data somewhere nobody looks.
 | `TWO_DATABASE_URL` | **yes** | `postgres://…` | **Not** `DATABASE_URL` — see below |
 | `DISCORD_STAFF_ALERT_CHANNEL_ID` | recommended | `1138590808715571300` | Settled on TOG-412. Staff-only: the alert lists member ids |
 | `DISCORD_LANDING_CHANNEL_IDS` | no | empty | Onboarding does not run while empty. Set it only when you want the picker posted |
+| `TWO_ONBOARDING_MODE` | no | `legacy` | Set `session` for roleless routing; requires the next three settings and removes `role.assign` from internal actions |
+| `DISCORD_GOODBYE_CHANNEL_IDS` | session only | empty | Comma-separated, guild-scoped goodbye targets |
+| `DISCORD_SESSION_LOOKING_TO_PLAY_CHANNEL_ID` | session only | empty | Per-guild destination for “Find people to play with” |
+| `DISCORD_SESSION_LOBBY_VOICE_CHANNEL_ID` | session only | empty | Per-guild destination for “Join voice now” |
 | `TWO_ONBOARDING_DRY_RUN` | no | `1` | Leave at `1` for the first deploy: onboarding records but grants no roles |
 | `LOG_LEVEL` | no | `info` | |
 | `TWO_RAID_JOIN_THRESHOLD` / `TWO_RAID_WINDOW_SECONDS` | no | `5` / `60` | Fires on all three raids in this server's history and on no other day in nine years |

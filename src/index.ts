@@ -9,7 +9,8 @@ import { FunnelHandlers } from './core/handlers.ts';
 import { createClient, registerHandlers } from './discord/client.ts';
 import { registerOnboarding, registerGameSelect } from './discord/onboarding.ts';
 import { registerSessionWelcome } from './discord/sessionWelcome.ts';
-import { SessionRecorder } from './onboarding/session.ts';
+import { SessionRecorder, buildSessionPicks } from './onboarding/session.ts';
+import { actionsForOnboardingMode } from './onboarding/mode.ts';
 import { registerAnchorWelcome } from './discord/anchorWelcome.ts';
 import { occurrencesFrom } from './onboarding/anchorEvent.ts';
 import { RaidWatch } from './analytics/raidWatch.ts';
@@ -35,6 +36,16 @@ import { startHealthServer, type HealthServer } from './core/health.ts';
 
 const cfg = loadConfig();
 setLogLevel(cfg.logLevel);
+
+if (
+  cfg.onboardingMode === 'session' &&
+  (!cfg.guildId || !cfg.sessionLookingToPlayChannelId || !cfg.sessionLobbyVoiceChannelId)
+) {
+  throw new Error(
+    'TWO_ONBOARDING_MODE=session requires DISCORD_GUILD_ID, ' +
+      'DISCORD_SESSION_LOOKING_TO_PLAY_CHANNEL_ID and DISCORD_SESSION_LOBBY_VOICE_CHANNEL_ID.',
+  );
+}
 
 const db = await openDb(cfg.dbPath, { poolMax: cfg.dbPoolMax });
 log.info('datastore_open', {
@@ -123,9 +134,14 @@ const onboardingDeps = {
 if (cfg.onboardingMode === 'session') {
   registerSessionWelcome(client, {
     recorder: new SessionRecorder(store),
+    guildId: cfg.guildId!,
     store,
     landingChannelIds: cfg.landingChannelIds,
     goodbyeChannelIds: cfg.goodbyeChannelIds,
+    picks: buildSessionPicks({
+      lookingToPlay: cfg.sessionLookingToPlayChannelId!,
+      lobbyVoice: cfg.sessionLobbyVoiceChannelId!,
+    }),
     dryRun: cfg.onboardingDryRun,
   });
   log.info('session_onboarding_enabled', {
@@ -162,6 +178,7 @@ if (cfg.onboardingMode === 'session') {
 // no port. When it is on, a bad bind address or a missing key is a startup
 // crash rather than a quietly-exposed remote control for the server.
 const internalCfg = loadInternalActionsConfig();
+if (internalCfg) internalCfg.enabled = actionsForOnboardingMode(cfg.onboardingMode, internalCfg.enabled);
 let internal: InternalServer | null = null;
 if (internalCfg) {
   if (!cfg.guildId) {
