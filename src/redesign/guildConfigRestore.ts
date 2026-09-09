@@ -33,7 +33,7 @@ export type RestoreOperation = {
 export type RestoreOverwriteTarget = {
   currentId: string | null;
   name: string;
-  currentOverwrites: GuildConfigOverwrite[];
+  actionPermissionOverwrites: GuildConfigOverwrite[];
   desiredOverwrites: GuildConfigOverwrite[];
   permissionCeilingOverwrites: GuildConfigOverwrite[];
 };
@@ -340,18 +340,30 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
     if (!role) throw new Error(`Snapshot overwrite references unknown role ${roleId}.`);
     return { id: role.id, name: role.name, position: role.position };
   });
+  const knownRoleId = (sourceId: string) => sourceId === snapshot.guildId ? current.guildId : roleIds.get(sourceId) ?? sourceId;
+  const knownOverwrites = (overwrites: GuildConfigOverwrite[]) => overwrites.map((overwrite) => ({
+    ...overwrite,
+    id: overwrite.type === 0 ? knownRoleId(overwrite.id) : overwrite.id,
+  }));
   const overwriteTargets = [...snapshot.channels.filter((channel) =>
     overwriteOperations.some((operation) => typeof operation.path !== 'string' && operation.path.channelSourceId === channel.id))]
     .map((channel) => {
       const currentId = channelIds.get(channel.id) ?? null;
       const currentChannel = currentId ? current.channels.find((item) => item.id === currentId) : undefined;
       const sourceParent = channel.parent_id ? snapshot.channels.find((item) => item.id === channel.parent_id) : undefined;
+      const currentParentId = sourceParent ? channelIds.get(sourceParent.id) : undefined;
+      const currentParent = currentParentId ? current.channels.find((item) => item.id === currentParentId) : undefined;
+      const desiredParentOverwrites = sourceParent ? knownOverwrites(sourceParent.permission_overwrites ?? []) : [];
+      const currentlySyncedToParent = Boolean(currentChannel && currentParent
+        && same(currentChannel.permission_overwrites ?? [], currentParent.permission_overwrites ?? []));
       return {
         currentId,
         name: channel.name,
-        currentOverwrites: currentChannel?.permission_overwrites ?? [],
-        desiredOverwrites: channel.permission_overwrites ?? [],
-        permissionCeilingOverwrites: sourceParent?.permission_overwrites ?? [],
+        actionPermissionOverwrites: sourceParent && (!currentId || currentlySyncedToParent)
+          ? desiredParentOverwrites
+          : currentId ? currentChannel?.permission_overwrites ?? [] : [],
+        desiredOverwrites: knownOverwrites(channel.permission_overwrites ?? []),
+        permissionCeilingOverwrites: sourceParent ? desiredParentOverwrites : [],
       };
     });
 
