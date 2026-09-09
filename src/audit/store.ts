@@ -98,16 +98,19 @@ export class OperationalAuditStore {
     return claimed;
   }
 
-  async ownsDeliveryClaim(entryId: string, claimToken: string): Promise<boolean> {
-    const row = await this.db
+  async authorizeDeliverySend(entryId: string, claimToken: string): Promise<void> {
+    const result = await this.db
       .prepare(
-        `SELECT entry_id FROM operational_audit_log
+        `UPDATE operational_audit_log
+            SET delivery_lease_until = '9999-12-31T23:59:59.999Z'
           WHERE entry_id = ?
             AND delivery_state = 'delivering'
-            AND delivery_claim_token = ?`,
+            AND delivery_claim_token = ?
+            AND delivery_search_before IS NOT NULL
+            AND delivery_lease_until IS NOT NULL`,
       )
-      .get<{ entry_id: string }>(entryId, claimToken);
-    return Boolean(row);
+      .run(entryId, claimToken);
+    if (result.changes !== 1) throw new Error('audit_delivery_send_not_authorized');
   }
 
   async saveDeliverySearchBefore(entryId: string, claimToken: string, before: string): Promise<void> {

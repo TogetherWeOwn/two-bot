@@ -14,6 +14,7 @@ import {
   CHANNEL_TYPE_TEXT,
   CHANNEL_TYPE_VOICE,
   GUILD_CREATE_HEADROOM,
+  auditChannelExports,
   GUILD_CREATE_LIMIT,
   channelCreateBody,
   chooseGuild,
@@ -240,6 +241,24 @@ test('staff log channels deny members and explicitly allow the bot to view and p
   ]);
   assert.equal(channelCreateBody({ name: 'general', type: CHANNEL_TYPE_TEXT }, STAGING, BOT).permission_overwrites, undefined);
   assert.equal(channelCreateBody({ name: 'Voice 1', type: CHANNEL_TYPE_VOICE }, STAGING, BOT).permission_overwrites, undefined);
+});
+
+test('provisioning emits exact runtime configuration for the three audit channels', () => {
+  const channels = [
+    { id: 'audit', name: 'audit-log', type: CHANNEL_TYPE_TEXT },
+    { id: 'voice', name: 'voice-log', type: CHANNEL_TYPE_TEXT },
+    { id: 'moderation', name: 'moderation-log', type: CHANNEL_TYPE_TEXT },
+    { id: 'general', name: 'general', type: CHANNEL_TYPE_TEXT },
+  ];
+  assert.deepEqual(auditChannelExports(channels), [
+    'export DISCORD_AUDIT_LOG_CHANNEL_ID=audit',
+    'export DISCORD_VOICE_LOG_CHANNEL_ID=voice',
+    'export DISCORD_MODERATION_LOG_CHANNEL_ID=moderation',
+  ]);
+  assert.throws(
+    () => auditChannelExports([...channels, { id: 'duplicate', name: 'audit-log', type: CHANNEL_TYPE_TEXT }]),
+    /expected exactly one #audit-log, found 2/,
+  );
 });
 
 test('reconcile repairs present member-readable staff logs and leaves private ones alone', () => {

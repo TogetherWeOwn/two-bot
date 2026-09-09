@@ -363,6 +363,20 @@ test('staging verification fails when the bot holds Administrator', () => {
   assert.match(adminBranch, /fail\(\s*'Administrator permission is held'/);
 });
 
+test('the bot runtime schedules persisted audit retries and clears the timer on shutdown', () => {
+  const index = readFileSync(join(import.meta.dirname, '..', 'src', 'index.ts'), 'utf8');
+  assert.match(index, /client\.once\('ready', auditRetry\)/);
+  assert.match(index, /setInterval\(auditRetry, 30_000\)/);
+  assert.match(index, /clearInterval\(auditSweep\)/);
+  assert.match(index, /operational_audit_retry_failed/);
+});
+
+test('staging provisioning prints all audit channel ids for runtime configuration', () => {
+  const provision = readFileSync(join(import.meta.dirname, '..', 'scripts', 'staging-provision.ts'), 'utf8');
+  assert.match(provision, /auditChannelExports\(channelsAfter\)/);
+  assert.match(provision, /DISCORD_STAGING_GUILD_ID/);
+});
+
 test('staging marker verification requires the leading audit identity field', () => {
   const verifier = readFileSync(join(import.meta.dirname, '..', 'scripts', 'staging-verify.ts'), 'utf8');
   const markerScanner = verifier.slice(

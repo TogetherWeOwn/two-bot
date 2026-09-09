@@ -386,6 +386,19 @@ export function channelCreateBody(
   };
 }
 
+export function auditChannelExports(channels: PartialChannel[]): string[] {
+  const variables = [
+    ['audit-log', 'DISCORD_AUDIT_LOG_CHANNEL_ID'],
+    ['voice-log', 'DISCORD_VOICE_LOG_CHANNEL_ID'],
+    ['moderation-log', 'DISCORD_MODERATION_LOG_CHANNEL_ID'],
+  ] as const;
+  return variables.map(([name, variable]) => {
+    const hits = channels.filter((channel) => channel.type === CHANNEL_TYPE_TEXT && channel.name === name);
+    if (hits.length !== 1) throw new Error(`expected exactly one #${name}, found ${hits.length}`);
+    return `export ${variable}=${hits[0].id}`;
+  });
+}
+
 function needsStaffPrivacyRepair(channel: PartialChannel, guildId: string, botId?: string): boolean {
   if (channel.type !== CHANNEL_TYPE_TEXT || !channel.name.endsWith('-log')) return false;
   const overwrites = channel.permission_overwrites ?? [];

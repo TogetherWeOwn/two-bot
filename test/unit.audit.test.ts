@@ -6,7 +6,7 @@ import { createClient, INTENTS, registerHandlers } from '../src/discord/client.t
 import { moderationAuditEvent } from '../src/audit/discordEvents.ts';
 import { formatAuditEvent, hasAuditEventIdentity, type OperationalAuditEvent } from '../src/audit/events.ts';
 import { makeOperationalAudit } from '../src/audit/service.ts';
-import { deliveryNonce, OperationalAuditStore } from '../src/audit/store.ts';
+import { deliveryNonce, OperationalAuditStore, type StoredOperationalAudit } from '../src/audit/store.ts';
 import { openDb } from '../src/store/db.ts';
 import type { FunnelHandlers } from '../src/core/handlers.ts';
 import type { InviteTracker } from '../src/core/inviteTracker.ts';
@@ -491,8 +491,14 @@ test('stale audit delivery claims cannot mutate replacement ownership', async ()
   assert.ok(replacement?.deliveryClaimToken);
   assert.notEqual(first.deliveryClaimToken, replacement.deliveryClaimToken);
 
-  assert.equal(await store.ownsDeliveryClaim(event.entryId, first.deliveryClaimToken), false);
-  assert.equal(await store.ownsDeliveryClaim(event.entryId, replacement.deliveryClaimToken), true);
+  await assert.rejects(
+    store.authorizeDeliverySend(event.entryId, first.deliveryClaimToken),
+    /audit_delivery_send_not_authorized/,
+  );
+  await assert.rejects(
+    store.authorizeDeliverySend(event.entryId, replacement.deliveryClaimToken),
+    /audit_delivery_send_not_authorized/,
+  );
   await assert.rejects(
     store.saveDeliverySearchBefore(event.entryId, first.deliveryClaimToken, '10'),
     /audit_delivery_search_bound_not_persisted/,
@@ -527,7 +533,43 @@ test('stale audit delivery claims cannot mutate replacement ownership', async ()
   await db.close();
 });
 
-test('a reclaimed delivery cannot send from the stale worker', async () => {
+test('send authorization closes the final reclaim window before Discord I/O', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  let sends = 0;
+  let reclaim: StoredOperationalAudit | null = null;
+  const channel = {
+    id: CHANNEL_A,
+    guild: { id: GUILD, members: { me: { id: 'bot' } } },
+    isTextBased: () => true,
+    isDMBased: () => false,
+    permissionsFor: () => ({ has: () => true }),
+    messages: { fetch: async () => new Collection() },
+    client: { user: { id: 'bot' } },
+    send: async () => {
+      sends++;
+      reclaim = await store.claim('authorized-before-send');
+      return { id: '1' };
+    },
+  };
+  const client = { channels: { cache: new Map([[CHANNEL_A, channel]]), fetch: async () => channel } } as unknown as Client;
+  const sink = makeOperationalAudit(client, {
+    guildId: GUILD, channels: { audit: CHANNEL_A, voice: null, moderation: null }, store,
+  });
+
+  await sink.record({
+    entryId: 'authorized-before-send', kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
+  });
+  assert.equal(sends, 1);
+  assert.equal(reclaim, null, 'an authorized send has no expiring lease to reclaim');
+  const row = await store.get('authorized-before-send');
+  assert.equal(row?.deliveryState, 'delivered');
+  assert.equal(row?.mirrorMessageId, '1');
+  await db.close();
+});
+
+test('a replacement claim before send authorization blocks the stale worker', async () => {
   const db = await openDb(':memory:');
   const store = new OperationalAuditStore(db);
   let sends = 0;
@@ -546,22 +588,24 @@ test('a reclaimed delivery cannot send from the stale worker', async () => {
   const sink = makeOperationalAudit(client, {
     guildId: GUILD, channels: { audit: CHANNEL_A, voice: null, moderation: null }, store,
   });
-  const realSave = store.saveDeliverySearchBefore.bind(store);
-  store.saveDeliverySearchBefore = async (entryId, claimToken, before) => {
-    await realSave(entryId, claimToken, before);
-    await db.prepare(`UPDATE operational_audit_log SET delivery_lease_until = ? WHERE entry_id = ?`).run(
-      '2000-01-01T00:00:00.000Z', entryId,
-    );
+  const realAuthorize = store.authorizeDeliverySend.bind(store);
+  store.authorizeDeliverySend = async (entryId, claimToken) => {
+    await db.prepare(
+      `UPDATE operational_audit_log
+          SET delivery_search_before = NULL, delivery_lease_until = ?
+        WHERE entry_id = ?`,
+    ).run('2000-01-01T00:00:00.000Z', entryId);
     replacementToken = (await store.claim(entryId))?.deliveryClaimToken ?? null;
+    await realAuthorize(entryId, claimToken);
   };
 
   await sink.record({
-    entryId: 'reclaimed-before-send', kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    entryId: 'reclaimed-before-authorization', kind: 'message_delete', channel: 'audit', guildId: GUILD,
     occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
   });
   assert.ok(replacementToken);
   assert.equal(sends, 0);
-  const row = await store.get('reclaimed-before-send');
+  const row = await store.get('reclaimed-before-authorization');
   assert.equal(row?.deliveryState, 'delivering');
   assert.equal(row?.deliveryClaimToken, replacementToken);
   await db.close();

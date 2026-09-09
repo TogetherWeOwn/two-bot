@@ -362,6 +362,15 @@ if (!cfg.guildId) {
   });
 }
 
+const auditRetry = () => {
+  void audit.retryPending().catch(() => {
+    log.error('operational_audit_retry_failed', { classification: 'audit_retry_failed' });
+  });
+};
+client.once('ready', auditRetry);
+const auditSweep = setInterval(auditRetry, 30_000);
+auditSweep.unref();
+
 const moderationSweep = moderationService
   ? setInterval(() => {
       void moderationService.runDueUnbans().catch((err: unknown) => {
@@ -414,6 +423,7 @@ if (healthPort > 0) {
 async function shutdown(signal: string) {
   log.info('shutdown', { signal });
   clearInterval(sweep);
+  clearInterval(auditSweep);
   if (moderationSweep) clearInterval(moderationSweep);
   presenceProbe?.stop();
   communitySnapshots?.stop();
