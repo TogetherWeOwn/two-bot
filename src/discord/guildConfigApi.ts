@@ -84,10 +84,11 @@ export class GuildConfigDiscordApi {
     }
   }
 
-  async assertRestorePermissions(snapshot: GuildConfigSnapshot, plan: Pick<RestorePlan, 'counts' | 'overwriteRoles'>): Promise<void> {
+  async assertRestorePermissions(snapshot: GuildConfigSnapshot, plan: Pick<RestorePlan, 'counts' | 'overwriteRoles' | 'overwriteTargets'>): Promise<void> {
     const member = await this.request<{ roles?: string[] }>('GET', `/guilds/${this.guildId}/members/${this.applicationId}`);
     if (member.status !== 200 || !member.body) throw new Error(`Could not read Owen's guild member for permission preflight: HTTP ${member.status}.`);
-    const heldRoles = snapshot.roles.filter((role) => role.id === this.guildId || (member.body!.roles ?? []).includes(role.id));
+    const heldRoleIds = new Set([this.guildId, ...(member.body.roles ?? [])]);
+    const heldRoles = snapshot.roles.filter((role) => heldRoleIds.has(role.id));
     const permissions = heldRoles.reduce((mask, role) => mask | BigInt(role.permissions), 0n);
     const administrator = (permissions & (1n << 3n)) !== 0n;
     const needsManageRoles = plan.counts.roles > 0 || plan.counts.overwrites > 0;
@@ -107,6 +108,39 @@ export class GuildConfigDiscordApi {
       const blocked = targets.filter((role) => botPosition <= role.position);
       if (blocked.length > 0) {
         throw new Error(`Restore hierarchy preflight failed: Owen role position ${botPosition} is not above overwrite target ${blocked.map((role) => `${role.name} (${role.position})`).join(', ')}.`);
+      }
+    }
+    if (!administrator) {
+      const effectivePermissions = (overwrites: GuildConfigChannel['permission_overwrites']) => {
+        let effective = permissions;
+        const everyone = overwrites.find((overwrite) => overwrite.type === 0 && overwrite.id === this.guildId);
+        if (everyone) effective = (effective & ~BigInt(everyone.deny)) | BigInt(everyone.allow);
+        let roleAllow = 0n;
+        let roleDeny = 0n;
+        for (const overwrite of overwrites.filter((item) => item.type === 0 && heldRoleIds.has(item.id) && item.id !== this.guildId)) {
+          roleAllow |= BigInt(overwrite.allow);
+          roleDeny |= BigInt(overwrite.deny);
+        }
+        effective = (effective & ~roleDeny) | roleAllow;
+        const memberOverwrite = overwrites.find((overwrite) => overwrite.type === 1 && overwrite.id === this.applicationId);
+        if (memberOverwrite) effective = (effective & ~BigInt(memberOverwrite.deny)) | BigInt(memberOverwrite.allow);
+        return effective;
+      };
+      const blockedTargets = plan.overwriteTargets.flatMap((target) => {
+        if (!target.currentId) return [];
+        const effective = effectivePermissions(target.currentOverwrites);
+        const missingChannelPermissions = [
+          { name: 'Manage Channels', bit: 1n << 4n },
+          { name: 'Manage Roles', bit: 1n << 28n },
+        ].filter((permission) => (effective & permission.bit) === 0n).map((permission) => permission.name);
+        const requestedOverwrites = target.desiredOverwrites.length > 0 ? target.desiredOverwrites : target.inheritedDesiredOverwrites;
+        const requested = requestedOverwrites.reduce((mask, overwrite) => mask | BigInt(overwrite.allow) | BigInt(overwrite.deny), 0n);
+        const unowned = requested & ~effective;
+        if (missingChannelPermissions.length === 0 && unowned === 0n) return [];
+        return [`${target.name} (missing ${missingChannelPermissions.join(', ') || 'none'}; unowned mask ${unowned})`];
+      });
+      if (blockedTargets.length > 0) {
+        throw new Error(`Restore channel permission preflight failed: ${blockedTargets.join('; ')}.`);
       }
     }
   }

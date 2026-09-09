@@ -30,10 +30,19 @@ export type RestoreOperation = {
   captureId?: { resource: RestoreResource; sourceId: string };
 };
 
+export type RestoreOverwriteTarget = {
+  currentId: string | null;
+  name: string;
+  currentOverwrites: GuildConfigOverwrite[];
+  desiredOverwrites: GuildConfigOverwrite[];
+  inheritedDesiredOverwrites: GuildConfigOverwrite[];
+};
+
 export type RestorePlan = {
   counts: { roles: number; channels: number; overwrites: number; settings: number; emojis: number; operations: number };
   knownIds: RestoreIdMap;
   overwriteRoles: Array<{ id: string; name: string; position: number }>;
+  overwriteTargets: RestoreOverwriteTarget[];
   operations: RestoreOperation[];
 };
 
@@ -331,6 +340,20 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
     if (!role) throw new Error(`Snapshot overwrite references unknown role ${roleId}.`);
     return { id: role.id, name: role.name, position: role.position };
   });
+  const overwriteTargets = [...snapshot.channels.filter((channel) =>
+    overwriteOperations.some((operation) => typeof operation.path !== 'string' && operation.path.channelSourceId === channel.id))]
+    .map((channel) => {
+      const currentId = channelIds.get(channel.id) ?? null;
+      const currentChannel = currentId ? current.channels.find((item) => item.id === currentId) : undefined;
+      const sourceParent = channel.parent_id ? snapshot.channels.find((item) => item.id === channel.parent_id) : undefined;
+      return {
+        currentId,
+        name: channel.name,
+        currentOverwrites: currentChannel?.permission_overwrites ?? [],
+        desiredOverwrites: channel.permission_overwrites ?? [],
+        inheritedDesiredOverwrites: sourceParent?.permission_overwrites ?? [],
+      };
+    });
 
   const operations = [
     ...roleOperations,
@@ -353,6 +376,7 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
     },
     knownIds: { roles: Object.fromEntries(roleIds), channels: Object.fromEntries(channelIds), emojis: Object.fromEntries(emojiIds) },
     overwriteRoles,
+    overwriteTargets,
     operations,
   };
 }
