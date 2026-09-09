@@ -345,6 +345,10 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
     ...overwrite,
     id: overwrite.type === 0 ? knownRoleId(overwrite.id) : overwrite.id,
   }));
+  const canonicalOverwrites = (overwrites: GuildConfigOverwrite[]) => [...overwrites]
+    .sort((left, right) => left.type - right.type || left.id.localeCompare(right.id));
+  const sameOverwrites = (left: GuildConfigOverwrite[], right: GuildConfigOverwrite[]) =>
+    same(canonicalOverwrites(left), canonicalOverwrites(right));
   const overwriteTargets = [...snapshot.channels.filter((channel) =>
     overwriteOperations.some((operation) => typeof operation.path !== 'string' && operation.path.channelSourceId === channel.id))]
     .map((channel) => {
@@ -355,7 +359,7 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
       const currentParent = currentParentId ? current.channels.find((item) => item.id === currentParentId) : undefined;
       const desiredParentOverwrites = sourceParent ? knownOverwrites(sourceParent.permission_overwrites ?? []) : [];
       const currentlySyncedToParent = Boolean(currentChannel && currentParent
-        && same(currentChannel.permission_overwrites ?? [], currentParent.permission_overwrites ?? []));
+        && sameOverwrites(currentChannel.permission_overwrites ?? [], currentParent.permission_overwrites ?? []));
       return {
         currentId,
         name: channel.name,
