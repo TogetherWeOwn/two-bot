@@ -100,7 +100,7 @@ export class GuildConfigDiscordApi {
     ];
     const missing = administrator ? [] : required.filter((permission) => (permissions & permission.bit) === 0n).map((permission) => permission.name);
     if (missing.length > 0) throw new Error(`Restore permission preflight failed: missing ${missing.join(', ')}.`);
-    if (needsManageRoles && !administrator && snapshot.guild.owner_id !== this.applicationId) {
+    if (needsManageRoles && snapshot.guild.owner_id !== this.applicationId) {
       const botPosition = Math.max(...heldRoles.map((role) => role.position), -1);
       const targets = plan.counts.roles > 0
         ? snapshot.roles.filter((role) => !role.managed && role.id !== this.guildId)
@@ -127,14 +127,13 @@ export class GuildConfigDiscordApi {
         return effective;
       };
       const blockedTargets = plan.overwriteTargets.flatMap((target) => {
-        const targetEffective = target.currentId ? effectivePermissions(target.currentOverwrites) : permissions;
+        const permissionCeiling = effectivePermissions(target.permissionCeilingOverwrites);
+        const actionPermissions = target.currentId ? effectivePermissions(target.currentOverwrites) : permissionCeiling;
         const missingChannelPermissions = [
           { name: 'Manage Channels', bit: 1n << 4n },
           { name: 'Manage Roles', bit: 1n << 28n },
-        ].filter((permission) => (targetEffective & permission.bit) === 0n).map((permission) => permission.name);
-        const permissionCeiling = effectivePermissions(target.permissionCeilingOverwrites);
-        const requestedOverwrites = target.desiredOverwrites.length > 0 ? target.desiredOverwrites : target.inheritedDesiredOverwrites;
-        const requested = requestedOverwrites.reduce((mask, overwrite) => mask | BigInt(overwrite.allow) | BigInt(overwrite.deny), 0n);
+        ].filter((permission) => (actionPermissions & permission.bit) === 0n).map((permission) => permission.name);
+        const requested = target.desiredOverwrites.reduce((mask, overwrite) => mask | BigInt(overwrite.allow) | BigInt(overwrite.deny), 0n);
         const unowned = requested & ~permissionCeiling;
         if (missingChannelPermissions.length === 0 && unowned === 0n) return [];
         return [`${target.name} (missing ${missingChannelPermissions.join(', ') || 'none'}; unowned mask ${unowned})`];

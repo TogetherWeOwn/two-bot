@@ -34,9 +34,8 @@ export type RestoreOverwriteTarget = {
   currentId: string | null;
   name: string;
   currentOverwrites: GuildConfigOverwrite[];
-  permissionCeilingOverwrites: GuildConfigOverwrite[];
   desiredOverwrites: GuildConfigOverwrite[];
-  inheritedDesiredOverwrites: GuildConfigOverwrite[];
+  permissionCeilingOverwrites: GuildConfigOverwrite[];
 };
 
 export type RestorePlan = {
@@ -347,15 +346,12 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
       const currentId = channelIds.get(channel.id) ?? null;
       const currentChannel = currentId ? current.channels.find((item) => item.id === currentId) : undefined;
       const sourceParent = channel.parent_id ? snapshot.channels.find((item) => item.id === channel.parent_id) : undefined;
-      const currentParentId = sourceParent ? channelIds.get(sourceParent.id) : null;
-      const currentParent = currentParentId ? current.channels.find((item) => item.id === currentParentId) : undefined;
       return {
         currentId,
         name: channel.name,
         currentOverwrites: currentChannel?.permission_overwrites ?? [],
-        permissionCeilingOverwrites: currentParent?.permission_overwrites ?? [],
         desiredOverwrites: channel.permission_overwrites ?? [],
-        inheritedDesiredOverwrites: sourceParent?.permission_overwrites ?? [],
+        permissionCeilingOverwrites: sourceParent?.permission_overwrites ?? [],
       };
     });
 
