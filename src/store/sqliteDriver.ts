@@ -88,6 +88,31 @@ function ensureColumn(raw: DatabaseSync, table: string, column: string, type: st
   raw.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
 }
 
+function reconcilePendingUnbans(raw: DatabaseSync): void {
+  const duplicates = raw.prepare(
+    `SELECT guild_id, user_id
+       FROM moderation_scheduled_unbans
+      WHERE state = 'pending'
+      GROUP BY guild_id, user_id
+     HAVING COUNT(*) > 1`,
+  ).all() as Array<{ guild_id: string; user_id: string }>;
+  const pending = raw.prepare(
+    `SELECT request_id FROM moderation_scheduled_unbans
+      WHERE guild_id = ? AND user_id = ? AND state = 'pending'
+      ORDER BY execute_at DESC, created_at DESC, request_id DESC`,
+  );
+  const supersede = raw.prepare(
+    `UPDATE moderation_scheduled_unbans
+        SET state = 'superseded', completed_at = COALESCE(completed_at, ?)
+      WHERE request_id = ?`,
+  );
+  const now = new Date().toISOString();
+  for (const pair of duplicates) {
+    const rows = pending.all(pair.guild_id, pair.user_id) as Array<{ request_id: string }>;
+    for (const row of rows.slice(1)) supersede.run(now, row.request_id);
+  }
+}
+
 /** Open a SQLite database. `:memory:` gives an ephemeral one. */
 export async function openSqlite(path: string): Promise<Db> {
   if (path !== ':memory:') mkdirSync(dirname(path), { recursive: true });
@@ -99,9 +124,23 @@ export async function openSqlite(path: string): Promise<Db> {
   // transactions, so waiting costs milliseconds and losing the run costs
   // several minutes of re-scanning Discord.
   raw.exec('PRAGMA busy_timeout = 15000;');
-  raw.exec(readFileSync(join(here, 'schema.sql'), 'utf8'));
+  let schema = readFileSync(join(here, 'schema.sql'), 'utf8');
+  const pendingIndex = `CREATE UNIQUE INDEX IF NOT EXISTS uq_moderation_pending_unban
+  ON moderation_scheduled_unbans (guild_id, user_id) WHERE state = 'pending';`;
+  // Old databases may contain duplicates that were legal before 0011. Defer
+  // this one index until the rows are reconciled below; all other bootstrap SQL
+  // remains unchanged.
+  schema = schema.replace(pendingIndex, '');
+  raw.exec(schema);
   // Mirrors migrations/0008_members_third_message_at.sql (TWO-95).
   ensureColumn(raw, 'members', 'third_message_at', 'TEXT');
+  // Existing SQLite databases already have the 0010 table, so schema.sql's
+  // CREATE TABLE IF NOT EXISTS cannot add the 0011/0012 claim columns.
+  ensureColumn(raw, 'moderation_scheduled_unbans', 'claimed_at', 'TEXT');
+  ensureColumn(raw, 'moderation_scheduled_unbans', 'claim_token', 'TEXT');
+  ensureColumn(raw, 'moderation_lockdowns', 'prior_exists', 'INTEGER NOT NULL DEFAULT 1');
+  reconcilePendingUnbans(raw);
+  raw.exec(pendingIndex);
   // schema.sql is the whole schema, so every migration whose tables it already
   // contains is recorded as applied. Adding a migration means adding its
   // tables above and its id here, or a database that is later moved to
@@ -112,6 +151,9 @@ export async function openSqlite(path: string): Promise<Db> {
     '0002_internal_actions',
     '0008_members_third_message_at',
     '0010_leveling',
+    '0010_moderation',
+    '0011_moderation_durability',
+    '0012_moderation_recovery',
   ]) {
     stamp.run(id, new Date().toISOString());
   }
