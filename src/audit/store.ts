@@ -165,18 +165,25 @@ export class OperationalAuditStore {
     if (result.changes !== 1) throw new Error('audit_delivery_ack_not_persisted');
   }
 
-  async markAcknowledgementFailed(entryId: string, claimToken: string): Promise<void> {
+  async markAcknowledgementFailed(
+    entryId: string,
+    claimToken: string,
+    leaseMs = AUDIT_DELIVERY_LEASE_MS,
+  ): Promise<void> {
+    const now = new Date();
+    const leaseUntil = new Date(now.getTime() + leaseMs).toISOString();
     const result = await this.db
       .prepare(
         `UPDATE operational_audit_log
             SET delivery_attempts = delivery_attempts + 1,
                 delivery_attempted_at = ?,
-                delivery_last_error = 'delivery_ack_failed'
+                delivery_last_error = 'delivery_ack_failed',
+                delivery_lease_until = ?
           WHERE entry_id = ?
             AND delivery_state = 'delivering'
             AND delivery_claim_token = ?`,
       )
-      .run(new Date().toISOString(), entryId, claimToken);
+      .run(now.toISOString(), leaseUntil, entryId, claimToken);
     if (result.changes !== 1) throw new Error('audit_delivery_ack_failure_not_persisted');
   }
 
