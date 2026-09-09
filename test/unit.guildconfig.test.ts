@@ -7,7 +7,7 @@ import {
   type GuildConfigSnapshot,
 } from '../src/redesign/guildConfig.ts';
 import { CATEGORIES, MODERATOR_ROLE, OWNER_ROLE, SERVER_DESCRIPTION, TOPICS, desiredEveryoneOverwrite } from '../src/redesign/clean-slate.ts';
-import { applyRestorePlan, planRestore, snapshotsEqual } from '../src/redesign/guildConfigRestore.ts';
+import { applyRestorePlan, planRestore, remapSnapshotIds, snapshotsEqual } from '../src/redesign/guildConfigRestore.ts';
 import type { GuildConfigDiscordApi } from '../src/discord/guildConfigApi.ts';
 
 const GUILD = '1545644954272137297';
@@ -167,7 +167,12 @@ test('restore applies roles, categories, channels and overwrites in dependency o
     },
   } as GuildConfigDiscordApi;
 
-  await applyRestorePlan(api, planRestore(source, current));
+  const restoredIds = await applyRestorePlan(api, planRestore(source, current));
+  const remapped = remapSnapshotIds(source, restoredIds);
+  assert.equal(remapped.roles.find((role) => role.name === 'Moderator')!.id, id(901));
+  assert.equal(remapped.channels.find((channel) => channel.name === sourceCategory.name)!.id, id(902));
+  assert.ok(remapped.channels.filter((channel) => channel.parent_id === id(902)).every((channel) => [id(903), id(904)].includes(channel.id)));
+  assert.deepEqual(remapped.channels.find((channel) => channel.id === id(904))!.permission_overwrites.map((overwrite) => overwrite.id), [GUILD, id(901)]);
   assert.deepEqual(calls.map((call) => `${call.method} ${call.path}`), [
     `POST /guilds/${GUILD}/roles`,
     `PATCH /guilds/${GUILD}/roles`,
