@@ -13,6 +13,10 @@ import {
   reactionOptionKey,
   selfRoleCustomId,
 } from '../src/selfRoles/plan.ts';
+import {
+  SELF_ROLE_PRIVILEGED_PERMISSIONS,
+  type SelfRolePrivilegedPermission,
+} from '../src/selfRoles/permissions.ts';
 import type { SelfRolePanel } from '../src/selfRoles/types.ts';
 import { validateSelfRoleDispatch } from '../src/discord/selfRoles.ts';
 import { SelfRoleStore } from '../src/store/selfRoleStore.ts';
@@ -61,42 +65,48 @@ test('configuration rejects duplicate panels, messages, roles, and unsafe color 
   );
 });
 
-test('configuration rejects a declared privileged role permission', () => {
-  assert.throws(
-    () => loadSelfRolePanels(JSON.stringify([{
-      ...panel,
-      options: [{ ...panel.options[0], permissions: String(1n << 2n) }], // BanMembers
-    }])),
-    /roleId 111111111111111111 has privileged permission BanMembers.*permissions/,
-  );
-});
-
-test('startup resolution rejects a role whose live permissions gained privilege', () => {
-  assert.throws(
-    () => validateSelfRolePanelRoles([panel], [
-      { id: A, name: 'Staff', permissions: String(1n << 2n) }, // BanMembers
-      { id: B, name: 'Blue', permissions: '0' },
-    ]),
-    /role 111111111111111111 \("Staff"\) has privileged permission BanMembers/,
-  );
-});
-
-test('dispatch re-check rejects a role that gains privilege after startup', () => {
-  const roles = new Map([
-    [A, { id: A, managed: false, editable: true, permissions: { bitfield: 1n << 13n } }], // ManageMessages
-  ]);
-  const member = {
-    guild: {
-      members: { me: { permissions: { has: () => true } } },
-      roles: { cache: { get: (id: string) => roles.get(id) } },
-    },
-  };
-  assert.deepEqual(validateSelfRoleDispatch(panel, member as never, [A]), {
-    code: 'privileged_role',
-    reason: `role ${A} has privileged permission ManageMessages`,
-    publicMessage: 'That role is not safe for self-service. Staff have been notified in the logs.',
+for (const [permission, bit] of SELF_ROLE_PRIVILEGED_PERMISSIONS) {
+  test(`configuration rejects declared ${permission} permission`, () => {
+    assert.throws(
+      () => loadSelfRolePanels(JSON.stringify([{
+        ...panel,
+        options: [{ ...panel.options[0], permissions: String(bit) }],
+      }])),
+      privilegedPermissionPattern(permission),
+    );
   });
-});
+
+  test(`startup resolution rejects live ${permission} permission`, () => {
+    assert.throws(
+      () => validateSelfRolePanelRoles([panel], [
+        { id: A, name: 'Staff', permissions: String(bit) },
+        { id: B, name: 'Blue', permissions: '0' },
+      ]),
+      new RegExp(`role ${A} \\(\"Staff\"\\) has privileged permission ${permission}`),
+    );
+  });
+
+  test(`dispatch re-check rejects live ${permission} permission`, () => {
+    const roles = new Map([
+      [A, { id: A, managed: false, editable: true, permissions: { bitfield: bit } }],
+    ]);
+    const member = {
+      guild: {
+        members: { me: { permissions: { has: () => true } } },
+        roles: { cache: { get: (id: string) => roles.get(id) } },
+      },
+    };
+    assert.deepEqual(validateSelfRoleDispatch(panel, member as never, [A]), {
+      code: 'privileged_role',
+      reason: `role ${A} has privileged permission ${permission}`,
+      publicMessage: 'That role is not safe for self-service. Staff have been notified in the logs.',
+    });
+  });
+}
+
+function privilegedPermissionPattern(permission: SelfRolePrivilegedPermission): RegExp {
+  return new RegExp(`roleId ${A} has privileged permission ${permission}.*permissions`);
+}
 
 test('dispatch re-check rejects any live permission-mask drift', () => {
   const roles = new Map([
