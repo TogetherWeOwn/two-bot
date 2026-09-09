@@ -180,6 +180,36 @@ describe('destructive-action containment', () => {
     assert.equal(calls, 0);
   });
 
+  test('reverse-delivered audit entries still trigger an occurrence-time threshold crossing', async () => {
+    let calls = 0;
+    const containment = new DestructiveContainment({
+      store,
+      discord: { quarantine: async () => (calls++, { removedRoleIds: [], skippedRoleIds: [] }) },
+      config: config({ heatThreshold: 5, windowSeconds: 60 }),
+      announce: async () => undefined,
+      now: () => NOW,
+    });
+    await containment.observe(destructive('newest', 'channel.delete', NOW - 1_000));
+    await containment.observe(destructive('middle', 'member.kick', NOW - 2_000));
+    await containment.observe(destructive('oldest', 'member.kick', NOW - 3_000));
+    assert.equal(calls, 1);
+  });
+
+  test('future audit entries are recorded but cannot contribute heat', async () => {
+    let calls = 0;
+    const containment = new DestructiveContainment({
+      store,
+      discord: { quarantine: async () => (calls++, { removedRoleIds: [], skippedRoleIds: [] }) },
+      config: config({ heatThreshold: 5, windowSeconds: 60 }),
+      announce: async () => undefined,
+      now: () => NOW,
+    });
+    await containment.observe(destructive('future', 'channel.delete', NOW + 6_000));
+    await containment.observe(destructive('fresh-a', 'member.kick', NOW));
+    await containment.observe(destructive('fresh-b', 'member.kick', NOW - 1_000));
+    assert.equal(calls, 0);
+  });
+
   test('timeout is uncertain and never automatically retried', async () => {
     let calls = 0;
     const containment = new DestructiveContainment({

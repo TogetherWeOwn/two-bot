@@ -57,6 +57,35 @@ describe('Postgres containment concurrency', { skip: !usingPostgres && 'needs TW
     assert.ok(rows[0].heat >= 5);
   });
 
+  test('reverse lock acquisition cannot hide an occurrence-time threshold crossing', async () => {
+    let quarantines = 0;
+    const containment = new DestructiveContainment({
+      store: new ContainmentStore(harness.db, () => NOW),
+      discord: { quarantine: async () => (quarantines++, { removedRoleIds: ['danger'], skippedRoleIds: [] }) },
+      config,
+      announce: async () => undefined,
+      now: () => NOW,
+    });
+    for (const [auditEntryId, offset, weight, action] of [
+      ['newest', -1_000, 3, 'channel.delete'],
+      ['middle', -2_000, 1, 'member.kick'],
+      ['oldest', -3_000, 1, 'member.kick'],
+    ] as const) {
+      await containment.observe({
+        auditEntryId,
+        guildId: GUILD,
+        executorId: EXECUTOR,
+        action,
+        targetId: `target-${auditEntryId}`,
+        occurredAt: new Date(NOW + offset).toISOString(),
+        weight,
+      });
+    }
+    assert.equal(quarantines, 1);
+    const incident = await harness.db.prepare('SELECT heat FROM containment_incidents').get<{ heat: number }>();
+    assert.equal(incident?.heat, 5);
+  });
+
   test('parallel bulk joins are counted atomically', async () => {
     const store = new ContainmentStore(harness.db, () => NOW);
     const rows = await Promise.all(Array.from({ length: 5 }, (_, index) => store.recordJoinRisk({

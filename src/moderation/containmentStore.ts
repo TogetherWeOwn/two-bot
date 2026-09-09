@@ -63,16 +63,34 @@ export class ContainmentStore {
       if (inserted.changes !== 1) return { claimed: false, heat: 0 };
       if (!row.executorId || row.state !== 'observe') return { claimed: true, heat: 0 };
       const occurredMs = Date.parse(row.occurredAt);
-      const throughMs = Math.min(occurredMs, this.now() + 5_000);
-      const cutoff = iso(throughMs - windowSeconds * 1000);
-      const through = iso(throughMs);
-      const heat = await tx.prepare(
-        `SELECT COALESCE(SUM(weight), 0) AS heat
+      const windowMs = windowSeconds * 1000;
+      const futureLimitMs = this.now() + 5_000;
+      if (occurredMs > futureLimitMs) return { claimed: true, heat: 0 };
+      const events = await tx.prepare(
+        `SELECT audit_entry_id, weight, occurred_at
            FROM containment_events
           WHERE guild_id = ? AND executor_id = ? AND state IN ('observe', 'contain')
-            AND occurred_at > ? AND occurred_at <= ?`,
-      ).get<{ heat: number }>(row.guildId, row.executorId, cutoff, through);
-      return { claimed: true, heat: Number(heat?.heat ?? 0) };
+            AND occurred_at > ? AND occurred_at <= ?
+          ORDER BY occurred_at, audit_entry_id`,
+      ).all<{ audit_entry_id: string; weight: number; occurred_at: string }>(
+        row.guildId,
+        row.executorId,
+        iso(occurredMs - windowMs),
+        iso(Math.min(occurredMs + windowMs, futureLimitMs)),
+      );
+      let heat = 0;
+      let maxHeat = 0;
+      let left = 0;
+      for (let right = 0; right < events.length; right++) {
+        const rightMs = Date.parse(events[right].occurred_at);
+        heat += Number(events[right].weight);
+        while (left <= right && rightMs - Date.parse(events[left].occurred_at) >= windowMs) {
+          heat -= Number(events[left].weight);
+          left++;
+        }
+        if (rightMs >= occurredMs) maxHeat = Math.max(maxHeat, heat);
+      }
+      return { claimed: true, heat: maxHeat };
     });
   }
 
