@@ -310,22 +310,129 @@ test('bypass roles, channel exceptions, bots, and dry-run make no Discord mutati
   await testDb.cleanup();
 });
 
-test('sanction hierarchy and protected-target checks come from moderation primitives', async () => {
+test('sanction refusals are audited and replay without a second mutation', async () => {
+  const refusals = [
+    {
+      name: 'protected role',
+      target: { userId: USER, roleIds: [BYPASS], highestRolePosition: 1, isBot: false, isGuildOwner: false },
+      botHighestRolePosition: 10,
+      protectedRoleIds: new Set([BYPASS]),
+      reason: 'target_staff_role',
+    },
+    {
+      name: 'role hierarchy',
+      target: { userId: USER, roleIds: [], highestRolePosition: 10, isBot: false, isGuildOwner: false },
+      botHighestRolePosition: 10,
+      protectedRoleIds: new Set<string>(),
+      reason: 'actor_hierarchy',
+    },
+  ];
+
+  for (const refusal of refusals) {
+    const testDb = await openTestDb(import.meta.filename);
+    const calls: string[] = [];
+    const discord: ModerationDiscordClient = {
+      async deleteMessage(_channel, id) { calls.push(`delete:${id}`); },
+      async timeout() { calls.push('timeout'); },
+      async ban() {}, async unban() {}, async kick() {},
+      async purge(_channel, count) { return count; }, async setSlowmode() {},
+      async getEveryoneOverwrite() { return null; }, async putEveryoneOverwrite() {}, async deleteEveryoneOverwrite() {},
+    };
+    const moderationStore = new ModerationStore(testDb.db);
+    const service = new AutomodService(
+      discord,
+      new ModerationService(discord, moderationStore, {
+        owenUserId: OWEN,
+        botUserId: OWEN,
+        protectedRoleIds: refusal.protectedRoleIds,
+      }),
+      moderationStore,
+      new AutomodStore(testDb.db),
+      { target: async () => refusal.target },
+      {
+        dryRun: false,
+        owenUserId: OWEN,
+        botHighestRolePosition: refusal.botHighestRolePosition,
+        policy: { ...policy, sanctions: [{ violations: 1, action: 'timeout', timeoutSeconds: 600 }] },
+      },
+    );
+    const messageId = `refused-${refusal.reason}`;
+    const first = await service.inspect(message({ messageId, content: 'very bad' }));
+    assert.deepEqual(first, { matched: true, deleted: true, filter: 'bad_words', sanction: 'timeout' }, refusal.name);
+    assert.deepEqual(calls, [`delete:${messageId}`], `${refusal.name}: no refused sanction reached Discord`);
+
+    const audit = await testDb.db.prepare(
+      `SELECT outcome, metadata_json FROM moderation_audit WHERE action = 'automod.bad_words'`,
+    ).get<{ outcome: string; metadata_json: string }>();
+    assert.equal(audit?.outcome, 'refused', refusal.name);
+    assert.deepEqual(JSON.parse(audit?.metadata_json ?? '{}'), {
+      message_id: messageId,
+      filter: 'bad_words',
+      violation_count: 1,
+      sanction: 'timeout',
+      timeout_seconds: 600,
+      dry_run: false,
+      refusal_reason: refusal.reason,
+    });
+    assert.ok(!audit?.metadata_json.includes('very bad'), `${refusal.name}: message content is absent from audit metadata`);
+
+    const replay = await service.inspect(message({ messageId, content: 'very bad' }));
+    assert.equal(replay.replayed, true, refusal.name);
+    assert.deepEqual(calls, [`delete:${messageId}`], `${refusal.name}: replay made no second Discord call`);
+    assert.equal((await testDb.db.prepare(`SELECT COUNT(*) AS n FROM automod_violations`).get<{ n: number }>())?.n, 1);
+    assert.equal((await testDb.db.prepare(
+      `SELECT COUNT(*) AS n FROM moderation_audit WHERE action = 'automod.bad_words'`,
+    ).get<{ n: number }>())?.n, 1);
+    await testDb.cleanup();
+  }
+});
+
+test('unexpected resolver action_not_allowed keeps the outer claim in flight', async () => {
   const testDb = await openTestDb(import.meta.filename);
+  const calls: string[] = [];
   const discord: ModerationDiscordClient = {
-    async deleteMessage() {}, async timeout() {}, async ban() {}, async unban() {}, async kick() {},
-    async purge(_channel, count) { return count; }, async setSlowmode() {},
-    async getEveryoneOverwrite() { return null; }, async putEveryoneOverwrite() {}, async deleteEveryoneOverwrite() {},
+    async deleteMessage(_channel, id) { calls.push(`delete:${id}`); }, async timeout() { calls.push('timeout'); },
+    async ban() {}, async unban() {}, async kick() {}, async purge(_channel, count) { return count; },
+    async setSlowmode() {}, async getEveryoneOverwrite() { return null; }, async putEveryoneOverwrite() {}, async deleteEveryoneOverwrite() {},
   };
   const moderationStore = new ModerationStore(testDb.db);
   const service = new AutomodService(
     discord,
-    new ModerationService(discord, moderationStore, { owenUserId: OWEN, botUserId: OWEN, protectedRoleIds: new Set([BYPASS]) }),
+    new ModerationService(discord, moderationStore, { owenUserId: OWEN, botUserId: OWEN, protectedRoleIds: new Set() }),
     moderationStore,
     new AutomodStore(testDb.db),
-    { target: async (_guild, userId) => ({ userId, roleIds: [BYPASS], highestRolePosition: 1, isBot: false, isGuildOwner: false }) },
+    { target: async () => { throw new ActionError('action_not_allowed', 'Unexpected resolver refusal', { logReason: 'unexpected_resolver_refusal' }); } },
     { dryRun: false, owenUserId: OWEN, botHighestRolePosition: 10, policy: { ...policy, sanctions: [{ violations: 1, action: 'timeout', timeoutSeconds: 600 }] } },
   );
-  await assert.rejects(() => service.inspect(message({ content: 'very bad' })), /Staff roles are protected/);
+  await assert.rejects(() => service.inspect(message({ messageId: 'unexpected-resolver', content: 'very bad' })), /Unexpected resolver refusal/);
+  await assert.rejects(() => service.inspect(message({ messageId: 'unexpected-resolver', content: 'very bad' })), /uncertain outcome/);
+  assert.deepEqual(calls, ['delete:unexpected-resolver']);
+  assert.equal((await testDb.db.prepare(
+    `SELECT COUNT(*) AS n FROM moderation_audit WHERE action = 'automod.bad_words'`,
+  ).get<{ n: number }>())?.n, 0);
+  await testDb.cleanup();
+});
+
+test('unexpected sanction failures keep the outer claim in flight', async () => {
+  const testDb = await openTestDb(import.meta.filename);
+  const discord: ModerationDiscordClient = {
+    async deleteMessage() {}, async timeout() { throw new Error('timeout transport failed'); },
+    async ban() {}, async unban() {}, async kick() {}, async purge(_channel, count) { return count; },
+    async setSlowmode() {}, async getEveryoneOverwrite() { return null; }, async putEveryoneOverwrite() {}, async deleteEveryoneOverwrite() {},
+  };
+  const moderationStore = new ModerationStore(testDb.db);
+  const service = new AutomodService(
+    discord,
+    new ModerationService(discord, moderationStore, { owenUserId: OWEN, botUserId: OWEN, protectedRoleIds: new Set() }),
+    moderationStore,
+    new AutomodStore(testDb.db),
+    { target: async (_guild, userId) => ({ userId, roleIds: [], highestRolePosition: 1, isBot: false, isGuildOwner: false }) },
+    { dryRun: false, owenUserId: OWEN, botHighestRolePosition: 10, policy: { ...policy, sanctions: [{ violations: 1, action: 'timeout', timeoutSeconds: 600 }] } },
+  );
+  await assert.rejects(() => service.inspect(message({ messageId: 'unexpected-sanction', content: 'very bad' })), /timeout transport failed/);
+  await assert.rejects(() => service.inspect(message({ messageId: 'unexpected-sanction', content: 'very bad' })), /uncertain outcome/);
+  assert.equal((await testDb.db.prepare(
+    `SELECT COUNT(*) AS n FROM moderation_audit WHERE action = 'automod.bad_words'`,
+  ).get<{ n: number }>())?.n, 0);
   await testDb.cleanup();
 });

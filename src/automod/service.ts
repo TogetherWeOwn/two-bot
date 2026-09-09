@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { ActionError } from '../internal/errors.ts';
 import type { ModerationDiscordClient } from '../moderation/discord.ts';
+import { isModerationPolicyRefusal } from '../moderation/policy.ts';
 import type { ModerationExecution } from '../moderation/service.ts';
 import type { ModerationService } from '../moderation/service.ts';
 import type { ModerationClaim, ModerationStore } from '../moderation/store.ts';
@@ -94,10 +95,17 @@ export class AutomodService {
     }
 
     let deleteAttempted = false;
+    let deleteSucceeded = false;
     try {
-      return await this.runClaimed(message, filter, idempotencyKey, () => { deleteAttempted = true; });
+      return await this.runClaimed(
+        message,
+        filter,
+        idempotencyKey,
+        () => { deleteAttempted = true; },
+        () => { deleteSucceeded = true; },
+      );
     } catch (err) {
-      if (!deleteAttempted || this.isDefiniteDeleteFailure(err)) {
+      if (!deleteAttempted || (!deleteSucceeded && this.isDefiniteDeleteFailure(err))) {
         await this.moderationStore.release(message.guildId, idempotencyKey).catch((releaseErr: unknown) => {
           log.error('automod_idempotency_release_failed', {
             requestId: message.messageId,
@@ -116,6 +124,7 @@ export class AutomodService {
     filter: NonNullable<AutomodResult['filter']>,
     idempotencyKey: string,
     markDeleteAttempted: () => void,
+    markDeleteSucceeded: () => void,
   ): Promise<AutomodResult> {
     const reason = `Automod ${filter.replace(/_/g, ' ')}`;
     let deleted = false;
@@ -123,6 +132,7 @@ export class AutomodService {
       if (!this.discord.deleteMessage) throw new Error('automod requires exact message deletion support');
       markDeleteAttempted();
       await this.discord.deleteMessage(message.channelId, message.messageId, reason);
+      markDeleteSucceeded();
       deleted = true;
     }
 
@@ -135,12 +145,24 @@ export class AutomodService {
           message.messageId,
         );
     const sanction = sanctionFor(Math.max(1, count), this.options.policy.sanctions);
+    let refusalReason: string | undefined;
     if (!this.options.dryRun && sanction.action !== 'delete') {
       const target = await this.resolver.target(message.guildId, message.authorId);
-      await this.moderation.execute(this.moderationRequest(message, target, sanction, count, reason));
+      try {
+        await this.moderation.execute(this.moderationRequest(message, target, sanction, count, reason));
+      } catch (err) {
+        if (!isModerationPolicyRefusal(err)) throw err;
+        refusalReason = err.logReason;
+      }
     }
 
-    const outcome = this.options.dryRun ? 'dry_run' : sanction.action === 'delete' ? 'deleted' : sanction.action;
+    const outcome = refusalReason
+      ? 'refused'
+      : this.options.dryRun
+        ? 'dry_run'
+        : sanction.action === 'delete'
+          ? 'deleted'
+          : sanction.action;
     const result: AutomodResult = { matched: true, deleted, filter, sanction: sanction.action };
     await this.moderationStore.recordAudit({
       requestId: idempotencyKey,
@@ -154,10 +176,12 @@ export class AutomodService {
       idempotencyKey,
       metadata: {
         message_id: message.messageId,
+        filter,
         violation_count: this.options.dryRun ? null : count,
         sanction: sanction.action,
         timeout_seconds: sanction.timeoutSeconds,
         dry_run: this.options.dryRun,
+        refusal_reason: refusalReason,
       },
     }).catch((err: unknown) => {
       log.error('automod_audit_failed', { requestId: message.messageId, err: String(err) });

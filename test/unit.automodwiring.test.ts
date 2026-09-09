@@ -9,9 +9,10 @@ import type { FunnelHandlers } from '../src/core/handlers.ts';
 import type { InviteTracker } from '../src/core/inviteTracker.ts';
 import { ActionError } from '../src/internal/errors.ts';
 import type { ModerationDiscordClient } from '../src/moderation/discord.ts';
-import type { ModerationService } from '../src/moderation/service.ts';
-import type { ModerationStore } from '../src/moderation/store.ts';
-import type { AutomodStore } from '../src/automod/store.ts';
+import { ModerationService } from '../src/moderation/service.ts';
+import { ModerationStore } from '../src/moderation/store.ts';
+import { AutomodStore } from '../src/automod/store.ts';
+import { openTestDb } from './helpers/testDb.ts';
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 const policy: AutomodPolicy = {
@@ -130,6 +131,68 @@ test('matched storage failures do not earn funnel activity or leveling', async (
     await settle();
     assert.equal(d.recorded(), 0, `${failure} failure must remain matched at the gateway`);
   }
+});
+
+test('protected-target refusal stays matched and produces one gateway audit', async () => {
+  const testDb = await openTestDb(import.meta.filename);
+  const d = deps();
+  const calls: string[] = [];
+  const discord = {
+    async deleteMessage(_channel: string, id: string) { calls.push(`delete:${id}`); },
+    async timeout() { calls.push('timeout'); }, async ban() {}, async unban() {}, async kick() {},
+    async purge(_channel: string, count: number) { return count; }, async setSlowmode() {},
+    async getEveryoneOverwrite() { return null; }, async putEveryoneOverwrite() {}, async deleteEveryoneOverwrite() {},
+  } as ModerationDiscordClient;
+  const moderationStore = new ModerationStore(testDb.db);
+  const service = new AutomodService(
+    discord,
+    new ModerationService(discord, moderationStore, {
+      owenUserId: '1469137636663758888',
+      botUserId: '1469137636663758888',
+      protectedRoleIds: new Set(['900000000000000002']),
+    }),
+    moderationStore,
+    new AutomodStore(testDb.db),
+    {
+      target: async (_guild, userId) => ({
+        userId,
+        roleIds: ['900000000000000002'],
+        highestRolePosition: 1,
+        isBot: false,
+        isGuildOwner: false,
+      }),
+    },
+    {
+      dryRun: false,
+      owenUserId: '1469137636663758888',
+      botHighestRolePosition: 10,
+      policy: { ...policy, sanctions: [{ violations: 1, action: 'timeout', timeoutSeconds: 600 }] },
+    },
+  );
+  const bus = new EventEmitter();
+  registerHandlers(bus as unknown as Client, {
+    ...d,
+    automod: { service, guildId: '1545644954272137297' },
+  });
+
+  bus.emit(Events.MessageCreate, message('protected-1', 'blocked'));
+  await settle();
+  assert.equal(d.recorded(), 0, 'refused sanction remains a matched automod event');
+  assert.deepEqual(calls, ['delete:protected-1']);
+  const audit = await testDb.db.prepare(
+    `SELECT outcome, metadata_json FROM moderation_audit WHERE action = 'automod.bad_words'`,
+  ).get<{ outcome: string; metadata_json: string }>();
+  assert.equal(audit?.outcome, 'refused');
+  assert.equal(JSON.parse(audit?.metadata_json ?? '{}').refusal_reason, 'target_staff_role');
+
+  bus.emit(Events.MessageCreate, message('protected-1', 'blocked'));
+  await settle();
+  assert.equal(d.recorded(), 0);
+  assert.deepEqual(calls, ['delete:protected-1'], 'gateway replay did not repeat deletion or sanction');
+  assert.equal((await testDb.db.prepare(
+    `SELECT COUNT(*) AS n FROM moderation_audit WHERE action = 'automod.bad_words'`,
+  ).get<{ n: number }>())?.n, 1);
+  await testDb.cleanup();
 });
 
 test('edited and uncached partial messages are inspected at edit time', async () => {
