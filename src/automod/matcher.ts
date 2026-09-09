@@ -2,8 +2,10 @@ import { createHmac, randomBytes } from 'node:crypto';
 import type { AutomodFilter, AutomodMessage, AutomodPolicy } from './types.ts';
 
 const INVITE = /(?:https?:\/\/)?(?:www\.)?(?:discord\.gg|discord(?:app)?\.com\/invite)\/[-\w]+/iu;
-const URL_PATTERN =
-  /(?:https?:\/\/|www\.)[^\s<]+|(?<![\p{L}\p{N}@._-])(?:[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?\.)+[\p{L}]{2,63}(?:\/[^\s<]*)?/giu;
+const EXPLICIT_URL_PATTERN = /(?:https?:\/\/|www\.)[^\s<]+/giu;
+const BARE_DOMAIN_PATTERN =
+  /(?<![\p{L}\p{N}@._/\\-])(?:[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?\.)+(?:app|ca|co|com|dev|gg|io|me|net|org|tv|uk|us|xyz)(?:\/[^\s<]*)?/giu;
+const COMMON_FILENAME_STEMS = new Set(['changelog', 'config', 'license', 'package', 'readme', 'tsconfig']);
 const TRAILING_URL_PUNCTUATION = /[>),.!?:;]+$/u;
 const ZERO_WIDTH = /[​-‍⁠﻿]/gu;
 
@@ -78,14 +80,18 @@ function hasBadWord(content: string, words: string[]): boolean {
 }
 
 function hasExternalLink(content: string, allowedDomains: string[]): boolean {
-  for (const match of content.matchAll(URL_PATTERN)) {
-    const candidate = match[0].replace(TRAILING_URL_PUNCTUATION, '');
-    try {
-      const parsed = /^https?:\/\//iu.test(candidate) ? candidate : `https://${candidate}`;
-      const host = new URL(parsed).hostname.toLowerCase().replace(/^www\./, '');
-      if (!allowedDomains.some((allowed) => host === allowed || host.endsWith(`.${allowed}`))) return true;
-    } catch {
-      return true;
+  for (const pattern of [EXPLICIT_URL_PATTERN, BARE_DOMAIN_PATTERN]) {
+    for (const match of content.matchAll(pattern)) {
+      const candidate = match[0].replace(TRAILING_URL_PUNCTUATION, '');
+      try {
+        const parsed = /^https?:\/\//iu.test(candidate) ? candidate : `https://${candidate}`;
+        const host = new URL(parsed).hostname.toLowerCase().replace(/^www\./, '');
+        const domainLabels = host.split('.').slice(0, -1);
+        if (pattern === BARE_DOMAIN_PATTERN && !domainLabels.some((label) => !COMMON_FILENAME_STEMS.has(label))) continue;
+        if (!allowedDomains.some((allowed) => host === allowed || host.endsWith(`.${allowed}`))) return true;
+      } catch {
+        return true;
+      }
     }
   }
   return false;

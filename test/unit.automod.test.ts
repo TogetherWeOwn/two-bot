@@ -86,7 +86,12 @@ test('matches every configured filter and avoids common false positives', () => 
     ['external link', { content: 'read https://example.net/rules' }, 'external_link'],
     ['scheme-less external link', { content: 'read www.evil.example/path' }, 'external_link'],
     ['bare external domain', { content: 'read example.net/path' }, 'external_link'],
+    ['bare external subdomain', { content: 'read foo.example.com/path' }, 'external_link'],
     ['zero-width external domain', { content: 'read example​.net/path' }, 'external_link'],
+    ['package filename', { content: 'inspect package.json' }, null],
+    ['source path', { content: 'inspect src/config.ts' }, null],
+    ['readme filename', { content: 'inspect README.md' }, null],
+    ['tsconfig filename', { content: 'inspect tsconfig.json' }, null],
     ['blocked attachment', { attachmentNames: ['payload.EXE'] }, 'attachment_type'],
     ['safe attachment', { attachmentNames: ['screenshot.png'] }, null],
   ];
