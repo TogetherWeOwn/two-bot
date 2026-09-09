@@ -10,7 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { Events, PermissionFlagsBits, type ApplicationCommandDataResolvable, type Client } from 'discord.js';
+import { Events, PermissionFlagsBits, PermissionsBitField, type ApplicationCommandDataResolvable, type Client } from 'discord.js';
 import { validateTemplate, renderTemplate, placeholdersIn } from '../src/automations/template.ts';
 import {
   cleanMee6Name,
@@ -32,7 +32,7 @@ import { MAX_CUSTOM_COMMANDS } from '../src/discord/commandNames.ts';
 import { openTestDb, TEST_PG_URL, usingPostgres, type TestDb } from './helpers/testDb.ts';
 import { openDb } from '../src/store/db.ts';
 import { loadMigrations } from '../src/store/migrate.ts';
-import { restoredStickyRow } from '../scripts/staging-automations-proof-state.ts';
+import { cleanupDecision, restoredStickyRow } from '../scripts/staging-automations-proof-state.ts';
 
 const GUILD = '1545644954272137297';
 const CHANNEL = '100000000000000001';
@@ -101,8 +101,11 @@ test('mee6: names are cleaned and truncated', () => {
   assert.equal(cleanMee6Name('!!!'), '');
 });
 
-test('mee6: placeholders map, unknown ones drop', () => {
-  assert.equal(translateMee6Template('{user} welcome to {server}! You are member #{member_count}'), '{user} welcome to {server}! You are member #');
+test('mee6: placeholders map and unsupported words or punctuation forms drop', () => {
+  assert.equal(
+    translateMee6Template('{user} welcome to {server}! #{member_count} {user.id} {random-choice}'),
+    '{user} welcome to {server}! #  ',
+  );
 });
 
 test('mee6: parse accepts the known field spellings and nothing else', () => {
@@ -411,6 +414,45 @@ test('store: two commands cannot claim one text trigger', async () => {
   await db.cleanup();
 });
 
+test('service: schedule timestamps are normalized to canonical ISO', async () => {
+  const db: TestDb = await openTestDb(import.meta.filename);
+  const store = new AutomationStore(db.db);
+  const svc = new AutomationService(store, fakeDiscord());
+  await svc.putScheduled({
+    guildId: GUILD,
+    id: 'normalized-time',
+    channelId: CHANNEL,
+    body: 'normalized',
+    nextRunAt: '2026-09-08T12:30:00+02:30',
+    actorId: ACTOR,
+  });
+  assert.equal(
+    (await store.getScheduled(GUILD, 'normalized-time'))?.nextRunAt,
+    '2026-09-08T10:00:00.000Z',
+  );
+  await db.cleanup();
+});
+
+test('service: scheduler claims only the configured guild', async () => {
+  const db: TestDb = await openTestDb(import.meta.filename);
+  const store = new AutomationStore(db.db);
+  const discord = fakeDiscord();
+  const svc = new AutomationService(store, discord);
+  const otherGuild = '900000000000000099';
+  await svc.putScheduled({
+    guildId: otherGuild,
+    id: 'other-guild-due',
+    channelId: 'other-channel',
+    body: 'must not post',
+    nextRunAt: '2026-09-08T10:00:00.000Z',
+    actorId: ACTOR,
+  });
+  assert.equal(await svc.runDueScheduled(GUILD, '2026-09-08T10:00:01.000Z'), 0);
+  assert.deepEqual(discord.posts, []);
+  assert.equal((await store.getScheduled(otherGuild, 'other-guild-due'))?.claimToken, null);
+  await db.cleanup();
+});
+
 test('service: scheduled one-shot fires once and disables itself', async () => {
   const db: TestDb = await openTestDb(import.meta.filename);
   const store = new AutomationStore(db.db);
@@ -425,11 +467,11 @@ test('service: scheduled one-shot fires once and disables itself', async () => {
     intervalSeconds: null,
     actorId: ACTOR,
   });
-  const fired1 = await svc.runDueScheduled('2026-09-08T10:00:01.000Z');
+  const fired1 = await svc.runDueScheduled(GUILD, '2026-09-08T10:00:01.000Z');
   assert.equal(fired1, 1);
-  const fired2 = await svc.runDueScheduled('2026-09-08T10:00:02.000Z');
+  const fired2 = await svc.runDueScheduled(GUILD, '2026-09-08T10:00:02.000Z');
   assert.equal(fired2, 0, 'a one-shot must not fire twice');
-  const row = await store.getScheduled('s1');
+  const row = await store.getScheduled(GUILD, 's1');
   assert.equal(row?.enabled, false);
   assert.equal(discord.posts.length, 1);
   await db.cleanup();
@@ -449,8 +491,8 @@ test('service: recurring advances from run time, not from a missed tick', async 
     actorId: ACTOR,
   });
   // An hour late: fires once, next run is one interval from NOW.
-  await svc.runDueScheduled('2026-09-08T11:00:00.000Z');
-  const row = await store.getScheduled('r1');
+  await svc.runDueScheduled(GUILD, '2026-09-08T11:00:00.000Z');
+  const row = await store.getScheduled(GUILD, 'r1');
   assert.equal(row?.nextRunAt, '2026-09-08T11:01:00.000Z');
   assert.equal(row?.enabled, true);
   await db.cleanup();
@@ -470,8 +512,8 @@ test('service: concurrent scheduler ticks claim one occurrence once', async () =
     actorId: ACTOR,
   });
   const results = await Promise.all([
-    svc.runDueScheduled('2026-09-08T10:00:01.000Z'),
-    svc.runDueScheduled('2026-09-08T10:00:01.000Z'),
+    svc.runDueScheduled(GUILD, '2026-09-08T10:00:01.000Z'),
+    svc.runDueScheduled(GUILD, '2026-09-08T10:00:01.000Z'),
   ]);
   assert.equal(results.reduce((sum, n) => sum + n, 0), 1);
   assert.equal(discord.posts.length, 1);
@@ -495,7 +537,7 @@ test('service: slow serial scheduling claims each row only when it is ready to p
       clock += 15_000;
       if (!launchedSecond && posts.length === 5) {
         launchedSecond = true;
-        secondRun = secondService.runDueScheduled();
+        secondRun = secondService.runDueScheduled(GUILD);
       }
       return `msg-${content}`;
     },
@@ -521,7 +563,7 @@ test('service: slow serial scheduling claims each row only when it is ready to p
     });
   }
 
-  const firstFired = await firstService.runDueScheduled();
+  const firstFired = await firstService.runDueScheduled(GUILD);
   assert.ok(secondRun);
   const secondFired = await secondRun;
   assert.equal(firstFired + secondFired, 10);
@@ -566,7 +608,7 @@ test('migration: an applied pre-lease 0015 is upgraded with scheduler claim colu
     actorId: ACTOR,
   });
   assert.equal((await store.claimDueScheduled(
-    '2026-09-08T10:00:01.000Z', 'upgrade-token', '2026-09-08T10:01:01.000Z', 1,
+    GUILD, '2026-09-08T10:00:01.000Z', 'upgrade-token', '2026-09-08T10:01:01.000Z', 1,
   )).length, 1);
   await db.cleanup();
 });
@@ -595,7 +637,7 @@ test('store: independent Postgres clients skip an already locked scheduled row',
   const locked = new Promise<void>((resolve) => { claimed = resolve; });
   const firstClaim = first.db.transaction(async (tx) => {
     const rows = await new AutomationStore(tx).claimDueScheduled(
-      '2026-09-08T10:00:01.000Z',
+      GUILD, '2026-09-08T10:00:01.000Z',
       'first-token',
       '2026-09-08T10:01:01.000Z',
     );
@@ -605,7 +647,7 @@ test('store: independent Postgres clients skip an already locked scheduled row',
   });
   await locked;
   const secondRows = await secondStore.claimDueScheduled(
-    '2026-09-08T10:00:01.000Z',
+    GUILD, '2026-09-08T10:00:01.000Z',
     'second-token',
     '2026-09-08T10:01:01.000Z',
   );
@@ -618,6 +660,61 @@ test('store: independent Postgres clients skip an already locked scheduled row',
   await first.cleanup();
 });
 
+test('service: cancellation during an active scheduled post deletes the orphan completion', async () => {
+  const db: TestDb = await openTestDb(import.meta.filename);
+  const store = new AutomationStore(db.db);
+  const discord = fakeDiscord();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let started!: () => void;
+  const posting = new Promise<void>((resolve) => { started = resolve; });
+  discord.postMessage = async (channelId, content) => {
+    discord.posts.push({ channelId, content });
+    started();
+    await held;
+    return 'cancelled-message';
+  };
+  const service = new AutomationService(store, discord);
+  await service.putScheduled({
+    guildId: GUILD, id: 'cancel-active', channelId: CHANNEL, body: 'one',
+    nextRunAt: '2026-09-08T10:00:00.000Z', actorId: ACTOR,
+  });
+  const run = service.runDueScheduled(GUILD, '2026-09-08T10:00:01.000Z');
+  await posting;
+  assert.equal(await service.deleteScheduled(GUILD, 'cancel-active', ACTOR), true);
+  release();
+  assert.equal(await run, 0);
+  assert.deepEqual(discord.deletes, [{ channelId: CHANNEL, messageId: 'cancelled-message' }]);
+  assert.equal(await store.getScheduled(GUILD, 'cancel-active'), null);
+  await db.cleanup();
+});
+
+test('service: scheduled update fences an active claim and its stale completion', async () => {
+  const db: TestDb = await openTestDb(import.meta.filename);
+  const store = new AutomationStore(db.db);
+  const service = new AutomationService(store, fakeDiscord());
+  await service.putScheduled({
+    guildId: GUILD, id: 'fenced-schedule', channelId: CHANNEL, body: 'old',
+    nextRunAt: '2026-09-08T10:00:00.000Z', intervalSeconds: 60, actorId: ACTOR,
+  });
+  assert.equal((await store.claimDueScheduled(
+    GUILD, '2026-09-08T10:00:01.000Z', 'old-claim', '2026-09-08T10:01:01.000Z',
+  )).length, 1);
+  await service.putScheduled({
+    guildId: GUILD, id: 'fenced-schedule', channelId: CHANNEL, body: 'new',
+    nextRunAt: '2026-09-08T12:00:00.000Z', intervalSeconds: null, enabled: false, actorId: ACTOR,
+  });
+  assert.equal(await store.markScheduledRun(
+    GUILD, 'fenced-schedule', '2026-09-08T10:00:02.000Z', 'stale', 'old-claim',
+  ), null);
+  const current = await store.getScheduled(GUILD, 'fenced-schedule');
+  assert.equal(current?.body, 'new');
+  assert.equal(current?.enabled, false);
+  assert.equal(current?.lastMessageId, null);
+  assert.equal(current?.claimToken, null);
+  await db.cleanup();
+});
+
 test('store: stale scheduled completion cannot replace a newer claim', async () => {
   const db: TestDb = await openTestDb(import.meta.filename);
   const store = new AutomationStore(db.db);
@@ -627,17 +724,17 @@ test('store: stale scheduled completion cannot replace a newer claim', async () 
     nextRunAt: '2026-09-08T10:00:00.000Z', actorId: ACTOR,
   });
   const first = await store.claimDueScheduled(
-    '2026-09-08T10:00:01.000Z', 'first', '2026-09-08T10:01:01.000Z',
+    GUILD, '2026-09-08T10:00:01.000Z', 'first', '2026-09-08T10:01:01.000Z',
   );
   assert.equal(first.length, 1);
   const second = await store.claimDueScheduled(
-    '2026-09-08T10:01:02.000Z', 'second', '2026-09-08T10:02:02.000Z',
+    GUILD, '2026-09-08T10:01:02.000Z', 'second', '2026-09-08T10:02:02.000Z',
   );
   assert.equal(second.length, 1);
   assert.equal(await store.markScheduledRun(
-    'stale-schedule', '2026-09-08T10:01:03.000Z', 'old', 'first',
+    GUILD, 'stale-schedule', '2026-09-08T10:01:03.000Z', 'old', 'first',
   ), null);
-  const current = await store.getScheduled('stale-schedule');
+  const current = await store.getScheduled(GUILD, 'stale-schedule');
   assert.equal(current?.claimToken, 'second');
   assert.equal(current?.lastMessageId, null);
   await db.cleanup();
@@ -689,14 +786,14 @@ test('service: transient schedule failures preserve the occurrence and Retry-Aft
     nextRunAt: '2026-09-08T10:00:00.000Z',
     actorId: ACTOR,
   });
-  assert.equal(await svc.runDueScheduled('2026-09-08T10:00:01.000Z'), 0);
-  const row = await store.getScheduled('retry-me');
+  assert.equal(await svc.runDueScheduled(GUILD, '2026-09-08T10:00:01.000Z'), 0);
+  const row = await store.getScheduled(GUILD, 'retry-me');
   assert.equal(row?.enabled, true);
   assert.equal(row?.nextRunAt, '2026-09-08T10:01:31.000Z');
   await db.cleanup();
 });
 
-test('discord client marks network, 429 and rate-limit failures retryable', async () => {
+test('discord client suppresses REST mentions and marks network, 429, and 5xx failures retryable', async () => {
   const network = new AutomationDiscordClient({
     token: 't',
     fetchImpl: (async () => { throw new Error('offline'); }) as typeof fetch,
@@ -705,6 +802,22 @@ test('discord client marks network, 429 and rate-limit failures retryable', asyn
     () => network.postMessage(CHANNEL, 'x'),
     (err: unknown) => err instanceof DiscordPostError && err.retryable,
   );
+  let sentBody: unknown;
+  const ok = new AutomationDiscordClient({
+    token: 't',
+    fetchImpl: (async (_url, init) => {
+      sentBody = JSON.parse(String(init?.body));
+      return new Response(JSON.stringify({ id: 'posted' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch,
+  });
+  assert.equal(await ok.postMessage(CHANNEL, '@everyone <@123456789012345678>'), 'posted');
+  assert.deepEqual(sentBody, {
+    content: '@everyone <@123456789012345678>',
+    allowed_mentions: { parse: [] },
+  });
   const limited = new AutomationDiscordClient({
     token: 't',
     fetchImpl: (async () => new Response(JSON.stringify({ retry_after: 2 }), {
@@ -716,6 +829,16 @@ test('discord client marks network, 429 and rate-limit failures retryable', asyn
     () => limited.postMessage(CHANNEL, 'retry'),
     (err: unknown) => err instanceof DiscordPostError && err.retryAfterMs === 2000,
   );
+  for (const status of [500, 502, 503]) {
+    const serverFailure = new AutomationDiscordClient({
+      token: 't',
+      fetchImpl: (async () => new Response('upstream failed', { status })) as typeof fetch,
+    });
+    await assert.rejects(
+      () => serverFailure.postMessage(CHANNEL, 'retry'),
+      (err: unknown) => err instanceof DiscordPostError && err.status === status && err.retryable,
+    );
+  }
 });
 
 test('service: a poison scheduled row does not wedge the queue', async () => {
@@ -749,7 +872,7 @@ test('service: a poison scheduled row does not wedge the queue', async () => {
     discord.posts.push({ channelId, content });
     return 'ok';
   };
-  const fired = await svc.runDueScheduled('2026-09-08T10:00:01.000Z');
+  const fired = await svc.runDueScheduled(GUILD, '2026-09-08T10:00:01.000Z');
   assert.equal(fired, 1, 'the good row still fires');
   await db.cleanup();
 });
@@ -803,6 +926,68 @@ test('service: concurrent sticky activity emits one repost', async () => {
   await db.cleanup();
 });
 
+test('service: sticky update fences an active claim and deletes its orphan replacement', async () => {
+  const db: TestDb = await openTestDb(import.meta.filename);
+  const store = new AutomationStore(db.db);
+  const discord = fakeDiscord();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let started!: () => void;
+  const posting = new Promise<void>((resolve) => { started = resolve; });
+  discord.postMessage = async (channelId, content) => {
+    discord.posts.push({ channelId, content });
+    started();
+    await held;
+    return 'orphan-sticky';
+  };
+  const service = new AutomationService(store, discord);
+  await service.putSticky({
+    guildId: GUILD, channelId: CHANNEL, body: 'old', debounceSeconds: 5, actorId: ACTOR,
+  });
+  const run = service.onChannelActivity(GUILD, CHANNEL, 'member', Date.parse('2026-09-08T10:00:00Z'));
+  await posting;
+  await service.putSticky({
+    guildId: GUILD, channelId: CHANNEL, body: 'new', debounceSeconds: 5, enabled: false, actorId: ACTOR,
+  });
+  release();
+  assert.equal(await run, 'held');
+  assert.deepEqual(discord.deletes, [{ channelId: CHANNEL, messageId: 'orphan-sticky' }]);
+  const current = await store.getSticky(GUILD, CHANNEL);
+  assert.equal(current?.body, 'new');
+  assert.equal(current?.enabled, false);
+  assert.equal(current?.lastMessageId, null);
+  assert.equal(current?.claimToken, null);
+  await db.cleanup();
+});
+
+test('service: recordStickyPost persistence failure deletes the orphan replacement', async () => {
+  const db: TestDb = await openTestDb(import.meta.filename);
+  const store = new AutomationStore(db.db);
+  const discord = fakeDiscord();
+  const service = new AutomationService(store, discord);
+  await service.putSticky({ guildId: GUILD, channelId: CHANNEL, body: 'sticky', actorId: ACTOR });
+  const originalRecord = store.recordStickyPost.bind(store);
+  (store as unknown as { recordStickyPost: typeof store.recordStickyPost }).recordStickyPost = async () => false;
+  assert.equal(
+    await service.onChannelActivity(GUILD, CHANNEL, 'member', Date.parse('2026-09-08T10:00:00Z')),
+    'held',
+  );
+  assert.deepEqual(discord.deletes, [{ channelId: CHANNEL, messageId: 'msg1' }]);
+  (store as unknown as { recordStickyPost: typeof store.recordStickyPost }).recordStickyPost = async () => {
+    throw new Error('database write failed');
+  };
+  await assert.rejects(
+    () => service.onChannelActivity(GUILD, CHANNEL, 'member', Date.parse('2026-09-08T10:01:01Z')),
+    /database write failed/,
+  );
+  assert.deepEqual(discord.deletes, [
+    { channelId: CHANNEL, messageId: 'msg1' },
+    { channelId: CHANNEL, messageId: 'msg2' },
+  ]);
+  (store as unknown as { recordStickyPost: typeof store.recordStickyPost }).recordStickyPost = originalRecord;
+  await db.cleanup();
+});
+
 test('service: failed sticky replacement preserves the old post and releases its claim', async () => {
   const db: TestDb = await openTestDb(import.meta.filename);
   const store = new AutomationStore(db.db);
@@ -832,6 +1017,16 @@ test('service: failed sticky replacement preserves the old post and releases its
   );
   assert.deepEqual(discord.deletes, [{ channelId: CHANNEL, messageId: 'msg1' }]);
   await db.cleanup();
+});
+
+test('staging proof cleanup skips rows changed concurrently after the proof write', () => {
+  const before = { name: 'proof', template: 'before' };
+  const proof = { name: 'proof', template: 'proof' };
+  assert.equal(cleanupDecision(proof, { before, proof }), 'restore');
+  assert.equal(
+    cleanupDecision({ name: 'proof', template: 'admin-change' }, { before, proof }),
+    'skip',
+  );
 });
 
 test('staging proof cleanup clears a deleted message id from a disabled prior sticky', () => {
@@ -898,6 +1093,25 @@ test('service: importMee6 preserves first text trigger and imports later collisi
   assert.equal((await store.getCommand(GUILD, 'faq-2'))?.textTrigger, null);
   const welcome = await store.getCommand(GUILD, 'welcome');
   assert.equal(welcome?.template, 'hi {user}');
+  await db.cleanup();
+});
+
+test('service: import capacity ignores invalid and reserved definitions', async () => {
+  const db: TestDb = await openTestDb(import.meta.filename);
+  const store = new AutomationStore(db.db);
+  const svc = new AutomationService(store, fakeDiscord());
+  const result = await svc.importMee6(
+    GUILD,
+    [
+      { command: 'rank', response: 'reserved' },
+      { command: 'empty-template', response: '{unsupported.placeholder}' },
+      { command: 'valid', response: 'works' },
+    ],
+    ACTOR,
+    { maxCommands: 1 },
+  );
+  assert.deepEqual(result, { imported: 1, skipped: 2, conflicts: [] });
+  assert.deepEqual((await store.listCommands(GUILD)).map((row) => row.name), ['valid']);
   await db.cleanup();
 });
 
@@ -1150,8 +1364,12 @@ test('service: export round-trips an import', async () => {
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, usingPostgres ? 50 : 0));
 
-function fakeAdminInteraction(manageGuild: boolean) {
+function fakeAdminInteraction(permissionBits: bigint | boolean) {
   const replies: unknown[] = [];
+  const bits = typeof permissionBits === 'boolean'
+    ? (permissionBits ? PermissionFlagsBits.ManageGuild : 0n)
+    : permissionBits;
+  const permissions = new PermissionsBitField(bits);
   return {
     replies,
     interaction: {
@@ -1160,9 +1378,7 @@ function fakeAdminInteraction(manageGuild: boolean) {
       inGuild: () => true,
       guildId: GUILD,
       user: { id: ACTOR },
-      memberPermissions: {
-        has: (permission: bigint) => manageGuild && permission === PermissionFlagsBits.ManageGuild,
-      },
+      memberPermissions: permissions,
       reply: async (reply: unknown) => {
         replies.push(reply);
       },
@@ -1189,6 +1405,37 @@ function fakeCustomInteraction(commandName = 'faq') {
   };
   return { replies, interaction };
 }
+
+test('Discord command handler discriminates the real ManageGuild permission bit', async () => {
+  const db: TestDb = await openTestDb(import.meta.filename);
+  const store = new AutomationStore(db.db);
+  for (const bits of [PermissionFlagsBits.ManageMessages, PermissionFlagsBits.KickMembers]) {
+    const bus = new EventEmitter();
+    registerAutomationCommands(bus as unknown as Client, {
+      guildId: GUILD,
+      service: new AutomationService(store, fakeDiscord()),
+      store,
+    });
+    const { interaction, replies } = fakeAdminInteraction(bits);
+    bus.emit(Events.InteractionCreate, interaction);
+    await settle();
+    assert.deepEqual(replies, [{
+      content: 'Manage Server permission is required.',
+      ephemeral: true,
+    }]);
+  }
+  const allowedBus = new EventEmitter();
+  registerAutomationCommands(allowedBus as unknown as Client, {
+    guildId: GUILD,
+    service: new AutomationService(store, fakeDiscord()),
+    store,
+  });
+  const { interaction, replies } = fakeAdminInteraction(PermissionFlagsBits.ManageGuild);
+  allowedBus.emit(Events.InteractionCreate, interaction);
+  await settle();
+  assert.deepEqual(replies, [{ content: 'No custom commands defined.', ephemeral: true }]);
+  await db.cleanup();
+});
 
 test('Discord command handler rejects a stale admin command from a non-admin', async () => {
   const db: TestDb = await openTestDb(import.meta.filename);
@@ -1276,6 +1523,7 @@ test('gateway keeps stickies live but text command processing off when disabled'
   let triggerLookups = 0;
   let replies = 0;
   registerAutomationGateway(bus as unknown as Client, {
+    guildId: GUILD,
     textCommandsEnabled: false,
     service: {
       onChannelActivity: async () => { stickyChecks++; return 'none'; },
@@ -1297,7 +1545,7 @@ test('gateway keeps stickies live but text command processing off when disabled'
       };
     },
   });
-  bus.emit('messageCreate', {
+  bus.emit('automationMessageAccepted', {
     guildId: GUILD,
     channelId: CHANNEL,
     author: { id: ACTOR, bot: false },
@@ -1310,10 +1558,42 @@ test('gateway keeps stickies live but text command processing off when disabled'
   assert.equal(replies, 0);
 });
 
+test('gateway rejects other guilds and does not intercept built-in text commands', async () => {
+  const bus = new EventEmitter();
+  let stickyChecks = 0;
+  let triggerLookups = 0;
+  let replies = 0;
+  registerAutomationGateway(bus as unknown as Client, {
+    guildId: GUILD,
+    textCommandsEnabled: true,
+    service: {
+      onChannelActivity: async () => { stickyChecks++; return 'none'; },
+      postTextReply: async () => { replies++; return 'message'; },
+    } as unknown as AutomationService,
+    findTrigger: async () => {
+      triggerLookups++;
+      return null;
+    },
+  });
+  bus.emit('automationMessageAccepted', {
+    guildId: '900000000000000099', channelId: CHANNEL,
+    author: { id: ACTOR, bot: false }, content: '!faq', createdTimestamp: 1,
+  });
+  bus.emit('automationMessageAccepted', {
+    guildId: GUILD, channelId: CHANNEL,
+    author: { id: ACTOR, bot: false }, content: '!rank', createdTimestamp: 1,
+  });
+  await settle();
+  assert.equal(stickyChecks, 1, 'only the configured guild reaches automations');
+  assert.equal(triggerLookups, 0, 'built-ins never reach custom-command lookup');
+  assert.equal(replies, 0);
+});
+
 test('gateway contains text-trigger lookup failures', async () => {
   const bus = new EventEmitter();
   let replies = 0;
   registerAutomationGateway(bus as unknown as Client, {
+    guildId: GUILD,
     textCommandsEnabled: true,
     service: {
       onChannelActivity: async () => 'none',
@@ -1321,7 +1601,7 @@ test('gateway contains text-trigger lookup failures', async () => {
     } as unknown as AutomationService,
     findTrigger: async () => { throw new Error('database down'); },
   });
-  bus.emit('messageCreate', {
+  bus.emit('automationMessageAccepted', {
     guildId: GUILD,
     channelId: CHANNEL,
     author: { id: ACTOR, bot: false },
@@ -1339,6 +1619,7 @@ test('gateway durably audits text command render failure', async () => {
   const service = new AutomationService(store, discord);
   const bus = new EventEmitter();
   registerAutomationGateway(bus as unknown as Client, {
+    guildId: GUILD,
     textCommandsEnabled: true,
     service,
     findTrigger: async () => ({
@@ -1354,7 +1635,7 @@ test('gateway durably audits text command render failure', async () => {
       updatedAt: 't',
     }),
   });
-  bus.emit('messageCreate', {
+  bus.emit('automationMessageAccepted', {
     guildId: GUILD,
     channelId: CHANNEL,
     author: { id: ACTOR, bot: false },
@@ -1374,6 +1655,7 @@ test('gateway processes text commands only when explicitly enabled', async () =>
   const bus = new EventEmitter();
   let replies = 0;
   registerAutomationGateway(bus as unknown as Client, {
+    guildId: GUILD,
     textCommandsEnabled: true,
     service: {
       onChannelActivity: async () => 'none',
@@ -1392,7 +1674,7 @@ test('gateway processes text commands only when explicitly enabled', async () =>
       updatedAt: 't',
     }),
   });
-  bus.emit('messageCreate', {
+  bus.emit('automationMessageAccepted', {
     guildId: GUILD,
     channelId: CHANNEL,
     author: { id: ACTOR, bot: false },

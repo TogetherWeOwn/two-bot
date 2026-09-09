@@ -247,6 +247,10 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
           ? (level) => applyLevelRoles(msg.member!, leveling, level)
           : undefined,
     });
+    // Downstream message automations run only after automod accepts the event
+    // and the ordinary funnel/leveling path has completed. A private event keeps
+    // those listeners from racing the primary MessageCreate handler.
+    client.emit('automationMessageAccepted' as never, msg as never);
   });
 
   client.on(Events.MessageUpdate, async (_old, partial) => {

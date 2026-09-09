@@ -292,11 +292,12 @@ if (cfg.guildId) {
     syncCommands: () => commandRegistry!.sync(),
   });
   registerAutomationGateway(client, {
+    guildId: cfg.guildId,
     service: automationService,
     textCommandsEnabled: process.env.TWO_TEXT_COMMANDS === '1',
     findTrigger: (guildId, word) => automationStore.findTextTrigger(guildId, word),
   });
-  automationScheduler = startScheduler(automationService);
+  automationScheduler = startScheduler(automationService, cfg.guildId);
   log.info('automations_enabled', {
     guildId: cfg.guildId,
     textCommands: process.env.TWO_TEXT_COMMANDS === '1' ? 'on' : 'off (slash-only)',

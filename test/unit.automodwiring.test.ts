@@ -105,18 +105,22 @@ function failingAutomod(failure: 'claim' | 'release'): AutomodService {
   );
 }
 
-test('blocked gateway messages do not earn funnel activity or leveling', async () => {
+test('blocked gateway messages do not earn funnel activity or reach downstream automations', async () => {
   const d = deps();
   const bus = new EventEmitter();
+  const accepted: string[] = [];
+  bus.on('automationMessageAccepted', (msg: { id: string }) => accepted.push(msg.id));
   registerHandlers(bus as unknown as Client, d);
   bus.emit(Events.MessageCreate, message('blocked-1', 'blocked'));
   await settle();
   assert.deepEqual(d.inspected, ['blocked-1:blocked']);
   assert.equal(d.recorded(), 0);
+  assert.deepEqual(accepted, []);
 
   bus.emit(Events.MessageCreate, message('allowed-1', 'allowed'));
   await settle();
   assert.equal(d.recorded(), 1);
+  assert.deepEqual(accepted, ['allowed-1']);
 });
 
 test('matched storage failures do not earn funnel activity or leveling', async () => {

@@ -45,10 +45,13 @@ export function cleanMee6Name(raw: string): string {
 
 /** Translate one MEE6 response into an Owen template. */
 export function translateMee6Template(raw: string): string {
-  return raw.replace(/\{([a-zA-Z0-9_]+)\}/g, (_whole, key: string) => {
-    const mapped = MEE6_PLACEHOLDER_MAP[key.toLowerCase()];
+  return raw.replace(/\{([^{}]+)\}/g, (_whole, key: string) => {
+    const mapped = /^[a-zA-Z0-9_]+$/.test(key)
+      ? MEE6_PLACEHOLDER_MAP[key.toLowerCase()]
+      : undefined;
     if (mapped) return `{${mapped}}`;
-    // Unknown MEE6 placeholder: drop it rather than render literal syntax.
+    // Unknown MEE6 placeholder, including punctuation-bearing forms: drop it
+    // rather than leak MEE6 syntax into a member-facing reply.
     return '';
   });
 }

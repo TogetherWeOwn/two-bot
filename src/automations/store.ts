@@ -303,10 +303,10 @@ export class AutomationStore {
 
   // --- scheduled messages ---------------------------------------------------
 
-  async getScheduled(id: string): Promise<ScheduledMessageRow | null> {
+  async getScheduled(guildId: string, id: string): Promise<ScheduledMessageRow | null> {
     const row = await this.db
-      .prepare(`SELECT * FROM scheduled_messages WHERE id = ?`)
-      .get(id);
+      .prepare(`SELECT * FROM scheduled_messages WHERE guild_id = ? AND id = ?`)
+      .get(guildId, id);
     return row ? mapScheduled(row) : null;
   }
 
@@ -335,6 +335,7 @@ export class AutomationStore {
    * already claimed; SQLite serialises writes and uses the portable fallback.
    */
   claimDueScheduled(
+    guildId: string,
     nowIso: string,
     claimToken: string,
     leaseUntilIso: string,
@@ -345,33 +346,33 @@ export class AutomationStore {
       .prepare(
         `WITH due AS (
            SELECT id FROM scheduled_messages
-            WHERE enabled = TRUE AND next_run_at <= ?
+            WHERE guild_id = ? AND enabled = TRUE AND next_run_at <= ?
             ORDER BY next_run_at
             LIMIT ?${locked}
          )
          UPDATE scheduled_messages
             SET next_run_at = ?, claim_token = ?, claimed_at = ?
-          WHERE id IN (SELECT id FROM due)
+          WHERE guild_id = ? AND id IN (SELECT id FROM due)
             AND next_run_at <= ?
           RETURNING *`,
       )
-      .all(nowIso, limit, leaseUntilIso, claimToken, nowIso, nowIso)
+      .all(guildId, nowIso, limit, leaseUntilIso, claimToken, nowIso, guildId, nowIso)
       .then((rows) => rows.map(mapScheduled));
   }
 
-  async retryScheduled(id: string, claimToken: string, nextRunAtIso: string): Promise<boolean> {
+  async retryScheduled(guildId: string, id: string, claimToken: string, nextRunAtIso: string): Promise<boolean> {
     const result = await this.db
       .prepare(
         `UPDATE scheduled_messages
             SET next_run_at = ?, claim_token = NULL, claimed_at = NULL
-          WHERE id = ? AND claim_token = ?`,
+          WHERE guild_id = ? AND id = ? AND claim_token = ?`,
       )
-      .run(nextRunAtIso, id, claimToken);
+      .run(nextRunAtIso, guildId, id, claimToken);
     return result.changes > 0;
   }
 
-  async putScheduled(row: ScheduledMessageRow): Promise<void> {
-    await this.db
+  async putScheduled(row: ScheduledMessageRow): Promise<boolean> {
+    const result = await this.db
       .prepare(
         `INSERT INTO scheduled_messages
            (id, guild_id, channel_id, body, next_run_at, interval_seconds, enabled,
@@ -384,7 +385,10 @@ export class AutomationStore {
            interval_seconds = excluded.interval_seconds,
            enabled          = excluded.enabled,
            updated_by       = excluded.updated_by,
-           updated_at       = excluded.updated_at`,
+           updated_at       = excluded.updated_at,
+           claim_token      = NULL,
+           claimed_at       = NULL
+         WHERE scheduled_messages.guild_id = excluded.guild_id`,
       )
       .run(
         row.id,
@@ -401,6 +405,7 @@ export class AutomationStore {
         row.updatedBy,
         row.updatedAt,
       );
+    return result.changes > 0;
   }
 
   /**
@@ -414,12 +419,13 @@ export class AutomationStore {
    * dialect date maths).
    */
   async markScheduledRun(
+    guildId: string,
     id: string,
     ranAtIso: string,
     messageId: string | null,
     claimToken: string,
   ): Promise<ScheduledMessageRow | null> {
-    const current = await this.getScheduled(id);
+    const current = await this.getScheduled(guildId, id);
     if (!current) return null;
     const nextRunAt = current.intervalSeconds
       ? new Date(Date.parse(ranAtIso) + current.intervalSeconds * 1000).toISOString()
@@ -433,10 +439,10 @@ export class AutomationStore {
            next_run_at     = ?,
            claim_token     = NULL,
            claimed_at      = NULL
-         WHERE id = ? AND claim_token = ?
+         WHERE guild_id = ? AND id = ? AND claim_token = ?
          RETURNING *`,
       )
-      .get(ranAtIso, messageId, nextRunAt, id, claimToken);
+      .get(ranAtIso, messageId, nextRunAt, guildId, id, claimToken);
     return row ? mapScheduled(row) : null;
   }
 
@@ -471,11 +477,13 @@ export class AutomationStore {
             last_message_id, last_posted_at, created_by, created_at, updated_by, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT (guild_id, channel_id) DO UPDATE SET
-           body            = excluded.body,
+           body             = excluded.body,
            debounce_seconds = excluded.debounce_seconds,
-           enabled         = excluded.enabled,
-           updated_by      = excluded.updated_by,
-           updated_at      = excluded.updated_at`,
+           enabled          = excluded.enabled,
+           updated_by       = excluded.updated_by,
+           updated_at       = excluded.updated_at,
+           claim_token      = NULL,
+           claimed_at       = NULL`,
       )
       .run(
         row.guildId,
