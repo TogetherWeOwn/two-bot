@@ -456,10 +456,8 @@ test('post-send acknowledgement retries reconcile beyond 500 newer Discord messa
   assert.equal(ambiguous?.deliveryState, 'delivering');
   assert.equal(ambiguous?.deliveryAttempts, 1);
   assert.equal(ambiguous?.deliverySearchBefore, searchBefore);
-  await db.prepare(`UPDATE operational_audit_log SET delivery_lease_until = ? WHERE entry_id = ?`).run(
-    '2000-01-01T00:00:00.000Z',
-    event.entryId,
-  );
+  assert.equal(await sink.retryPending(), 0);
+  await store.markAcknowledgementFailed(event.entryId, ambiguous!.deliveryClaimToken!, -1);
   assert.equal(await sink.retryPending(), 1);
 
   assert.equal(sends.length, 1);
@@ -470,6 +468,29 @@ test('post-send acknowledgement retries reconcile beyond 500 newer Discord messa
   const row = await store.get(event.entryId);
   assert.equal(row?.deliveryState, 'delivered');
   assert.equal(row?.mirrorMessageId, acceptedMessageId);
+  await db.close();
+});
+
+test('acknowledgement failure replaces send authorization with a finite reconciliation lease', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  const event: OperationalAuditEvent = {
+    entryId: 'finite-reconciliation-lease', kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
+  };
+  await store.record(event, CHANNEL_A);
+  const claim = await store.claim(event.entryId);
+  assert.ok(claim?.deliveryClaimToken);
+  await store.saveDeliverySearchBefore(event.entryId, claim.deliveryClaimToken, '1');
+  await store.authorizeDeliverySend(event.entryId, claim.deliveryClaimToken);
+  await store.markAcknowledgementFailed(event.entryId, claim.deliveryClaimToken, -1);
+
+  const retry = await store.claim(event.entryId);
+  assert.ok(retry?.deliveryClaimToken);
+  assert.notEqual(retry.deliveryClaimToken, claim.deliveryClaimToken);
+  assert.equal(retry.deliverySearchBefore, '1');
+  assert.equal(retry.deliveryAttempts, 1);
+  assert.equal(retry.deliveryLastError, 'delivery_ack_failed');
   await db.close();
 });
 
@@ -747,6 +768,11 @@ test('a post-send rejection retains its recovery bound for marker reconciliation
   assert.equal(row?.deliveryAttempts, 1);
   assert.equal(row?.deliveryLastError, 'delivery_ack_failed');
   assert.equal(row?.deliverySearchBefore, (BigInt(preSendMessageId) + 1n).toString());
+  assert.equal(await sink.retryPending(), 0);
+  await store.markAcknowledgementFailed('post-send-rejection', row!.deliveryClaimToken!, -1);
+  assert.equal(await sink.retryPending(), 1);
+  assert.equal(sends, 1);
+  assert.equal((await store.get('post-send-rejection'))?.deliveryLastError, 'discord_marker_missing');
   await db.close();
 });
 
