@@ -7,7 +7,7 @@ import {
   snapshotCounts,
   type GuildConfigSnapshot,
 } from '../src/redesign/guildConfig.ts';
-import { applyRestorePlan, planRestore } from '../src/redesign/guildConfigRestore.ts';
+import { applyRestorePlan, planRestore, remapSnapshotIds } from '../src/redesign/guildConfigRestore.ts';
 import { readSecret } from '../src/core/credentials.ts';
 import {
   LIVE_GUILD_ID,
@@ -72,28 +72,33 @@ if (!apply) {
   process.exit(0);
 }
 
-await applyRestorePlan(api, plan);
+const restoredIds = await applyRestorePlan(api, plan);
 const after = await api.capture();
 const remaining = planRestore(snapshot, after);
+const remappedSource = remapSnapshotIds(snapshot, restoredIds);
 const beforeCounts = snapshotCounts(before);
 const targetCounts = snapshotCounts(snapshot);
 const afterCounts = snapshotCounts(after);
+const sourceHash = configHash(canonicalSnapshot(snapshot));
+const semanticSourceHash = configHash(canonicalSnapshot(remappedSource));
+const afterHash = configHash(canonicalSnapshot(after));
 const evidence = {
   version: 1,
   generatedAt: new Date().toISOString(),
   guildId,
   source: snapshotPath,
-  sourceHash: configHash(canonicalSnapshot(snapshot)),
+  sourceHash,
+  semanticSourceHash,
   beforeHash: configHash(canonicalSnapshot(before)),
-  afterHash: configHash(canonicalSnapshot(after)),
+  afterHash,
   counts: { before: beforeCounts, source: targetCounts, after: afterCounts },
   applied: plan.counts,
-  hashesEqual: configHash(canonicalSnapshot(after)) === configHash(canonicalSnapshot(snapshot)),
+  hashesEqual: afterHash === semanticSourceHash,
   remaining: remaining.counts,
   remainingOperations: remaining.operations,
 };
 if (evidenceArgument) writeFileSync(resolve(evidenceArgument), `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
-console.log(`guild-config-restore: before=${evidence.beforeHash} after=${evidence.afterHash} source=${evidence.sourceHash}`);
+console.log(`guild-config-restore: before=${evidence.beforeHash} after=${evidence.afterHash} source=${evidence.sourceHash} semantic-source=${evidence.semanticSourceHash}`);
 console.log(`guild-config-restore: counts=${JSON.stringify(evidence.counts)} applied=${JSON.stringify(plan.counts)} remaining=${remaining.counts.operations}`);
 if (!evidence.hashesEqual) {
   console.error(`guild-config-restore: residual drift=${JSON.stringify(remaining.operations)}`);

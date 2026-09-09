@@ -11,10 +11,16 @@ import {
 } from './guildConfig.ts';
 
 type JsonObject = Record<string, unknown>;
-type RestoreResource = 'role' | 'channel';
-type RestoreReference = { restoreReference: RestoreResource; sourceId: string };
+type RestoreResource = 'role' | 'channel' | 'emoji';
+type RestoreReference = { restoreReference: Exclude<RestoreResource, 'emoji'>; sourceId: string };
 type RestoreValue = unknown | RestoreReference | RestoreValue[] | { [key: string]: RestoreValue };
 type RestorePath = string | { channelSourceId: string };
+
+export type RestoreIdMap = {
+  roles: Record<string, string>;
+  channels: Record<string, string>;
+  emojis: Record<string, string>;
+};
 
 export type RestoreOperation = {
   label: string;
@@ -26,7 +32,7 @@ export type RestoreOperation = {
 
 export type RestorePlan = {
   counts: { roles: number; channels: number; overwrites: number; settings: number; emojis: number; operations: number };
-  knownIds: { roles: Record<string, string>; channels: Record<string, string> };
+  knownIds: RestoreIdMap;
   operations: RestoreOperation[];
 };
 
@@ -46,7 +52,7 @@ function roleBody(role: GuildConfigRole): JsonObject {
   return bodyFromFields(role as unknown as JsonObject, ROLE_FIELDS);
 }
 
-function reference(resource: RestoreResource, sourceId: string): RestoreReference {
+function reference(resource: RestoreReference['restoreReference'], sourceId: string): RestoreReference {
   return { restoreReference: resource, sourceId };
 }
 
@@ -109,6 +115,7 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
   if (snapshot.guildId !== current.guildId) throw new Error(`Snapshot guild ${snapshot.guildId} does not match target guild ${current.guildId}.`);
   const roleIds = new Map<string, string>([[snapshot.guildId, current.guildId]]);
   const channelIds = new Map<string, string>();
+  const emojiIds = new Map<string, string>();
   const roleOperations: RestoreOperation[] = [];
   const rolePositionOperations: RestoreOperation[] = [];
   const categoryOperations: RestoreOperation[] = [];
@@ -288,12 +295,26 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
     const hasCreatedRoleReference = emoji.roles.some((roleId) => !roleIds.has(roleId));
     const actual = currentEmojis.get(emoji.name!);
     if (!actual) {
-      emojiOperations.push({ label: `create emoji ${emoji.name}`, method: 'POST', path: `/guilds/${current.guildId}/emojis`, body: { name: emoji.name, image: emojiImage(emoji), roles } });
+      emojiOperations.push({
+        label: `create emoji ${emoji.name}`,
+        method: 'POST',
+        path: `/guilds/${current.guildId}/emojis`,
+        body: { name: emoji.name, image: emojiImage(emoji), roles },
+        captureId: { resource: 'emoji', sourceId: emoji.id },
+      });
       emojiWrites++;
-    } else if (hasCreatedRoleReference || !same({ name: emoji.name, roles: knownRoles }, { name: actual.name, roles: actual.roles })) {
-      emojiOperations.push({ label: `patch emoji ${emoji.name}`, method: 'PATCH', path: `/guilds/${current.guildId}/emojis/${actual.id}`, body: { name: emoji.name, roles } });
-      emojiWrites++;
+    } else {
+      emojiIds.set(emoji.id, actual.id);
+      if (hasCreatedRoleReference || !same({ name: emoji.name, roles: knownRoles }, { name: actual.name, roles: actual.roles })) {
+        emojiOperations.push({ label: `patch emoji ${emoji.name}`, method: 'PATCH', path: `/guilds/${current.guildId}/emojis/${actual.id}`, body: { name: emoji.name, roles } });
+        emojiWrites++;
+      }
     }
+  }
+
+  for (const emoji of snapshot.emojis.filter((item) => item.managed)) {
+    const actual = current.emojis.find((item) => item.managed && item.id === emoji.id);
+    if (actual) emojiIds.set(emoji.id, actual.id);
   }
 
   const operations = [
@@ -315,23 +336,59 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
       emojis: emojiWrites,
       operations: operations.length,
     },
-    knownIds: { roles: Object.fromEntries(roleIds), channels: Object.fromEntries(channelIds) },
+    knownIds: { roles: Object.fromEntries(roleIds), channels: Object.fromEntries(channelIds), emojis: Object.fromEntries(emojiIds) },
     operations,
   };
 }
 
-export async function applyRestorePlan(api: GuildConfigDiscordApi, plan: RestorePlan): Promise<void> {
+export async function applyRestorePlan(api: GuildConfigDiscordApi, plan: RestorePlan): Promise<RestoreIdMap> {
   const ids = {
     roles: new Map(Object.entries(plan.knownIds.roles)),
     channels: new Map(Object.entries(plan.knownIds.channels)),
+    emojis: new Map(Object.entries(plan.knownIds.emojis)),
   };
   for (const operation of plan.operations) {
     const result = await api.write<{ id?: string }>(operation.method, resolvedPath(operation.path, ids.channels), resolveValue(operation.body, ids));
     if (!operation.captureId) continue;
     if (!result?.id) throw new Error(`${operation.label} returned no Discord id.`);
-    const values = operation.captureId.resource === 'role' ? ids.roles : ids.channels;
+    const values = ids[`${operation.captureId.resource}s`];
     values.set(operation.captureId.sourceId, result.id);
   }
+  return {
+    roles: Object.fromEntries(ids.roles),
+    channels: Object.fromEntries(ids.channels),
+    emojis: Object.fromEntries(ids.emojis),
+  };
+}
+
+export function remapSnapshotIds(snapshot: GuildConfigSnapshot, ids: RestoreIdMap): GuildConfigSnapshot {
+  const roleId = (sourceId: string) => ids.roles[sourceId] ?? sourceId;
+  const channelId = (sourceId: string) => ids.channels[sourceId] ?? sourceId;
+  const emojiId = (sourceId: string) => ids.emojis[sourceId] ?? sourceId;
+  const guild = { ...snapshot.guild };
+  for (const field of ['system_channel_id', 'rules_channel_id', 'public_updates_channel_id', 'afk_channel_id'] as const) {
+    const sourceId = guild[field];
+    if (typeof sourceId === 'string') guild[field] = channelId(sourceId);
+  }
+  return {
+    ...snapshot,
+    guild,
+    roles: snapshot.roles.map((role) => ({ ...role, id: roleId(role.id) })),
+    channels: snapshot.channels.map((channel) => ({
+      ...channel,
+      id: channelId(channel.id),
+      parent_id: channel.parent_id ? channelId(channel.parent_id) : null,
+      permission_overwrites: channel.permission_overwrites.map((overwrite) => ({
+        ...overwrite,
+        id: overwrite.type === 0 ? roleId(overwrite.id) : channelId(overwrite.id),
+      })),
+    })),
+    emojis: snapshot.emojis.map((emoji) => ({
+      ...emoji,
+      id: emojiId(emoji.id),
+      roles: emoji.roles.map(roleId),
+    })),
+  };
 }
 
 export function snapshotsEqual(left: GuildConfigSnapshot, right: GuildConfigSnapshot): boolean {

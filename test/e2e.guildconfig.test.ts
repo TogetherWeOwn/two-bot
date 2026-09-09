@@ -115,6 +115,26 @@ async function stubDiscord() {
         Object.assign(state.guild, body);
         return send(200, state.guild);
       }
+      if (method === 'POST' && path === `/api/v10/guilds/${GUILD}/roles`) {
+        const roleBody = body as Pick<Role, 'name' | 'color' | 'hoist' | 'permissions' | 'mentionable'>;
+        const role: Role = { id: id(100 + state.roles.length), managed: false, position: 1, ...roleBody };
+        state.roles.push(role);
+        return send(200, role);
+      }
+      if (method === 'POST' && path === `/api/v10/guilds/${GUILD}/channels`) {
+        const channelBody = body as Pick<Channel, 'name' | 'type'> & Partial<Channel>;
+        const channel: Channel = {
+          id: id(200 + state.channels.length),
+          parent_id: null,
+          position: 0,
+          permission_overwrites: [],
+          ...channelBody,
+          name: channelBody.name,
+          type: channelBody.type,
+        };
+        state.channels.push(channel);
+        return send(200, channel);
+      }
       return send(400, { method, path });
     });
   });
@@ -160,6 +180,48 @@ test('snapshot captures roles/channels/overwrites/settings/emoji and fails witho
     assert.equal(snapshot.emojis[0].image, 'data:image/png;base64,dHdv');
     assert.ok(snapshot.channels.some((channel: Channel) => channel.permission_overwrites.length > 0));
     assert.equal(drift.counts.drift, 0);
+  } finally {
+    await stub.close();
+  }
+});
+
+test('restore that recreates role, category and child channel remaps ids and reaches semantic hash success', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-guild-recreate-'));
+  const source = join(dir, 'source.json');
+  const evidence = join(dir, 'evidence.json');
+  const sourceOwner = stub.state.roles.find((role) => role.name === 'Owner')!;
+  const sourceCategory = stub.state.channels.find((channel) => channel.type === 4 && channel.name === CATEGORIES[0]!.name)!;
+  const sourceChildren = stub.state.channels.filter((channel) => channel.parent_id === sourceCategory.id);
+  const sourceChildIds = new Set(sourceChildren.map((channel) => channel.id));
+  const sourceRoleOverwrite = { id: sourceOwner.id, type: 0, allow: '1', deny: '0' };
+  sourceChildren[0]!.permission_overwrites.push(sourceRoleOverwrite);
+  writeFileSync(source, `${JSON.stringify({
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    applicationId: STAGING_BOT_APPLICATION_ID,
+    guildId: GUILD,
+    ...stub.state,
+    emojis: stub.state.emojis.map((emoji) => ({ ...emoji, image: 'data:image/png;base64,dHdv' })),
+  })}\n`);
+  stub.state.roles = stub.state.roles.filter((role) => role.id !== sourceOwner.id);
+  stub.state.channels = stub.state.channels.filter((channel) => channel.id !== sourceCategory.id && !sourceChildIds.has(channel.id));
+  try {
+    const applied = await run(RESTORE, ['--snapshot', source, '--confirm-staging-guild', '--apply', '--evidence', evidence], { GUILD_CONFIG_API_BASE: stub.base, GUILD_CONFIG_CDN_BASE: stub.base.replace(/\/api\/v10$/, '') });
+    assert.equal(applied.code, 0, applied.stderr);
+    assert.match(applied.stdout, /semantic-source=[0-9a-f]{64}/);
+    assert.match(applied.stdout, /remaining=0/);
+    const proof = JSON.parse(readFileSync(evidence, 'utf8'));
+    assert.equal(proof.hashesEqual, true);
+    assert.notEqual(proof.sourceHash, proof.afterHash);
+    assert.equal(proof.semanticSourceHash, proof.afterHash);
+    assert.equal(proof.remaining.operations, 0);
+    const restoredOwner = stub.state.roles.find((role) => role.name === 'Owner')!;
+    const restoredCategory = stub.state.channels.find((channel) => channel.type === 4 && channel.name === sourceCategory.name)!;
+    const restoredChild = stub.state.channels.find((channel) => channel.name === sourceChildren[0]!.name && channel.parent_id === restoredCategory.id)!;
+    assert.notEqual(restoredOwner.id, sourceOwner.id);
+    assert.notEqual(restoredCategory.id, sourceCategory.id);
+    assert.equal(restoredChild.permission_overwrites.at(-1)!.id, restoredOwner.id);
   } finally {
     await stub.close();
   }
