@@ -1,6 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ticketTestHelpers, ticketChannelName, buildTicketPanel, buildTicketControls } from '../src/discord/tickets.ts';
+import { openDb } from '../src/store/db.ts';
+import { INTENTS } from '../src/discord/client.ts';
+import { GatewayIntentBits } from 'discord.js';
+import {
+  TicketStore,
+  ticketTestHelpers,
+  ticketChannelName,
+  buildTicketPanel,
+  buildTicketControls,
+} from '../src/discord/tickets.ts';
 
 test('ticket controls have stable custom ids', () => {
   const panel = buildTicketPanel();
@@ -25,4 +34,115 @@ test('ticket cooldown refuses only recent tickets', () => {
   assert.equal(ticketTestHelpers.withinCooldown('2026-09-08T11:59:00.000Z', now, 300), true);
   assert.equal(ticketTestHelpers.withinCooldown('2026-09-08T11:50:00.000Z', now, 300), false);
   assert.equal(ticketTestHelpers.withinCooldown(null, now, 300), false);
+});
+
+test('ticket transcripts request message content and expire after 90 days', () => {
+  assert.ok(INTENTS.includes(GatewayIntentBits.MessageContent));
+  assert.equal(
+    ticketTestHelpers.purgeAfter('2026-09-08T12:00:00.000Z'),
+    '2026-12-07T12:00:00.000Z',
+  );
+});
+
+test('SQLite ticket store reserves one active ticket and supports cleanup recovery', async () => {
+  const db = await openDb(':memory:');
+  try {
+    const store = new TicketStore(db);
+    const reserved = await store.reserve('guild', 'member', '2026-09-08T12:00:00.000Z');
+    assert.ok(reserved);
+    assert.equal(reserved.status, 'creating');
+    assert.equal(await store.reserve('guild', 'member', '2026-09-08T12:00:01.000Z'), null);
+
+    const active = await store.activate(reserved.id, 'channel');
+    assert.equal(active?.status, 'open');
+    assert.equal(active?.channelId, 'channel');
+    assert.equal((await store.beginClose('channel'))?.status, 'closing');
+    assert.equal(await store.recoverInterrupted('2026-09-08T12:01:00.000Z', 'guild'), 1);
+    assert.equal((await store.byChannel('channel'))?.status, 'open');
+    assert.equal((await store.beginClose('channel'))?.status, 'closing');
+
+    await store.saveTranscript({
+      ticketId: reserved.id,
+      guildId: 'guild',
+      channelId: 'channel',
+      openerId: 'member',
+      claimedBy: null,
+      content: 'first snapshot',
+      messageCount: 1,
+      createdAt: '2026-09-08T12:01:00.000Z',
+      purgeAfter: '2026-12-07T12:01:00.000Z',
+    });
+    await store.saveTranscript({
+      ticketId: reserved.id,
+      guildId: 'guild',
+      channelId: 'channel',
+      openerId: 'member',
+      claimedBy: 'staff',
+      content: 'complete snapshot',
+      messageCount: 2,
+      createdAt: '2026-09-08T12:02:00.000Z',
+      purgeAfter: '2026-12-07T12:02:00.000Z',
+    });
+    const transcript = await db.prepare(`SELECT content, message_count FROM ticket_transcripts WHERE ticket_id = ?`).get<{ content: string; message_count: number }>(reserved.id);
+    assert.equal(transcript?.content, 'complete snapshot');
+    assert.equal(transcript?.message_count, 2);
+
+    await store.markCleanupPending(reserved.id, '2026-09-08T12:02:00.000Z');
+    assert.equal((await store.cleanupPending('guild')).length, 1);
+    await store.markClosed(reserved.id, '2026-09-08T12:02:00.000Z');
+    assert.equal((await store.byChannel('channel'))?.status, 'closed');
+  } finally {
+    await db.close();
+  }
+});
+
+test('interrupted ticket creation is released after its recovery cutoff', async () => {
+  const db = await openDb(':memory:');
+  try {
+    const store = new TicketStore(db);
+    assert.ok(await store.reserve('guild', 'member', '2026-09-08T12:00:00.000Z'));
+    assert.equal(await store.recoverInterrupted('2026-09-08T12:01:00.000Z', 'guild'), 1);
+    assert.equal(await store.activeFor('guild', 'member'), null);
+    assert.ok(await store.reserve('guild', 'member', '2026-09-08T12:02:00.000Z'));
+  } finally {
+    await db.close();
+  }
+});
+
+test('ticket transcript purge and member erasure delete sensitive rows', async () => {
+  const db = await openDb(':memory:');
+  try {
+    const store = new TicketStore(db);
+    const reserved = (await store.reserve('guild', 'member', '2026-09-08T12:00:00.000Z'))!;
+    await store.activate(reserved.id, 'channel');
+    await store.saveTranscript({
+      ticketId: reserved.id,
+      guildId: 'guild',
+      channelId: 'channel',
+      openerId: 'member',
+      claimedBy: null,
+      content: 'sensitive',
+      messageCount: 1,
+      createdAt: '2026-09-08T12:01:00.000Z',
+      purgeAfter: '2026-09-09T12:01:00.000Z',
+    });
+    assert.equal(await store.purgeExpired('2026-09-09T12:01:00.000Z'), 1);
+
+    await store.saveTranscript({
+      ticketId: reserved.id,
+      guildId: 'guild',
+      channelId: 'channel',
+      openerId: 'member',
+      claimedBy: null,
+      content: 'sensitive again',
+      messageCount: 1,
+      createdAt: '2026-09-08T12:02:00.000Z',
+      purgeAfter: '2026-12-07T12:02:00.000Z',
+    });
+    await store.eraseMember('member');
+    assert.equal((await db.prepare(`SELECT COUNT(*) AS n FROM tickets`).get<{ n: number }>())?.n, 0);
+    assert.equal((await db.prepare(`SELECT COUNT(*) AS n FROM ticket_transcripts`).get<{ n: number }>())?.n, 0);
+  } finally {
+    await db.close();
+  }
 });
