@@ -242,6 +242,9 @@ export async function openSqlite(path: string): Promise<Db> {
   ensureColumn(raw, 'moderation_lockdowns', 'prior_exists', 'INTEGER NOT NULL DEFAULT 1');
   reconcilePendingUnbans(raw);
   raw.exec(pendingIndex);
+  // Mirrors migrations/0014_ticket_safety.sql for rollback databases that
+  // created their ticket tables before the close-transition timestamp existed.
+  ensureColumn(raw, 'tickets', 'closing_started_at', 'TEXT');
   // schema.sql is the whole schema, so every migration whose tables it already
   // contains is recorded as applied. Adding a migration means adding its
   // tables above and its id here, or a database that is later moved to
@@ -259,6 +262,8 @@ export async function openSqlite(path: string): Promise<Db> {
     '0010_moderation',
     '0011_moderation_durability',
     '0012_moderation_recovery',
+    '0013_tickets',
+    '0014_ticket_safety',
   ]) {
     stamp.run(id, new Date().toISOString());
   }

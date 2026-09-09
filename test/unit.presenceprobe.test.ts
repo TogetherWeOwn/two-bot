@@ -84,10 +84,11 @@ describe('presence probe containment', () => {
         'If this instrument seems to need it, the issue has been misread.',
     );
 
-    // And the value check: the six documented intents, including the
-    // non-privileged GuildModeration dispatch used by the operational audit.
-    assert.equal(INTENTS.length, 6, 'the intent list changed - see client.ts:17-29');
+    // And the value check: operational audit adds GuildModeration and ticket
+    // transcripts add MessageContent, but the probe still adds no presence intent.
+    assert.equal(INTENTS.length, 7, 'the intent list changed - see client.ts intent rationale');
     assert.ok(INTENTS.includes(GatewayIntentBits.GuildModeration));
+    assert.ok(INTENTS.includes(GatewayIntentBits.MessageContent));
     assert.ok(!INTENTS.includes(GatewayIntentBits.GuildPresences));
   });
 

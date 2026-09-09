@@ -19,18 +19,21 @@ import { moderationAuditEvent } from '../audit/discordEvents.ts';
  *   Guilds              - required for any guild event at all
  *   GuildModeration     - GuildAuditLogEntryCreate for moderation mirrors
  *   GuildMembers        - member_join / member_leave        (PRIVILEGED)
- *   GuildMessages       - first_message                     (metadata only)
+ *   GuildMessages       - first_message + private ticket transcripts
+ *   MessageContent      - ticket transcript bodies only      (PRIVILEGED)
  *   GuildVoiceStates    - first_voice_session + voice_session_start/end
  *   GuildInvites        - invite create/delete for attribution
  *
- * We deliberately do NOT request MessageContent. We count that a message
- * happened; we never read what it said. See docs/PRIVACY.md.
+ * MessageContent is required for MEE6-equivalent ticket export. The bot only
+ * reads bodies while a staff member closes a bot-created private ticket; the
+ * bounded retention and erasure controls are documented in docs/PRIVACY.md.
  */
 export const INTENTS = [
   GatewayIntentBits.Guilds,
   GatewayIntentBits.GuildModeration,
   GatewayIntentBits.GuildMembers,
   GatewayIntentBits.GuildMessages,
+  GatewayIntentBits.MessageContent,
   GatewayIntentBits.GuildVoiceStates,
   GatewayIntentBits.GuildInvites,
 ];
