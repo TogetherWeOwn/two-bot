@@ -5,6 +5,7 @@ ALTER TABLE tickets DROP CONSTRAINT IF EXISTS tickets_status_check;
 ALTER TABLE tickets ALTER COLUMN channel_id DROP NOT NULL;
 ALTER TABLE tickets ADD CONSTRAINT tickets_status_check
   CHECK (status IN ('creating', 'open', 'closing', 'cleanup_pending', 'closed'));
+ALTER TABLE tickets ADD COLUMN IF NOT EXISTS closing_started_at TEXT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tickets_one_active
   ON tickets (guild_id, opener_id) WHERE status IN ('creating', 'open', 'closing', 'cleanup_pending');

@@ -305,14 +305,15 @@ CREATE TABLE IF NOT EXISTS level_import_runs (
 -- tickets: private support-channel lifecycle and bounded audit transcripts.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS tickets (
-  id         TEXT PRIMARY KEY,
-  guild_id   TEXT NOT NULL,
-  channel_id TEXT UNIQUE,
-  opener_id  TEXT NOT NULL,
-  claimed_by TEXT,
-  status     TEXT NOT NULL CHECK (status IN ('creating', 'open', 'closing', 'cleanup_pending', 'closed')),
-  created_at TEXT NOT NULL,
-  closed_at  TEXT
+  id                 TEXT PRIMARY KEY,
+  guild_id           TEXT NOT NULL,
+  channel_id         TEXT UNIQUE,
+  opener_id          TEXT NOT NULL,
+  claimed_by         TEXT,
+  status             TEXT NOT NULL CHECK (status IN ('creating', 'open', 'closing', 'cleanup_pending', 'closed')),
+  created_at         TEXT NOT NULL,
+  closing_started_at TEXT,
+  closed_at          TEXT
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tickets_one_active

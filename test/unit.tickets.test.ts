@@ -44,6 +44,12 @@ test('ticket transcripts request message content and expire after 90 days', () =
   );
 });
 
+test('Discord Unknown Channel is the only cleanup error treated as already deleted', () => {
+  assert.equal(ticketTestHelpers.isUnknownChannel({ code: 10003 }), true);
+  assert.equal(ticketTestHelpers.isUnknownChannel({ code: 50013 }), false);
+  assert.equal(ticketTestHelpers.isUnknownChannel(new Error('Unknown Channel')), false);
+});
+
 test('SQLite ticket store reserves one active ticket and supports cleanup recovery', async () => {
   const db = await openDb(':memory:');
   try {
@@ -53,13 +59,15 @@ test('SQLite ticket store reserves one active ticket and supports cleanup recove
     assert.equal(reserved.status, 'creating');
     assert.equal(await store.reserve('guild', 'member', '2026-09-08T12:00:01.000Z'), null);
 
+    assert.equal((await store.recordCreatedChannel(reserved.id, 'channel'))?.status, 'creating');
     const active = await store.activate(reserved.id, 'channel');
     assert.equal(active?.status, 'open');
     assert.equal(active?.channelId, 'channel');
-    assert.equal((await store.beginClose('channel'))?.status, 'closing');
+    assert.equal((await store.beginClose('channel', '2026-09-08T12:00:30.000Z'))?.status, 'closing');
     assert.equal(await store.recoverInterrupted('2026-09-08T12:01:00.000Z', 'guild'), 1);
     assert.equal((await store.byChannel('channel'))?.status, 'open');
-    assert.equal((await store.beginClose('channel'))?.status, 'closing');
+    assert.equal((await store.byChannel('channel'))?.closingStartedAt, null);
+    assert.equal((await store.beginClose('channel', '2026-09-08T12:01:30.000Z'))?.status, 'closing');
 
     await store.saveTranscript({
       ticketId: reserved.id,
@@ -86,6 +94,9 @@ test('SQLite ticket store reserves one active ticket and supports cleanup recove
     const transcript = await db.prepare(`SELECT content, message_count FROM ticket_transcripts WHERE ticket_id = ?`).get<{ content: string; message_count: number }>(reserved.id);
     assert.equal(transcript?.content, 'complete snapshot');
     assert.equal(transcript?.message_count, 2);
+    assert.equal(await store.recoverInterrupted('2026-09-08T12:02:00.000Z', 'guild'), 1);
+    assert.equal((await store.byChannel('channel'))?.status, 'cleanup_pending');
+    assert.equal((await db.prepare(`SELECT content FROM ticket_transcripts WHERE ticket_id = ?`).get<{ content: string }>(reserved.id))?.content, 'complete snapshot');
 
     await store.markCleanupPending(reserved.id, '2026-09-08T12:02:00.000Z');
     assert.equal((await store.cleanupPending('guild')).length, 1);
@@ -96,14 +107,17 @@ test('SQLite ticket store reserves one active ticket and supports cleanup recove
   }
 });
 
-test('interrupted ticket creation is released after its recovery cutoff', async () => {
+test('interrupted ticket creation remains recoverable after its cutoff', async () => {
   const db = await openDb(':memory:');
   try {
     const store = new TicketStore(db);
-    assert.ok(await store.reserve('guild', 'member', '2026-09-08T12:00:00.000Z'));
-    assert.equal(await store.recoverInterrupted('2026-09-08T12:01:00.000Z', 'guild'), 1);
-    assert.equal(await store.activeFor('guild', 'member'), null);
-    assert.ok(await store.reserve('guild', 'member', '2026-09-08T12:02:00.000Z'));
+    const reservation = await store.reserve('guild', 'member', '2026-09-08T12:00:00.000Z');
+    assert.ok(reservation);
+    assert.equal((await store.staleCreating('2026-09-08T12:01:00.000Z', 'guild')).length, 1);
+    assert.equal(await store.recoverInterrupted('2026-09-08T12:01:00.000Z', 'guild'), 0);
+    assert.equal((await store.activeFor('guild', 'member'))?.status, 'creating');
+    await store.recordCreatedChannel(reservation.id, 'channel');
+    assert.equal((await store.staleCreating('2026-09-08T12:01:00.000Z', 'guild'))[0]?.channelId, 'channel');
   } finally {
     await db.close();
   }

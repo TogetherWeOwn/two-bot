@@ -32,17 +32,15 @@ import { DatabaseSync } from 'node:sqlite';
 import { existsSync } from 'node:fs';
 import { openDb, isPostgresSpec, type Db } from '../src/store/db.ts';
 import { migrate } from '../src/store/migrate.ts';
+import { migrationValuesMatch } from './migration-values.ts';
 
 const args = new Set(process.argv.slice(2));
 const dryRun = args.has('--dry-run');
 const allowNonempty = args.has('--allow-nonempty');
 
 /**
- * Order matters only for readability; there are no FKs between these.
- *
- * The moderation tables are optional in the source: this script predates
- * them, and an old SQLite file has no moderation tables to copy. A missing
- * source table is reported and skipped, not fatal - the same as zero rows.
+ * Parent tables precede their FK dependants. Feature tables are optional in
+ * old SQLite sources: report and skip a table that did not exist yet.
  */
 const REQUIRED_TABLES = ['events', 'members', 'invite_snapshots'] as const;
 const OPTIONAL_TABLES = [
@@ -51,9 +49,24 @@ const OPTIONAL_TABLES = [
   'moderation_audit',
   'moderation_lockdowns',
   'moderation_idempotency',
+  'tickets',
+  'ticket_transcripts',
 ] as const;
 const TABLES = [...REQUIRED_TABLES, ...OPTIONAL_TABLES] as const;
 type Table = (typeof TABLES)[number];
+
+const PRIMARY_KEYS: Record<Table, readonly string[]> = {
+  events: ['id'],
+  members: ['guild_id', 'member_id'],
+  invite_snapshots: ['guild_id', 'code'],
+  moderation_warnings: ['id'],
+  moderation_scheduled_unbans: ['guild_id', 'user_id', 'request_id'],
+  moderation_audit: ['request_id'],
+  moderation_lockdowns: ['channel_id'],
+  moderation_idempotency: ['guild_id', 'idempotency_key'],
+  tickets: ['id'],
+  ticket_transcripts: ['ticket_id'],
+};
 
 const sqlitePath = process.env.TWO_SQLITE_PATH || process.env.TWO_DB_PATH || './data/two.db';
 if (!existsSync(sqlitePath)) {
@@ -70,7 +83,12 @@ function sourceCount(table: Table): number {
   return Number((src.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n);
 }
 
-/** A moderation table this old SQLite file never had. Copied as zero rows. */
+function sourceRows(table: Table, columns: readonly string[]): Record<string, unknown>[] {
+  const quoted = columns.map((c) => `"${c}"`).join(', ');
+  return src.prepare(`SELECT ${quoted} FROM ${table} ORDER BY ${PRIMARY_KEYS[table].join(', ')}`).all() as Record<string, unknown>[];
+}
+
+/** A feature table this old SQLite file never had. Copied as zero rows. */
 const absentFromSource = new Set<Table>(
   TABLES.filter((t) => (src.prepare(
     `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`,
@@ -157,7 +175,7 @@ try {
 
     // Deterministic read order so a re-run copies the same rows in the same
     // order, and so OFFSET means something.
-    const order = t === 'events' ? 'id' : shared.slice(0, 2).join(', ');
+    const order = PRIMARY_KEYS[t].join(', ');
     const quoted = shared.map((c) => `"${c}"`).join(', ');
     const placeholders = `(${shared.map(() => '?').join(', ')})`;
     // Postgres caps a statement at 65535 bound parameters.
@@ -220,16 +238,39 @@ try {
     if (!ok) failed = true;
   }
 
-  // Counts can match while the contents differ. Compare the key set.
+  // Counts can match while the contents differ. Compare every source row by
+  // primary key, including ticket state and transcript bodies.
+  for (const t of copyableTables) {
+    const srcCols = sourceColumns(t).filter((c) => c !== 'rowid');
+    const dstCols = await targetColumns(dst, t);
+    const shared = srcCols.filter((c) => dstCols.includes(c));
+    const rows = sourceRows(t, shared);
+    let mismatches = 0;
+    const keyColumns = PRIMARY_KEYS[t];
+    if (keyColumns.some((c) => !shared.includes(c))) {
+      failed = true;
+      console.log(`  ${t.padEnd(17)} primary key columns are not shared  MISMATCH`);
+      continue;
+    }
+    for (const row of rows) {
+      const target = await dst
+        .prepare(`SELECT ${shared.map((c) => `"${c}"`).join(', ')} FROM ${t} WHERE ${keyColumns.map((c) => `"${c}" = ?`).join(' AND ')}`)
+        .get<Record<string, unknown>>(...keyColumns.map((c) => row[c]));
+      if (!target || shared.some((c) => !migrationValuesMatch(t, c, row[c], target[c]))) mismatches++;
+    }
+    if (mismatches > 0) {
+      failed = true;
+      console.log(`  ${t.padEnd(17)} ${mismatches} source row(s) missing or changed  MISMATCH`);
+    } else {
+      console.log(`  ${t.padEnd(17)} ${rows.length} source row(s) match by primary key  ok`);
+    }
+  }
+
   const srcKeys = new Set(
-    (src.prepare(`SELECT idempotency_key AS k FROM events`).all() as { k: string }[]).map(
-      (r) => r.k,
-    ),
+    (src.prepare(`SELECT idempotency_key AS k FROM events`).all() as { k: string }[]).map((r) => r.k),
   );
   const dstKeys = new Set(
-    (await dst.prepare(`SELECT idempotency_key AS k FROM events`).all<{ k: string }>()).map(
-      (r) => r.k,
-    ),
+    (await dst.prepare(`SELECT idempotency_key AS k FROM events`).all<{ k: string }>()).map((r) => r.k),
   );
   const missing = [...srcKeys].filter((k) => !dstKeys.has(k));
   if (missing.length > 0) {

@@ -21,6 +21,7 @@ export const TICKET_CLAIM_ID = 'two:tickets:claim';
 export const TICKET_CLOSE_ID = 'two:tickets:close';
 const MAX_TRANSCRIPT_CHARS = 200_000;
 const TRANSCRIPT_RETENTION_DAYS = 90;
+const TICKET_TOPIC_PREFIX = 'two-ticket:';
 
 export type TicketStatus = 'creating' | 'open' | 'closing' | 'cleanup_pending' | 'closed';
 
@@ -32,6 +33,7 @@ export interface TicketRecord {
   claimedBy: string | null;
   status: TicketStatus;
   createdAt: string;
+  closingStartedAt: string | null;
   closedAt: string | null;
 }
 
@@ -58,7 +60,7 @@ export class TicketStore {
   async activeFor(guildId: string, openerId: string): Promise<TicketRecord | null> {
     const row = await this.db
       .prepare(
-        `SELECT id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closed_at
+        `SELECT id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closing_started_at, closed_at
            FROM tickets
           WHERE guild_id = ? AND opener_id = ?
             AND status IN ('creating', 'open', 'closing', 'cleanup_pending')
@@ -82,9 +84,20 @@ export class TicketStore {
         `INSERT INTO tickets (id, guild_id, channel_id, opener_id, status, created_at)
          VALUES (?, ?, NULL, ?, 'creating', ?)
          ON CONFLICT DO NOTHING
-         RETURNING id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closed_at`,
+         RETURNING id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closing_started_at, closed_at`,
       )
       .get<TicketRow>(randomUUID(), guildId, openerId, createdAt);
+    return row ? toTicket(row) : null;
+  }
+
+  async recordCreatedChannel(ticketId: string, channelId: string): Promise<TicketRecord | null> {
+    const row = await this.db
+      .prepare(
+        `UPDATE tickets SET channel_id = ?
+          WHERE id = ? AND status = 'creating' AND channel_id IS NULL
+         RETURNING id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closing_started_at, closed_at`,
+      )
+      .get<TicketRow>(channelId, ticketId);
     return row ? toTicket(row) : null;
   }
 
@@ -92,10 +105,10 @@ export class TicketStore {
     const row = await this.db
       .prepare(
         `UPDATE tickets SET channel_id = ?, status = 'open'
-          WHERE id = ? AND status = 'creating'
-         RETURNING id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closed_at`,
+          WHERE id = ? AND status = 'creating' AND (channel_id IS NULL OR channel_id = ?)
+         RETURNING id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closing_started_at, closed_at`,
       )
-      .get<TicketRow>(channelId, ticketId);
+      .get<TicketRow>(channelId, ticketId, channelId);
     return row ? toTicket(row) : null;
   }
 
@@ -109,24 +122,37 @@ export class TicketStore {
     return (
       await this.db
         .prepare(
-          `UPDATE tickets SET status = 'open'
-             WHERE status = 'closing' AND created_at <= ?${guildClause}`,
+          `UPDATE tickets SET status = 'cleanup_pending'
+             WHERE status = 'closing' AND closing_started_at <= ?${guildClause}
+               AND EXISTS (SELECT 1 FROM ticket_transcripts WHERE ticket_id = tickets.id)`,
         )
         .run(...params)
     ).changes + (
       await this.db
         .prepare(
-          `DELETE FROM tickets
-             WHERE status = 'creating' AND created_at <= ?${guildClause}`,
+          `UPDATE tickets SET status = 'open', closing_started_at = NULL
+             WHERE status = 'closing' AND closing_started_at <= ?${guildClause}
+               AND NOT EXISTS (SELECT 1 FROM ticket_transcripts WHERE ticket_id = tickets.id)`,
         )
         .run(...params)
     ).changes;
   }
 
+  async staleCreating(cutoff: string, guildId?: string | null): Promise<TicketRecord[]> {
+    const rows = guildId
+      ? await this.db
+          .prepare(`SELECT id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closing_started_at, closed_at FROM tickets WHERE status = 'creating' AND created_at <= ? AND guild_id = ? ORDER BY created_at`)
+          .all<TicketRow>(cutoff, guildId)
+      : await this.db
+          .prepare(`SELECT id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closing_started_at, closed_at FROM tickets WHERE status = 'creating' AND created_at <= ? ORDER BY created_at`)
+          .all<TicketRow>(cutoff);
+    return rows.map(toTicket);
+  }
+
   async byChannel(channelId: string): Promise<TicketRecord | null> {
     const row = await this.db
       .prepare(
-        `SELECT id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closed_at
+        `SELECT id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closing_started_at, closed_at
            FROM tickets WHERE channel_id = ?`,
       )
       .get<TicketRow>(channelId);
@@ -138,26 +164,26 @@ export class TicketStore {
       .prepare(
         `UPDATE tickets SET claimed_by = ?
            WHERE channel_id = ? AND status = 'open' AND claimed_by IS NULL
-         RETURNING id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closed_at`,
+         RETURNING id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closing_started_at, closed_at`,
       )
       .get<TicketRow>(staffId, channelId);
     return row ? toTicket(row) : null;
   }
 
   /** Only one closer may move an open ticket into the close workflow. */
-  async beginClose(channelId: string): Promise<TicketRecord | null> {
+  async beginClose(channelId: string, startedAt: string): Promise<TicketRecord | null> {
     const row = await this.db
       .prepare(
-        `UPDATE tickets SET status = 'closing'
+        `UPDATE tickets SET status = 'closing', closing_started_at = ?
            WHERE channel_id = ? AND status = 'open'
-         RETURNING id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closed_at`,
+         RETURNING id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closing_started_at, closed_at`,
       )
-      .get<TicketRow>(channelId);
+      .get<TicketRow>(startedAt, channelId);
     return row ? toTicket(row) : null;
   }
 
   async reopenAfterCloseFailure(ticketId: string): Promise<void> {
-    await this.db.prepare(`UPDATE tickets SET status = 'open' WHERE id = ? AND status = 'closing'`).run(ticketId);
+    await this.db.prepare(`UPDATE tickets SET status = 'open', closing_started_at = NULL WHERE id = ? AND status = 'closing'`).run(ticketId);
   }
 
   async saveTranscript(t: TicketTranscript): Promise<void> {
@@ -195,10 +221,10 @@ export class TicketStore {
   async cleanupPending(guildId?: string | null): Promise<TicketRecord[]> {
     const rows = guildId
       ? await this.db
-          .prepare(`SELECT id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closed_at FROM tickets WHERE status = 'cleanup_pending' AND guild_id = ? ORDER BY created_at`)
+          .prepare(`SELECT id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closing_started_at, closed_at FROM tickets WHERE status = 'cleanup_pending' AND guild_id = ? ORDER BY created_at`)
           .all<TicketRow>(guildId)
       : await this.db
-          .prepare(`SELECT id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closed_at FROM tickets WHERE status = 'cleanup_pending' ORDER BY created_at`)
+          .prepare(`SELECT id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closing_started_at, closed_at FROM tickets WHERE status = 'cleanup_pending' ORDER BY created_at`)
           .all<TicketRow>();
     return rows.map(toTicket);
   }
@@ -223,11 +249,12 @@ interface TicketRow {
   claimed_by: string | null;
   status: TicketStatus;
   created_at: string;
+  closing_started_at: string | null;
   closed_at: string | null;
 }
 
 function toTicket(row: TicketRow): TicketRecord {
-  return { id: row.id, guildId: row.guild_id, channelId: row.channel_id, openerId: row.opener_id, claimedBy: row.claimed_by, status: row.status, createdAt: row.created_at, closedAt: row.closed_at };
+  return { id: row.id, guildId: row.guild_id, channelId: row.channel_id, openerId: row.opener_id, claimedBy: row.claimed_by, status: row.status, createdAt: row.created_at, closingStartedAt: row.closing_started_at, closedAt: row.closed_at };
 }
 
 export interface TicketDeps {
@@ -328,6 +355,7 @@ async function openTicket(interaction: ButtonInteraction, deps: TicketDeps, stor
     if (!bot) throw new Error(`bot guild member is unavailable in guild ${guild.id}`);
     channel = await guild.channels.create({
       name: ticketChannelName(member), type: ChannelType.GuildText, parent: deps.categoryId,
+      topic: `${TICKET_TOPIC_PREFIX}${reservation.id}`,
       permissionOverwrites: [
         { id: guild.id, deny: [PermissionFlagsBits.ViewChannel] },
         { id: bot.id, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory, PermissionFlagsBits.ManageChannels] },
@@ -335,6 +363,8 @@ async function openTicket(interaction: ButtonInteraction, deps: TicketDeps, stor
         { id: deps.staffRoleId, allow: [PermissionFlagsBits.ViewChannel, PermissionFlagsBits.SendMessages, PermissionFlagsBits.ReadMessageHistory] },
       ],
     });
+    const recorded = await store.recordCreatedChannel(reservation.id, channel.id);
+    if (!recorded) throw new Error(`ticket reservation ${reservation.id} disappeared before channel recording`);
     const ticket = await store.activate(reservation.id, channel.id);
     if (!ticket) throw new Error(`ticket reservation ${reservation.id} disappeared before activation`);
     await channel.send({ content: `<@${member.id}> Thanks — staff will be with you shortly. Ticket messages are retained in a staff-only audit transcript for ${TRANSCRIPT_RETENTION_DAYS} days after close.`, components: [buildTicketControls()], allowedMentions: { users: [member.id] } });
@@ -372,7 +402,7 @@ async function closeTicket(interaction: ButtonInteraction, deps: TicketDeps, sto
     return;
   }
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-  const ticket = await store.beginClose(interaction.channelId);
+  const ticket = await store.beginClose(interaction.channelId, new Date().toISOString());
   if (!ticket) {
     const existing = await store.byChannel(interaction.channelId);
     await interaction.editReply({ content: existing?.status === 'cleanup_pending' ? 'Ticket is closed; channel cleanup is pending.' : 'This ticket is already closed or being closed.' });
@@ -412,6 +442,55 @@ async function closeTicket(interaction: ButtonInteraction, deps: TicketDeps, sto
   }
 }
 
+function isUnknownChannel(err: unknown): boolean {
+  return !!err && typeof err === 'object' && 'code' in err && (err as { code?: unknown }).code === 10003;
+}
+
+async function recoverCreating(client: Client, store: TicketStore, cutoff: string, guildId?: string | null): Promise<number> {
+  let recovered = 0;
+  for (const ticket of await store.staleCreating(cutoff, guildId)) {
+    let channelId = ticket.channelId;
+    if (!channelId) {
+      const guild = client.guilds.cache.get(ticket.guildId);
+      if (!guild) {
+        log.error('ticket_creation_recovery_failed', { ticketId: ticket.id, err: `guild ${ticket.guildId} is not cached` });
+        continue;
+      }
+      try {
+        const channels = await guild.channels.fetch();
+        const orphan = channels.find((channel) => channel?.isTextBased() && 'topic' in channel && channel.topic === `${TICKET_TOPIC_PREFIX}${ticket.id}`);
+        channelId = orphan?.id ?? null;
+        if (channelId) await store.recordCreatedChannel(ticket.id, channelId);
+      } catch (err) {
+        log.error('ticket_creation_recovery_failed', { ticketId: ticket.id, err: String(err) });
+        continue;
+      }
+    }
+    if (!channelId) {
+      await store.abandon(ticket.id);
+      recovered++;
+      continue;
+    }
+    try {
+      const channel = await client.channels.fetch(channelId);
+      if (channel) await channel.delete('recover interrupted ticket creation');
+      await store.abandon(ticket.id);
+      recovered++;
+      log.info('ticket_creation_recovered', { ticketId: ticket.id, channelId });
+    } catch (err) {
+      if (isUnknownChannel(err)) {
+        await store.abandon(ticket.id);
+        recovered++;
+        log.info('ticket_creation_already_absent', { ticketId: ticket.id, channelId });
+      } else {
+        await store.markCleanupPending(ticket.id, new Date().toISOString(), channelId);
+        log.error('ticket_creation_recovery_failed', { ticketId: ticket.id, channelId, err: String(err) });
+      }
+    }
+  }
+  return recovered;
+}
+
 async function retryCleanup(client: Client, store: TicketStore, guildId?: string | null): Promise<void> {
   for (const ticket of await store.cleanupPending(guildId)) {
     if (!ticket.channelId) continue;
@@ -421,7 +500,12 @@ async function retryCleanup(client: Client, store: TicketStore, guildId?: string
       await store.markClosed(ticket.id, ticket.closedAt ?? new Date().toISOString());
       log.info('ticket_cleanup_recovered', { ticketId: ticket.id, channelId: ticket.channelId });
     } catch (err) {
-      log.error('ticket_cleanup_retry_failed', { ticketId: ticket.id, channelId: ticket.channelId, err: String(err) });
+      if (isUnknownChannel(err)) {
+        await store.markClosed(ticket.id, ticket.closedAt ?? new Date().toISOString());
+        log.info('ticket_cleanup_already_absent', { ticketId: ticket.id, channelId: ticket.channelId });
+      } else {
+        log.error('ticket_cleanup_retry_failed', { ticketId: ticket.id, channelId: ticket.channelId, err: String(err) });
+      }
     }
   }
 }
@@ -437,7 +521,8 @@ export function registerTickets(client: Client, deps: TicketDeps): void {
     try {
       const cutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
       const recovered = await store.recoverInterrupted(cutoff, deps.guildId);
-      if (recovered > 0) log.info('ticket_interrupted_recovered', { count: recovered });
+      const creatingRecovered = await recoverCreating(client, store, cutoff, deps.guildId);
+      if (recovered + creatingRecovered > 0) log.info('ticket_interrupted_recovered', { count: recovered + creatingRecovered });
       await ensurePanel(client, deps.panelChannelId);
       await retryCleanup(client, store, deps.guildId);
       await purge();
@@ -466,4 +551,4 @@ export function registerTickets(client: Client, deps: TicketDeps): void {
   });
 }
 
-export const ticketTestHelpers = { withinCooldown, purgeAfter };
+export const ticketTestHelpers = { withinCooldown, purgeAfter, isUnknownChannel };
