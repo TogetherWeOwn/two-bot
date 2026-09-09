@@ -171,6 +171,7 @@ CREATE TABLE IF NOT EXISTS operational_audit_log (
   delivery_last_error     TEXT,
   delivery_lease_until    TEXT,
   delivery_nonce          TEXT,
+  delivery_search_before  TEXT,
   mirror_message_id       TEXT,
   mirrored_at             TEXT
 );

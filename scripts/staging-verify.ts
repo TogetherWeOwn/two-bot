@@ -258,6 +258,10 @@ if (weOwnIt) {
           ? `\n        (Not held as explicit bits: ${missing.join(', ')} - implied, not missing.)`
           : ''),
     );
+    fail(
+      'Administrator permission is held',
+      `parity acceptance requires the scoped invite set ${STAGING_INVITE_PERMISSIONS}`,
+    );
   } else if (missing.length) {
     // Re-inviting is the fix, not a settings tweak: an invited bot cannot
     // grant itself a bit its invite did not carry.
@@ -293,7 +297,7 @@ if (app.status === 200 && app.body) {
 
 
 async function discordMarkerMessageIds(channelId: string, entryId: string, since: string): Promise<string[]> {
-  const marker = `audit-event:${entryId}`;
+  const marker = `audit-event:${entryId};`;
   const matches: string[] = [];
   let before = '';
   for (let page = 0; page < 20; page++) {

@@ -64,7 +64,7 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
 
     let messageId: string | null = null;
     try {
-      const existing = await findMirror(channel, stored.event.entryId);
+      const existing = await findMirror(channel, stored.event.entryId, stored.deliverySearchBefore);
       if (existing) {
         messageId = existing.id;
       } else {
@@ -75,6 +75,7 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
           enforceNonce: true,
         });
         messageId = message.id;
+        await options.store?.saveDeliverySearchBefore(stored.event.entryId, message.id);
       }
     } catch {
       await options.store?.markDeliveryFailed(stored.event.entryId, 'discord_send_failed');
@@ -155,6 +156,7 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
           deliveryState: 'delivering',
           deliveryAttempts: 0,
           deliveryNonce: deliveryNonce(event.entryId),
+          deliverySearchBefore: null,
           mirrorMessageId: null,
         };
         await deliver(ephemeral);
@@ -175,12 +177,19 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
   };
 }
 
-async function findMirror(channel: GuildTextBasedChannel, entryId: string): Promise<Message<true> | null> {
-  const marker = `audit-event:${entryId}`;
-  let before: string | undefined;
-  for (let page = 0; page < 5; page++) {
+async function findMirror(
+  channel: GuildTextBasedChannel,
+  entryId: string,
+  searchBefore: string | null,
+): Promise<Message<true> | null> {
+  const marker = `audit-event:${entryId};`;
+  let before = searchBefore ?? undefined;
+  const pageLimit = searchBefore ? Number.POSITIVE_INFINITY : 5;
+  for (let page = 0; page < pageLimit; page++) {
     const messages = await channel.messages.fetch({ limit: 100, before, cache: false });
-    const match = messages.find((message) => message.author.id === channel.client.user?.id && message.content.includes(marker));
+    const match = messages.find(
+      (message) => message.author.id === channel.client.user?.id && message.content.includes(marker),
+    );
     if (match) return match;
     if (messages.size < 100) return null;
     before = messages.last()?.id;

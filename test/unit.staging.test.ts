@@ -8,6 +8,8 @@
  * itself, which re-checks every count after seeding and exits non-zero on a
  * mismatch.
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openDb } from '../src/store/db.ts';
@@ -351,6 +353,12 @@ test('the invite never asks for Administrator', () => {
   assert.equal(STAGING_INVITE_PERMISSIONS & (1n << 2n), 0n, 'Ban Members');
   assert.equal(STAGING_INVITE_PERMISSIONS & (1n << 1n), 0n, 'Kick Members');
   assert.equal(STAGING_INVITE_PERMISSIONS & (1n << 5n), 0n, 'Manage Server');
+});
+
+test('staging verification fails when the bot holds Administrator', () => {
+  const verifier = readFileSync(join(import.meta.dirname, '..', 'scripts', 'staging-verify.ts'), 'utf8');
+  const adminBranch = verifier.slice(verifier.indexOf('if (mask & ADMIN)'), verifier.indexOf('} else if (missing.length)'));
+  assert.match(adminBranch, /fail\(\s*'Administrator permission is held'/);
 });
 
 test('the invite is the operational set plus exactly the two events bits', () => {

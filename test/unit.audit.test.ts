@@ -146,6 +146,26 @@ test('gateway logging covers edit/delete, member deltas and voice move without c
   assert.doesNotMatch(serialized, /old secret|new secret|deleted secret|before nick|after nick/);
 });
 
+test('role-heavy member updates use a bounded occurrence key', async () => {
+  const events: OperationalAuditEvent[] = [];
+  const bus = new EventEmitter();
+  registerHandlers(bus as unknown as Client, deps(events));
+  const oldRoleIds = Array.from({ length: 60 }, (_, index) => `old-role-${index}`);
+  const newRoleIds = Array.from({ length: 60 }, (_, index) => `new-role-${index}`);
+  bus.emit(
+    Events.GuildMemberUpdate,
+    { id: MEMBER, guild: { id: GUILD }, partial: false, nickname: null, roles: roles([GUILD, ...oldRoleIds]) },
+    { id: MEMBER, guild: { id: GUILD }, nickname: null, roles: roles([GUILD, ...newRoleIds]), user: { bot: false } },
+  );
+  await settle();
+
+  assert.equal(events.length, 1);
+  assert.ok(events[0].entryId.length < 150);
+  assert.doesNotMatch(events[0].entryId, /old-role|new-role/);
+  assert.deepEqual(events[0].metadata?.addedRoleIds, newRoleIds.sort());
+  assert.deepEqual(events[0].metadata?.removedRoleIds, oldRoleIds.sort());
+});
+
 test('partial old members are not reported as role or nickname changes', async () => {
   const events: OperationalAuditEvent[] = [];
   const bus = new EventEmitter();
@@ -223,7 +243,7 @@ test('Discord moderation entries discard free-text reasons', () => {
   assert.deepEqual(event.metadata, { auditLogEntryId: 'audit-1', count: 3 });
 });
 
-test('mirror text suppresses raw message content and carries a detectable event marker', () => {
+test('mirror text suppresses raw message content and carries a delimited event marker', () => {
   const text = formatAuditEvent({
     entryId: 'one',
     kind: 'message_delete',
@@ -234,10 +254,25 @@ test('mirror text suppresses raw message content and carries a detectable event 
     sourceChannelId: CHANNEL_A,
     messageId: 'message-2',
   });
-  assert.match(text, /audit-event:one/);
+  assert.match(text, /audit-event:one;/);
   assert.match(text, new RegExp(MEMBER));
   assert.match(text, /message-2/);
   assert.doesNotMatch(text, /content|username|nickname|reason/);
+});
+
+test('role-heavy member updates stay within Discord message limits', () => {
+  const roleIds = Array.from({ length: 60 }, (_, index) => String(9_000_000_000_000_000n + BigInt(index)));
+  const text = formatAuditEvent({
+    entryId: 'member-update:bounded',
+    kind: 'member_update',
+    channel: 'audit',
+    guildId: GUILD,
+    occurredAt: '2026-09-09T07:00:00.000Z',
+    targetId: MEMBER,
+    metadata: { nicknameChanged: true, addedRoleIds: roleIds, removedRoleIds: roleIds },
+  });
+  assert.ok(text.length <= 2_000);
+  assert.match(text, /^audit-event:member-update:bounded;/);
 });
 
 test('audit-sink message tampering is stored but never remirrored', async () => {
@@ -252,7 +287,7 @@ test('audit-sink message tampering is stored but never remirrored', async () => 
     permissionsFor: () => ({ has: () => true }),
     messages: { fetch: async () => new Collection() },
     client: { user: { id: 'bot' } },
-    send: async () => { sent++; return { id: 'mirror-message' }; },
+    send: async () => { sent++; return { id: '900000000000000001' }; },
   };
   const client = { channels: { cache: new Map([[CHANNEL_A, channel]]), fetch: async () => channel } } as unknown as Client;
   const sink = makeOperationalAudit(client, {
@@ -291,7 +326,7 @@ test('failed audit delivery is retryable without duplicating the durable row', a
     send: async () => {
       attempts++;
       if (attempts === 1) throw new Error('transient Discord failure');
-      return { id: 'mirror-message-1' };
+      return { id: '900000000000000001' };
     },
   };
   const client = { channels: { cache: new Map([[CHANNEL_A, channel]]), fetch: async () => channel } } as unknown as Client;
@@ -318,17 +353,24 @@ test('failed audit delivery is retryable without duplicating the durable row', a
   assert.equal(row?.deliveryAttempts, 2);
   assert.equal(row?.deliveryNonce, deliveryNonce(event.entryId));
   assert.ok((row?.deliveryNonce.length ?? 26) <= 25);
-  assert.equal(row?.mirrorMessageId, 'mirror-message-1');
+  assert.equal(row?.mirrorMessageId, '900000000000000001');
   const count = await db.prepare(`SELECT COUNT(*) AS n FROM operational_audit_log`).get<{ n: number }>();
   assert.equal(Number(count?.n), 1);
   await db.close();
 });
 
-test('post-send acknowledgement retries reconcile the durable Discord marker', async () => {
+test('post-send acknowledgement retries reconcile beyond 500 newer Discord messages', async () => {
   const db = await openDb(':memory:');
   const store = new OperationalAuditStore(db);
   const sends: Array<{ nonce?: string | number; enforceNonce?: boolean }> = [];
+  const acceptedMessageId = '900000000000000000';
   let existingMessage: { id: string; author: { id: string }; content: string } | null = null;
+  const newerMessages = Array.from({ length: 550 }, (_, index) => ({
+    id: (BigInt(acceptedMessageId) + 550n - BigInt(index)).toString(),
+    author: { id: 'other' },
+    content: `newer-${index}`,
+  }));
+  const fetchedBefore: Array<string | undefined> = [];
   const channel = {
     id: CHANNEL_A,
     guild: { id: GUILD, members: { me: { id: 'bot' } } },
@@ -336,13 +378,19 @@ test('post-send acknowledgement retries reconcile the durable Discord marker', a
     isDMBased: () => false,
     permissionsFor: () => ({ has: () => true }),
     messages: {
-      fetch: async () => new Collection(existingMessage ? [[existingMessage.id, existingMessage]] : []),
+      fetch: async ({ before }: { before?: string }) => {
+        fetchedBefore.push(before);
+        if (before === (BigInt(acceptedMessageId) + 1n).toString() && existingMessage) {
+          return new Collection([[existingMessage.id, existingMessage]]);
+        }
+        return new Collection(newerMessages.slice(0, 100).map((message) => [message.id, message]));
+      },
     },
     client: { user: { id: 'bot' } },
     send: async (body: { nonce?: string | number; enforceNonce?: boolean; content?: string }) => {
       sends.push(body);
-      existingMessage = { id: 'same-discord-message', author: { id: 'bot' }, content: body.content ?? '' };
-      return { id: 'same-discord-message' };
+      existingMessage = { id: acceptedMessageId, author: { id: 'bot' }, content: body.content ?? '' };
+      return { id: acceptedMessageId };
     },
   };
   const client = { channels: { cache: new Map([[CHANNEL_A, channel]]), fetch: async () => channel } } as unknown as Client;
@@ -373,6 +421,7 @@ test('post-send acknowledgement retries reconcile the durable Discord marker', a
   const ambiguous = await store.get(event.entryId);
   assert.equal(ambiguous?.deliveryState, 'delivering');
   assert.equal(ambiguous?.deliveryAttempts, 1);
+  assert.equal(ambiguous?.deliverySearchBefore, (BigInt(acceptedMessageId) + 1n).toString());
   await db.prepare(`UPDATE operational_audit_log SET delivery_lease_until = ? WHERE entry_id = ?`).run(
     '2000-01-01T00:00:00.000Z',
     event.entryId,
@@ -382,9 +431,45 @@ test('post-send acknowledgement retries reconcile the durable Discord marker', a
   assert.equal(sends.length, 1);
   assert.deepEqual(sends.map((body) => body.nonce), [deliveryNonce(event.entryId)]);
   assert.deepEqual(sends.map((body) => body.enforceNonce), [true]);
+  assert.equal(fetchedBefore.at(-1), (BigInt(acceptedMessageId) + 1n).toString());
   const row = await store.get(event.entryId);
   assert.equal(row?.deliveryState, 'delivered');
-  assert.equal(row?.mirrorMessageId, 'same-discord-message');
+  assert.equal(row?.mirrorMessageId, acceptedMessageId);
+  await db.close();
+});
+
+test('marker reconciliation does not confuse entry id prefixes', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  let sends = 0;
+  const prefixMessage = {
+    id: '900000000000000100',
+    author: { id: 'bot' },
+    content: 'audit-event:abc2; · **message delete**',
+  };
+  const channel = {
+    id: CHANNEL_A,
+    guild: { id: GUILD, members: { me: { id: 'bot' } } },
+    isTextBased: () => true,
+    isDMBased: () => false,
+    permissionsFor: () => ({ has: () => true }),
+    messages: { fetch: async () => new Collection([[prefixMessage.id, prefixMessage]]) },
+    client: { user: { id: 'bot' } },
+    send: async () => { sends++; return { id: '900000000000000200' }; },
+  };
+  const client = { channels: { cache: new Map([[CHANNEL_A, channel]]), fetch: async () => channel } } as unknown as Client;
+  const sink = makeOperationalAudit(client, {
+    guildId: GUILD,
+    channels: { audit: CHANNEL_A, voice: null, moderation: null },
+    store,
+  });
+
+  await sink.record({
+    entryId: 'abc', kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
+  });
+  assert.equal(sends, 1);
+  assert.equal((await store.get('abc'))?.mirrorMessageId, '900000000000000200');
   await db.close();
 });
 
@@ -444,6 +529,7 @@ test('audit database write errors redact thrown text from process logs', async (
     async claim() { return null; },
     async claimPending() { return []; },
     async markDeliveryFailed() {},
+    async saveDeliverySearchBefore() {},
     async markDelivered() {},
     async markAcknowledgementFailed() {},
   } as unknown as OperationalAuditStore;
@@ -485,7 +571,7 @@ test('Discord mirror refuses a configured channel from another guild', async () 
     permissionsFor: () => ({ has: () => true }),
     messages: { fetch: async () => new Collection() },
     client: { user: { id: 'bot' } },
-    send: async () => { sent++; return { id: 'mirror-message' }; },
+    send: async () => { sent++; return { id: '900000000000000001' }; },
   };
   const client = {
     channels: {

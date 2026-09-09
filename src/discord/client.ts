@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Client, GatewayIntentBits, Events, Partials, type Guild } from 'discord.js';
 import { nowIso } from '../core/events.ts';
 import type { FunnelHandlers } from '../core/handlers.ts';
@@ -181,11 +182,15 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     if (!nicknameChanged && addedRoleIds.length === 0 && removedRoleIds.length === 0) return;
 
     const occurredAt = nowIso();
-    const stableChange = JSON.stringify({ nicknameChanged, addedRoleIds, removedRoleIds });
+    const changeDigest = createHash('sha256')
+      .update(JSON.stringify({ nicknameChanged, addedRoleIds, removedRoleIds }))
+      .digest('base64url')
+      .slice(0, 16);
     auditSafely({
       // Discord supplies no id for this gateway event. The occurrence timestamp
-      // preserves a later identical transition instead of collapsing it forever.
-      entryId: `member-update:${newMember.guild.id}:${newMember.id}:${occurredAt}:${stableChange}`,
+      // preserves a later identical transition; the bounded digest distinguishes
+      // simultaneous deltas without embedding an unbounded role list in the key.
+      entryId: `member-update:${newMember.guild.id}:${newMember.id}:${occurredAt}:${changeDigest}`,
       kind: 'member_update',
       channel: 'audit',
       guildId: newMember.guild.id,
