@@ -12,6 +12,7 @@ export interface StoredOperationalAudit {
   deliveryNonce: string | null;
   deliverySearchBefore: string | null;
   mirrorMessageId: string | null;
+  deliveryLastError: string | null;
 }
 
 export class OperationalAuditStore {
@@ -58,7 +59,7 @@ export class OperationalAuditStore {
     return row ? storedAudit(row) : null;
   }
 
-  async claim(entryId: string, leaseMs = 60_000): Promise<StoredOperationalAudit | null> {
+  async claim(entryId: string, leaseMs = AUDIT_DELIVERY_LEASE_MS): Promise<StoredOperationalAudit | null> {
     const now = new Date();
     const leaseUntil = new Date(now.getTime() + leaseMs).toISOString();
     const result = await this.db
@@ -76,7 +77,7 @@ export class OperationalAuditStore {
     return result.changes === 1 ? await this.get(entryId) : null;
   }
 
-  async claimPending(limit = 25, leaseMs = 60_000): Promise<StoredOperationalAudit[]> {
+  async claimPending(limit = 25, leaseMs = AUDIT_DELIVERY_LEASE_MS): Promise<StoredOperationalAudit[]> {
     const rows = await this.db
       .prepare(
         `${SELECT_AUDIT}
@@ -94,14 +95,14 @@ export class OperationalAuditStore {
     return claimed;
   }
 
-  async saveDeliverySearchBefore(entryId: string, messageId: string): Promise<void> {
+  async saveDeliverySearchBefore(entryId: string, before: string): Promise<void> {
     const result = await this.db
       .prepare(
         `UPDATE operational_audit_log
             SET delivery_search_before = COALESCE(delivery_search_before, ?)
           WHERE entry_id = ? AND delivery_state = 'delivering'`,
       )
-      .run(nextSnowflake(messageId), entryId);
+      .run(before, entryId);
     if (result.changes !== 1) throw new Error('audit_delivery_search_bound_not_persisted');
   }
 
@@ -154,7 +155,7 @@ const SELECT_AUDIT =
   `SELECT entry_id, event_kind, guild_id, occurred_at, actor_id, target_id,
           source_channel_id, destination_channel_id, message_id, action,
           metadata_json, mirror_channel_id, delivery_state, delivery_attempts,
-          delivery_nonce, delivery_search_before, mirror_message_id
+          delivery_nonce, delivery_search_before, mirror_message_id, delivery_last_error
      FROM operational_audit_log`;
 
 function storedAudit(row: Record<string, unknown>): StoredOperationalAudit {
@@ -179,6 +180,7 @@ function storedAudit(row: Record<string, unknown>): StoredOperationalAudit {
     deliveryNonce: nullableString(row.delivery_nonce),
     deliverySearchBefore: nullableString(row.delivery_search_before),
     mirrorMessageId: nullableString(row.mirror_message_id),
+    deliveryLastError: nullableString(row.delivery_last_error),
   };
 }
 
@@ -205,9 +207,11 @@ function parseMetadata(value: unknown): Record<string, unknown> {
   }
 }
 
-function nextSnowflake(messageId: string): string {
-  return (BigInt(messageId) + 1n).toString();
-}
+/**
+ * Keep an ambiguous Discord delivery claimed while its bounded reconciliation runs.
+ * This exceeds the retry sweep interval and the largest bounded history scan.
+ */
+export const AUDIT_DELIVERY_LEASE_MS = 5 * 60_000;
 
 /** Discord accepts message nonces up to 25 characters. */
 export function deliveryNonce(entryId: string): string {

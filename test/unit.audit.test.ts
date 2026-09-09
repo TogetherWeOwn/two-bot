@@ -325,7 +325,6 @@ test('failed audit delivery is retryable without duplicating the durable row', a
     client: { user: { id: 'bot' } },
     send: async () => {
       attempts++;
-      if (attempts === 1) throw new Error('transient Discord failure');
       return { id: '900000000000000001' };
     },
   };
@@ -344,10 +343,17 @@ test('failed audit delivery is retryable without duplicating the durable row', a
     sourceChannelId: CHANNEL_B,
     messageId: 'message-2',
   };
+  const realSaveDeliverySearchBefore = store.saveDeliverySearchBefore.bind(store);
+  let boundaryWrites = 0;
+  store.saveDeliverySearchBefore = async (entryId, before) => {
+    boundaryWrites++;
+    if (boundaryWrites === 1) throw new Error('transient database failure before send');
+    await realSaveDeliverySearchBefore(entryId, before);
+  };
   assert.equal(await sink.record(event), true);
   assert.equal((await store.get(event.entryId))?.deliveryState, 'pending');
   assert.equal(await sink.record(event), false);
-  assert.equal(attempts, 2);
+  assert.equal(attempts, 1);
   const row = await store.get(event.entryId);
   assert.equal(row?.deliveryState, 'delivered');
   assert.equal(row?.deliveryAttempts, 2);
@@ -364,6 +370,8 @@ test('post-send acknowledgement retries reconcile beyond 500 newer Discord messa
   const store = new OperationalAuditStore(db);
   const sends: Array<{ nonce?: string | number; enforceNonce?: boolean }> = [];
   const acceptedMessageId = '900000000000000000';
+  const preSendMessageId = '899999999999999999';
+  const searchBefore = (BigInt(preSendMessageId) + 1n).toString();
   let existingMessage: { id: string; author: { id: string }; content: string } | null = null;
   const newerMessages = Array.from({ length: 550 }, (_, index) => ({
     id: (BigInt(acceptedMessageId) + 550n - BigInt(index)).toString(),
@@ -378,9 +386,13 @@ test('post-send acknowledgement retries reconcile beyond 500 newer Discord messa
     isDMBased: () => false,
     permissionsFor: () => ({ has: () => true }),
     messages: {
-      fetch: async ({ before }: { before?: string }) => {
+      fetch: async ({ limit, before }: { limit?: number; before?: string }) => {
         fetchedBefore.push(before);
-        if (before === (BigInt(acceptedMessageId) + 1n).toString() && existingMessage) {
+        if (limit === 1) {
+          const message = { id: preSendMessageId, author: { id: 'other' }, content: 'pre-send' };
+          return new Collection([[message.id, message]]);
+        }
+        if (before === searchBefore && existingMessage) {
           return new Collection([[existingMessage.id, existingMessage]]);
         }
         return new Collection(newerMessages.slice(0, 100).map((message) => [message.id, message]));
@@ -421,7 +433,7 @@ test('post-send acknowledgement retries reconcile beyond 500 newer Discord messa
   const ambiguous = await store.get(event.entryId);
   assert.equal(ambiguous?.deliveryState, 'delivering');
   assert.equal(ambiguous?.deliveryAttempts, 1);
-  assert.equal(ambiguous?.deliverySearchBefore, (BigInt(acceptedMessageId) + 1n).toString());
+  assert.equal(ambiguous?.deliverySearchBefore, searchBefore);
   await db.prepare(`UPDATE operational_audit_log SET delivery_lease_until = ? WHERE entry_id = ?`).run(
     '2000-01-01T00:00:00.000Z',
     event.entryId,
@@ -431,29 +443,122 @@ test('post-send acknowledgement retries reconcile beyond 500 newer Discord messa
   assert.equal(sends.length, 1);
   assert.deepEqual(sends.map((body) => body.nonce), [deliveryNonce(event.entryId)]);
   assert.deepEqual(sends.map((body) => body.enforceNonce), [true]);
-  assert.equal(fetchedBefore.at(-1), (BigInt(acceptedMessageId) + 1n).toString());
+  assert.equal(fetchedBefore.at(-1), searchBefore);
   const row = await store.get(event.entryId);
   assert.equal(row?.deliveryState, 'delivered');
   assert.equal(row?.mirrorMessageId, acceptedMessageId);
   await db.close();
 });
 
-test('marker reconciliation does not confuse entry id prefixes', async () => {
+test('a failed pre-send recovery-bound write prevents the Discord send', async () => {
   const db = await openDb(':memory:');
   const store = new OperationalAuditStore(db);
   let sends = 0;
-  const prefixMessage = {
-    id: '900000000000000100',
-    author: { id: 'bot' },
-    content: 'audit-event:abc2; · **message delete**',
-  };
   const channel = {
     id: CHANNEL_A,
     guild: { id: GUILD, members: { me: { id: 'bot' } } },
     isTextBased: () => true,
     isDMBased: () => false,
     permissionsFor: () => ({ has: () => true }),
-    messages: { fetch: async () => new Collection([[prefixMessage.id, prefixMessage]]) },
+    messages: {
+      fetch: async () => {
+        const message = { id: '900000000000000000', author: { id: 'other' }, content: 'existing' };
+        return new Collection([[message.id, message]]);
+      },
+    },
+    client: { user: { id: 'bot' } },
+    send: async () => { sends++; return { id: '900000000000000001' }; },
+  };
+  const client = { channels: { cache: new Map([[CHANNEL_A, channel]]), fetch: async () => channel } } as unknown as Client;
+  const sink = makeOperationalAudit(client, {
+    guildId: GUILD,
+    channels: { audit: CHANNEL_A, voice: null, moderation: null },
+    store,
+  });
+  store.saveDeliverySearchBefore = async () => {
+    throw new Error('database disconnected before Discord send');
+  };
+
+  await sink.record({
+    entryId: 'pre-send-boundary', kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
+  });
+
+  assert.equal(sends, 0);
+  const row = await store.get('pre-send-boundary');
+  assert.equal(row?.deliveryState, 'pending');
+  assert.equal(row?.deliveryAttempts, 1);
+  assert.equal(row?.deliverySearchBefore, null);
+  await db.close();
+});
+
+test('a post-send rejection retains its recovery bound for marker reconciliation', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  const preSendMessageId = '900000000000000000';
+  let sends = 0;
+  const channel = {
+    id: CHANNEL_A,
+    guild: { id: GUILD, members: { me: { id: 'bot' } } },
+    isTextBased: () => true,
+    isDMBased: () => false,
+    permissionsFor: () => ({ has: () => true }),
+    messages: {
+      fetch: async () => {
+        const message = { id: preSendMessageId, author: { id: 'other' }, content: 'existing' };
+        return new Collection([[message.id, message]]);
+      },
+    },
+    client: { user: { id: 'bot' } },
+    send: async () => { sends++; throw new Error('Discord response lost after request started'); },
+  };
+  const client = { channels: { cache: new Map([[CHANNEL_A, channel]]), fetch: async () => channel } } as unknown as Client;
+  const sink = makeOperationalAudit(client, {
+    guildId: GUILD,
+    channels: { audit: CHANNEL_A, voice: null, moderation: null },
+    store,
+  });
+
+  await sink.record({
+    entryId: 'post-send-rejection', kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
+  });
+
+  assert.equal(sends, 1);
+  const row = await store.get('post-send-rejection');
+  assert.equal(row?.deliveryState, 'delivering');
+  assert.equal(row?.deliveryAttempts, 1);
+  assert.equal(row?.deliveryLastError, 'delivery_ack_failed');
+  assert.equal(row?.deliverySearchBefore, (BigInt(preSendMessageId) + 1n).toString());
+  await db.close();
+});
+
+test('marker reconciliation requires the marker as the leading identity field', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  let sends = 0;
+  const messages = [
+    {
+      id: '900000000000000100',
+      author: { id: 'bot' },
+      content: 'audit-event:abc2; · metadata=`audit-event:abc;`',
+    },
+    {
+      id: '900000000000000099',
+      author: { id: 'bot' },
+      content: 'metadata=`audit-event:abc;` · audit-event:other;',
+    },
+  ];
+  const channel = {
+    id: CHANNEL_A,
+    guild: { id: GUILD, members: { me: { id: 'bot' } } },
+    isTextBased: () => true,
+    isDMBased: () => false,
+    permissionsFor: () => ({ has: () => true }),
+    messages: {
+      fetch: async ({ limit }: { limit?: number }) =>
+        new Collection((limit === 1 ? messages.slice(0, 1) : messages).map((message) => [message.id, message])),
+    },
     client: { user: { id: 'bot' } },
     send: async () => { sends++; return { id: '900000000000000200' }; },
   };
@@ -470,6 +575,51 @@ test('marker reconciliation does not confuse entry id prefixes', async () => {
   });
   assert.equal(sends, 1);
   assert.equal((await store.get('abc'))?.mirrorMessageId, '900000000000000200');
+  await db.close();
+});
+
+
+test('a persisted acknowledged send fails closed when its marker was deleted or edited', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  let sends = 0;
+  const channel = {
+    id: CHANNEL_A,
+    guild: { id: GUILD, members: { me: { id: 'bot' } } },
+    isTextBased: () => true,
+    isDMBased: () => false,
+    permissionsFor: () => ({ has: () => true }),
+    messages: { fetch: async () => new Collection() },
+    client: { user: { id: 'bot' } },
+    send: async () => { sends++; return { id: '900000000000000200' }; },
+  };
+  const client = { channels: { cache: new Map([[CHANNEL_A, channel]]), fetch: async () => channel } } as unknown as Client;
+  const sink = makeOperationalAudit(client, {
+    guildId: GUILD,
+    channels: { audit: CHANNEL_A, voice: null, moderation: null },
+    store,
+  });
+  const event: OperationalAuditEvent = {
+    entryId: 'missing-marker', kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
+  };
+
+  await store.record(event, CHANNEL_A);
+  const claimed = await store.claim(event.entryId);
+  assert.ok(claimed);
+  await store.saveDeliverySearchBefore(event.entryId, '900000000000000300');
+  await store.markAcknowledgementFailed(event.entryId);
+  await db.prepare(`UPDATE operational_audit_log SET delivery_lease_until = ? WHERE entry_id = ?`).run(
+    '2000-01-01T00:00:00.000Z',
+    event.entryId,
+  );
+
+  assert.equal(await sink.retryPending(), 1);
+  assert.equal(sends, 0);
+  const row = await store.get(event.entryId);
+  assert.equal(row?.deliveryState, 'pending');
+  assert.equal(row?.deliverySearchBefore, '900000000000000300');
+  assert.equal(row?.deliveryAttempts, 2);
   await db.close();
 });
 
@@ -514,7 +664,7 @@ test('audit delivery failures redact thrown error text from process logs', async
   }
 
   assert.doesNotMatch(stderr, new RegExp(sentinel));
-  assert.match(stderr, /discord_send_failed/);
+  assert.match(stderr, /discord_post_ambiguous/);
   await db.close();
 });
 

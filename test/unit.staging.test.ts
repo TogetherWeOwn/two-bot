@@ -361,6 +361,16 @@ test('staging verification fails when the bot holds Administrator', () => {
   assert.match(adminBranch, /fail\(\s*'Administrator permission is held'/);
 });
 
+test('staging marker verification requires the leading audit identity field', () => {
+  const verifier = readFileSync(join(import.meta.dirname, '..', 'scripts', 'staging-verify.ts'), 'utf8');
+  const markerScanner = verifier.slice(
+    verifier.indexOf('async function discordMarkerMessageIds'),
+    verifier.indexOf('// 7. Reconcile'),
+  );
+  assert.match(markerScanner, /message\.content\.startsWith\(`\$\{marker\} · `\)/);
+  assert.doesNotMatch(markerScanner, /message\.content\.includes\(marker\)/);
+});
+
 test('the invite is the operational set plus exactly the two events bits', () => {
   // Pins the relationship rather than the number, so widening the invite is a
   // deliberate edit here and not a silently larger grant.

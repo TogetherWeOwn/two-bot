@@ -63,11 +63,25 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
     }
 
     let messageId: string | null = null;
+    let sendStarted = false;
     try {
       const existing = await findMirror(channel, stored.event.entryId, stored.deliverySearchBefore);
       if (existing) {
         messageId = existing.id;
+      } else if (stored.deliverySearchBefore && stored.deliveryLastError === 'delivery_ack_failed') {
+        // Discord returned a message but the acknowledgement failed. If its
+        // durable marker was deleted or edited, resending would duplicate it.
+        await options.store?.markDeliveryFailed(stored.event.entryId, 'discord_marker_missing');
+        log.error('operational_audit_marker_missing', {
+          entryId: stored.event.entryId,
+          channelId,
+          classification: 'discord_marker_missing',
+        });
+        return;
       } else {
+        const searchBefore = await newestMessageCursor(channel);
+        await options.store?.saveDeliverySearchBefore(stored.event.entryId, searchBefore);
+        sendStarted = true;
         const message = await channel.send({
           content: formatAuditEvent(stored.event),
           allowedMentions: { parse: [] },
@@ -75,15 +89,27 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
           enforceNonce: true,
         });
         messageId = message.id;
-        await options.store?.saveDeliverySearchBefore(stored.event.entryId, message.id);
       }
     } catch {
-      await options.store?.markDeliveryFailed(stored.event.entryId, 'discord_send_failed');
-      log.error('operational_audit_post_failed', {
-        entryId: stored.event.entryId,
-        channelId,
-        classification: 'discord_send_failed',
-      });
+      if (sendStarted) {
+        try {
+          await options.store?.markAcknowledgementFailed(stored.event.entryId);
+        } catch {
+          // Preserve the lease after an accepted send if the store is unavailable.
+        }
+        log.error('operational_audit_post_ambiguous', {
+          entryId: stored.event.entryId,
+          channelId,
+          classification: 'discord_post_ambiguous',
+        });
+      } else {
+        await options.store?.markDeliveryFailed(stored.event.entryId, 'discord_send_failed');
+        log.error('operational_audit_post_failed', {
+          entryId: stored.event.entryId,
+          channelId,
+          classification: 'discord_send_failed',
+        });
+      }
       return;
     }
 
@@ -158,6 +184,7 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
           deliveryNonce: deliveryNonce(event.entryId),
           deliverySearchBefore: null,
           mirrorMessageId: null,
+          deliveryLastError: null,
         };
         await deliver(ephemeral);
         return inserted;
@@ -177,18 +204,24 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
   };
 }
 
+async function newestMessageCursor(channel: GuildTextBasedChannel): Promise<string> {
+  const messages = await channel.messages.fetch({ limit: 1, cache: false });
+  const newestId = messages.first()?.id;
+  return newestId ? nextSnowflake(newestId) : currentDiscordSnowflake();
+}
+
 async function findMirror(
   channel: GuildTextBasedChannel,
   entryId: string,
   searchBefore: string | null,
 ): Promise<Message<true> | null> {
-  const marker = `audit-event:${entryId};`;
+  const marker = `audit-event:${entryId}; · `;
   let before = searchBefore ?? undefined;
-  const pageLimit = searchBefore ? Number.POSITIVE_INFINITY : 5;
+  const pageLimit = searchBefore ? 20 : 5;
   for (let page = 0; page < pageLimit; page++) {
     const messages = await channel.messages.fetch({ limit: 100, before, cache: false });
     const match = messages.find(
-      (message) => message.author.id === channel.client.user?.id && message.content.includes(marker),
+      (message) => message.author.id === channel.client.user?.id && message.content.startsWith(marker),
     );
     if (match) return match;
     if (messages.size < 100) return null;
@@ -196,6 +229,15 @@ async function findMirror(
     if (!before) return null;
   }
   return null;
+}
+
+function nextSnowflake(messageId: string): string {
+  return (BigInt(messageId) + 1n).toString();
+}
+
+function currentDiscordSnowflake(): string {
+  const discordEpoch = 1_420_070_400_000n;
+  return ((BigInt(Date.now()) - discordEpoch) << 22n).toString();
 }
 
 function channelFor(channels: AuditChannelIds, type: AuditChannel): string | null {
