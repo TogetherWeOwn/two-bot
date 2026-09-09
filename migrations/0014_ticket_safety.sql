@@ -1,4 +1,4 @@
--- 0012_ticket_safety: reserve opens, recover cleanup, and bound transcript retention.
+-- 0014_ticket_safety: reserve opens, recover cleanup, and bound transcript retention.
 DROP INDEX IF EXISTS idx_tickets_one_open;
 
 ALTER TABLE tickets DROP CONSTRAINT IF EXISTS tickets_status_check;

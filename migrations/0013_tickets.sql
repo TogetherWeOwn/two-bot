@@ -1,4 +1,4 @@
--- 0011_tickets: durable private ticket lifecycle and audit transcripts.
+-- 0013_tickets: durable private ticket lifecycle and audit transcripts.
 CREATE TABLE IF NOT EXISTS tickets (
   id         TEXT PRIMARY KEY,
   guild_id   TEXT NOT NULL,

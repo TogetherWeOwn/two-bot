@@ -2,6 +2,11 @@ export type MigrationTable =
   | 'events'
   | 'members'
   | 'invite_snapshots'
+  | 'moderation_warnings'
+  | 'moderation_scheduled_unbans'
+  | 'moderation_audit'
+  | 'moderation_lockdowns'
+  | 'moderation_idempotency'
   | 'tickets'
   | 'ticket_transcripts';
 
