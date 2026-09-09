@@ -10,6 +10,7 @@ export interface StoredOperationalAudit {
   deliveryState: AuditDeliveryState;
   deliveryAttempts: number;
   deliveryNonce: string | null;
+  deliverySearchBefore: string | null;
   mirrorMessageId: string | null;
 }
 
@@ -93,6 +94,17 @@ export class OperationalAuditStore {
     return claimed;
   }
 
+  async saveDeliverySearchBefore(entryId: string, messageId: string): Promise<void> {
+    const result = await this.db
+      .prepare(
+        `UPDATE operational_audit_log
+            SET delivery_search_before = COALESCE(delivery_search_before, ?)
+          WHERE entry_id = ? AND delivery_state = 'delivering'`,
+      )
+      .run(nextSnowflake(messageId), entryId);
+    if (result.changes !== 1) throw new Error('audit_delivery_search_bound_not_persisted');
+  }
+
   async markDelivered(entryId: string, messageId: string): Promise<void> {
     const now = new Date().toISOString();
     const result = await this.db
@@ -142,7 +154,7 @@ const SELECT_AUDIT =
   `SELECT entry_id, event_kind, guild_id, occurred_at, actor_id, target_id,
           source_channel_id, destination_channel_id, message_id, action,
           metadata_json, mirror_channel_id, delivery_state, delivery_attempts,
-          delivery_nonce, mirror_message_id
+          delivery_nonce, delivery_search_before, mirror_message_id
      FROM operational_audit_log`;
 
 function storedAudit(row: Record<string, unknown>): StoredOperationalAudit {
@@ -165,6 +177,7 @@ function storedAudit(row: Record<string, unknown>): StoredOperationalAudit {
     deliveryState: String(row.delivery_state) as AuditDeliveryState,
     deliveryAttempts: Number(row.delivery_attempts ?? 0),
     deliveryNonce: nullableString(row.delivery_nonce),
+    deliverySearchBefore: nullableString(row.delivery_search_before),
     mirrorMessageId: nullableString(row.mirror_message_id),
   };
 }
@@ -190,6 +203,10 @@ function parseMetadata(value: unknown): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+function nextSnowflake(messageId: string): string {
+  return (BigInt(messageId) + 1n).toString();
 }
 
 /** Discord accepts message nonces up to 25 characters. */

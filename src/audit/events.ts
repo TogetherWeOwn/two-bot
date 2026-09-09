@@ -43,7 +43,7 @@ export function auditEventFields(event: OperationalAuditEvent): Record<string, u
 /** Metadata only: no message bodies, usernames or nicknames. */
 export function formatAuditEvent(event: OperationalAuditEvent): string {
   const fields = [
-    `audit-event:${event.entryId}`,
+    `audit-event:${event.entryId};`,
     `**${event.kind.replaceAll('_', ' ')}**`,
     `at ${event.occurredAt}`,
     `target \`${event.targetId ?? 'unknown'}\``,
@@ -58,10 +58,15 @@ export function formatAuditEvent(event: OperationalAuditEvent): string {
     .filter(([, value]) => value !== undefined)
     .map(([key, value]) => `${key}=\`${formatMetadata(value)}\``);
   if (metadata.length) fields.push(metadata.join(' '));
-  return fields.join(' · ');
+  return truncateDiscordContent(fields.join(' · '));
 }
 
 function formatMetadata(value: unknown): string {
-  if (Array.isArray(value)) return value.map(String).join(',').slice(0, 500) || 'none';
-  return String(value).slice(0, 500);
+  if (Array.isArray(value)) return value.map(String).join(',').slice(0, 300) || 'none';
+  return String(value).slice(0, 300);
+}
+
+function truncateDiscordContent(content: string): string {
+  if (content.length <= 2_000) return content;
+  return `${content.slice(0, 1_996)}...`;
 }
