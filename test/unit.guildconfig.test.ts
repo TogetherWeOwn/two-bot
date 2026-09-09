@@ -7,7 +7,7 @@ import {
   type GuildConfigSnapshot,
 } from '../src/redesign/guildConfig.ts';
 import { CATEGORIES, MODERATOR_ROLE, OWNER_ROLE, SERVER_DESCRIPTION, TOPICS, desiredEveryoneOverwrite } from '../src/redesign/clean-slate.ts';
-import { applyRestorePlan, planRestore } from '../src/redesign/guildConfigRestore.ts';
+import { applyRestorePlan, planRestore, snapshotsEqual } from '../src/redesign/guildConfigRestore.ts';
 import type { GuildConfigDiscordApi } from '../src/discord/guildConfigApi.ts';
 
 const GUILD = '1545644954272137297';
@@ -95,6 +95,59 @@ test('restore plan covers roles, channels, overwrites, guild settings and emoji 
   assert.ok(plan.operations.every((operation) => operation.method !== ('DELETE' as never)));
 });
 
+test('ordering drift is reported and restored with batched role and channel position writes', async () => {
+  const source = acceptedSnapshot();
+  const current = acceptedSnapshot();
+  const owner = current.roles.find((role) => role.name === 'Owner')!;
+  const moderator = current.roles.find((role) => role.name === 'Moderator')!;
+  [owner.position, moderator.position] = [moderator.position, owner.position];
+
+  const categories = current.channels.filter((channel) => channel.type === 4).sort((a, b) => a.position - b.position);
+  [categories[0]!.position, categories[1]!.position] = [categories[1]!.position, categories[0]!.position];
+  const child = current.channels.find((channel) => channel.name === 'general')!;
+  const sibling = current.channels.find((channel) => channel.name === 'looking-to-play')!;
+  [child.position, sibling.position] = [sibling.position, child.position];
+
+  const driftPaths = driftAgainstAcceptedSpec(current).drift.map((item) => item.path);
+  assert.ok(driftPaths.includes('roles.positions'));
+  assert.ok(driftPaths.includes(`channels.${categories[0]!.name}.position`));
+  assert.ok(driftPaths.includes('channels.💬 COMMUNITY.general.position'));
+
+  const plan = planRestore(source, current);
+  assert.equal(snapshotsEqual(source, current), false);
+  const rolePositions = plan.operations.find((operation) => operation.label === 'restore role positions')!;
+  const channelPositions = plan.operations.find((operation) => operation.label === 'restore channel positions')!;
+  assert.equal(rolePositions.path, `/guilds/${GUILD}/roles`);
+  assert.equal(channelPositions.path, `/guilds/${GUILD}/channels`);
+
+  const calls: Array<{ method: string; path: string; body: unknown }> = [];
+  const api = {
+    async write(method: string, path: string, body: unknown) {
+      calls.push({ method, path, body });
+      return [];
+    },
+  } as GuildConfigDiscordApi;
+  await applyRestorePlan(api, plan);
+  owner.position = source.roles.find((role) => role.name === 'Owner')!.position;
+  moderator.position = source.roles.find((role) => role.name === 'Moderator')!.position;
+  for (const position of calls[1]!.body as Array<{ id: string; position: number; parent_id?: string | null }>) {
+    const channel = current.channels.find((item) => item.id === position.id)!;
+    channel.position = position.position;
+    if ('parent_id' in position) channel.parent_id = position.parent_id ?? null;
+  }
+  assert.deepEqual(canonicalSnapshot(current), canonicalSnapshot(source));
+  assert.equal(snapshotsEqual(source, current), true);
+  assert.deepEqual(calls.map((call) => `${call.method} ${call.path}`), [
+    `PATCH /guilds/${GUILD}/roles`,
+    `PATCH /guilds/${GUILD}/channels`,
+  ]);
+  assert.deepEqual((calls[0]!.body as Array<{ id: string; position: number }>).map(({ id: roleId, position }) => ({ roleId, position })), [
+    { roleId: moderator.id, position: source.roles.find((role) => role.name === 'Moderator')!.position },
+    { roleId: owner.id, position: source.roles.find((role) => role.name === 'Owner')!.position },
+  ]);
+  assert.ok((calls[1]!.body as Array<{ id: string; position: number; parent_id: string | null }>).some((position) => position.id === child.id && position.position === 0 && position.parent_id === child.parent_id));
+});
+
 test('restore applies roles, categories, channels and overwrites in dependency order with returned ids', async () => {
   const source = acceptedSnapshot();
   const current = acceptedSnapshot();
@@ -117,15 +170,17 @@ test('restore applies roles, categories, channels and overwrites in dependency o
   await applyRestorePlan(api, planRestore(source, current));
   assert.deepEqual(calls.map((call) => `${call.method} ${call.path}`), [
     `POST /guilds/${GUILD}/roles`,
+    `PATCH /guilds/${GUILD}/roles`,
     `POST /guilds/${GUILD}/channels`,
     `POST /guilds/${GUILD}/channels`,
     `POST /guilds/${GUILD}/channels`,
+    `PATCH /guilds/${GUILD}/channels`,
     `PATCH /channels/${id(903)}`,
     `PATCH /channels/${id(904)}`,
   ]);
-  assert.equal((calls[2]!.body as { parent_id: string }).parent_id, id(902));
   assert.equal((calls[3]!.body as { parent_id: string }).parent_id, id(902));
-  assert.deepEqual((calls[5]!.body as { permission_overwrites: Array<{ id: string }> }).permission_overwrites.map((overwrite) => overwrite.id), [GUILD, id(901)]);
+  assert.equal((calls[4]!.body as { parent_id: string }).parent_id, id(902));
+  assert.deepEqual((calls[7]!.body as { permission_overwrites: Array<{ id: string }> }).permission_overwrites.map((overwrite) => overwrite.id), [GUILD, id(901)]);
 });
 
 test('restore preserves same-guild managed role ids in channel overwrites', async () => {

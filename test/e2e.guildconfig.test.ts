@@ -84,11 +84,26 @@ async function stubDiscord() {
     req.on('end', () => {
       const body = JSON.parse(Buffer.concat(chunks).toString() || 'null') as JsonObject;
       writes.push({ method, path, body });
+      if (method === 'PATCH' && path === `/api/v10/guilds/${GUILD}/roles` && Array.isArray(body)) {
+        for (const position of body as Array<{ id: string; position: number }>) {
+          const role = state.roles.find((item) => item.id === position.id)!;
+          role.position = position.position;
+        }
+        return send(200, state.roles);
+      }
       let match = new RegExp(`/guilds/${GUILD}/roles/(\\d+)$`).exec(path);
       if (method === 'PATCH' && match) {
         const role = state.roles.find((item) => item.id === match![1])!;
         Object.assign(role, body);
         return send(200, role);
+      }
+      if (method === 'PATCH' && path === `/api/v10/guilds/${GUILD}/channels` && Array.isArray(body)) {
+        for (const position of body as Array<{ id: string; position: number; parent_id?: string | null }>) {
+          const channel = state.channels.find((item) => item.id === position.id)!;
+          channel.position = position.position;
+          if ('parent_id' in position) channel.parent_id = position.parent_id ?? null;
+        }
+        return send(200, state.channels);
       }
       match = /\/channels\/(\d+)$/.exec(path);
       if (method === 'PATCH' && match) {
@@ -150,7 +165,7 @@ test('snapshot captures roles/channels/overwrites/settings/emoji and fails witho
   }
 });
 
-test('restore drill is dry-run by default, guarded, repairs drift, emits hashes/counts, and is idempotent', async () => {
+test('restore drill is dry-run by default, guarded, repairs drift including ordering, emits hashes/counts, and is idempotent', async () => {
   const stub = await stubDiscord();
   const dir = mkdtempSync(join(tmpdir(), 'two-guild-restore-'));
   const source = join(dir, 'source.json');
@@ -164,8 +179,16 @@ test('restore drill is dry-run by default, guarded, repairs drift, emits hashes/
     emojis: stub.state.emojis.map((emoji) => ({ ...emoji, image: 'data:image/png;base64,dHdv' })),
   })}\n`);
   stub.state.guild.description = 'drift';
-  stub.state.roles.find((role) => role.name === 'Owner')!.color = 0;
-  stub.state.channels.find((channel) => channel.name === 'general')!.permission_overwrites = [];
+  const owner = stub.state.roles.find((role) => role.name === 'Owner')!;
+  const moderator = stub.state.roles.find((role) => role.name === 'Moderator')!;
+  owner.color = 0;
+  [owner.position, moderator.position] = [moderator.position, owner.position];
+  const categories = stub.state.channels.filter((channel) => channel.type === 4).sort((a, b) => a.position - b.position);
+  [categories[0]!.position, categories[1]!.position] = [categories[1]!.position, categories[0]!.position];
+  const general = stub.state.channels.find((channel) => channel.name === 'general')!;
+  const lookingToPlay = stub.state.channels.find((channel) => channel.name === 'looking-to-play')!;
+  [general.position, lookingToPlay.position] = [lookingToPlay.position, general.position];
+  general.permission_overwrites = [];
   try {
     const dry = await run(RESTORE, ['--snapshot', source], { GUILD_CONFIG_API_BASE: stub.base, GUILD_CONFIG_CDN_BASE: stub.base.replace(/\/api\/v10$/, '') });
     assert.equal(dry.code, 0, dry.stderr);
@@ -181,11 +204,15 @@ test('restore drill is dry-run by default, guarded, repairs drift, emits hashes/
     assert.match(applied.stdout, /before=[0-9a-f]{64} after=[0-9a-f]{64} source=[0-9a-f]{64}/);
     assert.match(applied.stdout, /remaining=0/);
     const proof = JSON.parse(readFileSync(evidence, 'utf8'));
+    assert.equal(proof.hashesEqual, true);
     assert.equal(proof.remaining.operations, 0);
     assert.ok(proof.counts.before.roles > 0);
     assert.equal(proof.counts.after.channels, proof.counts.source.channels);
     assert.equal(stub.state.guild.description, SERVER_DESCRIPTION);
     assert.equal(stub.state.roles.find((role) => role.name === 'Owner')!.color, OWNER_ROLE.color);
+    assert.equal(stub.state.roles.find((role) => role.name === 'Owner')!.position, 10);
+    assert.deepEqual(stub.state.channels.filter((channel) => channel.type === 4).sort((a, b) => a.position - b.position).map((channel) => channel.name), CATEGORIES.map((category) => category.name));
+    assert.equal(stub.state.channels.find((channel) => channel.name === 'general')!.position, 0);
     assert.deepEqual(stub.state.channels.find((channel) => channel.name === 'general')!.permission_overwrites, [desiredEveryoneOverwrite(GUILD, 'general')]);
 
     const writes = stub.writes.length;
@@ -194,6 +221,13 @@ test('restore drill is dry-run by default, guarded, repairs drift, emits hashes/
     assert.match(second.stdout, /applying 0 operation\(s\)/);
     assert.match(second.stdout, /complete with 0 Discord write\(s\)/);
     assert.equal(stub.writes.length, writes);
+
+    stub.state.emojis[0]!.available = false;
+    const hashMismatch = await run(RESTORE, ['--snapshot', source, '--confirm-staging-guild', '--apply'], { GUILD_CONFIG_API_BASE: stub.base, GUILD_CONFIG_CDN_BASE: stub.base.replace(/\/api\/v10$/, '') });
+    assert.equal(hashMismatch.code, 1);
+    assert.match(hashMismatch.stdout, /applying 0 operation\(s\)/);
+    assert.match(hashMismatch.stderr, /residual drift=\[\]/);
+    assert.match(hashMismatch.stderr, /post-restore hash does not match source hash \(0 operation\(s\) remain\)/);
   } finally {
     await stub.close();
   }
