@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { ActionError } from '../internal/errors.ts';
 import type { ModerationDiscordClient } from '../moderation/discord.ts';
+import { isModerationPolicyRefusal } from '../moderation/policy.ts';
 import type { ModerationExecution } from '../moderation/service.ts';
 import type { ModerationService } from '../moderation/service.ts';
 import type { ModerationClaim, ModerationStore } from '../moderation/store.ts';
@@ -94,10 +95,17 @@ export class AutomodService {
     }
 
     let deleteAttempted = false;
+    let deleteSucceeded = false;
     try {
-      return await this.runClaimed(message, filter, idempotencyKey, () => { deleteAttempted = true; });
+      return await this.runClaimed(
+        message,
+        filter,
+        idempotencyKey,
+        () => { deleteAttempted = true; },
+        () => { deleteSucceeded = true; },
+      );
     } catch (err) {
-      if (!deleteAttempted || this.isDefiniteDeleteFailure(err)) {
+      if (!deleteAttempted || (!deleteSucceeded && this.isDefiniteDeleteFailure(err))) {
         await this.moderationStore.release(message.guildId, idempotencyKey).catch((releaseErr: unknown) => {
           log.error('automod_idempotency_release_failed', {
             requestId: message.messageId,
@@ -116,6 +124,7 @@ export class AutomodService {
     filter: NonNullable<AutomodResult['filter']>,
     idempotencyKey: string,
     markDeleteAttempted: () => void,
+    markDeleteSucceeded: () => void,
   ): Promise<AutomodResult> {
     const reason = `Automod ${filter.replace(/_/g, ' ')}`;
     let deleted = false;
@@ -123,6 +132,7 @@ export class AutomodService {
       if (!this.discord.deleteMessage) throw new Error('automod requires exact message deletion support');
       markDeleteAttempted();
       await this.discord.deleteMessage(message.channelId, message.messageId, reason);
+      markDeleteSucceeded();
       deleted = true;
     }
 
@@ -137,11 +147,11 @@ export class AutomodService {
     const sanction = sanctionFor(Math.max(1, count), this.options.policy.sanctions);
     let refusalReason: string | undefined;
     if (!this.options.dryRun && sanction.action !== 'delete') {
+      const target = await this.resolver.target(message.guildId, message.authorId);
       try {
-        const target = await this.resolver.target(message.guildId, message.authorId);
         await this.moderation.execute(this.moderationRequest(message, target, sanction, count, reason));
       } catch (err) {
-        if (!isSanctionRefusal(err)) throw err;
+        if (!isModerationPolicyRefusal(err)) throw err;
         refusalReason = err.logReason;
       }
     }
@@ -229,8 +239,4 @@ function sanctionFor(count: number, sanctions: AutomodSanction[]): AutomodSancti
 
 function sanctionName(value: unknown): AutomodSanction['action'] | undefined {
   return value === 'delete' || value === 'warn' || value === 'timeout' ? value : undefined;
-}
-
-function isSanctionRefusal(err: unknown): err is ActionError {
-  return err instanceof ActionError && err.code === 'action_not_allowed';
 }

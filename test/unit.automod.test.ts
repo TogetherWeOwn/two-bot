@@ -387,6 +387,32 @@ test('sanction refusals are audited and replay without a second mutation', async
   }
 });
 
+test('unexpected resolver action_not_allowed keeps the outer claim in flight', async () => {
+  const testDb = await openTestDb(import.meta.filename);
+  const calls: string[] = [];
+  const discord: ModerationDiscordClient = {
+    async deleteMessage(_channel, id) { calls.push(`delete:${id}`); }, async timeout() { calls.push('timeout'); },
+    async ban() {}, async unban() {}, async kick() {}, async purge(_channel, count) { return count; },
+    async setSlowmode() {}, async getEveryoneOverwrite() { return null; }, async putEveryoneOverwrite() {}, async deleteEveryoneOverwrite() {},
+  };
+  const moderationStore = new ModerationStore(testDb.db);
+  const service = new AutomodService(
+    discord,
+    new ModerationService(discord, moderationStore, { owenUserId: OWEN, botUserId: OWEN, protectedRoleIds: new Set() }),
+    moderationStore,
+    new AutomodStore(testDb.db),
+    { target: async () => { throw new ActionError('action_not_allowed', 'Unexpected resolver refusal', { logReason: 'unexpected_resolver_refusal' }); } },
+    { dryRun: false, owenUserId: OWEN, botHighestRolePosition: 10, policy: { ...policy, sanctions: [{ violations: 1, action: 'timeout', timeoutSeconds: 600 }] } },
+  );
+  await assert.rejects(() => service.inspect(message({ messageId: 'unexpected-resolver', content: 'very bad' })), /Unexpected resolver refusal/);
+  await assert.rejects(() => service.inspect(message({ messageId: 'unexpected-resolver', content: 'very bad' })), /uncertain outcome/);
+  assert.deepEqual(calls, ['delete:unexpected-resolver']);
+  assert.equal((await testDb.db.prepare(
+    `SELECT COUNT(*) AS n FROM moderation_audit WHERE action = 'automod.bad_words'`,
+  ).get<{ n: number }>())?.n, 0);
+  await testDb.cleanup();
+});
+
 test('unexpected sanction failures keep the outer claim in flight', async () => {
   const testDb = await openTestDb(import.meta.filename);
   const discord: ModerationDiscordClient = {
