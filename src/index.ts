@@ -8,6 +8,7 @@ import { ExpectedJoins } from './core/expectedJoins.ts';
 import { FunnelHandlers } from './core/handlers.ts';
 import { createClient, registerHandlers } from './discord/client.ts';
 import { registerOnboarding, registerGameSelect } from './discord/onboarding.ts';
+import { registerSelfRoles } from './discord/selfRoles.ts';
 import { registerAnchorWelcome } from './discord/anchorWelcome.ts';
 import { occurrencesFrom } from './onboarding/anchorEvent.ts';
 import { RaidWatch } from './analytics/raidWatch.ts';
@@ -30,6 +31,8 @@ import { KeyRing } from './internal/signing.ts';
 import { DiscordActions } from './internal/discordActions.ts';
 import { InternalActionStore } from './internal/store.ts';
 import { registerTickets } from './discord/tickets.ts';
+import { loadSelfRolePanels, validateSelfRolePanelRoles } from './selfRoles/config.ts';
+import { SelfRoleStore } from './store/selfRoleStore.ts';
 import { startHealthServer, type HealthServer } from './core/health.ts';
 import { LevelingService } from './leveling/service.ts';
 import { registerLeveling } from './leveling/discord.ts';
@@ -352,6 +355,53 @@ if (cfg.anchorWelcomeChannelId) {
     landingChannelIds: cfg.landingChannelIds,
     dryRun: cfg.onboardingDryRun,
   });
+}
+
+// Hardened self-role panels (TOG-1646). The panel catalogue is deployment data:
+// ids are never guessed from the live guild, and an empty catalogue is a clean
+// disable rather than an implicit panel with production ids.
+const selfRolePanels = loadSelfRolePanels();
+if (selfRolePanels.length) {
+  if (!cfg.guildId) {
+    throw new Error('TWO_SELF_ROLE_PANELS requires DISCORD_GUILD_ID - every panel belongs to one guild.');
+  }
+  const selfRoleRest = new DiscordRest({
+    token: cfg.discordToken,
+    base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+  });
+  const [selfRoleRoles, selfRoleChannels] = await Promise.all([
+    selfRoleRest.get<Array<{ id: string; name?: string; permissions: string }>>(`/guilds/${cfg.guildId}/roles`),
+    selfRoleRest.get<Array<{
+      id: string;
+      name?: string;
+      permission_overwrites?: Array<{ id: string; type: number; allow: string; deny: string }>;
+    }>>(`/guilds/${cfg.guildId}/channels`),
+  ]);
+  if (!selfRoleRoles || !selfRoleChannels) {
+    throw new Error(`TWO_SELF_ROLE_PANELS roles or channels could not be resolved for guild ${cfg.guildId}`);
+  }
+  validateSelfRolePanelRoles(
+    selfRolePanels,
+    selfRoleRoles,
+    selfRoleChannels.map((channel) => ({
+      id: channel.id,
+      name: channel.name,
+      permissionOverwrites: channel.permission_overwrites,
+    })),
+    cfg.guildId,
+  );
+  registerSelfRoles(client, {
+    panels: selfRolePanels,
+    store: new SelfRoleStore(db),
+    dryRun: cfg.onboardingDryRun,
+  });
+  log.info('self_roles_enabled', {
+    panels: selfRolePanels.length,
+    modes: [...new Set(selfRolePanels.map((panel) => panel.mode))],
+    dryRun: cfg.onboardingDryRun,
+  });
+} else {
+  log.info('self_roles_disabled', { reason: 'TWO_SELF_ROLE_PANELS is empty' });
 }
 
 // The internal actions endpoint (TWO-24 / TWO-59). Off unless

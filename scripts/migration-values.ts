@@ -17,7 +17,8 @@ export type MigrationTable =
   | 'automation_commands'
   | 'scheduled_messages'
   | 'sticky_messages'
-  | 'automation_audit_log';
+  | 'automation_audit_log'
+  | 'self_role_audit';
 
 function isSqliteBooleanColumn(table: MigrationTable, column: string): boolean {
   return (

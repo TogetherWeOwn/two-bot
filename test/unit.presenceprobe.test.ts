@@ -18,10 +18,11 @@
  */
 import { test, describe, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { GatewayIntentBits, Partials } from 'discord.js';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb, type Db } from '../src/store/db.ts';
-import { INTENTS, intents } from '../src/discord/client.ts';
+import { INTENTS, PARTIALS, intents } from '../src/discord/client.ts';
 import { WEB_CONTRACT_VIEWS } from '../src/store/webContract.ts';
 import {
   runProbeCycle,
@@ -83,11 +84,20 @@ describe('presence probe containment', () => {
         'If this instrument seems to need it, the issue has been misread.',
     );
 
-    // And the value check: ticket transcripts require MessageContent, while
-    // automod reuses it and anti-nuke adds only GuildModeration.
+    // Ticket transcripts and automod reuse MessageContent; self roles add
+    // reaction metadata, but none of these features adds GuildPresences.
     assert.equal(intents(false).length, 7, 'the default intent list changed - see client.ts');
     assert.equal(intents(true).length, 7, 'automod must reuse the existing MessageContent intent');
-    assert.equal(INTENTS.length, 7, 'the intent list changed - see client.ts intent rationale');
+    assert.deepEqual(INTENTS, [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildMembers,
+      GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.MessageContent,
+      GatewayIntentBits.GuildMessageReactions,
+      GatewayIntentBits.GuildVoiceStates,
+      GatewayIntentBits.GuildInvites,
+    ]);
+    assert.deepEqual(PARTIALS, [Partials.Message, Partials.Reaction, Partials.User]);
   });
 
   test('the table is not readable through the web_v1 contract', () => {

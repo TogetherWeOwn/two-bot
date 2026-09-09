@@ -139,7 +139,7 @@ export const STAGING_TEXT_CHANNELS = ['welcome', 'general', 'events', 'bot-log']
 export const STAGING_VOICE_CHANNELS = ['Voice 1'] as const;
 
 /**
- * The bot must sit ABOVE all three of these in the role list, or role
+ * The bot must sit ABOVE every one of these in the role list, or role
  * assignment fails silently - Discord returns 403 and discord.js swallows it
  * into a rejected promise nobody awaited. This is the single most common
  * staging failure and it produces no error in the log. `staging-verify.ts`
@@ -149,7 +149,14 @@ export const STAGING_VOICE_CHANNELS = ['Voice 1'] as const;
  * bypasses hierarchy entirely. See `evaluateHierarchy` in ./provision.ts,
  * which is the only place that distinction is made.
  */
-export const STAGING_ROLES = ['Moderator', 'Member', 'Game: Test'] as const;
+export const STAGING_ROLES = [
+  'Moderator',
+  'Member',
+  'Game: Test',
+  'Game: Test 2',
+  'Color: Red',
+  'Color: Blue',
+] as const;
 
 /**
  * The scoped permission integer the bot is invited with. Not Administrator -

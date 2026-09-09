@@ -114,30 +114,6 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
       .run(G, 'mod-key-1', 'moderation.ban', 'deadbeef', '2026-08-01T10:00:00.000Z', '2026-08-01T10:00:01.000Z');
     await harness.db
       .prepare(
-        `INSERT INTO containment_events
-           (audit_entry_id, guild_id, executor_id, action, target_id, weight,
-            occurred_at, state, reason, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run('audit-1', G, 'staff', 'channel.delete', 'channel-1', 3, '2026-08-01T12:00:00.000Z', 'contain', 'threshold crossed', '2026-08-01T12:00:00.000Z');
-    await harness.db
-      .prepare(
-        `INSERT INTO containment_incidents
-           (id, guild_id, executor_id, trigger_audit_entry_id, heat, state,
-            result_json, started_at, completed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run('incident-1', G, 'staff', 'audit-1', 5, 'contained', '{"removedRoleIds":["danger"]}', '2026-08-01T12:00:00.000Z', '2026-08-01T12:00:01.000Z');
-    await harness.db
-      .prepare(
-        `INSERT INTO join_risk_flags
-           (event_id, guild_id, member_id, account_created_at, joined_at, source, score,
-            reasons_json, bulk_join_window, flagged, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run('join-risk-1', G, 'm-risk', '2026-08-01T11:59:00.000Z', '2026-08-01T12:00:00.000Z', 'unknown', 3, '["new account"]', false, true, '2026-08-01T12:00:00.000Z');
-    await harness.db
-      .prepare(
         `INSERT INTO tickets (id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closed_at)
          VALUES (?, ?, ?, ?, ?, 'closed', ?, ?)`,
       )
@@ -188,6 +164,18 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
          (id, guild_id, actor_id, action, target_key, outcome, reason, created_at)
        VALUES ('automation-audit-1', ?, 'staff', 'command.create', 'faq', 'ok', NULL, ?)`,
     ).run(G, '2026-08-01T12:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO self_role_audit
+           (event_id, guild_id, panel_id, member_id, source_id, option_key, role_id,
+            source, operation, outcome, code, reason, added_role_ids, removed_role_ids, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'self-role-event-1', G, 'colors', 'm1', 'panel-message', 'red', 'role-red',
+        'button', 'add', 'assigned', null, null, '["role-red"]', '[]',
+        '2026-08-01T12:00:00.000Z',
+      );
   }
 
   async function counts(): Promise<Record<string, number>> {
@@ -213,9 +201,7 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
     assert.equal(manifest.tables.find((t) => t.name === 'ticket_transcripts')?.count, 1);
     assert.equal(manifest.tables.find((t) => t.name === 'automod_violations')?.count, 1);
     assert.equal(manifest.tables.find((t) => t.name === 'automod_processed_messages')?.count, 3);
-    assert.equal(manifest.tables.find((t) => t.name === 'containment_events')?.count, 1);
-    assert.equal(manifest.tables.find((t) => t.name === 'containment_incidents')?.count, 1);
-    assert.equal(manifest.tables.find((t) => t.name === 'join_risk_flags')?.count, 1);
+    assert.equal(manifest.tables.find((t) => t.name === 'self_role_audit')?.count, 1);
 
     // Lose everything, exactly as a dead disk would.
     await harness.db.exec(`TRUNCATE ${DUMP_TABLES.join(', ')} RESTART IDENTITY`);
@@ -345,6 +331,27 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
     assert.equal(command?.name, 'faq');
     assert.equal(command?.text_trigger, '!faq');
     assert.equal(command?.enabled, true);
+  test('self-role audit survives the round trip with its per-panel evidence intact', async () => {
+    await seed();
+    const file = join(dir, 'self-role-audit.ndjson.gz');
+    const manifest = await dump(harness.db, file);
+    assert.equal(manifest.tables.find((t) => t.name === 'self_role_audit')?.count, 1);
+
+    await harness.db.exec(`TRUNCATE ${DUMP_TABLES.join(', ')} RESTART IDENTITY`);
+    await restore(harness.db, file);
+
+    const row = await harness.db
+      .prepare(
+        `SELECT event_id, guild_id, panel_id, member_id, source, operation, outcome,
+                added_role_ids, removed_role_ids
+           FROM self_role_audit`,
+      )
+      .get();
+    assert.deepEqual({ ...row }, {
+      event_id: 'self-role-event-1', guild_id: G, panel_id: 'colors', member_id: 'm1',
+      source: 'button', operation: 'add', outcome: 'assigned',
+      added_role_ids: '["role-red"]', removed_role_ids: '[]',
+    });
   });
 
   test('a truncated dump is refused rather than half-restored', async () => {

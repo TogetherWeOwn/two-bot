@@ -60,6 +60,7 @@ const OPTIONAL_TABLES = [
   'scheduled_messages',
   'sticky_messages',
   'automation_audit_log',
+  'self_role_audit',
 ] as const;
 const TABLES = [...REQUIRED_TABLES, ...OPTIONAL_TABLES] as const;
 type Table = (typeof TABLES)[number];
@@ -84,6 +85,7 @@ const PRIMARY_KEYS: Record<Table, readonly string[]> = {
   scheduled_messages: ['id'],
   sticky_messages: ['guild_id', 'channel_id'],
   automation_audit_log: ['id'],
+  self_role_audit: ['event_id'],
 };
 
 const sqlitePath = process.env.TWO_SQLITE_PATH || process.env.TWO_DB_PATH || './data/two.db';

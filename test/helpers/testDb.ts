@@ -76,6 +76,7 @@ const TABLES = [
   'tickets',
   'automod_violations',
   'automod_processed_messages',
+  'self_role_audit',
 ];
 
 /**
@@ -108,6 +109,7 @@ const SQLITE_TABLES = [
   'tickets',
   'automod_violations',
   'automod_processed_messages',
+  'self_role_audit',
 ];
 
 export interface TestDb {
