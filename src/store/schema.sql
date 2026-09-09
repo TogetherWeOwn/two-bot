@@ -170,7 +170,8 @@ CREATE TABLE IF NOT EXISTS moderation_scheduled_unbans (
   state        TEXT NOT NULL,
   created_at   TEXT NOT NULL,
   completed_at TEXT,
-  claimed_at   TEXT
+  claimed_at   TEXT,
+  claim_token  TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_moderation_unbans_due
   ON moderation_scheduled_unbans (state, execute_at);

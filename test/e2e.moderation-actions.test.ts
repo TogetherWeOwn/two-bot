@@ -58,14 +58,14 @@ function fixture(targetOver: Partial<Awaited<ReturnType<ModerationResolver['targ
   return { resolver, service, calls };
 }
 
-async function start(targetOver = {}) {
+async function start(targetOver = {}, internalStore = new InternalActionStore(db.db)) {
   const mod = fixture(targetOver);
   const server = await startInternalActions({
     host: '127.0.0.1', port: 0, keys: new KeyRing([{ id: 'web-staging', secret: SECRET }]),
     guildId: '1545644954272137297', discord: noopDiscord, roleKeys: buildRoleKeys(),
     enabled: new Set(['moderation.ban', 'moderation.tempban', 'moderation.kick', 'moderation.timeout',
       'moderation.warn', 'moderation.purge', 'moderation.slowmode', 'moderation.lockdown', 'moderation.unlock']),
-    store: new InternalActionStore(db.db), moderation: { resolver: mod.resolver, service: mod.service },
+    store: internalStore, moderation: { resolver: mod.resolver, service: mod.service },
   });
   servers.push(server);
   return { server, ...mod };
@@ -93,6 +93,33 @@ test('internal moderation action executes once and replays by idempotency key', 
   assert.equal(first.body.result.outcome, 'banned');
   assert.equal(second.status, 200);
   assert.equal(second.replayed, 'true');
+  assert.deepEqual(calls, [`ban:${TARGET}`]);
+});
+
+test('outer completion failure recovers the stored inner moderation result', async () => {
+  const internalStore = new InternalActionStore(db.db);
+  const originalComplete = internalStore.complete.bind(internalStore);
+  let failOnce = true;
+  internalStore.complete = async (...args) => {
+    if (failOnce) {
+      failOnce = false;
+      throw new Error('injected outer completion failure');
+    }
+    return originalComplete(...args);
+  };
+
+  const { server, calls } = await start({}, internalStore);
+  const body = { action: 'moderation.ban', actor_id: ACTOR, target_id: TARGET, reason: 'staging QA' };
+  const first = await call(server, body, 'moderation-recovery-0001');
+  const second = await call(server, body, 'moderation-recovery-0001');
+  const third = await call(server, body, 'moderation-recovery-0001');
+
+  assert.equal(first.status, 500);
+  assert.equal(second.status, 200);
+  assert.equal(second.replayed, 'true');
+  assert.equal(second.body.result.outcome, 'banned');
+  assert.equal(third.status, 200);
+  assert.equal(third.replayed, 'true');
   assert.deepEqual(calls, [`ban:${TARGET}`]);
 });
 

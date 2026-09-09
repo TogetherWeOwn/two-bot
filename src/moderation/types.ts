@@ -63,6 +63,7 @@ export interface ModerationRequest {
 export interface ModerationResult {
   outcome: string;
   affected?: number;
+  replayed?: boolean;
 }
 
 export interface ModerationPolicy {

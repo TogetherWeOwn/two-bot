@@ -52,6 +52,7 @@ export async function runModerationAction(
       ...(result.affected === undefined ? {} : { affected: result.affected }),
     },
     outcome: result.outcome,
+    ...(result.replayed ? { innerReplayed: true } : {}),
   };
 }
 

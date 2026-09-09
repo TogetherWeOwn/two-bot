@@ -88,6 +88,8 @@ export interface ActionOutcome {
   result: Record<string, unknown>;
   /** For the log line. Never any part of the request body. */
   outcome: string;
+  /** Inner moderation row supplied the stored result during outer recovery. */
+  innerReplayed?: boolean;
 }
 
 /**

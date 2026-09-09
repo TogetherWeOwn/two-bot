@@ -121,10 +121,8 @@ test('executes every verb and writes warnings, audits, and scheduled tempban exp
   assert.equal((await testDb.db.prepare('SELECT * FROM moderation_audit').all()).length, 9);
   assert.equal((await testDb.db.prepare('SELECT * FROM moderation_warnings').all()).length, 1);
   assert.equal((await testDb.db.prepare('SELECT * FROM moderation_scheduled_unbans').all()).length, 1);
-  await assert.rejects(
-    () => service.execute({ ...request('moderation.ban'), requestId: 'request-retry', idempotencyKey: 'interaction-0' }),
-    (error: unknown) => error instanceof ActionError && error.code === 'replayed',
-  );
+  const replay = await service.execute({ ...request('moderation.ban'), requestId: 'request-retry', idempotencyKey: 'interaction-0' });
+  assert.deepEqual(replay, { outcome: 'banned', replayed: true });
   assert.equal(calls.filter((call) => call === `ban:${TARGET}`).length, 2, 'interaction replay made no new call');
   await testDb.cleanup();
 });
@@ -150,13 +148,16 @@ test('concurrent executes of one idempotency key make exactly one Discord call (
   ]);
   assert.equal(bans, 1, `one ban, got ${bans}`);
   const rejected = attempts.filter((a) => a.status === 'rejected');
-  assert.equal(rejected.length, 1, 'the loser of the claim is refused, not queued');
-  assert.ok(rejected[0].reason instanceof ActionError);
-  assert.ok(['replayed', 'in_progress'].includes(rejected[0].reason.code));
+  const replayed = attempts.filter((a) => a.status === 'fulfilled' && a.value.replayed === true);
+  assert.equal(rejected.length + replayed.length, 1, 'the loser is refused or receives the completed replay');
+  if (rejected[0]) {
+    assert.ok(rejected[0].reason instanceof ActionError);
+    assert.equal(rejected[0].reason.code, 'in_progress');
+  }
   await testDb.cleanup();
 });
 
-test('a failed verb releases the claim, so a retry is a real second attempt (TOG-1659 High 3)', async () => {
+test('an uncertain Discord failure keeps the claim and cannot repeat a destructive action', async () => {
   const testDb = await openTestDb(import.meta.filename);
   let callsMade = 0;
   const discord: ModerationDiscordClient = {
@@ -172,13 +173,55 @@ test('a failed verb releases the claim, so a retry is a real second attempt (TOG
     () => service.execute({ ...request('moderation.ban'), requestId: 'r-1', idempotencyKey: 'key-x' }),
     (error: unknown) => error instanceof ActionError && error.code === 'discord_unavailable',
   );
-  assert.equal(callsMade, 1);
-  // The retry re-attempts for real rather than getting a cached failure.
   await assert.rejects(
     () => service.execute({ ...request('moderation.ban'), requestId: 'r-2', idempotencyKey: 'key-x' }),
-    (error: unknown) => error instanceof ActionError && error.code === 'discord_unavailable',
+    (error: unknown) => error instanceof ActionError && error.code === 'in_progress',
   );
-  assert.equal(callsMade, 2);
+  assert.equal(callsMade, 1, 'an uncertain result is not retried');
+  await testDb.cleanup();
+});
+
+test('validation fails before the claim, so a corrected request can reuse its key', async () => {
+  const testDb = await openTestDb(import.meta.filename);
+  let callsMade = 0;
+  const discord: ModerationDiscordClient = {
+    async ban() { callsMade++; }, async unban() {}, async kick() {}, async timeout() {},
+    async purge(_c, count) { callsMade++; return count; }, async setSlowmode() {},
+    async getEveryoneOverwrite() { return { allow: '0', deny: '0' }; }, async putEveryoneOverwrite() {},
+  };
+  const service = new ModerationService(discord, new ModerationStore(testDb.db), policy);
+  await assert.rejects(() => service.execute({
+    ...request('moderation.purge'), count: 101, requestId: 'bad', idempotencyKey: 'same-key',
+  }), (error: unknown) => error instanceof ActionError && error.code === 'malformed');
+  await service.execute({ ...request('moderation.purge'), count: 2, requestId: 'good', idempotencyKey: 'same-key' });
+  assert.equal(callsMade, 1);
+  await testDb.cleanup();
+});
+
+test('stale moderation claims are never taken over automatically', async () => {
+  const testDb = await openTestDb(import.meta.filename);
+  let clock = Date.parse('2026-09-08T12:00:00.000Z');
+  const store = new ModerationStore(testDb.db, () => clock);
+  assert.deepEqual(await store.claim('g', 'key-stale', 'moderation.ban', 'hash'), { state: 'claimed' });
+  clock += 24 * 60 * 60 * 1000;
+  assert.deepEqual(await store.claim('g', 'key-stale', 'moderation.ban', 'hash'), { state: 'in_flight' });
+  await testDb.cleanup();
+});
+
+test('a completed inner moderation action returns its stored result for outer recovery', async () => {
+  const testDb = await openTestDb(import.meta.filename);
+  let bans = 0;
+  const discord: ModerationDiscordClient = {
+    async ban() { bans++; }, async unban() {}, async kick() {}, async timeout() {},
+    async purge(_c, count) { return count; }, async setSlowmode() {},
+    async getEveryoneOverwrite() { return { allow: '0', deny: '0' }; }, async putEveryoneOverwrite() {},
+  };
+  const service = new ModerationService(discord, new ModerationStore(testDb.db), policy);
+  const first = await service.execute({ ...request('moderation.ban'), requestId: 'inner-1', idempotencyKey: 'inner-key' });
+  const replay = await service.execute({ ...request('moderation.ban'), requestId: 'inner-2', idempotencyKey: 'inner-key' });
+  assert.equal(first.outcome, 'banned');
+  assert.deepEqual(replay, { outcome: 'banned', replayed: true });
+  assert.equal(bans, 1);
   await testDb.cleanup();
 });
 
@@ -253,6 +296,31 @@ test('a second tempban of the same user moves the one pending job, not a second 
   await testDb.cleanup();
 });
 
+test('an extended tempban revokes an old running unban claim', async () => {
+  const testDb = await openTestDb(import.meta.filename);
+  const discord: ModerationDiscordClient = {
+    async ban() {}, async unban() {}, async kick() {}, async timeout() {},
+    async purge(_c, count) { return count; }, async setSlowmode() {},
+    async getEveryoneOverwrite() { return { allow: '0', deny: '0' }; }, async putEveryoneOverwrite() {},
+  };
+  let t = Date.parse('2026-09-08T12:00:00.000Z');
+  const store = new ModerationStore(testDb.db, () => t);
+  const service = new ModerationService(discord, store, policy, () => t);
+  await service.execute({ ...request('moderation.tempban'), requestId: 'old', idempotencyKey: 'old-key' });
+  t += 120_000;
+  const [oldClaim] = await store.claimDueUnbans();
+  const extension = request('moderation.tempban');
+  extension.durationSeconds = 3600;
+  await service.execute({ ...extension, requestId: 'new', idempotencyKey: 'new-key' });
+  assert.equal(await store.ownsUnbanClaim(oldClaim.requestId, oldClaim.claimToken), false);
+  const rows = await testDb.db.prepare(`SELECT request_id, state FROM moderation_scheduled_unbans ORDER BY request_id`).all();
+  assert.deepEqual(rows.map((row) => ({ ...row })), [
+    { request_id: 'new', state: 'pending' },
+    { request_id: 'old', state: 'superseded' },
+  ]);
+  await testDb.cleanup();
+});
+
 test('runDueUnbans claims atomically: two sweeps never process the same job (TOG-1659 High 4)', async () => {
   const testDb = await openTestDb(import.meta.filename);
   let unbans = 0;
@@ -279,7 +347,7 @@ test('a failed unban is requeued and retried by the next sweep', async () => {
   let attempts = 0;
   const discord: ModerationDiscordClient = {
     async ban() {}, async kick() {}, async timeout() {},
-    async unban() { attempts++; if (attempts === 1) throw new ActionError('discord_unavailable', 'boom', { logReason: 'test' }); },
+    async unban() { attempts++; if (attempts === 1) throw new ActionError('discord_rejected', 'boom', { logReason: 'test' }); },
     async purge(_c, count) { return count; }, async setSlowmode() {},
     async getEveryoneOverwrite() { return { allow: '0', deny: '0' }; },
     async putEveryoneOverwrite() {},
@@ -296,6 +364,33 @@ test('a failed unban is requeued and retried by the next sweep', async () => {
   assert.equal(requeued?.state, 'pending', 'the failed job went back to pending');
   await service.runDueUnbans();
   assert.equal(attempts, 2, 'the next sweep retried it');
+  await testDb.cleanup();
+});
+
+test('a failed job does not strand later jobs in the same claimed batch', async () => {
+  const testDb = await openTestDb(import.meta.filename);
+  const attempts: string[] = [];
+  const discord: ModerationDiscordClient = {
+    async ban() {}, async kick() {}, async timeout() {},
+    async unban(_g, userId) {
+      attempts.push(userId);
+      if (userId === TARGET) throw new ActionError('discord_rejected', 'known refusal', { logReason: 'test' });
+    },
+    async purge(_c, count) { return count; }, async setSlowmode() {},
+    async getEveryoneOverwrite() { return { allow: '0', deny: '0' }; }, async putEveryoneOverwrite() {},
+  };
+  let t = Date.parse('2026-09-08T12:00:00.000Z');
+  const store = new ModerationStore(testDb.db, () => t);
+  const service = new ModerationService(discord, store, policy, () => t);
+  await store.scheduleUnban(GUILD, TARGET, new Date(t).toISOString(), 'first', 'batch-1');
+  await store.scheduleUnban(GUILD, STAFF, new Date(t).toISOString(), 'second', 'batch-2');
+  await assert.rejects(() => service.runDueUnbans());
+  assert.deepEqual(attempts, [TARGET, STAFF]);
+  const states = await testDb.db.prepare(`SELECT request_id, state FROM moderation_scheduled_unbans ORDER BY request_id`).all();
+  assert.deepEqual(states.map((row) => ({ ...row })), [
+    { request_id: 'batch-1', state: 'pending' },
+    { request_id: 'batch-2', state: 'done' },
+  ]);
   await testDb.cleanup();
 });
 
@@ -316,22 +411,54 @@ test('a stale running claim is taken over by the next sweep (crash recovery)', a
   const claimed = await store.claimDueUnbans();
   assert.equal(claimed.length, 1);
   t += 61_000; // past MODERATION_CLAIM_STALE_SECONDS
-  // The takeover is itself a claim, and the taker then carries it out.
   const stolen = await store.claimDueUnbans();
   assert.equal(stolen.length, 1, 'a stale running claim is taken over');
-  await service.runDueUnbans().catch(() => undefined);
-  const row = await testDb.db
-    .prepare(`SELECT state FROM moderation_scheduled_unbans WHERE request_id = 'r-s1'`)
-    .get();
-  // The steal left the job running under a fresh claim; runDueUnbans sees it
-  // only once that claim too goes stale, so the row here belongs to the
-  // takeover, and the next stale window finishes it.
-  t += 61_000;
-  await service.runDueUnbans();
+  assert.notEqual(stolen[0].claimToken, claimed[0].claimToken);
+  await assert.rejects(
+    () => store.completeUnban(claimed[0].requestId, claimed[0].claimToken),
+    /lost scheduled-unban claim/,
+  );
+  await store.completeUnban(stolen[0].requestId, stolen[0].claimToken);
   const finished = await testDb.db
     .prepare(`SELECT state FROM moderation_scheduled_unbans WHERE request_id = 'r-s1'`)
     .get();
   assert.equal(finished?.state, 'done');
+  await testDb.cleanup();
+});
+
+test('repeated lockdown preserves the first masks and failed unlock keeps recovery state', async () => {
+  const testDb = await openTestDb(import.meta.filename);
+  let current = { allow: '1024', deny: '8192' };
+  let failRestore = true;
+  const writes: string[] = [];
+  const discord: ModerationDiscordClient = {
+    async ban() {}, async unban() {}, async kick() {}, async timeout() {},
+    async purge(_c, count) { return count; }, async setSlowmode() {},
+    async getEveryoneOverwrite() { return current; },
+    async putEveryoneOverwrite(_c, _g, ow) {
+      writes.push(`${ow.allow}/${ow.deny}`);
+      if (failRestore && ow.allow === '1024' && ow.deny === '8192') {
+        throw new ActionError('discord_unavailable', 'restore failed', { logReason: 'test' });
+      }
+      current = ow;
+    },
+  };
+  const store = new ModerationStore(testDb.db);
+  const service = new ModerationService(discord, store, policy);
+  await service.execute({ ...request('moderation.lockdown'), requestId: 'lock-1', idempotencyKey: 'lock-key-1' });
+  await service.execute({ ...request('moderation.lockdown'), requestId: 'lock-2', idempotencyKey: 'lock-key-2' });
+  await assert.rejects(() => service.execute({
+    ...request('moderation.unlock'), requestId: 'unlock-1', idempotencyKey: 'unlock-key-1',
+  }));
+  assert.deepEqual(await store.getLockdown(CHANNEL), {
+    channelId: CHANNEL, guildId: GUILD, priorAllow: '1024', priorDeny: '8192', reason: 'QA moderation proof',
+  });
+  failRestore = false;
+  await service.execute({ ...request('moderation.unlock'), requestId: 'unlock-2', idempotencyKey: 'unlock-key-2' });
+  assert.equal(await store.getLockdown(CHANNEL), null);
+  assert.equal(current.allow, '1024');
+  assert.equal(current.deny, '8192');
+  assert.deepEqual(writes.slice(0, 2), [`1024/${8192n | 2048n}`, `1024/${8192n | 2048n}`]);
   await testDb.cleanup();
 });
 

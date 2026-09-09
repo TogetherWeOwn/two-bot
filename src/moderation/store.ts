@@ -84,7 +84,6 @@ export class ModerationStore {
     hash: string,
   ): Promise<ModerationClaim> {
     const t = this.now();
-
     const won = await this.db
       .prepare(
         `INSERT INTO moderation_idempotency
@@ -126,15 +125,11 @@ export class ModerationStore {
       return { state: 'replayed', stored: { outcome: row.outcome ?? 'unknown', result: parsed } };
     }
 
-    // in_flight. Only take it over if the holder is old enough to be a corpse.
-    if (t - Date.parse(row.claimed_at) < this.claimStaleMs) return { state: 'in_flight' };
-    const taken = await this.db
-      .prepare(
-        `UPDATE moderation_idempotency SET claimed_at = ?
-          WHERE guild_id = ? AND idempotency_key = ? AND state = 'in_flight' AND claimed_at < ?`,
-      )
-      .run(iso(t), guildId, idempotencyKey, iso(t - this.claimStaleMs));
-    return taken.changes === 1 ? { state: 'claimed' } : { state: 'in_flight' };
+    // A timed takeover cannot distinguish a dead process from a slow Discord
+    // request. Taking it over would permit two destructive mutations. Keep the
+    // uncertain row until it is reconciled or completed; automatic crash
+    // recovery is safe only for naturally idempotent jobs such as unban.
+    return { state: 'in_flight' };
   }
 
   /** Record the result, so a retry replays it instead of acting again. */
@@ -216,12 +211,13 @@ export class ModerationStore {
    */
   async scheduleUnban(guildId: string, userId: string, executeAt: string, reason: string, requestId: string): Promise<void> {
     await this.db.transaction(async (tx) => {
-      // Retire any pending job for this (guild, user) first: the unique
-      // index would otherwise reject the insert for a still-banned user.
+      // Retire every unfinished job for this member. This also revokes a
+      // worker that claimed the old expiry before a moderator extended the
+      // tempban: its claim token can no longer complete the superseded row.
       await tx.prepare(
         `UPDATE moderation_scheduled_unbans
-            SET state = 'superseded', completed_at = ?
-          WHERE guild_id = ? AND user_id = ? AND state = 'pending'`,
+            SET state = 'superseded', completed_at = ?, claim_token = NULL
+          WHERE guild_id = ? AND user_id = ? AND state IN ('pending', 'running')`,
       ).run(iso(this.now()), guildId, userId);
       await tx.prepare(
         `INSERT INTO moderation_scheduled_unbans
@@ -229,6 +225,15 @@ export class ModerationStore {
          VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
       ).run(guildId, userId, executeAt, reason, requestId, iso(this.now()));
     });
+  }
+
+  /** A claimed expiry may have been superseded by a newer tempban. */
+  async ownsUnbanClaim(requestId: string, claimToken: string): Promise<boolean> {
+    const row = await this.db.prepare(
+      `SELECT request_id FROM moderation_scheduled_unbans
+        WHERE request_id = ? AND state = 'running' AND claim_token = ?`,
+    ).get<{ request_id: string }>(requestId, claimToken);
+    return Boolean(row);
   }
 
   /**
@@ -240,47 +245,57 @@ export class ModerationStore {
    * (TOG-1659 High 4). The UPDATE ... RETURNING is the claim: whichever
    * process's update lands first owns the row, and the other sees nothing.
    */
-  async claimDueUnbans(limit = 25): Promise<Array<ScheduledUnban & { requestId: string }>> {
+  async claimDueUnbans(limit = 25): Promise<Array<ScheduledUnban & { requestId: string; claimToken: string }>> {
     const t = iso(this.now());
-    const rows = await this.db
-      .prepare(
+    const staleBefore = iso(this.now() - this.claimStaleMs);
+    const claimed: Array<ScheduledUnban & { requestId: string; claimToken: string }> = [];
+    const candidates = await this.db.prepare(
+      `SELECT request_id, guild_id, user_id, reason
+         FROM moderation_scheduled_unbans
+        WHERE (state = 'pending' AND execute_at <= ?)
+           OR (state = 'running' AND claimed_at < ?)
+        ORDER BY execute_at ASC
+        LIMIT ?`,
+    ).all<{ request_id: string; guild_id: string; user_id: string; reason: string }>(t, staleBefore, limit);
+
+    for (const row of candidates) {
+      const claimToken = randomUUID();
+      const won = await this.db.prepare(
         `UPDATE moderation_scheduled_unbans
-            SET state = 'running', claimed_at = ?
-          WHERE request_id IN (
-            SELECT request_id FROM moderation_scheduled_unbans
-             WHERE (state = 'pending' AND execute_at <= ?)
-                OR (state = 'running' AND claimed_at < ?)
-             ORDER BY execute_at ASC
-             LIMIT ?
-          )
-          RETURNING request_id, guild_id, user_id, reason`,
-      )
-      .all<{ request_id: string; guild_id: string; user_id: string; reason: string }>(
-        t, t, iso(this.now() - this.claimStaleMs), limit,
-      );
-    return rows.map((row) => ({
-      requestId: row.request_id,
-      guildId: row.guild_id,
-      userId: row.user_id,
-      reason: row.reason,
-    }));
+            SET state = 'running', claimed_at = ?, claim_token = ?
+          WHERE request_id = ?
+            AND ((state = 'pending' AND execute_at <= ?)
+              OR (state = 'running' AND claimed_at < ?))`,
+      ).run(t, claimToken, row.request_id, t, staleBefore);
+      if (won.changes !== 1) continue;
+      claimed.push({
+        requestId: row.request_id,
+        guildId: row.guild_id,
+        userId: row.user_id,
+        reason: row.reason,
+        claimToken,
+      });
+    }
+
+    return claimed;
   }
 
-  async completeUnban(requestId: string): Promise<void> {
-    await this.db.prepare(
+  async completeUnban(requestId: string, claimToken: string): Promise<void> {
+    const result = await this.db.prepare(
       `UPDATE moderation_scheduled_unbans
-          SET state = 'done', completed_at = ?
-        WHERE request_id = ?`,
-    ).run(iso(this.now()), requestId);
+          SET state = 'done', completed_at = ?, claim_token = NULL
+        WHERE request_id = ? AND state = 'running' AND claim_token = ?`,
+    ).run(iso(this.now()), requestId, claimToken);
+    if (result.changes !== 1) throw new Error(`lost scheduled-unban claim: ${requestId}`);
   }
 
-  /** A job that failed goes back to pending, so the next sweep retries it. */
-  async requeueUnban(requestId: string): Promise<void> {
+  /** A known pre-mutation failure gives this exact claim back for retry. */
+  async requeueUnban(requestId: string, claimToken: string): Promise<void> {
     await this.db.prepare(
       `UPDATE moderation_scheduled_unbans
-          SET state = 'pending'
-        WHERE request_id = ? AND state = 'running'`,
-    ).run(requestId);
+          SET state = 'pending', claimed_at = NULL, claim_token = NULL
+        WHERE request_id = ? AND state = 'running' AND claim_token = ?`,
+    ).run(requestId, claimToken);
   }
 
   // --- lockdowns -----------------------------------------------------------
@@ -291,39 +306,49 @@ export class ModerationStore {
    * strings, taken from a read of the channel BEFORE any write, so unlock can
    * put the channel back bit-for-bit instead of guessing (TOG-1659 High 1).
    */
-  async recordLockdown(record: LockdownRecord): Promise<void> {
-    await this.db.prepare(
+  async recordLockdown(record: LockdownRecord): Promise<LockdownRecord> {
+    const row = await this.db.prepare(
       `INSERT INTO moderation_lockdowns
          (channel_id, guild_id, prior_allow, prior_deny, reason, locked_at)
        VALUES (?, ?, ?, ?, ?, ?)
        ON CONFLICT (channel_id) DO UPDATE
-         SET prior_allow = excluded.prior_allow,
-             prior_deny  = excluded.prior_deny,
-             reason      = excluded.reason,
-             locked_at   = excluded.locked_at`,
-    ).run(record.channelId, record.guildId, record.priorAllow, record.priorDeny, record.reason, iso(this.now()));
+         SET reason = excluded.reason,
+             locked_at = excluded.locked_at
+       RETURNING channel_id, guild_id, prior_allow, prior_deny, reason`,
+    ).get<{ channel_id: string; guild_id: string; prior_allow: string; prior_deny: string; reason: string }>(
+      record.channelId, record.guildId, record.priorAllow, record.priorDeny, record.reason, iso(this.now()),
+    );
+    if (!row) throw new Error(`could not record lockdown: ${record.channelId}`);
+    return mapLockdown(row);
   }
 
-  /**
-   * Take and delete the stored pre-lockdown overwrite. Null when this channel
-   * has no recorded lockdown - the caller must fall back to a minimal, safe
-   * restore (clear only the SendMessages deny) rather than inventing state.
-   */
-  async takeLockdown(channelId: string): Promise<LockdownRecord | null> {
-    const row = await this.db
-      .prepare(
-        `DELETE FROM moderation_lockdowns
-          WHERE channel_id = ?
-          RETURNING channel_id, guild_id, prior_allow, prior_deny, reason`,
-      )
-      .get<{ channel_id: string; guild_id: string; prior_allow: string; prior_deny: string; reason: string }>(channelId);
-    if (!row) return null;
-    return {
-      channelId: row.channel_id,
-      guildId: row.guild_id,
-      priorAllow: row.prior_allow,
-      priorDeny: row.prior_deny,
-      reason: row.reason,
-    };
+  /** Read the stored pre-lockdown overwrite without consuming recovery state. */
+  async getLockdown(channelId: string): Promise<LockdownRecord | null> {
+    const row = await this.db.prepare(
+      `SELECT channel_id, guild_id, prior_allow, prior_deny, reason
+         FROM moderation_lockdowns WHERE channel_id = ?`,
+    ).get<{ channel_id: string; guild_id: string; prior_allow: string; prior_deny: string; reason: string }>(channelId);
+    return row ? mapLockdown(row) : null;
   }
+
+  /** Delete recovery state only after Discord accepted the exact restoration. */
+  async clearLockdown(channelId: string): Promise<void> {
+    await this.db.prepare(`DELETE FROM moderation_lockdowns WHERE channel_id = ?`).run(channelId);
+  }
+}
+
+function mapLockdown(row: {
+  channel_id: string;
+  guild_id: string;
+  prior_allow: string;
+  prior_deny: string;
+  reason: string;
+}): LockdownRecord {
+  return {
+    channelId: row.channel_id,
+    guildId: row.guild_id,
+    priorAllow: row.prior_allow,
+    priorDeny: row.prior_deny,
+    reason: row.reason,
+  };
 }

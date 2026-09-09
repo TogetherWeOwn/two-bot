@@ -102,6 +102,10 @@ export async function openSqlite(path: string): Promise<Db> {
   raw.exec(readFileSync(join(here, 'schema.sql'), 'utf8'));
   // Mirrors migrations/0008_members_third_message_at.sql (TWO-95).
   ensureColumn(raw, 'members', 'third_message_at', 'TEXT');
+  // Existing SQLite databases already have the 0010 table, so schema.sql's
+  // CREATE TABLE IF NOT EXISTS cannot add the 0011/0012 claim columns.
+  ensureColumn(raw, 'moderation_scheduled_unbans', 'claimed_at', 'TEXT');
+  ensureColumn(raw, 'moderation_scheduled_unbans', 'claim_token', 'TEXT');
   // schema.sql is the whole schema, so every migration whose tables it already
   // contains is recorded as applied. Adding a migration means adding its
   // tables above and its id here, or a database that is later moved to
@@ -112,6 +116,9 @@ export async function openSqlite(path: string): Promise<Db> {
     '0002_internal_actions',
     '0008_members_third_message_at',
     '0010_leveling',
+    '0010_moderation',
+    '0011_moderation_durability',
+    '0012_moderation_recovery',
   ]) {
     stamp.run(id, new Date().toISOString());
   }

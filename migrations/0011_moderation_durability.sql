@@ -43,6 +43,5 @@ CREATE TABLE IF NOT EXISTS moderation_idempotency (
 CREATE INDEX IF NOT EXISTS idx_moderation_idem_state
   ON moderation_idempotency (state, claimed_at);
 
--- Partial: completed jobs do not block the next tempban of the same user.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_moderation_pending_unban
-  ON moderation_scheduled_unbans (guild_id, user_id) WHERE state = 'pending';
+-- The partial unique index is installed by 0012 after reconciling duplicate
+-- pending rows that 0010 permitted in existing databases.

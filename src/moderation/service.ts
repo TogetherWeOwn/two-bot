@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { log } from '../core/log.ts';
 import { ActionError } from '../internal/errors.ts';
 import type { ModerationDiscordClient } from './discord.ts';
 import { assertModerationAllowed } from './policy.ts';
@@ -37,14 +38,15 @@ export class ModerationService {
   /**
    * Execute one moderation verb, exactly once per idempotency key.
    *
-   * The claim on moderation_idempotency is taken BEFORE any Discord mutation
-   * and the result is written AFTER it (TOG-1659 High 3). Both entry paths -
-   * slash commands and signed internal actions - land here, so there is one
-   * at-most-once path for both. A crash between claim and result leaves an
-   * in_flight row that a later attempt takes over once stale: at-most-once
-   * inside a living process, a bounded window across a crash.
+   * The durable row is the owner and the recovery record. Once a request has
+   * reached Discord we never delete it or take it over on a timer: neither a
+   * timeout nor a process death can prove that Discord made no change. A retry
+   * therefore either replays a stored result or gets `in_progress`; an operator
+   * may reconcile an abandoned row, but the bot will not guess and duplicate a
+   * destructive action.
    */
   async execute(request: ModerationExecution): Promise<ModerationResult> {
+    validateRequest(request, this.policy);
     const claim = await this.store.claim(
       request.guildId,
       request.idempotencyKey,
@@ -52,12 +54,10 @@ export class ModerationService {
       hashOf(request),
     );
     if (claim.state === 'replayed') {
-      throw new ActionError('replayed', 'This moderation interaction has already been handled', {
-        logReason: 'moderation_idempotent_replay',
-      });
+      return storedResult(claim.stored);
     }
     if (claim.state === 'in_flight') {
-      throw new ActionError('in_progress', 'An earlier attempt at this moderation action is still running', {
+      throw new ActionError('in_progress', 'An earlier attempt at this moderation action has an uncertain outcome', {
         logReason: 'moderation_idempotent_in_flight',
       });
     }
@@ -67,25 +67,24 @@ export class ModerationService {
       });
     }
 
+    let result: ModerationResult;
     try {
-      const result = await this.carryOut(request);
-      await this.store.complete(request.guildId, request.idempotencyKey, {
-        outcome: result.outcome,
-        result: { outcome: result.outcome, affected: result.affected ?? null },
-      });
-      return result;
+      result = await this.carryOut(request);
     } catch (err) {
-      // Give the key back so a retry of a retryable failure is a real second
-      // attempt. For tempban the scheduled unban is NOT undone: it was
-      // written before the ban on purpose, and if the ban itself failed
-      // there is nothing for it to do except unban an unbanned user.
-      await this.store.release(request.guildId, request.idempotencyKey).catch(() => undefined);
+      if (isSafePreMutationFailure(err)) {
+        await this.store.release(request.guildId, request.idempotencyKey).catch(() => undefined);
+      }
       throw err;
     }
+
+    await this.store.complete(request.guildId, request.idempotencyKey, {
+      outcome: result.outcome,
+      result: { outcome: result.outcome, affected: result.affected ?? null },
+    });
+    return result;
   }
 
   private async carryOut(request: ModerationExecution): Promise<ModerationResult> {
-    assertModerationAllowed(request, this.policy);
     const targetId = request.target?.userId;
     const channelId = request.channel?.channelId;
     let result: ModerationResult;
@@ -96,7 +95,7 @@ export class ModerationService {
         result = { outcome: 'banned' };
         break;
       case 'moderation.tempban': {
-        const seconds = integerBetween(request.durationSeconds, 60, 365 * 24 * 60 * 60, 'duration_seconds');
+        const seconds = Number(request.durationSeconds);
         // Persist the expiry job BEFORE the ban (TOG-1659 High 2). If the
         // process dies after Discord accepts the ban, the job still fires:
         // worst case is an unban for a ban the moderator can re-apply, never
@@ -117,7 +116,7 @@ export class ModerationService {
         result = { outcome: 'kicked' };
         break;
       case 'moderation.timeout': {
-        const seconds = integerBetween(request.durationSeconds, 60, MAX_TIMEOUT_SECONDS, 'duration_seconds');
+        const seconds = Number(request.durationSeconds);
         const until = new Date(this.now() + seconds * 1000).toISOString();
         await this.discord.timeout(request.guildId, targetId!, until, request.reason);
         result = { outcome: 'timed_out' };
@@ -128,13 +127,13 @@ export class ModerationService {
         result = { outcome: 'warned' };
         break;
       case 'moderation.purge': {
-        const count = integerBetween(request.count, 1, MAX_PURGE, 'count');
+        const count = Number(request.count);
         const affected = await this.discord.purge(channelId!, count, request.reason);
         result = { outcome: 'purged', affected };
         break;
       }
       case 'moderation.slowmode': {
-        const seconds = integerBetween(request.seconds, 0, MAX_SLOWMODE_SECONDS, 'seconds');
+        const seconds = Number(request.seconds);
         await this.discord.setSlowmode(channelId!, seconds, request.reason);
         result = { outcome: 'slowmode_updated' };
         break;
@@ -163,42 +162,43 @@ export class ModerationService {
         seconds: request.seconds,
         affected: result.affected,
       },
+    }).catch((err: unknown) => {
+      // Discord already accepted the action. Audit loss is serious and logged,
+      // but returning a retryable error would invite a duplicate mutation.
+      log.error('moderation_audit_failed', { requestId: request.requestId, err: String(err) });
     });
     return result;
   }
 
   /**
    * Lock a channel while preserving every other bit of the @everyone
-   * overwrite (TOG-1659 High 1). The prior allow/deny masks are read BEFORE
-   * the write and stored durably; unlock restores them exactly. Locking an
-   * already-locked channel refreshes the stored masks from the live channel,
-   * which by construction has SendMessages denied and nothing else changed.
+   * overwrite (TOG-1659 High 1). `recordLockdown` is insert-only: a repeated
+   * lockdown may refresh the reason, but it cannot replace the original
+   * pre-lock masks with the already-locked masks.
    */
   private async lockChannel(channelId: string, request: ModerationExecution): Promise<string> {
     const current = await this.discord.getEveryoneOverwrite(channelId, request.guildId);
     const prior = current ?? { allow: '0', deny: '0' };
-    const denied = setBit(prior.deny, SEND_MESSAGES_BIT);
-    const allowed = clearBit(prior.allow, SEND_MESSAGES_BIT);
-    await this.store.recordLockdown({
+    const recorded = await this.store.recordLockdown({
       channelId,
       guildId: request.guildId,
       priorAllow: prior.allow,
       priorDeny: prior.deny,
       reason: request.reason,
     });
+    const denied = setBit(recorded.priorDeny, SEND_MESSAGES_BIT);
+    const allowed = clearBit(recorded.priorAllow, SEND_MESSAGES_BIT);
     await this.discord.putEveryoneOverwrite(channelId, request.guildId, { allow: allowed, deny: denied }, request.reason);
     return 'locked_down';
   }
 
   /**
-   * Restore the @everyone overwrite recorded at lockdown time. With no
-   * recorded state - the bot restarted and lost nothing Discord still holds,
-   * or the lock pre-dates this feature - fall back to clearing only the
-   * SendMessages deny, which is the minimal change that cannot grant a
-   * permission the channel did not have.
+   * Restore the @everyone overwrite recorded at lockdown time. The recovery row
+   * is deleted only after Discord accepts the restore, so a failed PUT remains
+   * retryable without losing the original masks.
    */
   private async unlockChannel(channelId: string, request: ModerationExecution): Promise<string> {
-    const recorded = await this.store.takeLockdown(channelId);
+    const recorded = await this.store.getLockdown(channelId);
     if (recorded) {
       await this.discord.putEveryoneOverwrite(
         channelId,
@@ -206,6 +206,7 @@ export class ModerationService {
         { allow: recorded.priorAllow, deny: recorded.priorDeny },
         request.reason,
       );
+      await this.store.clearLockdown(channelId);
       return 'unlocked';
     }
     const current = await this.discord.getEveryoneOverwrite(channelId, request.guildId);
@@ -227,10 +228,12 @@ export class ModerationService {
   async runDueUnbans(): Promise<number> {
     const jobs = await this.store.claimDueUnbans();
     let completed = 0;
+    let firstError: unknown;
     for (const job of jobs) {
       try {
+        if (!await this.store.ownsUnbanClaim(job.requestId, job.claimToken)) continue;
         await this.discord.unban(job.guildId, job.userId, job.reason);
-        await this.store.completeUnban(job.requestId);
+        await this.store.completeUnban(job.requestId, job.claimToken);
         await this.store.recordAudit({
           requestId: `${job.requestId}:unban`,
           guildId: job.guildId,
@@ -240,15 +243,51 @@ export class ModerationService {
           reason: job.reason,
           outcome: 'unbanned',
           idempotencyKey: job.requestId,
+        }).catch((err: unknown) => {
+          log.error('moderation_unban_audit_failed', { requestId: job.requestId, err: String(err) });
         });
         completed++;
       } catch (err) {
-        await this.store.requeueUnban(job.requestId).catch(() => undefined);
-        throw err;
+        if (isSafePreMutationFailure(err)) {
+          await this.store.requeueUnban(job.requestId, job.claimToken).catch(() => undefined);
+        }
+        firstError ??= err;
       }
     }
+    if (firstError) throw firstError;
     return completed;
   }
+}
+
+function storedResult(stored: { outcome: string; result: Record<string, unknown> }): ModerationResult {
+  const affected = stored.result.affected;
+  return {
+    outcome: stored.outcome,
+    ...(typeof affected === 'number' ? { affected } : {}),
+    replayed: true,
+  };
+}
+
+function validateRequest(request: ModerationExecution, policy: ModerationPolicy): void {
+  assertModerationAllowed(request, policy);
+  switch (request.action) {
+    case 'moderation.tempban':
+      integerBetween(request.durationSeconds, 60, 365 * 24 * 60 * 60, 'duration_seconds');
+      break;
+    case 'moderation.timeout':
+      integerBetween(request.durationSeconds, 60, MAX_TIMEOUT_SECONDS, 'duration_seconds');
+      break;
+    case 'moderation.purge':
+      integerBetween(request.count, 1, MAX_PURGE, 'count');
+      break;
+    case 'moderation.slowmode':
+      integerBetween(request.seconds, 0, MAX_SLOWMODE_SECONDS, 'seconds');
+      break;
+  }
+}
+
+function isSafePreMutationFailure(error: unknown): boolean {
+  return error instanceof ActionError && error.code === 'discord_rejected';
 }
 
 function setBit(mask: string, bit: bigint): string {
