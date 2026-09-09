@@ -2,7 +2,8 @@ import { createHmac, randomBytes } from 'node:crypto';
 import type { AutomodFilter, AutomodMessage, AutomodPolicy } from './types.ts';
 
 const INVITE = /(?:https?:\/\/)?(?:www\.)?(?:discord\.gg|discord(?:app)?\.com\/invite)\/[-\w]+/iu;
-const URL_PATTERN = /(?:https?:\/\/|www\.)[^\s<]+/giu;
+const URL_PATTERN =
+  /(?:https?:\/\/|www\.)[^\s<]+|(?<![\p{L}\p{N}@._-])(?:[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?\.)+[\p{L}]{2,63}(?:\/[^\s<]*)?/giu;
 const TRAILING_URL_PUNCTUATION = /[>),.!?:;]+$/u;
 const ZERO_WIDTH = /[​-‍⁠﻿]/gu;
 
@@ -48,13 +49,14 @@ export function matchAutomod(
   repeats: RepeatTracker,
 ): AutomodFilter | null {
   const normalized = normalize(message.content);
+  const linkContent = normalized.replace(ZERO_WIDTH, '');
   if (hasBadWord(normalized, policy.badWords)) return 'bad_words';
   if (repeats.observe(message, normalized, policy)) return 'repeated_message';
   // Only explicit mentions in message content are supplied here. Discord's
   // implicit reply reference does not count unless the author actually pinged it.
   if (message.mentionedUserIds.length >= policy.mentionLimit) return 'mention_spam';
-  if (INVITE.test(message.content)) return 'invite_link';
-  if (hasExternalLink(message.content, policy.allowedDomains)) return 'external_link';
+  if (INVITE.test(linkContent)) return 'invite_link';
+  if (hasExternalLink(linkContent, policy.allowedDomains)) return 'external_link';
   if (hasBlockedAttachment(message.attachmentNames, policy.blockedAttachmentExtensions)) return 'attachment_type';
   return null;
 }
@@ -79,7 +81,7 @@ function hasExternalLink(content: string, allowedDomains: string[]): boolean {
   for (const match of content.matchAll(URL_PATTERN)) {
     const candidate = match[0].replace(TRAILING_URL_PUNCTUATION, '');
     try {
-      const parsed = candidate.startsWith('www.') ? `https://${candidate}` : candidate;
+      const parsed = /^https?:\/\//iu.test(candidate) ? candidate : `https://${candidate}`;
       const host = new URL(parsed).hostname.toLowerCase().replace(/^www\./, '');
       if (!allowedDomains.some((allowed) => host === allowed || host.endsWith(`.${allowed}`))) return true;
     } catch {

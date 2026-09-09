@@ -67,6 +67,7 @@ const TABLES = [
   'ticket_transcripts',
   'tickets',
   'automod_violations',
+  'automod_processed_messages',
 ];
 
 /**

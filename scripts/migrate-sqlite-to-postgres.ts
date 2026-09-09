@@ -52,6 +52,7 @@ const OPTIONAL_TABLES = [
   'tickets',
   'ticket_transcripts',
   'automod_violations',
+  'automod_processed_messages',
 ] as const;
 const TABLES = [...REQUIRED_TABLES, ...OPTIONAL_TABLES] as const;
 type Table = (typeof TABLES)[number];
