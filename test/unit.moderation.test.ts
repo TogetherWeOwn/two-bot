@@ -184,6 +184,27 @@ test('an uncertain Discord failure keeps the claim and cannot repeat a destructi
   await testDb.cleanup();
 });
 
+test('audit failure after a Discord mutation still completes the idempotency claim', async () => {
+  const testDb = await openTestDb(import.meta.filename);
+  let bans = 0;
+  const discord: ModerationDiscordClient = {
+    async ban() { bans++; }, async unban() {}, async kick() {}, async timeout() {},
+    async purge(_c, count) { return count; }, async setSlowmode() {},
+    async getEveryoneOverwrite() { return { allow: '0', deny: '0' }; },
+    async deleteEveryoneOverwrite() {},
+    async putEveryoneOverwrite() {},
+  };
+  const store = new ModerationStore(testDb.db);
+  store.recordAudit = async () => { throw new Error('audit unavailable'); };
+  const service = new ModerationService(discord, store, policy);
+  const first = await service.execute({ ...request('moderation.ban'), requestId: 'audit-1', idempotencyKey: 'audit-key' });
+  const replay = await service.execute({ ...request('moderation.ban'), requestId: 'audit-2', idempotencyKey: 'audit-key' });
+  assert.equal(first.outcome, 'banned');
+  assert.deepEqual(replay, { outcome: 'banned', replayed: true });
+  assert.equal(bans, 1, 'audit failure did not make the Discord mutation retryable');
+  await testDb.cleanup();
+});
+
 test('validation fails before the claim, so a corrected request can reuse its key', async () => {
   const testDb = await openTestDb(import.meta.filename);
   let callsMade = 0;
