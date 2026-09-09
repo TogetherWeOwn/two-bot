@@ -1,7 +1,7 @@
-import { PermissionsBitField, type Client, type GuildTextBasedChannel } from 'discord.js';
+import { PermissionsBitField, type Client, type GuildTextBasedChannel, type Message } from 'discord.js';
 import { log } from '../core/log.ts';
 import { auditEventFields, formatAuditEvent, type AuditChannel, type OperationalAuditEvent } from './events.ts';
-import type { OperationalAuditStore, StoredOperationalAudit } from './store.ts';
+import { deliveryNonce, type OperationalAuditStore, type StoredOperationalAudit } from './store.ts';
 
 export interface AuditChannelIds {
   audit: string | null;
@@ -64,13 +64,18 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
 
     let messageId: string | null = null;
     try {
-      const message = await channel.send({
-        content: formatAuditEvent(stored.event),
-        allowedMentions: { parse: [] },
-        nonce: stored.deliveryNonce ?? stored.event.entryId,
-        enforceNonce: true,
-      });
-      messageId = message.id;
+      const existing = await findMirror(channel, stored.event.entryId);
+      if (existing) {
+        messageId = existing.id;
+      } else {
+        const message = await channel.send({
+          content: formatAuditEvent(stored.event),
+          allowedMentions: { parse: [] },
+          nonce: stored.deliveryNonce ?? deliveryNonce(stored.event.entryId),
+          enforceNonce: true,
+        });
+        messageId = message.id;
+      }
     } catch {
       await options.store?.markDeliveryFailed(stored.event.entryId, 'discord_send_failed');
       log.error('operational_audit_post_failed', {
@@ -85,14 +90,13 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
       await options.store?.markDelivered(stored.event.entryId, messageId);
       log.info('operational_audit_posted', { entryId: stored.event.entryId, channelId, messageId });
     } catch {
-      // The Discord nonce is stable for this durable event, so retrying the
-      // ambiguous post-send/pre-ack window returns the original message rather
-      // than creating a second mirror.
+      // The durable marker remains visible in Discord even after the nonce
+      // uniqueness window expires. A later retry scans for it before sending.
       try {
         await options.store?.markAcknowledgementFailed(stored.event.entryId);
       } catch {
         // The original acknowledgement write already proved the store may be
-        // unavailable. Keep the lease for a safe nonce-enforced retry.
+        // unavailable. Keep the lease for marker reconciliation on retry.
       }
       log.error('operational_audit_ack_failed', {
         entryId: stored.event.entryId,
@@ -119,7 +123,10 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
         try {
           inserted = await options.store.record(event, mirrorChannelId);
         } catch (err) {
-          log.error('operational_audit_write_failed', { entryId: event.entryId, err: String(err) });
+          log.error('operational_audit_write_failed', {
+            entryId: event.entryId,
+            classification: 'audit_store_write_failed',
+          });
           return false;
         }
       }
@@ -147,7 +154,7 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
           mirrorChannelId,
           deliveryState: 'delivering',
           deliveryAttempts: 0,
-          deliveryNonce: event.entryId,
+          deliveryNonce: deliveryNonce(event.entryId),
           mirrorMessageId: null,
         };
         await deliver(ephemeral);
@@ -166,6 +173,20 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
       return pending.length;
     },
   };
+}
+
+async function findMirror(channel: GuildTextBasedChannel, entryId: string): Promise<Message<true> | null> {
+  const marker = `audit-event:${entryId}`;
+  let before: string | undefined;
+  for (let page = 0; page < 5; page++) {
+    const messages = await channel.messages.fetch({ limit: 100, before, cache: false });
+    const match = messages.find((message) => message.author.id === channel.client.user?.id && message.content.includes(marker));
+    if (match) return match;
+    if (messages.size < 100) return null;
+    before = messages.last()?.id;
+    if (!before) return null;
+  }
+  return null;
 }
 
 function channelFor(channels: AuditChannelIds, type: AuditChannel): string | null {

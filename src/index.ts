@@ -98,13 +98,7 @@ const moderationResolver = cfg.guildId && moderationCfg.enabled
       base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
     })
   : null;
-const moderationService = moderationResolver
-  ? new ModerationService(moderationDiscord, moderationStore, {
-      owenUserId: moderationCfg.owenUserId,
-      botUserId: moderationCfg.owenUserId,
-      protectedRoleIds: moderationCfg.protectedRoleIds,
-    })
-  : null;
+let moderationService: ModerationService | null = null;
 
 // Point discord.js at a different API host. Only used by tools/mock-discord.
 if (cfg.apiBase) {
@@ -144,6 +138,13 @@ log.info('operational_audit_enabled', {
   voiceTarget: cfg.voiceLogChannelId ?? cfg.auditLogChannelId ?? 'durable/process log only',
   moderationTarget: cfg.moderationLogChannelId ?? cfg.auditLogChannelId ?? 'durable/process log only',
 });
+if (moderationResolver) {
+  moderationService = new ModerationService(moderationDiscord, moderationStore, {
+    owenUserId: moderationCfg.owenUserId,
+    botUserId: moderationCfg.owenUserId,
+    protectedRoleIds: moderationCfg.protectedRoleIds,
+  }, Date.now, audit);
+}
 
 registerHandlers(client, { handlers, invites, raid, expectedJoins, leveling, audit });
 registerLeveling(client, { service: leveling, guildId: cfg.guildId });
@@ -317,14 +318,14 @@ moderationSweep?.unref();
 const auditDeliverySweep = setInterval(
   () => {
     void audit.retryPending().catch((err: unknown) => {
-      log.error('operational_audit_retry_failed', { err: String(err) });
+      log.error('operational_audit_retry_failed', { classification: 'audit_retry_failed' });
     });
   },
   60 * 1000,
 );
 auditDeliverySweep.unref();
 void audit.retryPending().catch((err: unknown) => {
-  log.error('operational_audit_retry_failed', { err: String(err) });
+  log.error('operational_audit_retry_failed', { classification: 'audit_retry_failed' });
 });
 
 // Inactivity sweep once an hour. Cheap query; no outbound messages.

@@ -70,12 +70,27 @@ export interface AuditAcceptanceRow {
   rows: number | string;
   distinct_entries: number | string;
   incomplete_deliveries: number | string;
+  sink_tamper_rows: number | string;
+}
+
+export interface AuditMarkerCount {
+  entryId: string;
+  mirrorMessageId: string | null;
+  channelId: string;
+  messageIds: string[];
 }
 
 export interface AuditEvidenceResult {
   missing: OperationalAuditKind[];
   duplicates: OperationalAuditKind[];
   pendingDeliveries: OperationalAuditKind[];
+  missingSinkTamper: boolean;
+}
+
+export interface AuditMarkerResult {
+  missing: string[];
+  duplicates: string[];
+  messageIdMismatches: string[];
 }
 
 export function evaluateAuditEvidence(rows: AuditAcceptanceRow[]): AuditEvidenceResult {
@@ -92,16 +107,47 @@ export function evaluateAuditEvidence(rows: AuditAcceptanceRow[]): AuditEvidence
     if (Number(row.rows) !== Number(row.distinct_entries)) duplicates.push(kind);
     if (Number(row.incomplete_deliveries) > 0) pendingDeliveries.push(kind);
   }
-  return { missing, duplicates, pendingDeliveries };
+  return {
+    missing,
+    duplicates,
+    pendingDeliveries,
+    missingSinkTamper: !rows.some((row) => Number(row.sink_tamper_rows) > 0),
+  };
+}
+
+export function evaluateAuditMarkers(rows: AuditMarkerCount[]): AuditMarkerResult {
+  const missing: string[] = [];
+  const duplicates: string[] = [];
+  const messageIdMismatches: string[] = [];
+  for (const row of rows) {
+    if (row.messageIds.length === 0) missing.push(row.entryId);
+    else if (row.messageIds.length > 1) duplicates.push(row.entryId);
+    if (row.messageIds.length === 1 && row.messageIds[0] !== row.mirrorMessageId) {
+      messageIdMismatches.push(row.entryId);
+    }
+  }
+  return { missing, duplicates, messageIdMismatches };
 }
 
 export function auditAcceptanceSql(guildId: string, since?: string): string {
   const quotedGuild = guildId.replaceAll("'", "''");
   const kinds = AUDIT_ACCEPTANCE_KINDS.map((kind) => `'${kind}'`).join(', ');
   const sinceSql = since ? ` AND occurred_at >= '${since.replaceAll("'", "''")}'` : '';
-  return `SELECT event_kind, COUNT(*) AS rows, COUNT(DISTINCT entry_id) AS distinct_entries,\n` +
-    `       COUNT(*) FILTER (WHERE delivery_state <> 'delivered') AS incomplete_deliveries\n` +
+  return `SELECT event_kind,\n` +
+    `       COUNT(*) FILTER (WHERE mirror_channel_id IS NOT NULL) AS rows,\n` +
+    `       COUNT(DISTINCT entry_id) FILTER (WHERE mirror_channel_id IS NOT NULL) AS distinct_entries,\n` +
+    `       COUNT(*) FILTER (WHERE mirror_channel_id IS NOT NULL AND delivery_state <> 'delivered') AS incomplete_deliveries,\n` +
+    `       COUNT(*) FILTER (WHERE mirror_channel_id IS NULL AND delivery_state = 'none') AS sink_tamper_rows\n` +
     `FROM operational_audit_log\n` +
     `WHERE guild_id = '${quotedGuild}' AND event_kind IN (${kinds})${sinceSql}\n` +
     `GROUP BY event_kind ORDER BY event_kind;`;
+}
+
+export function auditMarkerRowsSql(guildId: string, since: string): string {
+  const quotedGuild = guildId.replaceAll("'", "''");
+  const quotedSince = since.replaceAll("'", "''");
+  const kinds = AUDIT_ACCEPTANCE_KINDS.map((kind) => `'${kind}'`).join(', ');
+  return `SELECT entry_id, mirror_channel_id, mirror_message_id FROM operational_audit_log ` +
+    `WHERE guild_id = '${quotedGuild}' AND event_kind IN (${kinds}) ` +
+    `AND occurred_at >= '${quotedSince}' AND mirror_channel_id IS NOT NULL ORDER BY entry_id;`;
 }

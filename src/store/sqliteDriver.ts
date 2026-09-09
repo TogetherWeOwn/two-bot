@@ -215,6 +215,9 @@ export async function openSqlite(path: string): Promise<Db> {
   // this one index until the rows are reconciled below; all other bootstrap SQL
   // remains unchanged.
   schema = schema.replace(pendingIndex, '');
+  const auditDeliveryIndex = `CREATE INDEX IF NOT EXISTS idx_operational_audit_delivery
+  ON operational_audit_log (delivery_state, created_at);`;
+  schema = schema.replace(auditDeliveryIndex, '');
   raw.exec(schema);
   // Mirrors migrations/0008_members_third_message_at.sql (TWO-95).
   ensureColumn(raw, 'members', 'third_message_at', 'TEXT');
@@ -230,6 +233,7 @@ export async function openSqlite(path: string): Promise<Db> {
   ensureColumn(raw, 'operational_audit_log', 'mirror_message_id', 'TEXT');
   ensureColumn(raw, 'operational_audit_log', 'mirrored_at', 'TEXT');
   ensureLevelingXpCeiling(raw);
+  raw.exec(auditDeliveryIndex);
   // Existing SQLite databases already have the 0010 table, so schema.sql's
   // CREATE TABLE IF NOT EXISTS cannot add the 0011/0012 claim columns.
   ensureColumn(raw, 'moderation_scheduled_unbans', 'claimed_at', 'TEXT');

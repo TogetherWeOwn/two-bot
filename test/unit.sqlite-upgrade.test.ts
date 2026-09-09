@@ -233,3 +233,27 @@ test('opening a pre-durability SQLite database adds claim columns and reconciles
   await db.close();
   await rm(dir, { recursive: true, force: true });
 });
+
+
+test('opening a pre-delivery SQLite audit database adds columns before the delivery index', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'two-bot-audit-upgrade-'));
+  const path = join(dir, 'two.db');
+  const raw = new DatabaseSync(path);
+  raw.exec(`
+    CREATE TABLE operational_audit_log (
+      entry_id TEXT PRIMARY KEY, event_kind TEXT NOT NULL, guild_id TEXT NOT NULL,
+      occurred_at TEXT NOT NULL, actor_id TEXT, target_id TEXT, source_channel_id TEXT,
+      destination_channel_id TEXT, message_id TEXT, action TEXT, metadata_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+  `);
+  raw.close();
+
+  const db = await openSqlite(path);
+  const columns = await db.prepare(`PRAGMA table_info(operational_audit_log)`).all<{ name: string }>();
+  assert.ok(columns.some((column) => column.name === 'delivery_state'));
+  const indexes = await db.prepare(`PRAGMA index_list(operational_audit_log)`).all<{ name: string }>();
+  assert.ok(indexes.some((index) => index.name === 'idx_operational_audit_delivery'));
+  await db.close();
+  await rm(dir, { recursive: true, force: true });
+});

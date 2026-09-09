@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { Db } from '../store/driver.ts';
 import type { AuditChannel, OperationalAuditEvent, OperationalAuditKind } from './events.ts';
 
@@ -64,13 +65,13 @@ export class OperationalAuditStore {
         `UPDATE operational_audit_log
             SET delivery_state = 'delivering',
                 delivery_lease_until = ?,
-                delivery_nonce = COALESCE(delivery_nonce, entry_id)
+                delivery_nonce = COALESCE(delivery_nonce, ?)
           WHERE entry_id = ?
             AND mirror_channel_id IS NOT NULL
             AND (delivery_state = 'pending'
               OR (delivery_state = 'delivering' AND delivery_lease_until < ?))`,
       )
-      .run(leaseUntil, entryId, now.toISOString());
+      .run(leaseUntil, deliveryNonce(entryId), entryId, now.toISOString());
     return result.changes === 1 ? await this.get(entryId) : null;
   }
 
@@ -189,4 +190,9 @@ function parseMetadata(value: unknown): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+/** Discord accepts message nonces up to 25 characters. */
+export function deliveryNonce(entryId: string): string {
+  return `oa_${createHash('sha256').update(entryId).digest('base64url').slice(0, 22)}`;
 }
