@@ -4,6 +4,7 @@ import type {
   GuildConfigRole,
   GuildConfigSnapshot,
 } from '../redesign/guildConfig.ts';
+import type { RestorePlan } from '../redesign/guildConfigRestore.ts';
 
 type JsonObject = Record<string, unknown>;
 type ApiResult<T> = { status: number; body: T | null };
@@ -83,24 +84,30 @@ export class GuildConfigDiscordApi {
     }
   }
 
-  async assertRestorePermissions(snapshot: GuildConfigSnapshot, needs: { roles: number; channels: number; overwrites: number; settings: number; emojis: number }): Promise<void> {
+  async assertRestorePermissions(snapshot: GuildConfigSnapshot, plan: Pick<RestorePlan, 'counts' | 'overwriteRoles'>): Promise<void> {
     const member = await this.request<{ roles?: string[] }>('GET', `/guilds/${this.guildId}/members/${this.applicationId}`);
     if (member.status !== 200 || !member.body) throw new Error(`Could not read Owen's guild member for permission preflight: HTTP ${member.status}.`);
     const heldRoles = snapshot.roles.filter((role) => role.id === this.guildId || (member.body!.roles ?? []).includes(role.id));
     const permissions = heldRoles.reduce((mask, role) => mask | BigInt(role.permissions), 0n);
     const administrator = (permissions & (1n << 3n)) !== 0n;
+    const needsManageRoles = plan.counts.roles > 0 || plan.counts.overwrites > 0;
     const required = [
-      ...(needs.settings ? [{ name: 'Manage Guild', bit: 1n << 5n }] : []),
-      ...(needs.channels || needs.overwrites ? [{ name: 'Manage Channels', bit: 1n << 4n }] : []),
-      ...(needs.roles ? [{ name: 'Manage Roles', bit: 1n << 28n }] : []),
-      ...(needs.emojis ? [{ name: 'Manage Guild Expressions', bit: 1n << 30n }] : []),
+      ...(plan.counts.settings ? [{ name: 'Manage Guild', bit: 1n << 5n }] : []),
+      ...(plan.counts.channels || plan.counts.overwrites ? [{ name: 'Manage Channels', bit: 1n << 4n }] : []),
+      ...(needsManageRoles ? [{ name: 'Manage Roles', bit: 1n << 28n }] : []),
+      ...(plan.counts.emojis ? [{ name: 'Manage Guild Expressions', bit: 1n << 30n }] : []),
     ];
     const missing = administrator ? [] : required.filter((permission) => (permissions & permission.bit) === 0n).map((permission) => permission.name);
     if (missing.length > 0) throw new Error(`Restore permission preflight failed: missing ${missing.join(', ')}.`);
-    if (needs.roles && !administrator && snapshot.guild.owner_id !== this.applicationId) {
+    if (needsManageRoles && !administrator && snapshot.guild.owner_id !== this.applicationId) {
       const botPosition = Math.max(...heldRoles.map((role) => role.position), -1);
-      const targetPosition = Math.max(...snapshot.roles.filter((role) => !role.managed && role.id !== this.guildId).map((role) => role.position), -1);
-      if (botPosition <= targetPosition) throw new Error(`Restore hierarchy preflight failed: Owen role position ${botPosition} is not above target position ${targetPosition}.`);
+      const targets = plan.counts.roles > 0
+        ? snapshot.roles.filter((role) => !role.managed && role.id !== this.guildId)
+        : plan.overwriteRoles;
+      const blocked = targets.filter((role) => botPosition <= role.position);
+      if (blocked.length > 0) {
+        throw new Error(`Restore hierarchy preflight failed: Owen role position ${botPosition} is not above overwrite target ${blocked.map((role) => `${role.name} (${role.position})`).join(', ')}.`);
+      }
     }
   }
 
