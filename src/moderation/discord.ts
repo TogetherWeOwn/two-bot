@@ -22,6 +22,8 @@ export interface ModerationDiscordClient {
   getEveryoneOverwrite(channelId: string, guildId: string): Promise<EveryoneOverwrite | null>;
   /** Write the @everyone overwrite. Both masks are full bitmasks. */
   putEveryoneOverwrite(channelId: string, guildId: string, overwrite: EveryoneOverwrite, reason: string): Promise<void>;
+  /** Remove the overwrite entirely when none existed before lockdown. */
+  deleteEveryoneOverwrite(channelId: string, guildId: string, reason: string): Promise<void>;
 }
 
 export interface ModerationDiscordOptions {
@@ -107,6 +109,16 @@ export class ModerationDiscord implements ModerationDiscordClient {
       { type: EVERYONE_OVERWRITE_TYPE, allow: overwrite.allow, deny: overwrite.deny },
       reason,
       [200, 204],
+    );
+  }
+
+  async deleteEveryoneOverwrite(channelId: string, guildId: string, reason: string): Promise<void> {
+    await this.call(
+      'DELETE',
+      `/channels/${channelId}/permissions/${guildId}`,
+      undefined,
+      reason,
+      [200, 204, 404],
     );
   }
 

@@ -202,6 +202,7 @@ CREATE TABLE IF NOT EXISTS moderation_lockdowns (
   guild_id      TEXT NOT NULL,
   prior_allow   TEXT NOT NULL,
   prior_deny    TEXT NOT NULL,
+  prior_exists  INTEGER NOT NULL DEFAULT 1,
   reason        TEXT NOT NULL,
   locked_at     TEXT NOT NULL
 );

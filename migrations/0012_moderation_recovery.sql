@@ -5,6 +5,9 @@
 ALTER TABLE moderation_scheduled_unbans
   ADD COLUMN IF NOT EXISTS claim_token TEXT;
 
+ALTER TABLE moderation_lockdowns
+  ADD COLUMN IF NOT EXISTS prior_exists BOOLEAN NOT NULL DEFAULT TRUE;
+
 -- 0010 allowed multiple pending rows for one member. Keep the latest expiry as
 -- the active schedule and retire the rest before creating the unique index.
 WITH ranked AS (

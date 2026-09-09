@@ -47,6 +47,16 @@ export class ModerationService {
    */
   async execute(request: ModerationExecution): Promise<ModerationResult> {
     validateRequest(request, this.policy);
+    if (request.action === 'moderation.tempban') {
+      return this.store.serializeMember(request.guildId, request.target!.userId, () => this.executeClaimed(request));
+    }
+    if (request.action === 'moderation.lockdown' || request.action === 'moderation.unlock') {
+      return this.store.serializeChannel(request.channel!.channelId, () => this.executeClaimed(request));
+    }
+    return this.executeClaimed(request);
+  }
+
+  private async executeClaimed(request: ModerationExecution): Promise<ModerationResult> {
     const claim = await this.store.claim(
       request.guildId,
       request.idempotencyKey,
@@ -96,18 +106,24 @@ export class ModerationService {
         break;
       case 'moderation.tempban': {
         const seconds = Number(request.durationSeconds);
-        // Persist the expiry job BEFORE the ban (TOG-1659 High 2). If the
-        // process dies after Discord accepts the ban, the job still fires:
-        // worst case is an unban for a ban the moderator can re-apply, never
-        // a permanent ban the moderator asked to be temporary.
-        await this.store.scheduleUnban(
+        // Stage the expiry BEFORE the ban. It is not active until Discord
+        // accepts the ban; a crash after that point is recovered by activating
+        // staged rows at the next sweep, while a definite rejection can cancel
+        // this exact row without changing an existing tempban.
+        await this.store.stageUnban(
           request.guildId,
           targetId!,
           new Date(this.now() + seconds * 1000).toISOString(),
           `Temporary ban expired: ${request.reason}`,
           request.requestId,
         );
-        await this.discord.ban(request.guildId, targetId!, request.reason);
+        try {
+          await this.discord.ban(request.guildId, targetId!, request.reason);
+        } catch (err) {
+          if (isSafePreMutationFailure(err)) await this.store.cancelStagedUnban(request.requestId);
+          throw err;
+        }
+        await this.store.activateStagedUnban(request.guildId, targetId!, request.requestId);
         result = { outcome: 'temporarily_banned' };
         break;
       }
@@ -184,10 +200,13 @@ export class ModerationService {
       guildId: request.guildId,
       priorAllow: prior.allow,
       priorDeny: prior.deny,
+      priorExists: current !== null,
       reason: request.reason,
     });
-    const denied = setBit(recorded.priorDeny, SEND_MESSAGES_BIT);
-    const allowed = clearBit(recorded.priorAllow, SEND_MESSAGES_BIT);
+    // Preserve unrelated permission edits made while the channel is locked.
+    // The durable record is only for the eventual unlock.
+    const denied = setBit(prior.deny, SEND_MESSAGES_BIT);
+    const allowed = clearBit(prior.allow, SEND_MESSAGES_BIT);
     await this.discord.putEveryoneOverwrite(channelId, request.guildId, { allow: allowed, deny: denied }, request.reason);
     return 'locked_down';
   }
@@ -200,12 +219,16 @@ export class ModerationService {
   private async unlockChannel(channelId: string, request: ModerationExecution): Promise<string> {
     const recorded = await this.store.getLockdown(channelId);
     if (recorded) {
-      await this.discord.putEveryoneOverwrite(
-        channelId,
-        request.guildId,
-        { allow: recorded.priorAllow, deny: recorded.priorDeny },
-        request.reason,
-      );
+      if (recorded.priorExists) {
+        await this.discord.putEveryoneOverwrite(
+          channelId,
+          request.guildId,
+          { allow: recorded.priorAllow, deny: recorded.priorDeny },
+          request.reason,
+        );
+      } else {
+        await this.discord.deleteEveryoneOverwrite(channelId, request.guildId, request.reason);
+      }
       await this.store.clearLockdown(channelId);
       return 'unlocked';
     }
@@ -231,9 +254,13 @@ export class ModerationService {
     let firstError: unknown;
     for (const job of jobs) {
       try {
-        if (!await this.store.ownsUnbanClaim(job.requestId, job.claimToken)) continue;
-        await this.discord.unban(job.guildId, job.userId, job.reason);
-        await this.store.completeUnban(job.requestId, job.claimToken);
+        const acted = await this.store.serializeMember(job.guildId, job.userId, async () => {
+          if (!await this.store.ownsUnbanClaim(job.requestId, job.claimToken)) return false;
+          await this.discord.unban(job.guildId, job.userId, job.reason);
+          await this.store.completeUnban(job.requestId, job.claimToken);
+          return true;
+        });
+        if (!acted) continue;
         await this.store.recordAudit({
           requestId: `${job.requestId}:unban`,
           guildId: job.guildId,

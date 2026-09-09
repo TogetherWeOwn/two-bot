@@ -41,6 +41,7 @@ function fixture(targetOver: Partial<Awaited<ReturnType<ModerationResolver['targ
     async purge(_c, count) { calls.push(`purge:${count}`); return count; },
     async setSlowmode(_c, seconds) { calls.push(`slowmode:${seconds}`); },
     async getEveryoneOverwrite() { return { allow: '0', deny: '0' }; },
+    async deleteEveryoneOverwrite() {},
     async putEveryoneOverwrite(_c, _g, ow) { calls.push(`overwrite:${ow.allow}/${ow.deny}`); },
   };
   const resolver: ModerationResolver = {

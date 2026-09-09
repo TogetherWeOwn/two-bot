@@ -51,6 +51,7 @@ export interface LockdownRecord {
   guildId: string;
   priorAllow: string;
   priorDeny: string;
+  priorExists: boolean;
   reason: string;
 }
 
@@ -58,11 +59,40 @@ export class ModerationStore {
   private db: Db;
   private now: () => number;
   private claimStaleMs: number;
+  private memberQueues = new Map<string, Promise<void>>();
+  private channelQueues = new Map<string, Promise<void>>();
 
   constructor(db: Db, now: () => number = Date.now, claimStaleSeconds = MODERATION_CLAIM_STALE_SECONDS) {
     this.db = db;
     this.now = now;
     this.claimStaleMs = claimStaleSeconds * 1000;
+  }
+
+  async serializeMember<T>(guildId: string, userId: string, fn: () => Promise<T>): Promise<T> {
+    return this.serialize(this.memberQueues, `${guildId}:${userId}`, fn);
+  }
+
+  async serializeChannel<T>(channelId: string, fn: () => Promise<T>): Promise<T> {
+    return this.serialize(this.channelQueues, channelId, fn);
+  }
+
+  private async serialize<T>(
+    queues: Map<string, Promise<void>>,
+    key: string,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    const previous = queues.get(key) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    const tail = previous.catch(() => undefined).then(() => current);
+    queues.set(key, tail);
+    await previous.catch(() => undefined);
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (queues.get(key) === tail) queues.delete(key);
+    }
   }
 
   // --- idempotency ---------------------------------------------------------
@@ -209,22 +239,42 @@ export class ModerationStore {
    * job per (guild, user), so a second tempban of the same user - or an
    * extension - moves this job's expiry instead of forking a second one.
    */
-  async scheduleUnban(guildId: string, userId: string, executeAt: string, reason: string, requestId: string): Promise<void> {
+  async stageUnban(guildId: string, userId: string, executeAt: string, reason: string, requestId: string): Promise<void> {
+    await this.db.prepare(
+      `INSERT INTO moderation_scheduled_unbans
+         (guild_id, user_id, execute_at, reason, request_id, state, created_at)
+       VALUES (?, ?, ?, ?, ?, 'staged', ?)`,
+    ).run(guildId, userId, executeAt, reason, requestId, iso(this.now()));
+  }
+
+  async activateStagedUnban(guildId: string, userId: string, requestId: string): Promise<void> {
     await this.db.transaction(async (tx) => {
-      // Retire every unfinished job for this member. This also revokes a
-      // worker that claimed the old expiry before a moderator extended the
-      // tempban: its claim token can no longer complete the superseded row.
       await tx.prepare(
         `UPDATE moderation_scheduled_unbans
             SET state = 'superseded', completed_at = ?, claim_token = NULL
           WHERE guild_id = ? AND user_id = ? AND state IN ('pending', 'running')`,
       ).run(iso(this.now()), guildId, userId);
-      await tx.prepare(
-        `INSERT INTO moderation_scheduled_unbans
-           (guild_id, user_id, execute_at, reason, request_id, state, created_at)
-         VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
-      ).run(guildId, userId, executeAt, reason, requestId, iso(this.now()));
+      const activated = await tx.prepare(
+        `UPDATE moderation_scheduled_unbans
+            SET state = 'pending'
+          WHERE request_id = ? AND state = 'staged'`,
+      ).run(requestId);
+      if (activated.changes !== 1) throw new Error(`lost staged unban: ${requestId}`);
     });
+  }
+
+  async cancelStagedUnban(requestId: string): Promise<void> {
+    await this.db.prepare(
+      `UPDATE moderation_scheduled_unbans
+          SET state = 'cancelled', completed_at = ?
+        WHERE request_id = ? AND state = 'staged'`,
+    ).run(iso(this.now()), requestId);
+  }
+
+  /** Compatibility helper for tests and explicit scheduling call sites. */
+  async scheduleUnban(guildId: string, userId: string, executeAt: string, reason: string, requestId: string): Promise<void> {
+    await this.stageUnban(guildId, userId, executeAt, reason, requestId);
+    await this.activateStagedUnban(guildId, userId, requestId);
   }
 
   /** A claimed expiry may have been superseded by a newer tempban. */
@@ -246,27 +296,37 @@ export class ModerationStore {
    * process's update lands first owns the row, and the other sees nothing.
    */
   async claimDueUnbans(limit = 25): Promise<Array<ScheduledUnban & { requestId: string; claimToken: string }>> {
-    const t = iso(this.now());
-    const staleBefore = iso(this.now() - this.claimStaleMs);
+    return this.serialize(this.memberQueues, '__scheduled-unban-claim__', async () => {
+      const t = iso(this.now());
+    // A staged row means the Discord ban returned success but the process died
+    // before activation. It is safe to activate: the durable schedule existed
+    // before the mutation. Running rows are never taken over by age; an unban
+    // that timed out may have succeeded and a later ban may now be in force.
+    const staged = await this.db.prepare(
+      `SELECT guild_id, user_id, request_id
+         FROM moderation_scheduled_unbans
+        WHERE state = 'staged'`,
+    ).all<{ guild_id: string; user_id: string; request_id: string }>();
+    for (const row of staged) {
+      await this.activateStagedUnban(row.guild_id, row.user_id, row.request_id);
+    }
+
     const claimed: Array<ScheduledUnban & { requestId: string; claimToken: string }> = [];
     const candidates = await this.db.prepare(
       `SELECT request_id, guild_id, user_id, reason
          FROM moderation_scheduled_unbans
-        WHERE (state = 'pending' AND execute_at <= ?)
-           OR (state = 'running' AND claimed_at < ?)
+        WHERE state = 'pending' AND execute_at <= ?
         ORDER BY execute_at ASC
         LIMIT ?`,
-    ).all<{ request_id: string; guild_id: string; user_id: string; reason: string }>(t, staleBefore, limit);
+    ).all<{ request_id: string; guild_id: string; user_id: string; reason: string }>(t, limit);
 
     for (const row of candidates) {
       const claimToken = randomUUID();
       const won = await this.db.prepare(
         `UPDATE moderation_scheduled_unbans
             SET state = 'running', claimed_at = ?, claim_token = ?
-          WHERE request_id = ?
-            AND ((state = 'pending' AND execute_at <= ?)
-              OR (state = 'running' AND claimed_at < ?))`,
-      ).run(t, claimToken, row.request_id, t, staleBefore);
+          WHERE request_id = ? AND state = 'pending' AND execute_at <= ?`,
+      ).run(t, claimToken, row.request_id, t);
       if (won.changes !== 1) continue;
       claimed.push({
         requestId: row.request_id,
@@ -277,7 +337,8 @@ export class ModerationStore {
       });
     }
 
-    return claimed;
+      return claimed;
+    });
   }
 
   async completeUnban(requestId: string, claimToken: string): Promise<void> {
@@ -309,14 +370,15 @@ export class ModerationStore {
   async recordLockdown(record: LockdownRecord): Promise<LockdownRecord> {
     const row = await this.db.prepare(
       `INSERT INTO moderation_lockdowns
-         (channel_id, guild_id, prior_allow, prior_deny, reason, locked_at)
-       VALUES (?, ?, ?, ?, ?, ?)
+         (channel_id, guild_id, prior_allow, prior_deny, prior_exists, reason, locked_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (channel_id) DO UPDATE
          SET reason = excluded.reason,
              locked_at = excluded.locked_at
-       RETURNING channel_id, guild_id, prior_allow, prior_deny, reason`,
-    ).get<{ channel_id: string; guild_id: string; prior_allow: string; prior_deny: string; reason: string }>(
-      record.channelId, record.guildId, record.priorAllow, record.priorDeny, record.reason, iso(this.now()),
+       RETURNING channel_id, guild_id, prior_allow, prior_deny, prior_exists, reason`,
+    ).get<{ channel_id: string; guild_id: string; prior_allow: string; prior_deny: string; prior_exists: number | boolean; reason: string }>(
+      record.channelId, record.guildId, record.priorAllow, record.priorDeny,
+      record.priorExists ? 1 : 0, record.reason, iso(this.now()),
     );
     if (!row) throw new Error(`could not record lockdown: ${record.channelId}`);
     return mapLockdown(row);
@@ -325,9 +387,9 @@ export class ModerationStore {
   /** Read the stored pre-lockdown overwrite without consuming recovery state. */
   async getLockdown(channelId: string): Promise<LockdownRecord | null> {
     const row = await this.db.prepare(
-      `SELECT channel_id, guild_id, prior_allow, prior_deny, reason
+      `SELECT channel_id, guild_id, prior_allow, prior_deny, prior_exists, reason
          FROM moderation_lockdowns WHERE channel_id = ?`,
-    ).get<{ channel_id: string; guild_id: string; prior_allow: string; prior_deny: string; reason: string }>(channelId);
+    ).get<{ channel_id: string; guild_id: string; prior_allow: string; prior_deny: string; prior_exists: number | boolean; reason: string }>(channelId);
     return row ? mapLockdown(row) : null;
   }
 
@@ -342,6 +404,7 @@ function mapLockdown(row: {
   guild_id: string;
   prior_allow: string;
   prior_deny: string;
+  prior_exists: number | boolean;
   reason: string;
 }): LockdownRecord {
   return {
@@ -349,6 +412,7 @@ function mapLockdown(row: {
     guildId: row.guild_id,
     priorAllow: row.prior_allow,
     priorDeny: row.prior_deny,
+    priorExists: Boolean(row.prior_exists),
     reason: row.reason,
   };
 }
