@@ -90,13 +90,13 @@ describe('presence probe containment', () => {
     assert.equal(intents(true).length, 8, 'automod must reuse the existing MessageContent intent');
     assert.deepEqual(INTENTS, [
       GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildModeration,
       GatewayIntentBits.GuildMembers,
       GatewayIntentBits.GuildMessages,
       GatewayIntentBits.MessageContent,
       GatewayIntentBits.GuildMessageReactions,
       GatewayIntentBits.GuildVoiceStates,
       GatewayIntentBits.GuildInvites,
-      GatewayIntentBits.GuildModeration,
     ]);
     assert.deepEqual(PARTIALS, [Partials.Message, Partials.Reaction, Partials.User]);
   });

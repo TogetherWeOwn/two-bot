@@ -48,6 +48,7 @@ export const DUMP_TABLES = [
   'events',
   'members',
   'invite_snapshots',
+  'operational_audit_log',
   'moderation_warnings',
   'moderation_scheduled_unbans',
   'moderation_audit',
@@ -133,6 +134,7 @@ function orderFor(table: DumpTable, columns: string[]): string {
   if (table === 'events') return 'id';
   if (table === 'members') return 'guild_id, member_id';
   if (table === 'invite_snapshots') return 'guild_id, code';
+  if (table === 'operational_audit_log') return 'entry_id';
   if (table === 'moderation_warnings') return 'created_at, id';
   if (table === 'moderation_scheduled_unbans') return 'execute_at, request_id';
   if (table === 'moderation_audit') return 'created_at, request_id';

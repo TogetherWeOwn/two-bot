@@ -149,6 +149,40 @@ CREATE INDEX IF NOT EXISTS idx_internal_log_time   ON internal_action_log (creat
 CREATE INDEX IF NOT EXISTS idx_internal_log_action ON internal_action_log (action, created_at);
 CREATE INDEX IF NOT EXISTS idx_internal_log_key    ON internal_action_log (key_id, created_at);
 
+-- Metadata-only Discord event audit (migration 0011 on Postgres). Never stores
+-- message bodies, usernames or nicknames; see docs/PRIVACY.md.
+CREATE TABLE IF NOT EXISTS operational_audit_log (
+  entry_id               TEXT PRIMARY KEY,
+  event_kind             TEXT NOT NULL,
+  guild_id               TEXT NOT NULL,
+  occurred_at            TEXT NOT NULL,
+  actor_id                TEXT,
+  target_id               TEXT,
+  source_channel_id       TEXT,
+  destination_channel_id  TEXT,
+  message_id              TEXT,
+  action                  TEXT,
+  metadata_json           TEXT NOT NULL,
+  created_at              TEXT NOT NULL,
+  mirror_channel_id       TEXT,
+  delivery_state          TEXT NOT NULL DEFAULT 'none',
+  delivery_attempts       INTEGER NOT NULL DEFAULT 0,
+  delivery_attempted_at   TEXT,
+  delivery_last_error     TEXT,
+  delivery_lease_until    TEXT,
+  delivery_claim_token    TEXT,
+  delivery_nonce          TEXT,
+  delivery_search_before  TEXT,
+  mirror_message_id       TEXT,
+  mirrored_at             TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_operational_audit_time
+  ON operational_audit_log (guild_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_operational_audit_kind
+  ON operational_audit_log (guild_id, event_kind, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_operational_audit_target
+  ON operational_audit_log (guild_id, target_id, occurred_at);
 CREATE TABLE IF NOT EXISTS moderation_warnings (
   id         TEXT PRIMARY KEY,
   guild_id   TEXT NOT NULL,

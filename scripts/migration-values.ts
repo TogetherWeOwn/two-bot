@@ -10,6 +10,7 @@ export type MigrationTable =
   | 'containment_events'
   | 'containment_incidents'
   | 'join_risk_flags'
+  | 'operational_audit_log'
   | 'tickets'
   | 'ticket_transcripts'
   | 'automod_violations'

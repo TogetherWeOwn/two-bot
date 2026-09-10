@@ -279,14 +279,33 @@ export async function openSqlite(path: string): Promise<Db> {
   ON moderation_scheduled_unbans (guild_id, user_id) WHERE state = 'pending';`;
   const selfRoleLeaseIndex = `CREATE INDEX IF NOT EXISTS idx_self_role_audit_processing_lease
   ON self_role_audit (outcome, processing_expires_at);`;
-  // Old databases may contain duplicates that were legal before 0011, and the
-  // self-role lease column may not exist yet. Defer both indexes until their
-  // prerequisite data/column upgrades finish below.
-  schema = schema.replace(pendingIndex, '').replace(selfRoleLeaseIndex, '');
+  const auditDeliveryIndex = `CREATE INDEX IF NOT EXISTS idx_operational_audit_delivery
+  ON operational_audit_log (delivery_state, created_at);`;
+  // Old databases may contain duplicates that were legal before 0011, while
+  // audit delivery and self-role lease columns may not exist yet. Defer all
+  // three indexes until their prerequisite data/column upgrades finish below.
+  schema = schema
+    .replace(pendingIndex, '')
+    .replace(selfRoleLeaseIndex, '')
+    .replace(auditDeliveryIndex, '');
   raw.exec(schema);
   // Mirrors migrations/0008_members_third_message_at.sql (TWO-95).
   ensureColumn(raw, 'members', 'third_message_at', 'TEXT');
+  // Existing SQLite databases may already have the 0011 operational audit
+  // table, so schema.sql's CREATE TABLE IF NOT EXISTS cannot add delivery state.
+  ensureColumn(raw, 'operational_audit_log', 'mirror_channel_id', 'TEXT');
+  ensureColumn(raw, 'operational_audit_log', 'delivery_state', "TEXT NOT NULL DEFAULT 'none'");
+  ensureColumn(raw, 'operational_audit_log', 'delivery_attempts', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(raw, 'operational_audit_log', 'delivery_attempted_at', 'TEXT');
+  ensureColumn(raw, 'operational_audit_log', 'delivery_last_error', 'TEXT');
+  ensureColumn(raw, 'operational_audit_log', 'delivery_lease_until', 'TEXT');
+  ensureColumn(raw, 'operational_audit_log', 'delivery_claim_token', 'TEXT');
+  ensureColumn(raw, 'operational_audit_log', 'delivery_nonce', 'TEXT');
+  ensureColumn(raw, 'operational_audit_log', 'delivery_search_before', 'TEXT');
+  ensureColumn(raw, 'operational_audit_log', 'mirror_message_id', 'TEXT');
+  ensureColumn(raw, 'operational_audit_log', 'mirrored_at', 'TEXT');
   ensureLevelingXpCeiling(raw);
+  raw.exec(auditDeliveryIndex);
   // Existing SQLite databases already have the 0010 table, so schema.sql's
   // CREATE TABLE IF NOT EXISTS cannot add the 0011/0012 claim columns.
   ensureColumn(raw, 'moderation_scheduled_unbans', 'claimed_at', 'TEXT');
@@ -313,6 +332,9 @@ export async function openSqlite(path: string): Promise<Db> {
     '0002_internal_actions',
     '0008_members_third_message_at',
     '0010_leveling',
+    '0011_operational_audit',
+    '0012_operational_audit_delivery',
+    '0013_operational_audit_delivery_message',
     '0011_leveling_xp_ceiling',
     '0010_moderation',
     '0011_moderation_durability',

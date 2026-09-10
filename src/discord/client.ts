@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Client, GatewayIntentBits, Events, Options, Partials, type Guild } from 'discord.js';
 import { nowIso } from '../core/events.ts';
 import type { FunnelHandlers } from '../core/handlers.ts';
@@ -11,6 +12,8 @@ import type { LevelingService } from '../leveling/service.ts';
 import type { AutomodService } from '../automod/service.ts';
 import { AutomodProcessingError } from '../automod/types.ts';
 import type { JoinRiskScorer } from '../moderation/containment.ts';
+import type { AuditSink } from '../audit/service.ts';
+import { moderationAuditEvent } from '../audit/discordEvents.ts';
 
 /**
  * Intents we ask Discord for, and why. Keep this list minimal - each one is a
@@ -31,13 +34,13 @@ import type { JoinRiskScorer } from '../moderation/containment.ts';
  */
 const BASE_INTENTS = [
   GatewayIntentBits.Guilds,
+  GatewayIntentBits.GuildModeration,
   GatewayIntentBits.GuildMembers,
   GatewayIntentBits.GuildMessages,
   GatewayIntentBits.MessageContent,
   GatewayIntentBits.GuildMessageReactions,
   GatewayIntentBits.GuildVoiceStates,
   GatewayIntentBits.GuildInvites,
-  GatewayIntentBits.GuildModeration,
 ];
 
 export function intents(_automodEnabled = process.env.TWO_AUTOMOD === '1'): GatewayIntentBits[] {
@@ -76,6 +79,8 @@ export interface BotDeps {
   automod?: { service: AutomodService; guildId: string };
   /** Flag-only join risk scoring. It never changes or removes the member. */
   joinRisk?: JoinRiskScorer;
+  /** Metadata-only staff audit. Optional so the funnel remains independently usable. */
+  audit?: AuditSink;
 }
 
 export function createClient(automodEnabled = process.env.TWO_AUTOMOD === '1'): Client {
@@ -90,7 +95,7 @@ export function createClient(automodEnabled = process.env.TWO_AUTOMOD === '1'): 
           // default 200-message-per-channel cache.
           makeCache: Options.cacheWithLimits({ MessageManager: 0 }),
         }
-      : {}),
+      : { partials: [Partials.Message] }),
   });
 }
 
@@ -119,7 +124,17 @@ async function snapshotInvites(guild: Guild, invites: InviteTracker): Promise<st
 
 /** Wire gateway events to the framework-free handlers. */
 export function registerHandlers(client: Client, deps: BotDeps): void {
-  const { handlers, invites, community, raid, expectedJoins, leveling, automod, joinRisk } = deps;
+  const { handlers, invites, community, raid, expectedJoins, leveling, automod, joinRisk, audit } = deps;
+
+  const auditSafely = (event: Parameters<NonNullable<BotDeps['audit']>['record']>[0]) => {
+    if (!audit) return;
+    void audit.record(event).catch(() => {
+      log.error('operational_audit_failed', {
+        entryId: event.entryId,
+        classification: 'audit_record_failed',
+      });
+    });
+  };
 
   client.once(Events.ClientReady, async (c) => {
     log.info('ready', { user: c.user.tag, guilds: c.guilds.cache.size });
@@ -196,11 +211,40 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
   // registered at all when no landing channel is configured, and the funnel
   // number must not depend on whether we happen to be greeting people.
   client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
-    if (!oldMember.pending || newMember.pending) return;
-    await handlers.onGateCleared({
+    if (oldMember.pending && !newMember.pending) {
+      await handlers.onGateCleared({
+        guildId: newMember.guild.id,
+        memberId: newMember.id,
+        isBot: !!newMember.user?.bot,
+      });
+    }
+
+    // A partial old member has no trustworthy role/nickname baseline. Skipping
+    // is safer than reporting every current role as newly granted.
+    if (oldMember.partial) return;
+    const oldRoles = roleIds(oldMember);
+    const newRoles = roleIds(newMember);
+    const addedRoleIds = [...newRoles].filter((id) => !oldRoles.has(id)).sort();
+    const removedRoleIds = [...oldRoles].filter((id) => !newRoles.has(id)).sort();
+    const nicknameChanged = oldMember.nickname !== newMember.nickname;
+    if (!nicknameChanged && addedRoleIds.length === 0 && removedRoleIds.length === 0) return;
+
+    const occurredAt = nowIso();
+    const changeDigest = createHash('sha256')
+      .update(JSON.stringify({ nicknameChanged, addedRoleIds, removedRoleIds }))
+      .digest('base64url')
+      .slice(0, 16);
+    auditSafely({
+      // Discord supplies no id for this gateway event. The occurrence timestamp
+      // preserves a later identical transition; the bounded digest distinguishes
+      // simultaneous deltas without embedding an unbounded role list in the key.
+      entryId: `member-update:${newMember.guild.id}:${newMember.id}:${occurredAt}:${changeDigest}`,
+      kind: 'member_update',
+      channel: 'audit',
       guildId: newMember.guild.id,
-      memberId: newMember.id,
-      isBot: !!newMember.user?.bot,
+      occurredAt,
+      targetId: newMember.id,
+      metadata: { nicknameChanged, addedRoleIds, removedRoleIds },
     });
   });
 
@@ -293,20 +337,51 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     client.emit('automationMessageAccepted' as never, msg as never);
   });
 
-  client.on(Events.MessageUpdate, async (_old, partial) => {
-    if (!partial.guildId) return;
+  client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
+    if (!newMessage.guildId) return;
+    // Audit before fetching a partial so metadata logging does not depend on the
+    // MessageContent read that automod needs for edited messages.
+    const occurredAt = newMessage.editedAt?.toISOString() ?? nowIso();
+    auditSafely({
+      entryId: `message-edit:${newMessage.guildId}:${newMessage.id}:${newMessage.editedTimestamp ?? occurredAt}`,
+      kind: 'message_edit',
+      channel: 'audit',
+      guildId: newMessage.guildId,
+      occurredAt,
+      actorId: newMessage.author?.id ?? oldMessage?.author?.id ?? null,
+      targetId: newMessage.author?.id ?? oldMessage?.author?.id ?? null,
+      sourceChannelId: newMessage.channelId,
+      messageId: newMessage.id,
+      metadata: { cachedBefore: oldMessage ? !oldMessage.partial : false },
+    });
     try {
-      const msg = partial.partial ? await partial.fetch() : partial;
+      const msg = newMessage.partial ? await newMessage.fetch() : newMessage;
       if (!msg.author) return;
       await inspectAutomod(msg, Date.now());
     } catch (err) {
       log.error('automod_edit_fetch_failed', {
-        guildId: partial.guildId,
-        channelId: partial.channelId,
-        messageId: partial.id,
+        guildId: newMessage.guildId,
+        channelId: newMessage.channelId,
+        messageId: newMessage.id,
         err: String(err),
       });
     }
+  });
+
+  client.on(Events.MessageDelete, (message) => {
+    if (!message.guildId) return;
+    auditSafely({
+      entryId: `message-delete:${message.guildId}:${message.id}`,
+      kind: 'message_delete',
+      channel: 'audit',
+      guildId: message.guildId,
+      occurredAt: nowIso(),
+      actorId: null,
+      targetId: message.author?.id ?? null,
+      sourceChannelId: message.channelId,
+      messageId: message.id,
+      metadata: { cached: !message.partial },
+    });
   });
 
   client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
@@ -322,6 +397,22 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     // start are the same instant, and taking nowIso() twice would make the
     // pair look like a gap.
     const at = nowIso();
+    const voiceKind = oldState.channelId
+      ? newState.channelId
+        ? 'voice_move'
+        : 'voice_leave'
+      : 'voice_join';
+    auditSafely({
+      entryId: `${voiceKind}:${guild.id}:${memberId}:${oldState.channelId ?? 'none'}:${newState.channelId ?? 'none'}:${at}`,
+      kind: voiceKind,
+      channel: 'voice',
+      guildId: guild.id,
+      occurredAt: at,
+      targetId: memberId,
+      sourceChannelId: oldState.channelId,
+      destinationChannelId: newState.channelId,
+      metadata: { isBot },
+    });
 
     // End first, so a move reads as end(A) then start(B) in occurred order.
     if (oldState.channelId) {
@@ -363,5 +454,15 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     if (invite.guild) await snapshotInvites(invite.guild as Guild, invites);
   });
 
+  client.on(Events.GuildAuditLogEntryCreate, (entry, guild) => {
+    const event = moderationAuditEvent(entry, guild.id);
+    if (event) auditSafely(event);
+  });
+
   client.on(Events.Error, (err) => log.error('client_error', { err: String(err) }));
+}
+
+function roleIds(member: { guild: { id: string }; roles?: { cache?: { keys(): IterableIterator<string> } } }): Set<string> {
+  const keys = member.roles?.cache?.keys();
+  return new Set(keys ? [...keys].filter((id) => id !== member.guild.id) : []);
 }
