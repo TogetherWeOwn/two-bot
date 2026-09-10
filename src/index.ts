@@ -64,6 +64,12 @@ import { AutomationService } from './automations/service.ts';
 import { registerAutomationGateway } from './automations/gateway.ts';
 import { startScheduler } from './automations/scheduler.ts';
 import { loadAutomationConfig } from './automations/config.ts';
+import { CommunityClassifier, loadCommunityClassifierConfig } from './analytics/communityClassifier.ts';
+import { CommunityFactStore } from './analytics/communityFacts.ts';
+import {
+  startCommunityScorecardJob,
+  type CommunityScorecardJobHandle,
+} from './jobs/communityScorecard.ts';
 
 const cfg = loadConfig();
 const automationCfg = loadAutomationConfig();
@@ -107,7 +113,9 @@ const invites = new InviteTracker(db);
 // note, the gateway join handler consumes it. docs/INTERNAL_ACTIONS.md §7.
 const expectedJoins = new ExpectedJoins();
 const leveling = new LevelingService(db);
-const handlers = new FunnelHandlers(store, leveling);
+const communityClassifier = new CommunityClassifier(loadCommunityClassifierConfig());
+const communityFacts = cfg.communityScorecard ? new CommunityFactStore(db, communityClassifier) : null;
+const handlers = new FunnelHandlers(store, leveling, communityFacts);
 
 const client = createClient();
 const moderationCfg = loadModerationConfig();
@@ -186,6 +194,12 @@ const joinRisk = containmentCfg.enabled
 registerHandlers(client, {
   handlers,
   invites,
+  community: communityFacts
+    ? {
+        humanChannelIds: new Set(cfg.communityHumanChannelIds),
+        welcomeChannelIds: new Set(cfg.communityWelcomeChannelIds),
+      }
+    : undefined,
   raid,
   expectedJoins,
   leveling,
@@ -456,6 +470,21 @@ if (!cfg.guildId) {
   });
 }
 
+let communityScorecard: CommunityScorecardJobHandle | null = null;
+if (!cfg.communityScorecard) {
+  log.info('community_scorecard_disabled', { reason: 'TWO_COMMUNITY_SCORECARD is not 1' });
+} else if (!cfg.guildId) {
+  log.info('community_scorecard_disabled', { reason: 'DISCORD_GUILD_ID is unset' });
+} else {
+  communityScorecard = startCommunityScorecardJob({
+    db,
+    guildId: cfg.guildId,
+    classifierVersion: communityClassifier.version,
+    recommendationsEnabled: cfg.communityRecommendations,
+    correctionCycles: cfg.communityCorrectionCycles,
+  });
+}
+
 const moderationSweep = moderationService
   ? setInterval(() => {
       void moderationService.runDueUnbans().catch((err: unknown) => {
@@ -513,6 +542,7 @@ async function shutdown(signal: string) {
   presenceProbe?.stop();
   communitySnapshots?.stop();
   scheduledEvents?.stop();
+  communityScorecard?.stop();
   // Health goes down first: while the rest is closing, the bot must already be
   // reporting itself out of service so the platform stops routing to it.
   if (health) await health.close();

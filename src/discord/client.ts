@@ -52,6 +52,10 @@ export function intentsFor(_env: NodeJS.ProcessEnv = process.env): GatewayIntent
 export interface BotDeps {
   handlers: FunnelHandlers;
   invites: InviteTracker;
+  community?: {
+    humanChannelIds: ReadonlySet<string>;
+    welcomeChannelIds: ReadonlySet<string>;
+  };
   /**
    * Join-burst detection (TWO-56). Optional: leave it out and joins are
    * recorded exactly as before, which is what every existing test does.
@@ -109,7 +113,7 @@ async function snapshotInvites(guild: Guild, invites: InviteTracker): Promise<st
 
 /** Wire gateway events to the framework-free handlers. */
 export function registerHandlers(client: Client, deps: BotDeps): void {
-  const { handlers, invites, raid, expectedJoins, leveling, automod, joinRisk } = deps;
+  const { handlers, invites, community, raid, expectedJoins, leveling, automod, joinRisk } = deps;
 
   client.once(Events.ClientReady, async (c) => {
     log.info('ready', { user: c.user.tag, guilds: c.guilds.cache.size });
@@ -138,6 +142,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
       source,
       inviterId,
       occurredAt: member.joinedAt?.toISOString(),
+      sourceEventId: `${member.guild.id}:${member.id}:${member.joinedAt?.toISOString() ?? 'observed'}`,
     });
 
     // Someone who arrives with the gate already cleared - they accepted the
@@ -240,7 +245,14 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
       guildId: msg.guildId,
       memberId: msg.author.id,
       isBot: msg.author.bot,
+      messageId: msg.id,
+      webhookId: msg.webhookId,
       channelId: msg.channelId,
+      channelClass: community?.welcomeChannelIds.has(msg.channelId)
+        ? 'welcome'
+        : community?.humanChannelIds.has(msg.channelId)
+          ? 'human'
+          : 'other',
       occurredAt: new Date(msg.createdTimestamp).toISOString(),
       onLevelUp:
         leveling && msg.member

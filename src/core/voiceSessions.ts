@@ -21,6 +21,8 @@ export interface OpenSession {
   channelId: string;
   /** ISO-8601 UTC. */
   startedAt: string;
+  /** Durable scorecard key for this exact Discord voice interval. */
+  sessionKey?: string;
 }
 
 function key(guildId: string, memberId: string): string {
@@ -37,8 +39,8 @@ export class VoiceSessionTracker {
   }
 
   /** Record that a member is now in voice. Replaces any session already open. */
-  start(guildId: string, memberId: string, channelId: string, startedAt: string): void {
-    this.open.set(key(guildId, memberId), { channelId, startedAt });
+  start(guildId: string, memberId: string, channelId: string, startedAt: string, sessionKey?: string): void {
+    this.open.set(key(guildId, memberId), { channelId, startedAt, sessionKey });
   }
 
   /**
