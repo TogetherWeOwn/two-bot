@@ -45,20 +45,6 @@ export function rankText(profile: LevelProfile, displayName: string): string {
   ].join('\n');
 }
 
-async function syncCommands(client: Client, guildId?: string | null): Promise<void> {
-  if (!client.application) return;
-  if (guildId) {
-    const guild = client.guilds.cache.get(guildId);
-    if (!guild) {
-      log.error('leveling_command_sync_failed', { guildId, reason: 'guild_not_cached' });
-      return;
-    }
-    await guild.commands.set([...LEVELING_COMMANDS]);
-    return;
-  }
-  await client.application.commands.set([...LEVELING_COMMANDS]);
-}
-
 export async function applyLevelRoles(member: GuildMember, service: LevelingService, level: number): Promise<void> {
   const rewards = await service.roleRewards(member.guild.id);
   if (!rewards.length) return;
@@ -78,15 +64,6 @@ export async function applyLevelRoles(member: GuildMember, service: LevelingServ
 }
 
 export function registerLeveling(client: Client, deps: LevelingDiscordDeps): void {
-  client.once(Events.ClientReady, async () => {
-    try {
-      await syncCommands(client, deps.guildId);
-      log.info('leveling_commands_ready', { guildId: deps.guildId ?? 'global' });
-    } catch (err) {
-      log.error('leveling_command_sync_failed', { err: String(err) });
-    }
-  });
-
   client.on(Events.InteractionCreate, async (interaction) => {
     if (!interaction.isChatInputCommand() || !interaction.guildId) return;
     if (interaction.commandName === 'rank') await handleRank(interaction, deps.service);

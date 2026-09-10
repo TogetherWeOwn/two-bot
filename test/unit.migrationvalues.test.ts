@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { migrationValuesMatch } from '../scripts/migration-values.ts';
+import { migrationValue, migrationValuesMatch } from '../scripts/migration-values.ts';
 
 test('SQLite boolean columns accept only canonical integer booleans', () => {
   const columns = [
@@ -21,6 +21,20 @@ test('SQLite boolean columns accept only canonical integer booleans', () => {
         `accepted non-canonical SQLite value ${String(invalid)} for ${table}.${column}`,
       );
     }
+  }
+});
+
+test('SQLite automation booleans are converted before binding to Postgres', () => {
+  const columns = [
+    ['automation_commands', 'enabled'],
+    ['scheduled_messages', 'enabled'],
+    ['sticky_messages', 'enabled'],
+  ] as const;
+
+  for (const [table, column] of columns) {
+    assert.equal(migrationValue(table, column, 0), false);
+    assert.equal(migrationValue(table, column, 1), true);
+    assert.equal(migrationValue(table, column, null), null);
   }
 });
 
