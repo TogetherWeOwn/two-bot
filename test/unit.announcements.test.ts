@@ -4,7 +4,7 @@ import { AnnouncementsService, normalizeFeedSource, parseRoleSpec, type FeedItem
 import { loadAnnouncementsConfig } from '../src/announcements/config.ts';
 import { AnnouncementsStore, type FeedRelayRow } from '../src/announcements/store.ts';
 import { announcementCommandData, parseXmlFeed, XmlFeedReader } from '../src/announcements/discord.ts';
-import { assertPublicHostname, isPublicAddress, readLimitedText } from '../src/announcements/feedHttp.ts';
+import { assertPublicHostname, createPublicLookup, isPublicAddress, readLimitedText } from '../src/announcements/feedHttp.ts';
 import { openTestDb } from './helpers/testDb.ts';
 
 const GUILD = '1545644954272137297';
@@ -219,16 +219,48 @@ test('feed reader stops streamed bodies above the byte ceiling', async () => {
 });
 
 test('feed destinations reject private, link-local, metadata, and ULA addresses', async () => {
-  for (const address of ['10.0.0.1', '127.0.0.1', '169.254.169.254', '192.168.1.1', '::1', '::ffff:10.0.0.1', '64:ff9b:1::a00:1', '2002:0a00:0001::', 'fd00::1', 'fe80::1']) {
+  for (const address of [
+    '10.0.0.1', '127.0.0.1', '169.254.169.254', '192.168.1.1', '::1', '::ffff:10.0.0.1',
+    '64:ff9b:1::a00:1', '100:0:0:1::', '2002:0a00:0001::', '3fff::1', '5f00::1', 'fd00::1', 'fe80::1',
+  ]) {
     assert.equal(isPublicAddress(address), false, address);
   }
-  assert.equal(isPublicAddress('93.184.216.34'), true);
-  assert.equal(isPublicAddress('2606:2800:220:1:248:1893:25c8:1946'), true);
+  for (const address of [
+    '93.184.216.34', '100:0:0:2::', '3fef:ffff:ffff:ffff:ffff:ffff:ffff:ffff', '4000::',
+    '5eff:ffff:ffff:ffff:ffff:ffff:ffff:ffff', '6000::', '2606:2800:220:1:248:1893:25c8:1946',
+  ]) {
+    assert.equal(isPublicAddress(address), true, address);
+  }
   const privateLookup = ((_hostname: string, options: unknown, callback: (...args: unknown[]) => void) => {
     if ((options as { all?: boolean }).all) callback(null, [{ address: '93.184.216.34', family: 4 }, { address: '10.0.0.1', family: 4 }]);
     else callback(null, '10.0.0.1', 4);
   }) as typeof import('node:dns').lookup;
   await assert.rejects(assertPublicHostname('metadata.internal', privateLookup), /public IP/);
+});
+
+test('feed connection lookup returns the all-address callback shape requested by Undici', async () => {
+  const lookup = ((_hostname: string, options: unknown, callback: (...args: unknown[]) => void) => {
+    assert.equal((options as { all?: boolean }).all, true);
+    callback(null, [{ address: '93.184.216.34', family: 4 }]);
+  }) as typeof import('node:dns').lookup;
+  const guardedLookup = createPublicLookup(lookup);
+  const addresses = await new Promise<unknown[]>((resolve, reject) => {
+    guardedLookup('example.com', { all: true }, (error, found) => {
+      if (error) reject(error);
+      else resolve(found as unknown[]);
+    });
+  });
+  assert.deepEqual(addresses, [{ address: '93.184.216.34', family: 4 }]);
+});
+
+test('feed connection lookup rechecks every resolved address', async () => {
+  const lookup = ((_hostname: string, _options: unknown, callback: (...args: unknown[]) => void) => {
+    callback(null, [{ address: '93.184.216.34', family: 4 }, { address: '169.254.169.254', family: 4 }]);
+  }) as typeof import('node:dns').lookup;
+  const guardedLookup = createPublicLookup(lookup);
+  await assert.rejects(new Promise((resolve, reject) => {
+    guardedLookup('example.com', { all: true }, error => error ? reject(error) : resolve(undefined));
+  }), /non-public IP/);
 });
 
 test('feed sources require HTTPS and normalize YouTube channel ids', () => {

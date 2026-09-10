@@ -1,4 +1,4 @@
-import { lookup as dnsLookup } from 'node:dns';
+import { lookup as dnsLookup, type LookupOptions } from 'node:dns';
 import { BlockList, isIP } from 'node:net';
 import { Agent, buildConnector, fetch as undiciFetch, type Dispatcher } from 'undici';
 
@@ -13,7 +13,8 @@ for (const [network, prefix] of [
 ] as const) blockedIpv4.addSubnet(network, prefix, 'ipv4');
 for (const [network, prefix] of [
   ['::', 128], ['::1', 128], ['::ffff:0:0', 96], ['64:ff9b:1::', 48], ['100::', 64],
-  ['2001::', 23], ['2001:db8::', 32], ['2002::', 16], ['fc00::', 7], ['fe80::', 10], ['ff00::', 8],
+  ['100:0:0:1::', 64], ['2001::', 23], ['2001:db8::', 32], ['2002::', 16], ['3fff::', 20],
+  ['5f00::', 16], ['fc00::', 7], ['fe80::', 10], ['ff00::', 8],
 ] as const) blockedIpv6.addSubnet(network, prefix, 'ipv6');
 
 export type FeedLookup = typeof dnsLookup;
@@ -43,6 +44,23 @@ export async function assertPublicHostname(hostname: string, lookup: FeedLookup 
   }
 }
 
+export function createPublicLookup(lookup: FeedLookup = dnsLookup): FeedLookup {
+  return ((hostname: string, options: LookupOptions, callback: (...args: unknown[]) => void) => {
+    lookup(hostname, { ...options, all: true, verbatim: true }, (error, addresses) => {
+      if (error) return callback(error);
+      const publicAddresses = addresses.filter(({ address }) => isPublicAddress(address));
+      if (publicAddresses.length !== addresses.length || publicAddresses.length === 0) {
+        return callback(new Error('Feed source resolved to a non-public IP address.'));
+      }
+      if (options.all) callback(null, publicAddresses);
+      else {
+        const selected = publicAddresses[0];
+        callback(null, selected?.address ?? '', selected?.family ?? 0);
+      }
+    });
+  }) as FeedLookup;
+}
+
 export interface FeedResponse {
   ok: boolean;
   status: number;
@@ -60,19 +78,7 @@ export class PublicFeedFetcher {
   async read(source: string, signal: AbortSignal): Promise<FeedResponse> {
     const url = new URL(source);
     await assertPublicHostname(url.hostname, this.lookup);
-    const connector = buildConnector({
-      lookup: (hostname, options, callback) => {
-        this.lookup(hostname, { ...options, all: true, verbatim: true }, (error, addresses) => {
-          if (error) return callback(error, null as never);
-          const publicAddresses = addresses.filter(({ address }) => isPublicAddress(address));
-          if (publicAddresses.length !== addresses.length || publicAddresses.length === 0) {
-            return callback(new Error('Feed source resolved to a non-public IP address.'), null as never);
-          }
-          const selected = publicAddresses[0];
-          callback(null, selected?.address ?? '', selected?.family ?? 0);
-        });
-      },
-    });
+    const connector = buildConnector({ lookup: createPublicLookup(this.lookup) });
     const dispatcher: Dispatcher = new Agent({ connect: connector, maxResponseSize: MAX_FEED_BYTES });
     try {
       const response = await undiciFetch(url, {
