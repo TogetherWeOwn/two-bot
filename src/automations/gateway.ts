@@ -50,7 +50,6 @@ export function registerAutomationGateway(client: Client, opts: GatewayOptions):
         guildId,
         msg.channelId,
         msg.author?.id ?? '',
-        msg.createdTimestamp ?? Date.now(),
       );
       if (stickyOutcome === 'reposted') log.info('sticky_reposted', { guildId, channelId: msg.channelId });
     } catch (err) {

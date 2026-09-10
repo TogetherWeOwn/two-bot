@@ -20,6 +20,7 @@ import {
 import type { AutomationService } from './service.ts';
 import { renderTemplate } from './template.ts';
 import { log } from '../core/log.ts';
+import { BUILTIN_COMMAND_NAMES } from '../discord/commandNames.ts';
 
 const API = 'https://discord.com/api/v10';
 
@@ -93,13 +94,14 @@ export class AutomationDiscord {
     }
   }
 
-  async postMessage(channelId: string, content: string): Promise<string> {
+  async postMessage(channelId: string, content: string, nonce?: string): Promise<string> {
     if (content.length > MAX_MESSAGE_CHARS) {
       throw new Error(`Message is ${content.length} characters; Discord's ceiling is ${MAX_MESSAGE_CHARS}.`);
     }
     const { res, json } = await this.call('POST', `/channels/${channelId}/messages`, {
       content,
       allowed_mentions: { parse: [] },
+      ...(nonce ? { nonce, enforce_nonce: true } : {}),
     });
     if (!res.ok) {
       const retryAfterHeader = res.headers.get('retry-after');
@@ -121,10 +123,22 @@ export class AutomationDiscord {
   }
 
   async deleteMessage(channelId: string, messageId: string): Promise<void> {
-    const { res } = await this.call('DELETE', `/channels/${channelId}/messages/${messageId}`);
+    const { res, json } = await this.call('DELETE', `/channels/${channelId}/messages/${messageId}`);
     // 404: already gone. Un-deleting is impossible, so it is success here.
     if (!res.ok && res.status !== 404) {
-      throw new Error(`Discord rejected the delete: HTTP ${res.status}`);
+      const retryAfterHeader = res.headers.get('retry-after');
+      const retryAfterSeconds = retryAfterHeader === null ? NaN : Number(retryAfterHeader);
+      const jsonRetryAfterValue = (json as { retry_after?: unknown } | null)?.retry_after;
+      const jsonRetryAfter = jsonRetryAfterValue === undefined ? NaN : Number(jsonRetryAfterValue);
+      const retryAfterMs = Number.isFinite(retryAfterSeconds)
+        ? Math.ceil(retryAfterSeconds * 1000)
+        : Number.isFinite(jsonRetryAfter)
+          ? Math.ceil(jsonRetryAfter * 1000)
+          : undefined;
+      throw new DiscordPostError(`Discord rejected the delete: HTTP ${res.status}`, {
+        status: res.status,
+        retryAfterMs,
+      });
     }
   }
 }
@@ -251,6 +265,7 @@ export function registerAutomationCommands(
       'sticky', 'sticky-remove',
     ]);
     if (!automationNames.has(name)) {
+      if (BUILTIN_COMMAND_NAMES.has(name)) return;
       try {
         const custom = await options.store.getCommand(options.guildId, name);
         if (!custom?.enabled) return;

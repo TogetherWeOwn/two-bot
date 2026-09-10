@@ -25,6 +25,7 @@ import {
 import { AutomationService } from '../src/automations/service.ts';
 import {
   AutomationDiscord,
+  DiscordPostError,
   registerAutomationCommands,
 } from '../src/automations/discord.ts';
 import { registerAutomationGateway } from '../src/automations/gateway.ts';
@@ -339,7 +340,16 @@ try {
   }
   for (const messageId of createdMessageIds) {
     try {
-      await discord.deleteMessage(CHANNEL, messageId);
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await discord.deleteMessage(CHANNEL, messageId);
+          break;
+        } catch (error) {
+          const retryAfterMs = error instanceof DiscordPostError ? error.retryAfterMs : null;
+          if (attempt >= 2 || retryAfterMs === null) throw error;
+          await new Promise((resolve) => setTimeout(resolve, retryAfterMs));
+        }
+      }
     } catch (error) {
       recordCleanupFailure(`message.${messageId}`, error);
     }
