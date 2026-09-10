@@ -138,8 +138,10 @@ describe('presence probe containment', () => {
       join('test', 'unit.presenceprobe.test.ts'),
       join('test', 'helpers', 'testDb.ts'),
       // The role verifier names every bot-owned table so a specific denial is
-      // proven in addition to the relation census. It has no rendering path.
+      // proven in addition to the relation census. Its inventory test parses
+      // migrations to catch named-check drift; neither file has a rendering path.
       join('src', 'store', 'webRoleCheck.ts'),
+      join('test', 'unit.webroletables.test.ts'),
     ]);
     // The BARE identifier only. `\b` on both sides deliberately does not match
     // `presence_probe_enabled` (a log event name) or `0004_presence_probe.sql`

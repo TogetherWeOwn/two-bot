@@ -69,6 +69,11 @@ export const BOT_TABLES = [
   'moderation_idempotency',
   'automod_violations',
   'automod_processed_messages',
+  // 0015–0017 — private automation definitions, delivery state and audit.
+  'automation_commands',
+  'scheduled_messages',
+  'sticky_messages',
+  'automation_audit_log',
   // 0015 — destructive-action evidence and private member risk flags.
   'containment_events',
   'containment_incidents',
@@ -85,6 +90,11 @@ export const BOT_TABLES = [
   // 0018+ — private self-role mutation and recovery evidence.
   'self_role_audit',
   'self_role_panel_claims',
+  // 0018 — private community classification inputs, heartbeat state and alerts.
+  'community_facts',
+  'community_stream_heartbeats',
+  'community_scorecard_runs',
+  'community_scorecard_alerts',
   // 0003 — the tables behind this contract. The website reads the views over
   // them, never these.
   'web_contract_meta',

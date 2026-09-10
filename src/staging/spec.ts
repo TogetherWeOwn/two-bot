@@ -269,11 +269,11 @@ export function stagingGuildId(): string {
         'to the new server id. It is not a secret. See docs/STAGING.md.',
     );
   }
-  if (id === LIVE_GUILD_ID) {
+  if (id !== TWO_STAGING_GUILD_ID) {
     throw new Error(
-      `DISCORD_STAGING_GUILD_ID is set to the LIVE TWO server (${LIVE_GUILD_ID}). ` +
-        'Refusing to continue.',
+      `DISCORD_STAGING_GUILD_ID must be the TWO Staging guild (${TWO_STAGING_GUILD_ID}); ` +
+        `got ${id}${id === LIVE_GUILD_ID ? ' (the LIVE TWO server)' : ''}. Refusing to continue.`,
     );
   }
-  return id;
+  return TWO_STAGING_GUILD_ID;
 }

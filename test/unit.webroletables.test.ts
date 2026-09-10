@@ -1,19 +1,25 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { BOT_TABLES } from '../src/store/webRoleCheck.ts';
 
-test('website-role named denial inventory keeps every private table', () => {
-  assert.deepEqual(BOT_TABLES, [
-    'events', 'members', 'invite_snapshots', 'schema_migrations',
-    'internal_nonces', 'internal_idempotency', 'internal_action_log', 'internal_discord_events',
-    'moderation_warnings', 'moderation_scheduled_unbans', 'moderation_audit',
-    'moderation_lockdowns', 'moderation_idempotency', 'automod_violations',
-    'automod_processed_messages', 'containment_events', 'containment_incidents',
-    'join_risk_flags', 'tickets', 'ticket_transcripts', 'member_levels',
-    'xp_cooldowns', 'xp_awards', 'level_role_rewards', 'level_import_runs',
-    'self_role_audit', 'self_role_panel_claims', 'web_contract_meta',
-    'guild_counters', 'rank_ladder', 'rank_snapshots', 'member_ranks',
-    'scheduled_events', 'presence_probe', 'counter_snapshots',
-    'member_exclusions', 'invite_campaigns',
-  ]);
+const MIGRATIONS = join(import.meta.dirname, '..', 'migrations');
+
+function migrationTables(): string[] {
+  const tables = new Set<string>();
+  for (const name of readdirSync(MIGRATIONS).filter((entry) => entry.endsWith('.sql')).sort()) {
+    const sql = readFileSync(join(MIGRATIONS, name), 'utf8');
+    for (const match of sql.matchAll(/\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:"[^"]+"\.)?"?([A-Za-z_][A-Za-z0-9_]*)"?/gi)) {
+      tables.add(match[1]);
+    }
+  }
+  // The migration runner owns this bookkeeping table rather than a numbered
+  // SQL file, but the website role must still receive a named denial check.
+  tables.add('schema_migrations');
+  return [...tables].sort();
+}
+
+test('website-role named denial inventory matches every migration-created table', () => {
+  assert.deepEqual([...BOT_TABLES].sort(), migrationTables());
 });

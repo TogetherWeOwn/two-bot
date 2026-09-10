@@ -15,6 +15,13 @@ function env(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return { ...process.env, TWO_SELF_ROLE_PANELS: panels, DISCORD_STAGING_GUILD_ID: TWO_STAGING_GUILD_ID, DISCORD_STAGING_BOT_TOKEN: tokenFor(STAGING_BOT_APPLICATION_ID), ...extra };
 }
 
+test('self-role apply rejects an arbitrary non-live guild before network', async () => {
+  await assert.rejects(
+    run(process.execPath, ['scripts/self-role-panel.ts', '--panel', 'colors', '--apply'], { env: env({ DISCORD_STAGING_GUILD_ID: '1555555555555555555' }) }),
+    (err: unknown) => String((err as { stderr?: string }).stderr).includes('must be the TWO Staging guild'),
+  );
+});
+
 test('self-role apply rejects unknown token identity before network', async () => {
   await assert.rejects(
     run(process.execPath, ['scripts/self-role-panel.ts', '--panel', 'colors', '--apply'], { env: env({ DISCORD_STAGING_BOT_TOKEN: 'garbage' }) }),

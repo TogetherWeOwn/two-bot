@@ -60,6 +60,7 @@ import { GuildConfigDiscordApi } from './discord/guildConfigApi.ts';
 import type { GuildConfigSnapshot } from './redesign/guildConfig.ts';
 import { readFileSync } from 'node:fs';
 import { STAGING_BOT_APPLICATION_ID, TWO_STAGING_GUILD_ID } from './staging/spec.ts';
+import { assertSelfRoleStagingBoundary } from './selfRoles/stagingFence.ts';
 import { CommandRegistry } from './discord/commandRegistry.ts';
 import { AutomationStore } from './automations/store.ts';
 import { AutomationDiscord, registerAutomationCommands } from './automations/discord.ts';
@@ -386,6 +387,7 @@ if (selfRolePanels.length) {
   if (!cfg.guildId) {
     throw new Error('TWO_SELF_ROLE_PANELS requires DISCORD_GUILD_ID - every panel belongs to one guild.');
   }
+  assertSelfRoleStagingBoundary(cfg.guildId, cfg.discordToken);
   const selfRoleRest = new DiscordRest({
     token: cfg.discordToken,
     base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
