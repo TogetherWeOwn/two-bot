@@ -240,7 +240,28 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
 
   client.on(Events.MessageCreate, async (msg) => {
     if (!msg.guildId) return; // ignore DMs
-    if (await inspectAutomod(msg, msg.createdTimestamp)) return;
+    const occurredAt = new Date(msg.createdTimestamp).toISOString();
+    const channelClass = community?.welcomeChannelIds.has(msg.channelId)
+      ? 'welcome'
+      : community?.humanChannelIds.has(msg.channelId)
+        ? 'human'
+        : 'other';
+    if (await inspectAutomod(msg, msg.createdTimestamp)) {
+      // Automod-rejected messages still belong in raw ingestion and exact
+      // reconciliation, but they must not award XP or advance funnel activity.
+      await handlers.onMessage({
+        guildId: msg.guildId,
+        memberId: msg.author.id,
+        isBot: msg.author.bot,
+        messageId: msg.id,
+        webhookId: msg.webhookId,
+        channelId: msg.channelId,
+        channelClass,
+        captureOnly: true,
+        occurredAt,
+      });
+      return;
+    }
     await handlers.onMessage({
       guildId: msg.guildId,
       memberId: msg.author.id,
@@ -248,12 +269,8 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
       messageId: msg.id,
       webhookId: msg.webhookId,
       channelId: msg.channelId,
-      channelClass: community?.welcomeChannelIds.has(msg.channelId)
-        ? 'welcome'
-        : community?.humanChannelIds.has(msg.channelId)
-          ? 'human'
-          : 'other',
-      occurredAt: new Date(msg.createdTimestamp).toISOString(),
+      channelClass,
+      occurredAt,
       onLevelUp:
         leveling && msg.member
           ? (level) => applyLevelRoles(msg.member!, leveling, level)

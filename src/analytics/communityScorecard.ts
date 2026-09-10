@@ -445,13 +445,21 @@ export async function buildCommunityScorecard(
   const reply = firstHumanReply(facts, config.weekEnd);
   const humans = evidenceHumans(facts, reply);
   const evidenceState = humans.size < 5 ? 'insufficient' : 'sufficient';
-  const killSwitchActive = config.correctionCycles >= 2 &&
-    (coverageState === 'incomplete' || Object.values(reconciliation).some((row) => !row.reconciles));
-  const recommendationsEnabled = config.recommendationsEnabled && !killSwitchActive;
   const selected = selectIntervention(coverageState, evidenceState, botAlert, reply);
+  const invalidRecommendation =
+    selected.code !== 'INGESTION_INCOMPLETE' &&
+    selected.code !== 'none_insufficient_evidence' &&
+    (coverageState === 'incomplete' || evidenceState === 'insufficient');
+  const killSwitchActive = config.correctionCycles >= 2 &&
+    (coverageState === 'incomplete' || Object.values(reconciliation).some((row) => !row.reconciles) || invalidRecommendation);
+  const recommendationsEnabled = config.recommendationsEnabled && !killSwitchActive;
   const intervention = recommendationsEnabled
     ? selected
-    : { code: 'INGESTION_INCOMPLETE' as const, reason: 'recommendations and threshold notifications disabled by kill switch' };
+    : coverageState === 'incomplete'
+      ? { code: 'INGESTION_INCOMPLETE' as const, reason: 'recommendations and threshold notifications disabled; repair ingestion/reconciliation' }
+      : evidenceState === 'insufficient'
+        ? { code: 'none_insufficient_evidence' as const, reason: 'recommendations and threshold notifications disabled; fewer than five eligible humans' }
+        : { code: 'HOLD' as const, reason: 'recommendations and threshold notifications disabled by kill switch' };
 
   const previous = await db
     .prepare(

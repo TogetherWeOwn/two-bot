@@ -48,6 +48,7 @@ export interface MessageInput {
   isStaffAutomation?: boolean;
   channelId: string;
   channelClass?: CommunityChannelClass;
+  captureOnly?: boolean;
   occurredAt?: string;
   onLevelUp?: (level: number) => Promise<void>;
 }
@@ -170,7 +171,7 @@ export class FunnelHandlers {
         occurredAt: at,
       });
     }
-    if (i.isBot || i.webhookId || i.isStaffAutomation) return null;
+    if (i.isBot || i.webhookId || i.isStaffAutomation || i.captureOnly) return null;
     await this.store.touchActivity(i.guildId, i.memberId, at);
     if (this.leveling) {
       const award = await this.leveling.awardMessage(i.guildId, i.memberId, at, i.channelId);
