@@ -88,7 +88,7 @@ function assertDumpTable(name: unknown, where: string): asserts name is DumpTabl
   }
 }
 
-export const DUMP_VERSION = 1;
+export const DUMP_VERSION = 2;
 
 export interface DumpTableInfo {
   name: DumpTable;

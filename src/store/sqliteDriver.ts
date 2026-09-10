@@ -170,13 +170,14 @@ function ensureLevelingXpCeiling(raw: DatabaseSync): void {
   }
 }
 
-/** Apply every additive self-role SQLite upgrade under one write lock. */
+/** Apply every additive self-role SQLite upgrade and repair under one write lock. */
 function ensureSelfRoleRecovery(raw: DatabaseSync): void {
-  const id = '0022_self_role_committed_target';
-  if (raw.prepare(`SELECT 1 FROM schema_migrations WHERE id = ?`).get(id)) return;
+  const publishedId = '0022_self_role_committed_target';
+  const repairId = '0023_self_role_committed_target_repair';
+  if (raw.prepare(`SELECT 1 FROM schema_migrations WHERE id = ?`).get(repairId)) return;
   raw.exec('BEGIN IMMEDIATE');
   try {
-    if (raw.prepare(`SELECT 1 FROM schema_migrations WHERE id = ?`).get(id)) {
+    if (raw.prepare(`SELECT 1 FROM schema_migrations WHERE id = ?`).get(repairId)) {
       raw.exec('COMMIT');
       return;
     }
@@ -201,10 +202,7 @@ function ensureSelfRoleRecovery(raw: DatabaseSync): void {
     // persisted desired state. A successful empty desired set commits NULL;
     // an ambiguous lane stays uncommitted and is reseeded from Discord instead.
     raw.prepare(`UPDATE self_role_panel_claims AS claims
-      SET target_committed = 1
-      WHERE target_committed = 0
-        AND latest_event_id IS NOT NULL
-        AND EXISTS (
+      SET target_committed = CASE WHEN EXISTS (
           SELECT 1 FROM self_role_audit AS audit
            WHERE audit.event_id = claims.latest_event_id
              AND audit.guild_id = claims.guild_id
@@ -216,17 +214,17 @@ function ensureSelfRoleRecovery(raw: DatabaseSync): void {
                ELSE '__invalid_multi_target__'
              END IS claims.latest_option_key
              AND audit.outcome IN ('assigned', 'removed', 'switched', 'already_held', 'already_absent')
-        )`).run();
+        ) THEN 1 ELSE 0 END`).run();
     raw.prepare(`UPDATE self_role_audit
       SET outcome = 'rejected', code = 'interrupted_before_recovery',
           reason = 'processing row predates persisted self-role intent'
       WHERE outcome = 'processing' AND processing_expires_at IS NULL`).run();
     raw.exec(`CREATE INDEX IF NOT EXISTS idx_self_role_audit_processing_lease
       ON self_role_audit (outcome, processing_expires_at)`);
-    raw.prepare(`INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?, ?)`).run(
-      id,
-      new Date().toISOString(),
-    );
+    const stamp = raw.prepare(`INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?, ?)`);
+    const appliedAt = new Date().toISOString();
+    stamp.run(publishedId, appliedAt);
+    stamp.run(repairId, appliedAt);
     raw.exec('COMMIT');
   } catch (err) {
     try {
@@ -330,6 +328,7 @@ export async function openSqlite(path: string): Promise<Db> {
     '0020_self_role_ordering',
     '0021_self_role_event_order',
     '0022_self_role_committed_target',
+    '0023_self_role_committed_target_repair',
   ]) {
     stamp.run(id, new Date().toISOString());
   }

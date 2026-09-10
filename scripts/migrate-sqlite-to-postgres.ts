@@ -245,10 +245,7 @@ try {
   if (copyableTables.includes('self_role_audit') && copyableTables.includes('self_role_panel_claims')) {
     await dst.prepare(
       `UPDATE self_role_panel_claims AS claims
-          SET target_committed = TRUE
-        WHERE claims.target_committed = FALSE
-          AND claims.latest_event_id IS NOT NULL
-          AND EXISTS (
+          SET target_committed = EXISTS (
             SELECT 1 FROM self_role_audit AS audit
              WHERE audit.event_id = claims.latest_event_id
                AND audit.guild_id = claims.guild_id
@@ -313,7 +310,10 @@ try {
       const target = await dst
         .prepare(`SELECT ${shared.map((c) => `"${c}"`).join(', ')} FROM ${t} WHERE ${keyColumns.map((c) => `"${c}" = ?`).join(' AND ')}`)
         .get<Record<string, unknown>>(...keyColumns.map((c) => row[c]));
-      if (!target || shared.some((c) => !migrationValuesMatch(t, c, row[c], target[c]))) mismatches++;
+      if (!target || shared.some((c) => {
+        if (t === 'self_role_panel_claims' && c === 'target_committed') return false;
+        return !migrationValuesMatch(t, c, row[c], target[c]);
+      })) mismatches++;
     }
     if (mismatches > 0) {
       failed = true;

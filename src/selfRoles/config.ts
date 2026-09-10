@@ -39,10 +39,20 @@ export function loadSelfRolePanels(raw = process.env.TWO_SELF_ROLE_PANELS ?? '')
   const panels = value.map((panel, index) => parsePanel(panel, index));
   const panelIds = new Set<string>();
   const messageIds = new Set<string>();
+  const rolePanels = new Map<string, string>();
   for (const panel of panels) {
     if (panelIds.has(panel.id)) throw new SelfRoleConfigError(`duplicate panel id "${panel.id}"`);
     if (messageIds.has(panel.messageId)) {
       throw new SelfRoleConfigError(`message ${panel.messageId} is assigned to more than one panel`);
+    }
+    for (const option of panel.options) {
+      const priorPanelId = rolePanels.get(option.roleId);
+      if (priorPanelId) {
+        throw new SelfRoleConfigError(
+          `role ${option.roleId} is assigned to both panel "${priorPanelId}" and panel "${panel.id}"`,
+        );
+      }
+      rolePanels.set(option.roleId, panel.id);
     }
     panelIds.add(panel.id);
     messageIds.add(panel.messageId);
@@ -54,6 +64,8 @@ export interface SelfRoleResolvedRole {
   id: string;
   name?: string;
   permissions: string | bigint | { bitfield: bigint };
+  /** Discord integer color; zero means the role has no visible color. */
+  color?: number;
 }
 
 /**
@@ -102,6 +114,13 @@ export function validateSelfRolePanelRoles(
           `panel "${panel.id}" option "${option.key}" role ${option.roleId}` +
             `${role.name ? ` ("${role.name}")` : ''} permission mask changed from ` +
             `${option.permissions} to ${livePermissions}`,
+        );
+      }
+      const liveColor = role.color;
+      if (panel.color && (!Number.isInteger(liveColor) || (liveColor ?? 0) <= 0)) {
+        throw new SelfRoleConfigError(
+          `panel "${panel.id}" option "${option.key}" role ${option.roleId}` +
+            `${role.name ? ` ("${role.name}")` : ''} does not have a visible Discord color`,
         );
       }
       const unsafeGrant = everyone && guildId

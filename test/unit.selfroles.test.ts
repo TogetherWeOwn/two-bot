@@ -47,8 +47,24 @@ beforeEach(async () => { await harness.reset(); });
 test('multiple panels and all three picker modes parse from deployment config', () => {
   const parsed = loadSelfRolePanels(JSON.stringify([
     panel,
-    { ...panel, id: 'games', messageId: C, mode: 'select', exclusive: false, color: false },
-    { ...panel, id: 'alerts', messageId: '444444444444444444', mode: 'reaction', exclusive: false, color: false },
+    {
+      ...panel,
+      id: 'games',
+      messageId: C,
+      mode: 'select',
+      exclusive: false,
+      color: false,
+      options: [{ ...panel.options[0], roleId: '444444444444444444' }],
+    },
+    {
+      ...panel,
+      id: 'alerts',
+      messageId: '555555555555555555',
+      mode: 'reaction',
+      exclusive: false,
+      color: false,
+      options: [{ ...panel.options[0], roleId: '666666666666666666' }],
+    },
   ]));
   assert.deepEqual(parsed.map((p) => p.mode), ['button', 'select', 'reaction']);
 });
@@ -64,6 +80,36 @@ test('configuration rejects duplicate panels, messages, roles, and unsafe color 
     () => loadSelfRolePanels(JSON.stringify([{ ...panel, options: [...panel.options, { key: 'green', label: 'Green', roleId: A, permissions: '0' }] }])),
     /offers role .* more than once/,
   );
+});
+
+test('configuration rejects role ids reused across panels', () => {
+  assert.throws(
+    () => loadSelfRolePanels(JSON.stringify([
+      panel,
+      {
+        ...panel,
+        id: 'other',
+        messageId: C,
+        color: false,
+        options: [{ ...panel.options[0], key: 'shared' }],
+      },
+    ])),
+    new RegExp(`role ${A} is assigned to both panel "colors" and panel "other"`),
+  );
+});
+
+test('color panels require every resolved live role to have a visible color', () => {
+  assert.throws(
+    () => validateSelfRolePanelRoles([panel], [
+      { id: A, name: 'Red', permissions: '0', color: 0xff0000 },
+      { id: B, name: 'Uncolored', permissions: '0', color: 0 },
+    ]),
+    new RegExp(`role ${B} \\("Uncolored"\\) does not have a visible Discord color`),
+  );
+  assert.doesNotThrow(() => validateSelfRolePanelRoles([panel], [
+    { id: A, name: 'Red', permissions: '0', color: 0xff0000 },
+    { id: B, name: 'Blue', permissions: '0', color: 0x0000ff },
+  ]));
 });
 
 const allowedPermissionNames = new Set<string>(SELF_ROLE_ALLOWED_PERMISSIONS.map(([name]) => name));
@@ -97,7 +143,7 @@ for (const [bit, permission] of knownPermissionBits) {
 
   test(`dispatch re-check rejects live non-allowlisted ${permission} permission`, () => {
     const roles = new Map([
-      [A, { id: A, managed: false, editable: true, permissions: { bitfield: bit } }],
+      [A, { id: A, managed: false, editable: true, color: 1, permissions: { bitfield: bit } }],
     ]);
     const member = {
       guild: {
@@ -144,7 +190,7 @@ test('unknown future permission bits fail closed through every gate', () => {
   );
 
   const roles = new Map([
-    [A, { id: A, managed: false, editable: true, permissions: { bitfield: unknownBit } }],
+    [A, { id: A, managed: false, editable: true, color: 1, permissions: { bitfield: unknownBit } }],
   ]);
   const member = {
     guild: {
@@ -161,7 +207,7 @@ test('unknown future permission bits fail closed through every gate', () => {
 
 test('dispatch re-check rejects any live permission-mask drift', () => {
   const roles = new Map([
-    [A, { id: A, managed: false, editable: true, permissions: { bitfield: 1n << 10n } }], // ViewChannel
+    [A, { id: A, managed: false, editable: true, color: 1, permissions: { bitfield: 1n << 10n } }], // ViewChannel
   ]);
   const member = {
     guild: {
@@ -176,10 +222,40 @@ test('dispatch re-check rejects any live permission-mask drift', () => {
   });
 });
 
+test('dispatch re-check rejects a color-panel role without visible color', () => {
+  const roles = new Map([
+    [A, { id: A, managed: false, editable: true, color: 0, permissions: { bitfield: 0n } }],
+  ]);
+  const member = {
+    guild: {
+      members: { me: { permissions: { has: () => true } } },
+      roles: { cache: { get: (id: string) => roles.get(id) } },
+    },
+  };
+  assert.deepEqual(validateSelfRoleDispatch(panel, member as never, [A]), {
+    code: 'missing_role_color',
+    reason: `color-panel role ${A} does not have a visible Discord color`,
+    publicMessage: 'That color role has no visible color. Staff have been notified in the logs.',
+  });
+});
+
+test('dispatch fails closed when a color-panel role omits live color data', () => {
+  const roles = new Map([
+    [A, { id: A, managed: false, editable: true, permissions: { bitfield: 0n } }],
+  ]);
+  const member = {
+    guild: {
+      members: { me: { permissions: { has: () => true } } },
+      roles: { cache: { get: (id: string) => roles.get(id) } },
+    },
+  };
+  assert.equal(validateSelfRoleDispatch(panel, member as never, [A])?.code, 'missing_role_color');
+});
+
 test('dispatch fetches the authoritative role and rejects a stale safe cache before mutation', async () => {
   let fetches = 0;
   const added: string[] = [];
-  const cachedRole = { id: A, managed: false, editable: true, permissions: { bitfield: 0n } };
+  const cachedRole = { id: A, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } };
   const fetchedRole = {
     id: A,
     managed: false,
@@ -241,8 +317,8 @@ test('dispatch mutates only explicit role ids and never submits a cached full-ro
   const added: unknown[] = [];
   const removed: unknown[] = [];
   const authoritativeRoles = new Map([
-    [A, { id: A, managed: false, editable: true, permissions: { bitfield: 0n } }],
-    [B, { id: B, managed: false, editable: true, permissions: { bitfield: 0n } }],
+    [A, { id: A, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } }],
+    [B, { id: B, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } }],
   ]);
   const member = {
     id: C,
@@ -300,9 +376,9 @@ test('a later add failure reconciles authoritative role state to the pre-mutatio
   const added: string[] = [];
   const removed: string[] = [];
   const authoritativeRoles = new Map([
-    [A, { id: A, managed: false, editable: true, permissions: { bitfield: 0n } }],
-    [B, { id: B, managed: false, editable: true, permissions: { bitfield: 0n } }],
-    [D, { id: D, managed: false, editable: true, permissions: { bitfield: 0n } }],
+    [A, { id: A, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } }],
+    [B, { id: B, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } }],
+    [D, { id: D, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } }],
   ]);
   const audits: Array<{ outcome: string; code: string | null }> = [];
   const member = {
@@ -374,9 +450,9 @@ test('rollback does not grant a stale-cache role whose remove was an authoritati
   const added: string[] = [];
   const removed: string[] = [];
   const authoritativeRoles = new Map([
-    [A, { id: A, managed: false, editable: true, permissions: { bitfield: 0n } }],
-    [B, { id: B, managed: false, editable: true, permissions: { bitfield: 0n } }],
-    [D, { id: D, managed: false, editable: true, permissions: { bitfield: 0n } }],
+    [A, { id: A, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } }],
+    [B, { id: B, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } }],
+    [D, { id: D, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } }],
   ]);
   const audits: Array<{ outcome: string; code: string | null }> = [];
   const member = {
@@ -448,9 +524,9 @@ test('rollback does not remove a role already held outside the stale cache', asy
   const added: string[] = [];
   const removed: string[] = [];
   const authoritativeRoles = new Map([
-    [A, { id: A, managed: false, editable: true, permissions: { bitfield: 0n } }],
-    [B, { id: B, managed: false, editable: true, permissions: { bitfield: 0n } }],
-    [D, { id: D, managed: false, editable: true, permissions: { bitfield: 0n } }],
+    [A, { id: A, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } }],
+    [B, { id: B, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } }],
+    [D, { id: D, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } }],
   ]);
   const audits: Array<{ outcome: string; code: string | null }> = [];
   const member = {
@@ -585,6 +661,69 @@ test('a control cannot cross panel mode and unknown options are rejected', () =>
   assert.equal(planSelfRoleChange({ panel, optionKey: 'green', memberRoleIds: [], source: 'button', remove: false }).ok, false);
 });
 
+test('stale button and select component types are rejected before applying changes', async () => {
+  for (const componentType of ['button', 'select'] as const) {
+    const configuredPanel = { ...panel, mode: componentType === 'button' ? 'select' as const : 'button' as const };
+    const listeners = new Map<string, (...args: never[]) => Promise<void>>();
+    const audits: Array<{ code: string | null; source: string }> = [];
+    let memberFetches = 0;
+    let mutations = 0;
+    let reply = '';
+    registerSelfRoles({
+      on: (event: string, listener: (...args: never[]) => Promise<void>) => listeners.set(event, listener),
+    } as never, {
+      panels: [configuredPanel],
+      store: {
+        claimAudit: async () => ({ token: 'test', generation: 1, recovered: false, desiredRoleIds: [], preMutationRoleIds: [] }),
+        finishAudit: async (row: { code: string | null; source: string }) => { audits.push(row); },
+      } as never,
+    });
+    const member = {
+      id: C,
+      guild: {
+        id: A,
+        members: {
+          me: { permissions: { has: () => true } },
+          fetch: async () => { memberFetches++; return member; },
+        },
+      },
+      roles: {
+        cache: new Map(),
+        add: async () => { mutations++; },
+        remove: async () => { mutations++; },
+      },
+    };
+    const interaction = {
+      id: `stale-${componentType}`,
+      customId: componentType === 'button'
+        ? selfRoleCustomId(configuredPanel.id, configuredPanel.options[0].key)
+        : selfRoleCustomId(configuredPanel.id),
+      user: { id: C },
+      member,
+      guild: member.guild,
+      guildId: A,
+      channelId: configuredPanel.channelId,
+      message: { id: configuredPanel.messageId },
+      values: componentType === 'select' ? [configuredPanel.options[0].key] : undefined,
+      deferred: false,
+      replied: false,
+      isButton: () => componentType === 'button',
+      isStringSelectMenu: () => componentType === 'select',
+      deferReply: async () => {},
+      editReply: async ({ content }: { content: string }) => { reply = content; },
+    };
+
+    await listeners.get(Events.InteractionCreate)!(interaction as never);
+
+    assert.equal(memberFetches, 0, componentType);
+    assert.equal(mutations, 0, componentType);
+    assert.equal(audits.length, 1, componentType);
+    assert.equal(audits[0]?.code, 'wrong_component_type', componentType);
+    assert.equal(audits[0]?.source, componentType, componentType);
+    assert.match(reply, /does not match the configured/, componentType);
+  }
+});
+
 test('custom ids and reaction emoji resolve only configured panel options', () => {
   assert.equal(selfRoleCustomId('colors', 'red'), 'two:self-role:colors:red');
   assert.deepEqual(parseSelfRoleCustomId('two:self-role:colors:red'), { panelId: 'colors', optionKey: 'red' });
@@ -616,15 +755,15 @@ test('unsafe channel overwrite grants fail closed at startup and dispatch', () =
   }];
   assert.throws(
     () => validateSelfRolePanelRoles([panel], [
-      { id: A, name: 'Red', permissions: '0' },
-      { id: B, name: 'Blue', permissions: '0' },
-      { id: C, name: '@everyone', permissions: '0' },
+      { id: A, name: 'Red', permissions: '0', color: 0xff0000 },
+      { id: B, name: 'Blue', permissions: '0', color: 0x0000ff },
+      { id: C, name: '@everyone', permissions: '0', color: 0 },
     ], channels, C),
     /disallowed effective channel permission ManageMessages.*channel 333333333333333333/,
   );
 
   const roles = new Map([
-    [A, { id: A, managed: false, editable: true, permissions: { bitfield: 0n } }],
+    [A, { id: A, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } }],
     [C, { id: C, managed: false, editable: false, permissions: { bitfield: 0n } }],
   ]);
   const member = {
@@ -645,7 +784,7 @@ test('an ambiguous mutation is authoritatively reconciled and audited by actual 
   const roleState = new Set<string>();
   const roles = new Map(panel.options.map((option) => [
     option.roleId,
-    { id: option.roleId, managed: false, editable: true, permissions: { bitfield: 0n } },
+    { id: option.roleId, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } },
   ]));
   const audits: Array<Record<string, unknown>> = [];
   const member = {
@@ -776,7 +915,7 @@ test('concurrent exclusive selections serialize and recompute from forced member
   const firstStarted = new Promise<void>((resolve) => { firstAddStarted = resolve; });
   const roles = new Map(panel.options.map((option) => [
     option.roleId,
-    { id: option.roleId, managed: false, editable: true, permissions: { bitfield: 0n } },
+    { id: option.roleId, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } },
   ]));
   const member = {
     id: C,
@@ -829,8 +968,8 @@ test('recovered button converges to persisted desired roles after the first add 
   const roleState = new Set([A]);
   const removed: string[] = [];
   const roles = new Map([
-    [A, { id: A, managed: false, editable: true, permissions: { bitfield: 0n } }],
-    [B, { id: B, managed: false, editable: true, permissions: { bitfield: 0n } }],
+    [A, { id: A, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } }],
+    [B, { id: B, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } }],
   ]);
   const row = {
     eventId: 'recovered-button', guildId: C, panelId: panel.id, memberId: B, sourceId: panel.messageId,
@@ -886,7 +1025,7 @@ test('dispatch keeps fetched @everyone for effective channel permission validati
   const added: string[] = [];
   const safePanel = { ...panel, options: [{ ...panel.options[0] }] };
   const roles = new Map([
-    [A, { id: A, managed: false, editable: true, permissions: { bitfield: 0n } }],
+    [A, { id: A, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } }],
     [C, { id: C, managed: false, editable: false, permissions: { bitfield: 0n } }],
   ]);
   const channel = { id: B, name: 'general', permissionOverwrites: { cache: new Map() } };
@@ -928,7 +1067,7 @@ test('independent stores serialize exclusive changes through the shared database
   const blocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
   const roles = new Map(panel.options.map((option) => [
     option.roleId,
-    { id: option.roleId, managed: false, editable: true, permissions: { bitfield: 0n } },
+    { id: option.roleId, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } },
   ]));
   const makeMember = () => {
     const member = {
@@ -1035,7 +1174,7 @@ test('first exclusive dispatch seeds the committed target from authoritative rol
   const roleState = new Set([A]);
   const roles = new Map(panel.options.map((option) => [
     option.roleId,
-    { id: option.roleId, managed: false, editable: true, permissions: { bitfield: 0n } },
+    { id: option.roleId, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } },
   ]));
   const member = {
     id: C,
@@ -1081,7 +1220,7 @@ test('an older delayed exclusive selection cannot overwrite a newer completed se
   let blockOlder = true;
   const roles = new Map(panel.options.map((option) => [
     option.roleId,
-    { id: option.roleId, managed: false, editable: true, permissions: { bitfield: 0n } },
+    { id: option.roleId, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } },
   ]));
   const makeMember = () => {
     const member = {
@@ -1146,7 +1285,7 @@ test('a stale delayed clear restores a newer accepted exclusive selection', asyn
   let blockOlder = true;
   const roles = new Map(panel.options.map((option) => [
     option.roleId,
-    { id: option.roleId, managed: false, editable: true, permissions: { bitfield: 0n } },
+    { id: option.roleId, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } },
   ]));
   const makeMember = () => {
     const member = {
@@ -1212,7 +1351,7 @@ test('failed stale reconciliation leaves exact unresolved audit evidence', async
   let failRepairAdd = false;
   const roles = new Map(panel.options.map((option) => [
     option.roleId,
-    { id: option.roleId, managed: false, editable: true, permissions: { bitfield: 0n } },
+    { id: option.roleId, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } },
   ]));
   const makeMember = () => {
     const member = {
@@ -1287,7 +1426,7 @@ test('a rejected successor never becomes the stale-repair target', async () => {
   let blockOlder = true;
   const roles = new Map(panel.options.map((option) => [
     option.roleId,
-    { id: option.roleId, managed: false, editable: true, permissions: { bitfield: 0n } },
+    { id: option.roleId, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } },
   ]));
   const makeMember = () => {
     const member = {
@@ -1331,14 +1470,14 @@ test('a rejected successor never becomes the stale-repair target', async () => {
   await started;
   now = new Date('2026-09-09T00:00:33.001Z');
   blockOlder = false;
-  roles.set(B, { id: B, managed: false, editable: true, permissions: { bitfield: 8n } });
+  roles.set(B, { id: B, managed: false, editable: true, color: 1, permissions: { bitfield: 8n } });
   await applyRoleDelta({
     panel, member: makeMember() as never, source: 'select', sourceId: panel.messageId,
     eventId: 'rejected-target-blue', eventOrder: '0000000000002:000001', optionKey: 'blue', roleId: B,
     operation: 'replace', addRoleIds: [], removeRoleIds: [], desiredRoleIds: [B],
     deps: { panels: [panel], store },
   });
-  roles.set(B, { id: B, managed: false, editable: true, permissions: { bitfield: 0n } });
+  roles.set(B, { id: B, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } });
   releaseOlder();
   await older;
 
@@ -1365,7 +1504,7 @@ test('stale repair removes an unsafe divergent role while restoring only a safe 
   let blockOlder = true;
   const roles = new Map(panel.options.map((option) => [
     option.roleId,
-    { id: option.roleId, managed: false, editable: true, permissions: { bitfield: 0n } },
+    { id: option.roleId, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } },
   ]));
   const makeMember = () => {
     const member = {
@@ -1406,7 +1545,7 @@ test('stale repair removes an unsafe divergent role while restoring only a safe 
   await started;
   now = new Date('2026-09-09T00:00:33.001Z');
   blockOlder = false;
-  roles.set(B, { id: B, managed: false, editable: true, permissions: { bitfield: 8n } });
+  roles.set(B, { id: B, managed: false, editable: true, color: 1, permissions: { bitfield: 8n } });
   roleState.add(B);
   releaseOlder();
   await older;
@@ -1425,7 +1564,7 @@ test('stale in-flight claimant stops before audit or compensation after REST ret
   const roleState = new Set<string>();
   const roles = new Map(panel.options.map((option) => [
     option.roleId,
-    { id: option.roleId, managed: false, editable: true, permissions: { bitfield: 0n } },
+    { id: option.roleId, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } },
   ]));
   const member = {
     id: C,

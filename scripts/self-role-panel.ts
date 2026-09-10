@@ -6,10 +6,23 @@
  * config entry to persist. It refuses the live guild and accepts only the Owen
  * QA Test staging token.
  */
-import { checkStagingToken, LIVE_GUILD_ID, STAGING_BOT_APPLICATION_NAME, stagingGuildId } from '../src/staging/spec.ts';
+import {
+  applicationIdFromToken,
+  checkStagingToken,
+  LIVE_GUILD_ID,
+  STAGING_BOT_APPLICATION_ID,
+  STAGING_BOT_APPLICATION_NAME,
+  stagingGuildId,
+} from '../src/staging/spec.ts';
 import { loadSelfRolePanels } from '../src/selfRoles/config.ts';
 import { buildSelfRoleComponents } from '../src/discord/selfRoles.ts';
 import { reactionEndpointEmoji } from '../src/selfRoles/plan.ts';
+
+const API = process.env.SELF_ROLE_PANEL_API_BASE ?? 'https://discord.com/api/v10';
+if (API !== 'https://discord.com/api/v10' && !/^http:\/\/(127\.0\.0\.1|\[::1\]|localhost)(:\d+)?(?:\/|$)/.test(API)) {
+  console.error('SELF_ROLE_PANEL_API_BASE may only override Discord with a loopback test server');
+  process.exit(2);
+}
 
 const apply = process.argv.includes('--apply');
 const idAt = process.argv.indexOf('--panel');
@@ -37,8 +50,15 @@ if (guildId === LIVE_GUILD_ID) {
 }
 const token = process.env.DISCORD_STAGING_BOT_TOKEN ?? '';
 const tokenCheck = checkStagingToken(token);
-if (!token || !tokenCheck.ok) {
-  console.error(token ? tokenCheck.message : `missing ${STAGING_BOT_APPLICATION_NAME} token`);
+const tokenApplicationId = applicationIdFromToken(token);
+if (!token || !tokenCheck.ok || tokenApplicationId !== STAGING_BOT_APPLICATION_ID) {
+  console.error(
+    !token
+      ? `missing ${STAGING_BOT_APPLICATION_NAME} token`
+      : tokenApplicationId !== STAGING_BOT_APPLICATION_ID
+        ? `refusing application ${tokenApplicationId ?? 'unknown'}; expected ${STAGING_BOT_APPLICATION_NAME} (${STAGING_BOT_APPLICATION_ID})`
+        : tokenCheck.message,
+  );
   process.exit(2);
 }
 
@@ -52,7 +72,19 @@ if (!apply) {
   console.log('\nDry run. Nothing was posted. Re-run with --apply.\n');
   process.exit(0);
 }
-const res = await fetch(`https://discord.com/api/v10/channels/${panel.channelId}/messages`, {
+const channelRes = await fetch(`${API}/channels/${panel.channelId}`, {
+  headers: { Authorization: `Bot ${token}` },
+});
+const channel = (await channelRes.json().catch(() => null)) as { guild_id?: string; message?: string } | null;
+if (channelRes.status !== 200 || channel?.guild_id !== guildId) {
+  console.error(
+    channelRes.status !== 200
+      ? `Discord rejected the channel lookup: HTTP ${channelRes.status} ${channel?.message ?? ''}`
+      : `refusing channel ${panel.channelId}: Discord says guild ${channel?.guild_id ?? 'unknown'}, expected ${guildId}`,
+  );
+  process.exit(1);
+}
+const res = await fetch(`${API}/channels/${panel.channelId}/messages`, {
   method: 'POST',
   headers: { Authorization: `Bot ${token}`, 'Content-Type': 'application/json' },
   body: JSON.stringify(body),
@@ -67,7 +99,7 @@ if (panel.mode === 'reaction') {
   for (const option of panel.options) {
     const encoded = encodeURIComponent(reactionEndpointEmoji(option.emoji!));
     const reaction = await fetch(
-      `https://discord.com/api/v10/channels/${panel.channelId}/messages/${result.id}/reactions/${encoded}/@me`,
+      `${API}/channels/${panel.channelId}/messages/${result.id}/reactions/${encoded}/@me`,
       { method: 'PUT', headers: { Authorization: `Bot ${token}` } },
     );
     if (reaction.status !== 204) {

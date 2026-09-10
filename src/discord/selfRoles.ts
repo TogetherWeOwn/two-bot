@@ -179,6 +179,18 @@ async function handleComponent(
   if (!member || !interaction.guild) return;
   await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
+  const componentMode = interaction.isButton() ? 'button' : 'select';
+  if (panel.mode !== componentMode) {
+    await rejectComponent(
+      interaction,
+      panel,
+      deps,
+      'wrong_component_type',
+      `This role control does not match the configured ${panel.mode} panel.`,
+    );
+    return;
+  }
+
   if (interaction.message.id !== panel.messageId || interaction.channelId !== panel.channelId) {
     await rejectComponent(interaction, panel, deps, 'wrong_message', 'This role control is not attached to its configured panel.');
     return;
@@ -1097,6 +1109,13 @@ export function validateSelfRoleDispatch(
           ? `role ${roleId} permission mask changed from ${option.permissions} to ${role.permissions.bitfield}`
           : `role ${roleId} is not configured on panel ${panel.id}`,
         publicMessage: 'That role changed after this panel was configured. Staff have been notified in the logs.',
+      };
+    }
+    if (panel.color && (!Number.isInteger(role.color) || role.color <= 0)) {
+      return {
+        code: 'missing_role_color',
+        reason: `color-panel role ${roleId} does not have a visible Discord color`,
+        publicMessage: 'That color role has no visible color. Staff have been notified in the logs.',
       };
     }
     if (role.managed || !role.editable) {
