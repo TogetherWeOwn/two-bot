@@ -36,6 +36,18 @@ export interface SelfRoleDeps {
 }
 
 const panelMemberLocks = new Map<string, Promise<void>>();
+let eventOrderSequence = 0;
+const DISCORD_EPOCH_MS = 1_420_070_400_000n;
+
+function eventOrderFor(eventId: string): string {
+  if (/^\d{17,20}$/.test(eventId)) {
+    const snowflake = BigInt(eventId);
+    const timestamp = (snowflake >> 22n) + DISCORD_EPOCH_MS;
+    return `${timestamp.toString().padStart(13, '0')}:${eventId.padStart(20, '0')}`;
+  }
+  eventOrderSequence = (eventOrderSequence + 1) % 1_000_000;
+  return `${String(Date.now()).padStart(13, '0')}:${String(eventOrderSequence).padStart(20, '0')}`;
+}
 
 export function buildSelfRoleComponents(panel: SelfRolePanel, heldRoleIds: readonly string[] = []) {
   if (panel.mode === 'reaction') return [];
@@ -252,6 +264,7 @@ export async function applyRoleDelta(opts: {
   source: SelfRolePanelMode;
   sourceId: string;
   eventId: string;
+  eventOrder?: string;
   optionKey: string | null;
   roleId: string | null;
   operation: 'add' | 'remove' | 'replace';
@@ -264,53 +277,59 @@ export async function applyRoleDelta(opts: {
   deps: SelfRoleDeps;
   reply?: ButtonInteraction | StringSelectMenuInteraction;
 }): Promise<void> {
+  const orderedOpts = { ...opts, eventOrder: opts.eventOrder ?? eventOrderFor(opts.eventId) };
   const run = async () => {
-    const panelClaim = opts.panel.exclusive ? await acquirePanelClaim(opts) : null;
+    const panelClaim = orderedOpts.panel.exclusive ? await acquirePanelClaim(orderedOpts) : null;
+    if (panelClaim?.superseded) {
+      await auditRejected(orderedOpts, 'superseded_by_later_event', 'a later exclusive-panel event was already accepted');
+      if (orderedOpts.reply) await orderedOpts.reply.editReply({ content: 'A newer role selection was already handled.' });
+      return;
+    }
     try {
       let authoritativeMember: GuildMember;
       try {
-        authoritativeMember = await opts.member.guild.members.fetch({ user: opts.member.id, force: true });
+        authoritativeMember = await orderedOpts.member.guild.members.fetch({ user: orderedOpts.member.id, force: true });
       } catch (err) {
-        log.error('self_role_member_fetch_failed', { panelId: opts.panel.id, memberId: opts.member.id, err: String(err) });
-        await auditRejected(opts, 'member_fetch_failed', String(err));
-        if (opts.reply) await opts.reply.editReply({ content: 'I could not verify your current roles. Staff have been notified in the logs.' });
+        log.error('self_role_member_fetch_failed', { panelId: orderedOpts.panel.id, memberId: orderedOpts.member.id, err: String(err) });
+        await auditRejected(orderedOpts, 'member_fetch_failed', String(err));
+        if (orderedOpts.reply) await orderedOpts.reply.editReply({ content: 'I could not verify your current roles. Staff have been notified in the logs.' });
         return;
       }
       const heldRoleIds = new Set(authoritativeMember.roles.cache.keys());
-      const initialPlan = recomputeDelta(opts, heldRoleIds);
+      const initialPlan = recomputeDelta(orderedOpts, heldRoleIds);
       if (!initialPlan.ok) {
-        if (opts.reply) await opts.reply.editReply({ content: 'That role control is invalid.' });
+        if (orderedOpts.reply) await orderedOpts.reply.editReply({ content: 'That role control is invalid.' });
         return;
       }
       const intended = new Set(heldRoleIds);
       for (const roleId of initialPlan.removeRoleIds) intended.delete(roleId);
       for (const roleId of initialPlan.addRoleIds) intended.add(roleId);
       const claimed = await claim({
-        ...opts,
-        desiredRoleIds: [...intended].filter((id) => opts.panel.options.some((option) => option.roleId === id)),
-        preMutationRoleIds: [...heldRoleIds].filter((id) => opts.panel.options.some((option) => option.roleId === id)),
+        ...orderedOpts,
+        desiredRoleIds: [...intended].filter((id) => orderedOpts.panel.options.some((option) => option.roleId === id)),
+        preMutationRoleIds: [...heldRoleIds].filter((id) => orderedOpts.panel.options.some((option) => option.roleId === id)),
       });
       if (!claimed) {
-        if (opts.reply) await opts.reply.editReply({ content: 'This role request was already handled.' });
+        if (orderedOpts.reply) await orderedOpts.reply.editReply({ content: 'This role request was already handled.' });
         return;
       }
       if (claimed.recovered) {
         log.info('self_role_dispatch_recovered', {
-          eventId: opts.eventId,
-          panelId: opts.panel.id,
-          memberId: opts.member.id,
+          eventId: orderedOpts.eventId,
+          panelId: orderedOpts.panel.id,
+          memberId: orderedOpts.member.id,
           generation: claimed.generation,
         });
       }
-      await applyClaimedRoleDelta({ ...opts, desiredRoleIds: claimed.desiredRoleIds }, claimed, authoritativeMember, panelClaim);
+      await applyClaimedRoleDelta({ ...orderedOpts, desiredRoleIds: claimed.desiredRoleIds }, claimed, authoritativeMember, panelClaim);
     } finally {
-      if (panelClaim && opts.deps.store.releasePanelClaim) {
-        await opts.deps.store.releasePanelClaim(panelClaim);
+      if (panelClaim && !panelClaim.superseded && orderedOpts.deps.store.releasePanelClaim) {
+        await orderedOpts.deps.store.releasePanelClaim(panelClaim);
       }
     }
   };
-  if (opts.panel.exclusive && typeof opts.deps.store.claimPanel === 'function') await run();
-  else await withPanelMemberLock(opts.member.guild.id, opts.member.id, opts.panel.id, run);
+  if (orderedOpts.panel.exclusive && typeof orderedOpts.deps.store.claimPanel === 'function') await run();
+  else await withPanelMemberLock(orderedOpts.member.guild.id, orderedOpts.member.id, orderedOpts.panel.id, run);
 }
 
 async function acquirePanelClaim(opts: Parameters<typeof applyRoleDelta>[0]): Promise<SelfRolePanelClaim | null> {
@@ -323,6 +342,7 @@ async function acquirePanelClaim(opts: Parameters<typeof applyRoleDelta>[0]): Pr
       opts.panel.id,
       opts.eventId,
       opts.optionKey,
+      opts.eventOrder,
     );
     if (claim) return claim;
     await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -433,7 +453,11 @@ async function applyClaimedRoleDelta(
           const repair = await acquirePanelClaim(opts);
           if (repair) {
             try {
+              const protectedRoleId = repair.latestOptionKey
+                ? panel.options.find((option) => option.key === repair.latestOptionKey)?.roleId ?? null
+                : null;
               for (const roleId of claimToken.desiredRoleIds) {
+                if (roleId === protectedRoleId) continue;
                 try {
                   const current = await member.guild.members.fetch({ user: member.id, force: true });
                   if (current.roles.cache.has(roleId)) {
@@ -450,7 +474,7 @@ async function applyClaimedRoleDelta(
                 }
               }
             } finally {
-              await opts.deps.store.releasePanelClaim?.(repair);
+              if (!repair.superseded) await opts.deps.store.releasePanelClaim?.(repair);
             }
           }
         }
@@ -863,6 +887,7 @@ type AuditableChange = {
   source: SelfRolePanelMode;
   sourceId: string;
   eventId: string;
+  eventOrder?: string;
   optionKey: string | null;
   roleId: string | null;
   operation: 'add' | 'remove' | 'replace';
@@ -893,6 +918,7 @@ function auditRow(
 ): SelfRoleAuditRow {
   return {
     eventId: opts.eventId,
+    eventOrder: opts.eventOrder,
     guildId: opts.member.guild.id,
     panelId: opts.panel.id,
     memberId: opts.member.id,

@@ -172,7 +172,7 @@ function ensureLevelingXpCeiling(raw: DatabaseSync): void {
 
 /** Apply every additive self-role SQLite upgrade under one write lock. */
 function ensureSelfRoleRecovery(raw: DatabaseSync): void {
-  const id = '0017_self_role_ordering';
+  const id = '0018_self_role_event_order';
   if (raw.prepare(`SELECT 1 FROM schema_migrations WHERE id = ?`).get(id)) return;
   raw.exec('BEGIN IMMEDIATE');
   try {
@@ -193,6 +193,8 @@ function ensureSelfRoleRecovery(raw: DatabaseSync): void {
     ensureColumn(raw, 'self_role_audit', 'processing_expires_at', 'TEXT');
     ensureColumn(raw, 'self_role_panel_claims', 'latest_event_id', 'TEXT');
     ensureColumn(raw, 'self_role_panel_claims', 'latest_option_key', 'TEXT');
+    ensureColumn(raw, 'self_role_panel_claims', 'latest_event_order', 'TEXT');
+    ensureColumn(raw, 'self_role_audit', 'event_order', 'TEXT');
     raw.prepare(`UPDATE self_role_audit
       SET outcome = 'rejected', code = 'interrupted_before_recovery',
           reason = 'processing row predates persisted self-role intent'
@@ -304,6 +306,7 @@ export async function openSqlite(path: string): Promise<Db> {
     '0015_self_role_audit',
     '0016_self_role_recovery',
     '0017_self_role_ordering',
+    '0018_self_role_event_order',
   ]) {
     stamp.run(id, new Date().toISOString());
   }

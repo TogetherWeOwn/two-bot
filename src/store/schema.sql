@@ -304,6 +304,7 @@ CREATE INDEX IF NOT EXISTS idx_join_risk_flags_time
 -- gateway replays are claimed before any role mutation.
 CREATE TABLE IF NOT EXISTS self_role_audit (
   event_id          TEXT PRIMARY KEY,
+  event_order       TEXT,
   guild_id          TEXT NOT NULL,
   panel_id          TEXT NOT NULL,
   member_id         TEXT NOT NULL,
@@ -347,6 +348,7 @@ CREATE TABLE IF NOT EXISTS self_role_panel_claims (
   processing_expires_at TEXT NOT NULL,
   latest_event_id       TEXT,
   latest_option_key     TEXT,
+  latest_event_order    TEXT,
   PRIMARY KEY (guild_id, member_id, panel_id)
 );
 

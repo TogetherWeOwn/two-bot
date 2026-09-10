@@ -35,6 +35,7 @@ export type SelfRoleAuditOutcome =
 
 export interface SelfRoleAuditRow {
   eventId: string;
+  eventOrder?: string;
   guildId: string;
   panelId: string;
   memberId: string;

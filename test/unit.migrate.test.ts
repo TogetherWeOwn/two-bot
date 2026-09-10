@@ -18,14 +18,18 @@ test('self-role audit migration is immutable and recovery stays additive', () =>
   const audit = migrations.find((migration) => migration.id === '0015_self_role_audit');
   const recovery = migrations.find((migration) => migration.id === '0016_self_role_recovery');
   const ordering = migrations.find((migration) => migration.id === '0017_self_role_ordering');
+  const eventOrder = migrations.find((migration) => migration.id === '0018_self_role_event_order');
   assert.equal(audit?.checksum, 'bc32090819445847');
   assert.ok(recovery, 'recovery columns and claims belong in the next-free migration');
   assert.ok(ordering, 'exclusive-panel ordering metadata belongs in a new additive migration');
+  assert.ok(eventOrder, 'explicit event chronology belongs in a later additive migration');
   assert.ok(migrations.indexOf(recovery) > migrations.indexOf(audit!));
   assert.ok(migrations.indexOf(ordering) > migrations.indexOf(recovery));
+  assert.ok(migrations.indexOf(eventOrder) > migrations.indexOf(ordering));
   assert.match(recovery.sql, /ALTER TABLE self_role_audit ADD COLUMN IF NOT EXISTS desired_role_ids/);
   assert.match(recovery.sql, /CREATE TABLE IF NOT EXISTS self_role_panel_claims/);
   assert.match(ordering.sql, /ADD COLUMN IF NOT EXISTS latest_event_id/);
+  assert.match(eventOrder.sql, /ADD COLUMN IF NOT EXISTS event_order/);
   assert.equal(migrations.filter((migration) => migration.id === '0015_self_role_audit').length, 1);
   assert.equal(migrations.some((migration) => migration.id === '0013_self_role_audit'), false);
   assert.equal(migrations.some((migration) => migration.id === '0010_self_role_audit'), false);
@@ -82,6 +86,7 @@ test('briefly shipped migration rewrites remain rollback-compatible while additi
   assert.ok(migrated.includes('0011_leveling_xp_ceiling'));
   assert.ok(migrated.includes('0016_self_role_recovery'));
   assert.ok(migrated.includes('0017_self_role_ordering'));
+  assert.ok(migrated.includes('0018_self_role_event_order'));
   assert.deepEqual(applied, ['0011_leveling_xp_ceiling']);
 });
 

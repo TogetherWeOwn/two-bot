@@ -971,6 +971,71 @@ test('independent stores serialize exclusive changes through the shared database
   assert.deepEqual([...roleState], [B]);
 });
 
+test('an older delayed exclusive selection cannot overwrite a newer completed selection', async () => {
+  let now = new Date('2026-09-09T00:00:00.000Z');
+  const store = new SelfRoleStore(harness.db, { now: () => now, leaseMs: 1_000 });
+  const roleState = new Set<string>();
+  let releaseOlder!: () => void;
+  const olderBlocked = new Promise<void>((resolve) => { releaseOlder = resolve; });
+  let olderStarted!: () => void;
+  const started = new Promise<void>((resolve) => { olderStarted = resolve; });
+  let blockOlder = true;
+  const roles = new Map(panel.options.map((option) => [
+    option.roleId,
+    { id: option.roleId, managed: false, editable: true, permissions: { bitfield: 0n } },
+  ]));
+  const makeMember = () => {
+    const member = {
+      id: C,
+      guild: {
+        id: A,
+        members: {
+          me: { permissions: { has: () => true } },
+          fetch: async () => ({ ...member, roles: { ...member.roles, cache: new Map([...roleState].map((id) => [id, { id }])) } }),
+        },
+        roles: { fetch: async () => roles },
+        channels: { fetch: async () => new Map() },
+      },
+      roles: {
+        cache: new Map(),
+        remove: async (roleId: string) => { roleState.delete(roleId); },
+        add: async (roleId: string) => {
+          if (roleId === A && blockOlder) {
+            olderStarted();
+            await olderBlocked;
+          }
+          roleState.add(roleId);
+        },
+      },
+    };
+    return member;
+  };
+
+  const older = applyRoleDelta({
+    panel, member: makeMember() as never, source: 'button', sourceId: panel.messageId,
+    eventId: 'older-red', eventOrder: '0000000000001:000001', optionKey: 'red', roleId: A,
+    operation: 'replace', addRoleIds: [], removeRoleIds: [], requestedOptionKey: 'red',
+    deps: { panels: [panel], store },
+  });
+  await started;
+  now = new Date('2026-09-09T00:00:01.001Z');
+  blockOlder = false;
+  await applyRoleDelta({
+    panel, member: makeMember() as never, source: 'button', sourceId: panel.messageId,
+    eventId: 'newer-blue', eventOrder: '0000000000002:000001', optionKey: 'blue', roleId: B,
+    operation: 'replace', addRoleIds: [], removeRoleIds: [], requestedOptionKey: 'blue',
+    deps: { panels: [panel], store },
+  });
+  releaseOlder();
+  await older;
+
+  assert.deepEqual([...roleState], [B]);
+  const olderAudit = await harness.db.prepare(
+    `SELECT outcome, code FROM self_role_audit WHERE event_id = ?`,
+  ).get<{ outcome: string; code: string | null }>('older-red');
+  assert.deepEqual({ ...olderAudit }, { outcome: 'rejected', code: 'superseded_by_later_event' });
+});
+
 test('stale in-flight claimant stops before audit or compensation after REST returns', async () => {
   let owns = true;
   let releaseAdd!: () => void;
