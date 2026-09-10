@@ -103,8 +103,7 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
         return;
       } else {
         const searchBefore = await newestMessageCursor(channel);
-        await options.store?.saveDeliverySearchBefore(stored.event.entryId, claimToken!, searchBefore);
-        await options.store?.authorizeDeliverySend(stored.event.entryId, claimToken!);
+        await options.store?.prepareDeliverySend(stored.event.entryId, claimToken!, searchBefore);
         sendStarted = true;
         const message = await channel.send({
           content: formatAuditEvent(stored.event),
@@ -128,7 +127,7 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
         });
       } else {
         try {
-          await options.store?.markDeliveryFailed(stored.event.entryId, claimToken!, 'discord_send_failed');
+          await options.store?.markDeliveryFailed(stored.event.entryId, claimToken!, 'discord_send_failed', true);
         } catch {
           // Another worker may have replaced this claim before send authorization.
           // Its token owns the row now; the stale worker must not mutate it.

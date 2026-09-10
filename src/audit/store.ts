@@ -98,32 +98,25 @@ export class OperationalAuditStore {
     return claimed;
   }
 
-  async authorizeDeliverySend(entryId: string, claimToken: string): Promise<void> {
+  async prepareDeliverySend(
+    entryId: string,
+    claimToken: string,
+    before: string,
+    leaseMs = AUDIT_DELIVERY_LEASE_MS,
+  ): Promise<void> {
+    const leaseUntil = new Date(Date.now() + leaseMs).toISOString();
     const result = await this.db
       .prepare(
         `UPDATE operational_audit_log
-            SET delivery_lease_until = '9999-12-31T23:59:59.999Z'
+            SET delivery_search_before = COALESCE(delivery_search_before, ?),
+                delivery_lease_until = ?
           WHERE entry_id = ?
             AND delivery_state = 'delivering'
             AND delivery_claim_token = ?
-            AND delivery_search_before IS NOT NULL
             AND delivery_lease_until IS NOT NULL`,
       )
-      .run(entryId, claimToken);
-    if (result.changes !== 1) throw new Error('audit_delivery_send_not_authorized');
-  }
-
-  async saveDeliverySearchBefore(entryId: string, claimToken: string, before: string): Promise<void> {
-    const result = await this.db
-      .prepare(
-        `UPDATE operational_audit_log
-            SET delivery_search_before = COALESCE(delivery_search_before, ?)
-          WHERE entry_id = ?
-            AND delivery_state = 'delivering'
-            AND delivery_claim_token = ?`,
-      )
-      .run(before, entryId, claimToken);
-    if (result.changes !== 1) throw new Error('audit_delivery_search_bound_not_persisted');
+      .run(before, leaseUntil, entryId, claimToken);
+    if (result.changes !== 1) throw new Error('audit_delivery_send_not_prepared');
   }
 
   async extendDeliveryLease(
@@ -187,7 +180,12 @@ export class OperationalAuditStore {
     if (result.changes !== 1) throw new Error('audit_delivery_ack_failure_not_persisted');
   }
 
-  async markDeliveryFailed(entryId: string, claimToken: string, classification: string): Promise<void> {
+  async markDeliveryFailed(
+    entryId: string,
+    claimToken: string,
+    classification: string,
+    clearSearchBefore = false,
+  ): Promise<void> {
     const result = await this.db
       .prepare(
         `UPDATE operational_audit_log
@@ -196,13 +194,23 @@ export class OperationalAuditStore {
                 delivery_attempted_at = ?,
                 delivery_last_error = ?,
                 delivery_lease_until = NULL,
-                delivery_claim_token = NULL
+                delivery_claim_token = NULL,
+                delivery_search_before = CASE WHEN ? = 1 THEN NULL ELSE delivery_search_before END
           WHERE entry_id = ?
             AND delivery_state = 'delivering'
             AND delivery_claim_token = ?`,
       )
-      .run(new Date().toISOString(), classification.slice(0, 120), entryId, claimToken);
+      .run(new Date().toISOString(), classification.slice(0, 120), clearSearchBefore ? 1 : 0, entryId, claimToken);
     if (result.changes !== 1) throw new Error('audit_delivery_failure_not_persisted');
+  }
+
+  async eraseMember(memberId: string): Promise<number> {
+    return this.db.transaction(async (tx) => {
+      const result = await tx
+        .prepare(`DELETE FROM operational_audit_log WHERE actor_id = ? OR target_id = ?`)
+        .run(memberId, memberId);
+      return result.changes;
+    });
   }
 }
 
