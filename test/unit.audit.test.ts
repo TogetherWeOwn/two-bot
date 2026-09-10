@@ -365,9 +365,9 @@ test('failed audit delivery is retryable without duplicating the durable row', a
     sourceChannelId: CHANNEL_B,
     messageId: 'message-2',
   };
-  const realSaveDeliverySearchBefore = store.saveDeliverySearchBefore.bind(store);
+  const realSaveDeliverySearchBefore = store.prepareDeliverySend.bind(store);
   let boundaryWrites = 0;
-  store.saveDeliverySearchBefore = async (entryId, claimToken, before) => {
+  store.prepareDeliverySend = async (entryId, claimToken, before) => {
     boundaryWrites++;
     if (boundaryWrites === 1) throw new Error('transient database failure before send');
     await realSaveDeliverySearchBefore(entryId, claimToken, before);
@@ -481,8 +481,7 @@ test('acknowledgement failure replaces send authorization with a finite reconcil
   await store.record(event, CHANNEL_A);
   const claim = await store.claim(event.entryId);
   assert.ok(claim?.deliveryClaimToken);
-  await store.saveDeliverySearchBefore(event.entryId, claim.deliveryClaimToken, '1');
-  await store.authorizeDeliverySend(event.entryId, claim.deliveryClaimToken);
+  await store.prepareDeliverySend(event.entryId, claim.deliveryClaimToken, '1');
   await store.markAcknowledgementFailed(event.entryId, claim.deliveryClaimToken, -1);
 
   const retry = await store.claim(event.entryId);
@@ -513,16 +512,8 @@ test('stale audit delivery claims cannot mutate replacement ownership', async ()
   assert.notEqual(first.deliveryClaimToken, replacement.deliveryClaimToken);
 
   await assert.rejects(
-    store.authorizeDeliverySend(event.entryId, first.deliveryClaimToken),
-    /audit_delivery_send_not_authorized/,
-  );
-  await assert.rejects(
-    store.authorizeDeliverySend(event.entryId, replacement.deliveryClaimToken),
-    /audit_delivery_send_not_authorized/,
-  );
-  await assert.rejects(
-    store.saveDeliverySearchBefore(event.entryId, first.deliveryClaimToken, '10'),
-    /audit_delivery_search_bound_not_persisted/,
+    store.prepareDeliverySend(event.entryId, first.deliveryClaimToken, '10'),
+    /audit_delivery_send_not_prepared/,
   );
   await assert.rejects(
     store.extendDeliveryLease(event.entryId, first.deliveryClaimToken),
@@ -554,39 +545,21 @@ test('stale audit delivery claims cannot mutate replacement ownership', async ()
   await db.close();
 });
 
-test('send authorization closes the final reclaim window before Discord I/O', async () => {
+test('a crash after send preparation remains reclaimable for marker reconciliation', async () => {
   const db = await openDb(':memory:');
   const store = new OperationalAuditStore(db);
-  let sends = 0;
-  let reclaim: StoredOperationalAudit | null = null;
-  const channel = {
-    id: CHANNEL_A,
-    guild: { id: GUILD, members: { me: { id: 'bot' } } },
-    isTextBased: () => true,
-    isDMBased: () => false,
-    permissionsFor: () => ({ has: () => true }),
-    messages: { fetch: async () => new Collection() },
-    client: { user: { id: 'bot' } },
-    send: async () => {
-      sends++;
-      reclaim = await store.claim('authorized-before-send');
-      return { id: '1' };
-    },
-  };
-  const client = { channels: { cache: new Map([[CHANNEL_A, channel]]), fetch: async () => channel } } as unknown as Client;
-  const sink = makeOperationalAudit(client, {
-    guildId: GUILD, channels: { audit: CHANNEL_A, voice: null, moderation: null }, store,
-  });
-
-  await sink.record({
-    entryId: 'authorized-before-send', kind: 'message_delete', channel: 'audit', guildId: GUILD,
+  await store.record({
+    entryId: 'crash-before-send', kind: 'message_delete', channel: 'audit', guildId: GUILD,
     occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
-  });
-  assert.equal(sends, 1);
-  assert.equal(reclaim, null, 'an authorized send has no expiring lease to reclaim');
-  const row = await store.get('authorized-before-send');
-  assert.equal(row?.deliveryState, 'delivered');
-  assert.equal(row?.mirrorMessageId, '1');
+  }, CHANNEL_A);
+  const claim = await store.claim('crash-before-send');
+  assert.ok(claim?.deliveryClaimToken);
+  await store.prepareDeliverySend('crash-before-send', claim.deliveryClaimToken, '1', -1);
+
+  const retry = await store.claim('crash-before-send');
+  assert.ok(retry?.deliveryClaimToken);
+  assert.notEqual(retry.deliveryClaimToken, claim.deliveryClaimToken);
+  assert.equal(retry.deliverySearchBefore, '1');
   await db.close();
 });
 
@@ -609,15 +582,15 @@ test('a replacement claim before send authorization blocks the stale worker', as
   const sink = makeOperationalAudit(client, {
     guildId: GUILD, channels: { audit: CHANNEL_A, voice: null, moderation: null }, store,
   });
-  const realAuthorize = store.authorizeDeliverySend.bind(store);
-  store.authorizeDeliverySend = async (entryId, claimToken) => {
+  const realPrepare = store.prepareDeliverySend.bind(store);
+  store.prepareDeliverySend = async (entryId, claimToken, before, leaseMs) => {
     await db.prepare(
       `UPDATE operational_audit_log
           SET delivery_search_before = NULL, delivery_lease_until = ?
         WHERE entry_id = ?`,
     ).run('2000-01-01T00:00:00.000Z', entryId);
     replacementToken = (await store.claim(entryId))?.deliveryClaimToken ?? null;
-    await realAuthorize(entryId, claimToken);
+    await realPrepare(entryId, claimToken, before, leaseMs);
   };
 
   await sink.record({
@@ -713,7 +686,7 @@ test('a failed pre-send recovery-bound write prevents the Discord send', async (
     channels: { audit: CHANNEL_A, voice: null, moderation: null },
     store,
   });
-  store.saveDeliverySearchBefore = async () => {
+  store.prepareDeliverySend = async () => {
     throw new Error('database disconnected before Discord send');
   };
 
@@ -964,7 +937,7 @@ test('audit database write errors redact thrown text from process logs', async (
     async claim() { return null; },
     async claimPending() { return []; },
     async markDeliveryFailed() {},
-    async saveDeliverySearchBefore() {},
+    async prepareDeliverySend() {},
     async markDelivered() {},
     async markAcknowledgementFailed() {},
   } as unknown as OperationalAuditStore;
@@ -986,6 +959,27 @@ test('audit database write errors redact thrown text from process logs', async (
   assert.doesNotMatch(stderr, new RegExp(sentinel));
   assert.match(stderr, /audit_store_write_failed/);
 });
+
+test('member erasure removes operational audit rows carrying the member identity', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  const memberId = '900000000000000001';
+  await store.record({
+    entryId: `member-update:${GUILD}:${memberId}:2026-09-09T00:00:00.000Z:digest`,
+    kind: 'member_update', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z', targetId: memberId,
+  });
+  await store.record({
+    entryId: 'unrelated', kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z', actorId: '900000000000000002',
+  });
+
+  assert.equal(await store.eraseMember(memberId), 1);
+  assert.equal(await store.get(`member-update:${GUILD}:${memberId}:2026-09-09T00:00:00.000Z:digest`), null);
+  assert.ok(await store.get('unrelated'));
+  await db.close();
+});
+
 test('delivery nonces are deterministic and fit Discord production bounds', () => {
   const entryId = 'member-update:1545644954272137297:900000000000000001:2026-09-09T07:00:00.000Z:' + 'x'.repeat(120);
   assert.equal(deliveryNonce(entryId), deliveryNonce(entryId));

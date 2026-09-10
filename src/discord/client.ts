@@ -95,7 +95,7 @@ export function createClient(automodEnabled = process.env.TWO_AUTOMOD === '1'): 
           // default 200-message-per-channel cache.
           makeCache: Options.cacheWithLimits({ MessageManager: 0 }),
         }
-      : { partials: [Partials.Message] }),
+      : {}),
   });
 }
 

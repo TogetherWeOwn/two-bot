@@ -54,6 +54,7 @@ export interface ModerationRequest {
   actor: ModerationActor;
   target?: ModerationTarget;
   channel?: ModerationChannel;
+  botHighestRolePosition?: number;
   reason: string;
   durationSeconds?: number;
   count?: number;

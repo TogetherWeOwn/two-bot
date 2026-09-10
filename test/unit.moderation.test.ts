@@ -51,6 +51,7 @@ const REFUSALS: Array<[string, (r: ModerationRequest) => void, string]> = [
   ['Owen', (r) => { r.target!.userId = OWEN; }, 'target_owen'],
   ['bot', (r) => { r.target!.isBot = true; }, 'target_bot'],
   ['staff role', (r) => { r.target!.roleIds = [STAFF_ROLE]; }, 'target_staff_role'],
+  ['bot hierarchy', (r) => { r.botHighestRolePosition = 1; }, 'bot_hierarchy'],
   ['actor hierarchy', (r) => { r.target!.highestRolePosition = 10; }, 'actor_hierarchy'],
 ];
 
@@ -147,14 +148,14 @@ test('protected moderation refusals are mirrored without a Discord mutation', as
   const service = new ModerationService(discord, new ModerationStore(testDb.db), policy,
     () => Date.parse('2026-09-09T07:00:00.000Z'), audit);
   const refused = request('moderation.ban');
-  refused.target!.roleIds = [STAFF_ROLE];
+  refused.botHighestRolePosition = 1;
   await assert.rejects(() => service.execute({ ...refused, requestId: 'r-refuse', idempotencyKey: 'k-refuse' }),
     (error: unknown) => error instanceof ActionError && error.code === 'action_not_allowed');
   assert.equal(callsMade, 0);
   assert.equal(events.length, 1);
   assert.equal(events[0].kind, 'moderation_action');
   assert.equal(events[0].action, 'moderation.ban');
-  assert.deepEqual(events[0].metadata, { outcome: 'refused', code: 'action_not_allowed', classification: 'target_staff_role' });
+  assert.deepEqual(events[0].metadata, { outcome: 'refused', code: 'action_not_allowed', classification: 'bot_hierarchy' });
   await testDb.cleanup();
 });
 test('concurrent executes of one idempotency key make exactly one Discord call (TOG-1659 High 3)', async () => {

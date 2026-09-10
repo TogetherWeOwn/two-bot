@@ -22,7 +22,7 @@ import { GatewayIntentBits, Partials } from 'discord.js';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb, type Db } from '../src/store/db.ts';
-import { INTENTS, PARTIALS, intents } from '../src/discord/client.ts';
+import { createClient, INTENTS, PARTIALS, intents } from '../src/discord/client.ts';
 import { WEB_CONTRACT_VIEWS } from '../src/store/webContract.ts';
 import {
   runProbeCycle,
@@ -99,6 +99,9 @@ describe('presence probe containment', () => {
       GatewayIntentBits.GuildInvites,
     ]);
     assert.deepEqual(PARTIALS, [Partials.Message, Partials.Reaction, Partials.User]);
+    const client = createClient(false);
+    assert.deepEqual(client.options.partials, PARTIALS);
+    client.destroy();
   });
 
   test('the table is not readable through the web_v1 contract', () => {
