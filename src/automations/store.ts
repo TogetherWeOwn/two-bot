@@ -43,6 +43,7 @@ export interface ScheduledMessageRow {
   updatedAt: string;
   claimToken: string | null;
   claimedAt: string | null;
+  occurrenceNonce: string | null;
 }
 
 export interface StickyMessageRow {
@@ -107,6 +108,8 @@ function mapScheduled(r: Record<string, unknown>): ScheduledMessageRow {
     updatedAt: String(r.updated_at),
     claimToken: r.claim_token === null || r.claim_token === undefined ? null : String(r.claim_token),
     claimedAt: r.claimed_at === null || r.claimed_at === undefined ? null : String(r.claimed_at),
+    occurrenceNonce:
+      r.occurrence_nonce === null || r.occurrence_nonce === undefined ? null : String(r.occurrence_nonce),
   };
 }
 
@@ -340,6 +343,7 @@ export class AutomationStore {
     claimToken: string,
     leaseUntilIso: string,
     limit = 10,
+    occurrenceNonce = claimToken,
   ): Promise<ScheduledMessageRow[]> {
     const locked = this.db.kind === 'postgres' ? ' FOR UPDATE SKIP LOCKED' : '';
     return this.db
@@ -351,23 +355,34 @@ export class AutomationStore {
             LIMIT ?${locked}
          )
          UPDATE scheduled_messages
-            SET next_run_at = ?, claim_token = ?, claimed_at = ?
+            SET next_run_at = ?, claim_token = ?, claimed_at = ?,
+                occurrence_nonce = COALESCE(occurrence_nonce, ?)
           WHERE guild_id = ? AND id IN (SELECT id FROM due)
             AND next_run_at <= ?
           RETURNING *`,
       )
-      .all(guildId, nowIso, limit, leaseUntilIso, claimToken, nowIso, guildId, nowIso)
+      .all(
+        guildId, nowIso, limit, leaseUntilIso, claimToken, nowIso,
+        occurrenceNonce, guildId, nowIso,
+      )
       .then((rows) => rows.map(mapScheduled));
   }
 
-  async retryScheduled(guildId: string, id: string, claimToken: string, nextRunAtIso: string): Promise<boolean> {
+  async retryScheduled(
+    guildId: string,
+    id: string,
+    claimToken: string,
+    nextRunAtIso: string,
+    preserveNonce = true,
+  ): Promise<boolean> {
     const result = await this.db
       .prepare(
         `UPDATE scheduled_messages
-            SET next_run_at = ?, claim_token = NULL, claimed_at = NULL
+            SET next_run_at = ?, claim_token = NULL, claimed_at = NULL,
+                occurrence_nonce = CASE WHEN ? THEN occurrence_nonce ELSE NULL END
           WHERE guild_id = ? AND id = ? AND claim_token = ?`,
       )
-      .run(nextRunAtIso, guildId, id, claimToken);
+      .run(nextRunAtIso, preserveNonce ? 1 : 0, guildId, id, claimToken);
     return result.changes > 0;
   }
 
@@ -437,6 +452,7 @@ export class AutomationStore {
            last_message_id = ?,
            enabled         = CASE WHEN interval_seconds IS NULL THEN FALSE ELSE TRUE END,
            next_run_at     = ?,
+           occurrence_nonce = NULL,
            claim_token     = NULL,
            claimed_at      = NULL
          WHERE guild_id = ? AND id = ? AND claim_token = ?
@@ -528,11 +544,16 @@ export class AutomationStore {
     return row ? mapSticky(row) : null;
   }
 
-  async deleteSticky(guildId: string, channelId: string): Promise<boolean> {
-    const r = await this.db
-      .prepare(`DELETE FROM sticky_messages WHERE guild_id = ? AND channel_id = ?`)
-      .run(guildId, channelId);
-    return r.changes > 0;
+  /** Atomically delete and return the message id current at deletion time. */
+  async deleteSticky(guildId: string, channelId: string): Promise<StickyMessageRow | null> {
+    const row = await this.db
+      .prepare(
+        `DELETE FROM sticky_messages
+          WHERE guild_id = ? AND channel_id = ?
+          RETURNING *`,
+      )
+      .get(guildId, channelId);
+    return row ? mapSticky(row) : null;
   }
 
   /** After posting a fresh sticky, remember which message to un-stick next time. */

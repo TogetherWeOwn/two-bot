@@ -20,7 +20,7 @@
  * for the same reason announcement.post does: an admin template is not a
  * licence to @everyone on a live server.
  */
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { CommandCapacityError } from './errors.ts';
 import type { AutomationStore } from './store.ts';
 import { validateTemplate } from './template.ts';
@@ -33,7 +33,7 @@ const MAX_BODY = 2000;
 
 export interface AutomationDiscord {
   /** Post a message to a channel; returns the message id. */
-  postMessage(channelId: string, content: string): Promise<string>;
+  postMessage(channelId: string, content: string, nonce?: string): Promise<string>;
   /** Delete one message (the previous sticky). */
   deleteMessage(channelId: string, messageId: string): Promise<void>;
 }
@@ -71,6 +71,11 @@ export interface PutStickyInput {
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+/** Discord message nonces are strings no longer than 25 characters. */
+function messageNonce(): string {
+  return randomBytes(12).toString('hex');
 }
 
 function requirePattern(value: string, pattern: RegExp, what: string): void {
@@ -234,6 +239,7 @@ export class AutomationService {
         updatedAt: now,
         claimToken: existing?.claimToken ?? null,
         claimedAt: existing?.claimedAt ?? null,
+        occurrenceNonce: existing?.occurrenceNonce ?? null,
       });
       if (!written) {
         throw new Error('Scheduled message id belongs to another guild.');
@@ -296,11 +302,17 @@ export class AutomationService {
       // Discord requests abort after 15 seconds; one minute leaves ample margin
       // for this one outbound call while still recovering after a process crash.
       const leaseUntil = new Date(Date.parse(now) + 60_000).toISOString();
-      const [row] = await this.store.claimDueScheduled(guildId, now, claimToken, leaseUntil, 1);
+      const [row] = await this.store.claimDueScheduled(
+        guildId, now, claimToken, leaseUntil, 1, messageNonce(),
+      );
       if (!row) break;
 
+      let messageId: string | null = null;
       try {
-        const messageId = await this.discord.postMessage(row.channelId, row.body);
+        // The occurrence has a stable enforced nonce across claim retries. An
+        // ambiguous response can therefore be retried without creating a
+        // duplicate, even after this worker's lease expires.
+        messageId = await this.discord.postMessage(row.channelId, row.body, row.occurrenceNonce!);
         const completed = await this.store.markScheduledRun(guildId, row.id, now, messageId, claimToken);
         if (!completed) {
           // The definition was changed or cancelled while Discord was posting.
@@ -316,12 +328,33 @@ export class AutomationService {
           );
           continue;
         }
+        fired++;
         await this.store.audit(
           { guildId: row.guildId, actorId: null, action: 'scheduled.run', targetKey: row.id, outcome: 'ok' },
           now,
-        );
-        fired++;
+        ).catch(() => {});
       } catch (err) {
+        if (messageId) {
+          const deleted = await this.discord.deleteMessage(row.channelId, messageId)
+            .then(() => true, () => false);
+          const retained = await this.store.retryScheduled(
+            guildId, row.id, claimToken, now, !deleted,
+          );
+          if (retained) {
+            await this.store.audit(
+              {
+                guildId: row.guildId,
+                actorId: null,
+                action: 'scheduled.run',
+                targetKey: row.id,
+                outcome: deleted ? 'persistence_failed_cleaned' : 'persistence_failed_retry_idempotent',
+                reason: safeErrorName(err),
+              },
+              now,
+            ).catch(() => {});
+          }
+          return fired;
+        }
         const retryAfterMs = retryDelayMs(err);
         if (retryAfterMs !== null) {
           const retryAt = new Date(Date.parse(now) + retryAfterMs).toISOString();
@@ -413,13 +446,10 @@ export class AutomationService {
   }
 
   async deleteSticky(guildId: string, channelId: string, actorId: string): Promise<boolean> {
-    // Read the row before deleting it: the live message id only exists while
-    // the row does, and cleaning up the pinned copy is best-effort - the row
-    // is already gone, so a failure here must not resurrect it.
-    const existing = await this.store.getSticky(guildId, channelId);
-    const gone = await this.store.deleteSticky(guildId, channelId);
-    if (gone && existing?.lastMessageId) {
-      await this.discord.deleteMessage(channelId, existing.lastMessageId).catch(() => {});
+    const at = this.now();
+    const deleted = await this.store.deleteSticky(guildId, channelId);
+    if (deleted?.lastMessageId) {
+      await this.discord.deleteMessage(channelId, deleted.lastMessageId).catch(() => {});
     }
     await this.store.audit(
       {
@@ -427,11 +457,11 @@ export class AutomationService {
         actorId,
         action: 'sticky.delete',
         targetKey: channelId,
-        outcome: gone ? 'ok' : 'absent',
+        outcome: deleted ? 'ok' : 'absent',
       },
-      this.now(),
+      at,
     );
-    return gone;
+    return deleted !== null;
   }
 
   /**
@@ -447,14 +477,14 @@ export class AutomationService {
     guildId: string,
     channelId: string,
     actorMemberId: string,
-    atMs: number,
+    processedAtMs: number = Date.parse(this.now()),
   ): Promise<'reposted' | 'held' | 'none'> {
     const existing = await this.store.getSticky(guildId, channelId);
     if (!existing?.enabled) return 'none';
-    const postedAt = new Date(atMs).toISOString();
-    const cutoff = new Date(atMs - existing.debounceSeconds * 1000).toISOString();
+    const postedAt = new Date(processedAtMs).toISOString();
+    const cutoff = new Date(processedAtMs - existing.debounceSeconds * 1000).toISOString();
     const claimToken = randomUUID();
-    const expiredClaimCutoff = new Date(atMs - 60_000).toISOString();
+    const expiredClaimCutoff = new Date(processedAtMs - 60_000).toISOString();
     const sticky = await this.store.claimStickyPost(
       guildId, channelId, claimToken, postedAt, cutoff, expiredClaimCutoff,
     );

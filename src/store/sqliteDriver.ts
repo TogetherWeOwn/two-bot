@@ -226,6 +226,7 @@ export async function openSqlite(path: string): Promise<Db> {
   ensureColumn(raw, 'moderation_lockdowns', 'prior_exists', 'INTEGER NOT NULL DEFAULT 1');
   ensureColumn(raw, 'scheduled_messages', 'claim_token', 'TEXT');
   ensureColumn(raw, 'scheduled_messages', 'claimed_at', 'TEXT');
+  ensureColumn(raw, 'scheduled_messages', 'occurrence_nonce', 'TEXT');
   ensureColumn(raw, 'sticky_messages', 'claim_token', 'TEXT');
   ensureColumn(raw, 'sticky_messages', 'claimed_at', 'TEXT');
   reconcilePendingUnbans(raw);
@@ -252,6 +253,7 @@ export async function openSqlite(path: string): Promise<Db> {
     '0014_ticket_safety',
     '0015_automations',
     '0016_automation_claims',
+    '0017_scheduled_occurrence_nonce',
   ]) {
     stamp.run(id, new Date().toISOString());
   }

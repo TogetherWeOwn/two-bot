@@ -19,6 +19,7 @@ import {
   translateExport,
 } from '../src/automations/mee6.ts';
 import { AutomationService, type AutomationDiscord } from '../src/automations/service.ts';
+import { loadAutomationConfig } from '../src/automations/config.ts';
 import {
   AutomationDiscord as AutomationDiscordClient,
   DiscordPostError,
@@ -28,7 +29,7 @@ import { AutomationStore, type StickyMessageRow } from '../src/automations/store
 import { registerAutomationGateway, triggerWord } from '../src/automations/gateway.ts';
 import { CommandRegistry, mergedCommandData } from '../src/discord/commandRegistry.ts';
 import { MODERATION_COMMAND_DATA } from '../src/moderation/commands.ts';
-import { MAX_CUSTOM_COMMANDS } from '../src/discord/commandNames.ts';
+import { AUTOMATION_COMMAND_DATA, MAX_CUSTOM_COMMANDS } from '../src/discord/commandNames.ts';
 import { openTestDb, TEST_PG_URL, usingPostgres, type TestDb } from './helpers/testDb.ts';
 import { openDb } from '../src/store/db.ts';
 import { loadMigrations } from '../src/store/migrate.ts';
@@ -146,13 +147,47 @@ test('mee6: translateExport preserves the first trigger and suffixes later colli
 
 // --- command registry ---------------------------------------------------------
 
+test('automations are default-off and categorically refuse the live guild', () => {
+  assert.deepEqual(loadAutomationConfig({}), { enabled: false, textCommandsEnabled: false });
+  assert.deepEqual(loadAutomationConfig({
+    TWO_AUTOMATIONS: '1',
+    TWO_TEXT_COMMANDS: '1',
+    DISCORD_GUILD_ID: GUILD,
+  }), {
+    enabled: true,
+    textCommandsEnabled: true,
+  });
+  assert.deepEqual(loadAutomationConfig({ TWO_TEXT_COMMANDS: '1' }), {
+    enabled: false,
+    textCommandsEnabled: false,
+  });
+  assert.throws(
+    () => loadAutomationConfig({
+      TWO_AUTOMATIONS: '1',
+      DISCORD_GUILD_ID: '326474832151838730',
+    }),
+    /staging-only.*expected guild/i,
+  );
+  assert.throws(
+    () => loadAutomationConfig({ TWO_AUTOMATIONS: '1' }),
+    /got unset/i,
+  );
+  assert.throws(
+    () => loadAutomationConfig({ TWO_AUTOMATIONS: '1', DISCORD_GUILD_ID: '999999999999999999' }),
+    /got 999999999999999999/i,
+  );
+});
+
 test('command registry merges every built-in and custom command without replacement', () => {
   const commands = mergedCommandData([
     { name: 'faq', description: 'FAQ', enabled: true },
     { name: 'disabled', description: 'off', enabled: false },
     { name: 'rank', description: 'must not replace builtin', enabled: true },
     { name: 'ban', description: 'must not replace moderation', enabled: true },
-  ], MODERATION_COMMAND_DATA as ApplicationCommandDataResolvable[]) as { name: string; description: string }[];
+  ], [
+    ...AUTOMATION_COMMAND_DATA,
+    ...MODERATION_COMMAND_DATA,
+  ] as ApplicationCommandDataResolvable[]) as { name: string; description: string }[];
   const names = commands.map((command) => command.name);
   assert.ok(names.includes('rank'));
   assert.ok(names.includes('leaderboard'));
@@ -172,7 +207,10 @@ test('command registry rejects overflow instead of silently truncating definitio
     enabled: true,
   }));
   assert.throws(
-    () => mergedCommandData(custom, MODERATION_COMMAND_DATA as ApplicationCommandDataResolvable[]),
+    () => mergedCommandData(custom, [
+      ...AUTOMATION_COMMAND_DATA,
+      ...MODERATION_COMMAND_DATA,
+    ] as ApplicationCommandDataResolvable[]),
     /above Discord's guild limit/,
   );
 });
@@ -793,6 +831,81 @@ test('service: transient schedule failures preserve the occurrence and Retry-Aft
   await db.cleanup();
 });
 
+test('discord client sends an enforced nonce for idempotent scheduled posts', async () => {
+  let body: Record<string, unknown> | null = null;
+  const client = new AutomationDiscordClient({
+    token: 't',
+    fetchImpl: (async (_url: string | URL | Request, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return new Response(JSON.stringify({ id: 'same-message' }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch,
+  });
+  assert.equal(await client.postMessage(CHANNEL, 'once', 'stable-nonce'), 'same-message');
+  assert.deepEqual(body, {
+    content: 'once',
+    allowed_mentions: { parse: [] },
+    nonce: 'stable-nonce',
+    enforce_nonce: true,
+  });
+});
+
+test('service: scheduled occurrence nonce stays stable across an ambiguous retry', async () => {
+  const db: TestDb = await openTestDb(import.meta.filename);
+  const store = new AutomationStore(db.db);
+  const nonces: string[] = [];
+  let attempts = 0;
+  const discord: AutomationDiscord = {
+    async postMessage(_channelId, _content, nonce) {
+      nonces.push(String(nonce));
+      if (++attempts === 1) throw new DiscordPostError('response lost');
+      return 'accepted';
+    },
+    async deleteMessage() {},
+  };
+  const service = new AutomationService(store, discord);
+  await service.putScheduled({
+    guildId: GUILD, id: 'ambiguous', channelId: CHANNEL, body: 'once',
+    nextRunAt: '2026-09-08T10:00:00.000Z', actorId: ACTOR,
+  });
+  assert.equal(await service.runDueScheduled(GUILD, '2026-09-08T10:00:01.000Z'), 0);
+  assert.equal(await service.runDueScheduled(GUILD, '2026-09-08T10:00:31.000Z'), 1);
+  assert.equal(nonces.length, 2);
+  assert.equal(nonces[0], nonces[1]);
+  assert.match(nonces[0]!, /^[a-f0-9]{24}$/);
+  assert.equal((await store.getScheduled(GUILD, 'ambiguous'))?.enabled, false);
+  await db.cleanup();
+});
+
+test('service: persistence failure deletes the accepted scheduled message and retries the row', async () => {
+  const db: TestDb = await openTestDb(import.meta.filename);
+  const store = new AutomationStore(db.db);
+  const discord = fakeDiscord();
+  const service = new AutomationService(store, discord);
+  await service.putScheduled({
+    guildId: GUILD, id: 'persist-fail', channelId: CHANNEL, body: 'once',
+    nextRunAt: '2026-09-08T10:00:00.000Z', actorId: ACTOR,
+  });
+  const originalMark = store.markScheduledRun.bind(store);
+  let failOnce = true;
+  store.markScheduledRun = async (...args) => {
+    if (failOnce) {
+      failOnce = false;
+      throw new Error('database write failed');
+    }
+    return originalMark(...args);
+  };
+  assert.equal(await service.runDueScheduled(GUILD, '2026-09-08T10:00:01.000Z'), 0);
+  assert.deepEqual(discord.deletes, [{ channelId: CHANNEL, messageId: 'msg1' }]);
+  const retry = await store.getScheduled(GUILD, 'persist-fail');
+  assert.equal(retry?.enabled, true);
+  assert.equal(retry?.nextRunAt, '2026-09-08T10:00:01.000Z');
+  assert.equal(await service.runDueScheduled(GUILD, '2026-09-08T10:00:02.000Z'), 1);
+  await db.cleanup();
+});
+
 test('discord client suppresses REST mentions and marks network, 429, and 5xx failures retryable', async () => {
   const network = new AutomationDiscordClient({
     token: 't',
@@ -1071,6 +1184,44 @@ test('service: sticky delete removes the row and the live message', async () => 
   assert.equal(discord.deletes.length, 1);
   const row = await store.getSticky(GUILD, CHANNEL);
   assert.equal(row, null);
+  await db.cleanup();
+});
+
+test('service: sticky delete fences an in-flight replacement and removes both messages', async () => {
+  const db: TestDb = await openTestDb(import.meta.filename);
+  const store = new AutomationStore(db.db);
+  const discord = fakeDiscord();
+  const service = new AutomationService(store, discord);
+  await service.putSticky({
+    guildId: GUILD, channelId: CHANNEL, body: 'replace me', debounceSeconds: 1, actorId: ACTOR,
+  });
+  assert.equal(
+    await service.onChannelActivity(GUILD, CHANNEL, 'first', Date.parse('2026-09-08T10:00:00Z')),
+    'reposted',
+  );
+
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  let started!: () => void;
+  const posting = new Promise<void>((resolve) => { started = resolve; });
+  discord.postMessage = async (channelId, content) => {
+    started();
+    await held;
+    discord.posts.push({ channelId, content });
+    return 'replacement';
+  };
+  const repost = service.onChannelActivity(
+    GUILD, CHANNEL, 'second', Date.parse('2026-09-08T10:00:02Z'),
+  );
+  await posting;
+  assert.equal(await service.deleteSticky(GUILD, CHANNEL, ACTOR), true);
+  release();
+  assert.equal(await repost, 'held');
+  assert.deepEqual(discord.deletes, [
+    { channelId: CHANNEL, messageId: 'msg1' },
+    { channelId: CHANNEL, messageId: 'replacement' },
+  ]);
+  assert.equal(await store.getSticky(GUILD, CHANNEL), null);
   await db.cleanup();
 });
 
@@ -1493,6 +1644,26 @@ test('Discord custom slash command contains lookup failures', async () => {
   assert.deepEqual(replies, [{ content: 'The custom command failed.', ephemeral: true }]);
 });
 
+test('Discord automation handler leaves built-in slash commands to their owner', async () => {
+  const bus = new EventEmitter();
+  let lookups = 0;
+  registerAutomationCommands(bus as unknown as Client, {
+    guildId: GUILD,
+    service: {} as AutomationService,
+    store: {
+      getCommand: async () => {
+        lookups++;
+        throw new Error('database down');
+      },
+    } as unknown as AutomationStore,
+  });
+  const { interaction, replies } = fakeCustomInteraction('rank');
+  bus.emit(Events.InteractionCreate, interaction);
+  await settle();
+  assert.equal(lookups, 0);
+  assert.deepEqual(replies, []);
+});
+
 test('Discord custom slash command catches rendering failure and audits it', async () => {
   const db: TestDb = await openTestDb(import.meta.filename);
   const store = new AutomationStore(db.db);
@@ -1515,6 +1686,30 @@ test('Discord custom slash command catches rendering failure and audits it', asy
   ).all<{ outcome: string; reason: string }>('faq');
   assert.deepEqual(audits.map((row) => ({ ...row })), [{ outcome: 'failed', reason: 'Error' }]);
   await db.cleanup();
+});
+
+test('gateway uses processing time rather than a delayed Discord event timestamp for sticky claims', async () => {
+  const bus = new EventEmitter();
+  let seenArgs: unknown[] = [];
+  registerAutomationGateway(bus as unknown as Client, {
+    guildId: GUILD,
+    textCommandsEnabled: false,
+    service: {
+      onChannelActivity: async (...args: unknown[]) => {
+        seenArgs = args;
+        return 'none';
+      },
+    } as unknown as AutomationService,
+    findTrigger: async () => null,
+  });
+  bus.emit('automationMessageAccepted', {
+    guildId: GUILD,
+    channelId: CHANNEL,
+    author: { id: ACTOR, bot: false },
+    createdTimestamp: 1,
+  });
+  await settle();
+  assert.deepEqual(seenArgs, [GUILD, CHANNEL, ACTOR]);
 });
 
 test('gateway keeps stickies live but text command processing off when disabled', async () => {

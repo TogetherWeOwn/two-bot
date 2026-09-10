@@ -39,6 +39,7 @@ import { RestModerationResolver } from './moderation/resolver.ts';
 import { ModerationService } from './moderation/service.ts';
 import { ModerationStore } from './moderation/store.ts';
 import { MODERATION_COMMAND_DATA, registerModerationHandler } from './moderation/commands.ts';
+import { AUTOMATION_COMMAND_DATA } from './discord/commandNames.ts';
 import { loadAutomodConfig } from './automod/config.ts';
 import { AutomodService } from './automod/service.ts';
 import { AutomodStore } from './automod/store.ts';
@@ -62,8 +63,10 @@ import { AutomationDiscord, registerAutomationCommands } from './automations/dis
 import { AutomationService } from './automations/service.ts';
 import { registerAutomationGateway } from './automations/gateway.ts';
 import { startScheduler } from './automations/scheduler.ts';
+import { loadAutomationConfig } from './automations/config.ts';
 
 const cfg = loadConfig();
+const automationCfg = loadAutomationConfig();
 setLogLevel(cfg.logLevel);
 
 const db = await openDb(cfg.dbPath, { poolMax: cfg.dbPoolMax });
@@ -282,9 +285,14 @@ if (cfg.guildId) {
   commandRegistry = new CommandRegistry(client, {
     guildId: cfg.guildId,
     automations: automationStore,
-    additionalBuiltins: moderationResolver && moderationService ? MODERATION_COMMAND_DATA : [],
+    additionalBuiltins: [
+      ...(automationCfg.enabled ? AUTOMATION_COMMAND_DATA : []),
+      ...(moderationResolver && moderationService ? MODERATION_COMMAND_DATA : []),
+    ],
   });
   commandRegistry.register();
+}
+if (cfg.guildId && automationCfg.enabled) {
   registerAutomationCommands(client, {
     guildId: cfg.guildId,
     service: automationService,
@@ -294,16 +302,18 @@ if (cfg.guildId) {
   registerAutomationGateway(client, {
     guildId: cfg.guildId,
     service: automationService,
-    textCommandsEnabled: process.env.TWO_TEXT_COMMANDS === '1',
+    textCommandsEnabled: automationCfg.textCommandsEnabled,
     findTrigger: (guildId, word) => automationStore.findTextTrigger(guildId, word),
   });
   automationScheduler = startScheduler(automationService, cfg.guildId);
   log.info('automations_enabled', {
     guildId: cfg.guildId,
-    textCommands: process.env.TWO_TEXT_COMMANDS === '1' ? 'on' : 'off (slash-only)',
+    textCommands: automationCfg.textCommandsEnabled ? 'on' : 'off (slash-only)',
   });
 } else {
-  log.info('automations_disabled', { reason: 'DISCORD_GUILD_ID is unset' });
+  log.info('automations_disabled', {
+    reason: cfg.guildId ? 'TWO_AUTOMATIONS is not 1' : 'DISCORD_GUILD_ID is unset',
+  });
 }
 
 // Onboarding (TWO-7). Skipped entirely if no landing channel is configured -
@@ -370,9 +380,9 @@ if (internalCfg) {
     // database as everything else, so it is covered by the same backups.
     store: new InternalActionStore(db),
     expectedJoins,
-    automations: automationService,
-    allowAutomationOverwrite: internalCfg.allowAutomationOverwrite,
-    syncCommands: commandRegistry ? () => commandRegistry!.sync() : null,
+    automations: automationCfg.enabled ? automationService : null,
+    allowAutomationOverwrite: automationCfg.enabled && internalCfg.allowAutomationOverwrite,
+    syncCommands: automationCfg.enabled && commandRegistry ? () => commandRegistry!.sync() : null,
     moderation: moderationResolver && moderationService
       ? { resolver: moderationResolver, service: moderationService }
       : null,

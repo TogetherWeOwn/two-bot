@@ -423,6 +423,7 @@ CREATE TABLE IF NOT EXISTS scheduled_messages (
   updated_at       TEXT NOT NULL,
   claim_token      TEXT,
   claimed_at       TEXT,
+  occurrence_nonce TEXT,
   CHECK (length(body) BETWEEN 1 AND 2000),
   CHECK (interval_seconds IS NULL OR interval_seconds BETWEEN 60 AND 31536000)
 );
