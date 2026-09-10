@@ -31,10 +31,12 @@ import {
   LIVE_GUILD_ID,
   STAGING_BOT_APPLICATION_ID,
   STAGING_INVITE_PERMISSIONS,
+  TWO_STAGING_GUILD_ID,
   STAGING_PERMISSIONS,
   applicationIdFromToken,
   checkStagingToken,
   describePermissions,
+  stagingGuildId,
   stagingInviteUrl,
 } from '../src/staging/spec.ts';
 import type { EventType } from '../src/core/events.ts';
@@ -284,12 +286,35 @@ test('the superseded test-two token is refused, not waved through as unknown', (
   assert.match(r.message, new RegExp(STAGING_BOT_APPLICATION_ID));
 });
 
-test('an unrecognised or unparseable token is allowed through to Discord, not hard-failed', () => {
+test('an unrecognised or unparseable token is refused before Discord', () => {
   // A token reset changes the secret but never the application id, so a reset
-  // staging token still passes above. This covers a THIRD app someone makes
-  // later: we warn, we do not block a setup that may be correct.
-  assert.equal(checkStagingToken(tokenFor('123456789012345678')).ok, true);
-  assert.equal(checkStagingToken('garbage').ok, true);
+  // staging token still passes above. A different application is a policy
+  // change, not something staging tooling may discover by making a request.
+  const unknown = checkStagingToken(tokenFor('123456789012345678'));
+  assert.equal(unknown.ok, false);
+  assert.match(unknown.message, /Nothing was contacted/);
+
+  const unparseable = checkStagingToken('garbage');
+  assert.equal(unparseable.ok, false);
+  assert.match(unparseable.message, /unparseable application id/);
+  assert.match(unparseable.message, /Nothing was contacted/);
+});
+
+test('staging guild selection accepts only the exact TWO Staging guild', () => {
+  const previous = process.env.DISCORD_STAGING_GUILD_ID;
+  try {
+    process.env.DISCORD_STAGING_GUILD_ID = TWO_STAGING_GUILD_ID;
+    assert.equal(stagingGuildId(), TWO_STAGING_GUILD_ID);
+
+    process.env.DISCORD_STAGING_GUILD_ID = '1555555555555555555';
+    assert.throws(() => stagingGuildId(), /must be the TWO Staging guild/);
+
+    process.env.DISCORD_STAGING_GUILD_ID = LIVE_GUILD_ID;
+    assert.throws(() => stagingGuildId(), /the LIVE TWO server/);
+  } finally {
+    if (previous === undefined) delete process.env.DISCORD_STAGING_GUILD_ID;
+    else process.env.DISCORD_STAGING_GUILD_ID = previous;
+  }
 });
 
 /**

@@ -81,21 +81,26 @@ export function applicationIdFromToken(token: string): string | null {
 }
 
 /**
- * Refuse a token that belongs to the LIVE bot.
+ * Refuse every token except the exact Owen QA Test application.
  *
  * This is not hypothetical. On 2026-08-19 the secrets store bound this agent
  * the live bot's token under a generic name while the staging token was
- * absent. Had a staging script been handed that value, it would have created a
- * guild owned by the production bot - and `POST /guilds` is refused once a bot
- * is in ten, so the live bot's guild slots are not something to spend by
- * accident.
+ * absent. A later shell retained the superseded `test-two` token. Both values
+ * remained valid Discord credentials, so allowing an unknown application to
+ * reach the network would turn a staging command into a mutation of whichever
+ * guilds that application can access.
  *
- * Unrecognised ids only warn. A token reset changes the secret but never the
- * application id, so the ids above stay true across resets; but a third
- * staging app someone creates later should not hard-fail a correct setup.
+ * A token reset changes the secret but never the application id, so exact
+ * application matching remains valid across resets. A new staging application
+ * is a policy change: update this constant and its review evidence first rather
+ * than silently accepting it at runtime.
  */
 export function checkStagingToken(token: string): { ok: boolean; message: string } {
   const appId = applicationIdFromToken(token);
+  if (appId === STAGING_BOT_APPLICATION_ID) {
+    return { ok: true, message: `token is ${STAGING_BOT_APPLICATION_NAME} (${appId})` };
+  }
+
   if (appId === LIVE_BOT_APPLICATION_ID) {
     return {
       ok: false,
@@ -107,9 +112,7 @@ export function checkStagingToken(token: string): { ok: boolean; message: string
         'raise it on TWO-21 rather than editing it locally.',
     };
   }
-  if (appId === STAGING_BOT_APPLICATION_ID) {
-    return { ok: true, message: `token is ${STAGING_BOT_APPLICATION_NAME} (${appId})` };
-  }
+
   if (appId === FORMER_STAGING_BOT_APPLICATION_ID) {
     return {
       ok: false,
@@ -122,10 +125,15 @@ export function checkStagingToken(token: string): { ok: boolean; message: string
         '  Re-read DISCORD_STAGING_BOT_TOKEN from the secrets store - your shell has a stale value.',
     };
   }
-  if (appId === null) {
-    return { ok: true, message: 'token shape not recognised - continuing, Discord will judge it' };
-  }
-  return { ok: true, message: `token is application ${appId}, which is neither the live nor the expected staging bot` };
+
+  const actual = appId === null ? 'an unparseable application id' : `application ${appId}`;
+  return {
+    ok: false,
+    message:
+      `This token identifies ${actual}, not ${STAGING_BOT_APPLICATION_NAME} ` +
+      `(${STAGING_BOT_APPLICATION_ID}).\n` +
+      '  Refusing to run. Nothing was contacted.',
+  };
 }
 
 /** Text channels the fixtures and the integration suite expect to find. */
