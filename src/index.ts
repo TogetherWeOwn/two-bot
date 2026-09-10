@@ -42,7 +42,7 @@ import { RestModerationResolver } from './moderation/resolver.ts';
 import { ModerationService } from './moderation/service.ts';
 import { ModerationStore } from './moderation/store.ts';
 import { MODERATION_COMMAND_DATA, registerModerationHandler } from './moderation/commands.ts';
-import { AUTOMATION_COMMAND_DATA, COMMUNITY_COMMAND_DATA } from './discord/commandNames.ts';
+import { ANNOUNCEMENT_COMMAND_DATA, AUTOMATION_COMMAND_DATA, COMMUNITY_COMMAND_DATA } from './discord/commandNames.ts';
 import { loadAutomodConfig } from './automod/config.ts';
 import { AutomodService } from './automod/service.ts';
 import { AutomodStore } from './automod/store.ts';
@@ -75,10 +75,15 @@ import {
   type CommunityScorecardJobHandle,
 } from './jobs/communityScorecard.ts';
 import { registerCommunityAttendance } from './analytics/communityAttendance.ts';
+import { loadAnnouncementsConfig } from './announcements/config.ts';
+import { AnnouncementsStore } from './announcements/store.ts';
+import { AnnouncementsService } from './announcements/service.ts';
+import { DiscordAnnouncements, XmlFeedReader, registerAnnouncementCommands, startFeedPoller } from './announcements/discord.ts';
 
 const cfg = loadConfig();
 const automationCfg = loadAutomationConfig();
 const processStartedAt = new Date().toISOString();
+const announcementsCfg = loadAnnouncementsConfig();
 setLogLevel(cfg.logLevel);
 
 const db = await openDb(cfg.dbPath, { poolMax: cfg.dbPoolMax });
@@ -312,6 +317,7 @@ if (cfg.guildId) {
     additionalBuiltins: [
       ...(communityFacts ? COMMUNITY_COMMAND_DATA : []),
       ...(automationCfg.enabled ? AUTOMATION_COMMAND_DATA : []),
+      ...(announcementsCfg.enabled ? ANNOUNCEMENT_COMMAND_DATA : []),
       ...(moderationResolver && moderationService ? MODERATION_COMMAND_DATA : []),
     ],
   });

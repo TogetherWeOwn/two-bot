@@ -62,6 +62,13 @@ const OPTIONAL_TABLES = [
   'automation_audit_log',
   'self_role_audit',
   'self_role_panel_claims',
+  'event_rsvps',
+  'lfg_posts',
+  'lfg_roles',
+  'lfg_signups',
+  'feed_relays',
+  'feed_deliveries',
+  'announcements_audit_log',
 ] as const;
 const TABLES = [...REQUIRED_TABLES, ...OPTIONAL_TABLES] as const;
 type Table = (typeof TABLES)[number];
@@ -88,6 +95,13 @@ const PRIMARY_KEYS: Record<Table, readonly string[]> = {
   automation_audit_log: ['id'],
   self_role_audit: ['event_id'],
   self_role_panel_claims: ['guild_id', 'member_id', 'panel_id'],
+  event_rsvps: ['guild_id', 'event_id', 'user_id'],
+  lfg_posts: ['id'],
+  lfg_roles: ['lfg_id', 'role_key'],
+  lfg_signups: ['lfg_id', 'user_id'],
+  feed_relays: ['id'],
+  feed_deliveries: ['feed_id', 'item_key'],
+  announcements_audit_log: ['id'],
 };
 
 const sqlitePath = process.env.TWO_SQLITE_PATH || process.env.TWO_DB_PATH || './data/two.db';

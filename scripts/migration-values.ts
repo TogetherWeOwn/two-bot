@@ -19,7 +19,14 @@ export type MigrationTable =
   | 'sticky_messages'
   | 'automation_audit_log'
   | 'self_role_audit'
-  | 'self_role_panel_claims';
+  | 'self_role_panel_claims'
+  | 'event_rsvps'
+  | 'lfg_posts'
+  | 'lfg_roles'
+  | 'lfg_signups'
+  | 'feed_relays'
+  | 'feed_deliveries'
+  | 'announcements_audit_log';
 
 function isSqliteBooleanColumn(table: MigrationTable, column: string): boolean {
   return (
@@ -29,6 +36,7 @@ function isSqliteBooleanColumn(table: MigrationTable, column: string): boolean {
     (table === 'scheduled_messages' && column === 'enabled') ||
     (table === 'sticky_messages' && column === 'enabled') ||
     (table === 'self_role_panel_claims' && column === 'target_committed')
+    || (table === 'feed_relays' && column === 'enabled')
   );
 }
 
