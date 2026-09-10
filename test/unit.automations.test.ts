@@ -879,6 +879,42 @@ test('service: scheduled occurrence nonce stays stable across an ambiguous retry
   await db.cleanup();
 });
 
+test('service: editing an ambiguous scheduled occurrence uses a fresh nonce', async () => {
+  const db: TestDb = await openTestDb(import.meta.filename);
+  const store = new AutomationStore(db.db);
+  const nonces: string[] = [];
+  const bodies: string[] = [];
+  let attempts = 0;
+  const discord: AutomationDiscord = {
+    async postMessage(_channelId, content, nonce) {
+      bodies.push(content);
+      nonces.push(String(nonce));
+      if (++attempts === 1) throw new DiscordPostError('response lost');
+      return 'edited-message';
+    },
+    async deleteMessage() {},
+  };
+  const service = new AutomationService(store, discord);
+  await service.putScheduled({
+    guildId: GUILD, id: 'ambiguous-edit', channelId: CHANNEL, body: 'old',
+    nextRunAt: '2026-09-08T10:00:00.000Z', actorId: ACTOR,
+  });
+  assert.equal(await service.runDueScheduled(GUILD, '2026-09-08T10:00:01.000Z'), 0);
+  const firstNonce = nonces[0];
+  assert.ok(firstNonce);
+
+  await service.putScheduled({
+    guildId: GUILD, id: 'ambiguous-edit', channelId: CHANNEL, body: 'new',
+    nextRunAt: '2026-09-08T10:01:00.000Z', actorId: ACTOR,
+  });
+  assert.equal((await store.getScheduled(GUILD, 'ambiguous-edit'))?.occurrenceNonce, null);
+  assert.equal(await service.runDueScheduled(GUILD, '2026-09-08T10:01:01.000Z'), 1);
+  assert.deepEqual(bodies, ['old', 'new']);
+  assert.notEqual(nonces[1], firstNonce);
+  assert.match(nonces[1]!, /^[a-f0-9]{24}$/);
+  await db.cleanup();
+});
+
 test('service: persistence failure deletes the accepted scheduled message and retries the row', async () => {
   const db: TestDb = await openTestDb(import.meta.filename);
   const store = new AutomationStore(db.db);
