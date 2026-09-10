@@ -402,7 +402,8 @@ export class AutomationStore {
            updated_by       = excluded.updated_by,
            updated_at       = excluded.updated_at,
            claim_token      = NULL,
-           claimed_at       = NULL
+           claimed_at       = NULL,
+           occurrence_nonce = NULL
          WHERE scheduled_messages.guild_id = excluded.guild_id`,
       )
       .run(
