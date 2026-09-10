@@ -148,11 +148,11 @@ test('existing SQLite leveling tables gain the XP ceiling without losing data', 
 test('SQLite schema metadata records the self-role audit migration at its unique id', async () => {
   const db = await openSqlite(':memory:');
   assert.equal(
-    Number((await db.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE id = '0015_self_role_audit'`).get<{ count: number }>())?.count),
+    Number((await db.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE id = '0018_self_role_audit'`).get<{ count: number }>())?.count),
     1,
   );
   assert.equal(
-    Number((await db.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE id = '0016_self_role_recovery'`).get<{ count: number }>())?.count),
+    Number((await db.prepare(`SELECT COUNT(*) AS count FROM schema_migrations WHERE id = '0019_self_role_recovery'`).get<{ count: number }>())?.count),
     1,
   );
   assert.equal(
@@ -224,6 +224,91 @@ test('opening a baseline self-role SQLite database adds recovery columns and cla
     2,
   );
   await reopened.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('SQLite committed-target backfill requires the exact successful latest event', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'two-bot-self-role-target-upgrade-'));
+  const path = join(dir, 'two.db');
+  const raw = new DatabaseSync(path);
+  raw.exec(`
+    CREATE TABLE schema_migrations (
+      id TEXT PRIMARY KEY,
+      applied_at TEXT NOT NULL,
+      checksum TEXT
+    );
+    CREATE TABLE self_role_audit (
+      event_id TEXT PRIMARY KEY,
+      event_order TEXT,
+      guild_id TEXT NOT NULL,
+      panel_id TEXT NOT NULL,
+      member_id TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      option_key TEXT,
+      role_id TEXT,
+      source TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      code TEXT,
+      reason TEXT,
+      added_role_ids TEXT NOT NULL,
+      removed_role_ids TEXT NOT NULL,
+      attempted_added_role_ids TEXT NOT NULL DEFAULT '[]',
+      attempted_removed_role_ids TEXT NOT NULL DEFAULT '[]',
+      compensated_added_role_ids TEXT NOT NULL DEFAULT '[]',
+      compensated_removed_role_ids TEXT NOT NULL DEFAULT '[]',
+      unresolved_added_role_ids TEXT NOT NULL DEFAULT '[]',
+      unresolved_removed_role_ids TEXT NOT NULL DEFAULT '[]',
+      desired_role_ids TEXT NOT NULL DEFAULT '[]',
+      pre_mutation_role_ids TEXT NOT NULL DEFAULT '[]',
+      claim_token TEXT,
+      claim_generation INTEGER NOT NULL DEFAULT 0,
+      processing_expires_at TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE self_role_panel_claims (
+      guild_id TEXT NOT NULL,
+      member_id TEXT NOT NULL,
+      panel_id TEXT NOT NULL,
+      claim_token TEXT NOT NULL,
+      claim_generation INTEGER NOT NULL,
+      processing_expires_at TEXT NOT NULL,
+      latest_event_id TEXT,
+      latest_option_key TEXT,
+      latest_event_order TEXT,
+      PRIMARY KEY (guild_id, member_id, panel_id)
+    );
+    INSERT INTO self_role_audit
+      (event_id, event_order, guild_id, panel_id, member_id, source_id, option_key,
+       role_id, source, operation, outcome, added_role_ids, removed_role_ids, created_at)
+    VALUES
+      ('accepted-red', '1', 'g', 'colors', 'safe', 's', 'red', 'r', 'button', 'add',
+       'assigned', '["r"]', '[]', '2026-09-09T00:00:00.000Z'),
+      ('accepted-red-old', '1', 'g', 'colors', 'ambiguous', 's', 'red', 'r', 'button', 'add',
+       'assigned', '["r"]', '[]', '2026-09-09T00:00:00.000Z'),
+      ('rejected-blue', '2', 'g', 'colors', 'ambiguous', 's', 'blue', 'b', 'button', 'add',
+       'rejected', '[]', '[]', '2026-09-09T00:01:00.000Z');
+    INSERT INTO self_role_panel_claims
+      (guild_id, member_id, panel_id, claim_token, claim_generation, processing_expires_at,
+       latest_event_id, latest_option_key, latest_event_order)
+    VALUES
+      ('g', 'safe', 'colors', 'released', 1, '2026-09-09T00:00:00.000Z',
+       'accepted-red', 'red', '1'),
+      ('g', 'ambiguous', 'colors', 'released', 2, '2026-09-09T00:01:00.000Z',
+       'rejected-blue', 'blue', '2');
+  `);
+  raw.close();
+
+  const db = await openSqlite(path);
+  const rows = await db.prepare(
+    `SELECT member_id, latest_option_key, target_committed
+       FROM self_role_panel_claims ORDER BY member_id`,
+  ).all();
+  assert.deepEqual(rows.map((row) => ({ ...row })), [
+    { member_id: 'ambiguous', latest_option_key: 'blue', target_committed: 0 },
+    { member_id: 'safe', latest_option_key: 'red', target_committed: 1 },
+  ]);
+  await db.close();
   await rm(dir, { recursive: true, force: true });
 });
 

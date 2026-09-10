@@ -172,7 +172,7 @@ function ensureLevelingXpCeiling(raw: DatabaseSync): void {
 
 /** Apply every additive self-role SQLite upgrade under one write lock. */
 function ensureSelfRoleRecovery(raw: DatabaseSync): void {
-  const id = '0019_self_role_committed_target';
+  const id = '0022_self_role_committed_target';
   if (raw.prepare(`SELECT 1 FROM schema_migrations WHERE id = ?`).get(id)) return;
   raw.exec('BEGIN IMMEDIATE');
   try {
@@ -196,15 +196,22 @@ function ensureSelfRoleRecovery(raw: DatabaseSync): void {
     ensureColumn(raw, 'self_role_panel_claims', 'latest_event_order', 'TEXT');
     ensureColumn(raw, 'self_role_panel_claims', 'target_committed', 'INTEGER NOT NULL DEFAULT 0');
     ensureColumn(raw, 'self_role_audit', 'event_order', 'TEXT');
+    // Old builds could publish latest_option_key before the matching audit
+    // committed. Tie the backfill to the exact successful latest event; an
+    // ambiguous lane stays uncommitted and is reseeded from Discord instead.
     raw.prepare(`UPDATE self_role_panel_claims AS claims
       SET target_committed = 1
-      WHERE target_committed = 0 AND EXISTS (
-        SELECT 1 FROM self_role_audit AS audit
-         WHERE audit.guild_id = claims.guild_id
-           AND audit.member_id = claims.member_id
-           AND audit.panel_id = claims.panel_id
-           AND audit.outcome IN ('assigned', 'removed', 'switched', 'already_held', 'already_absent')
-      )`).run();
+      WHERE target_committed = 0
+        AND latest_event_id IS NOT NULL
+        AND EXISTS (
+          SELECT 1 FROM self_role_audit AS audit
+           WHERE audit.event_id = claims.latest_event_id
+             AND audit.guild_id = claims.guild_id
+             AND audit.member_id = claims.member_id
+             AND audit.panel_id = claims.panel_id
+             AND audit.option_key IS claims.latest_option_key
+             AND audit.outcome IN ('assigned', 'removed', 'switched', 'already_held', 'already_absent')
+        )`).run();
     raw.prepare(`UPDATE self_role_audit
       SET outcome = 'rejected', code = 'interrupted_before_recovery',
           reason = 'processing row predates persisted self-role intent'
@@ -313,11 +320,11 @@ export async function openSqlite(path: string): Promise<Db> {
     '0015_automations',
     '0016_automation_claims',
     '0017_scheduled_occurrence_nonce',
-    '0015_self_role_audit',
-    '0016_self_role_recovery',
-    '0017_self_role_ordering',
-    '0018_self_role_event_order',
-    '0019_self_role_committed_target',
+    '0018_self_role_audit',
+    '0019_self_role_recovery',
+    '0020_self_role_ordering',
+    '0021_self_role_event_order',
+    '0022_self_role_committed_target',
   ]) {
     stamp.run(id, new Date().toISOString());
   }

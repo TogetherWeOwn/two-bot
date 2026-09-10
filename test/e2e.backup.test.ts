@@ -191,14 +191,25 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
     await harness.db
       .prepare(
         `INSERT INTO self_role_audit
-           (event_id, guild_id, panel_id, member_id, source_id, option_key, role_id,
+           (event_id, event_order, guild_id, panel_id, member_id, source_id, option_key, role_id,
             source, operation, outcome, code, reason, added_role_ids, removed_role_ids, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
-        'self-role-event-1', G, 'colors', 'm1', 'panel-message', 'red', 'role-red',
-        'button', 'add', 'assigned', null, null, '["role-red"]', '[]',
-        '2026-08-01T12:00:00.000Z',
+        'self-role-event-1', '0000000000001:self-role-event-1', G, 'colors', 'm1',
+        'panel-message', 'red', 'role-red', 'button', 'add', 'assigned', null, null,
+        '["role-red"]', '[]', '2026-08-01T12:00:00.000Z',
+      );
+    await harness.db
+      .prepare(
+        `INSERT INTO self_role_panel_claims
+           (guild_id, member_id, panel_id, claim_token, claim_generation, processing_expires_at,
+            latest_event_id, latest_option_key, target_committed, latest_event_order)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        G, 'm1', 'colors', 'released-claim', 4, '2026-08-01T12:00:00.000Z',
+        'self-role-event-1', 'red', true, '0000000000001:self-role-event-1',
       );
   }
 
@@ -229,6 +240,7 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
     assert.equal(manifest.tables.find((t) => t.name === 'containment_incidents')?.count, 1);
     assert.equal(manifest.tables.find((t) => t.name === 'join_risk_flags')?.count, 1);
     assert.equal(manifest.tables.find((t) => t.name === 'self_role_audit')?.count, 1);
+    assert.equal(manifest.tables.find((t) => t.name === 'self_role_panel_claims')?.count, 1);
 
     // Lose everything, exactly as a dead disk would.
     await harness.db.exec(`TRUNCATE ${DUMP_TABLES.join(', ')} RESTART IDENTITY`);
@@ -358,11 +370,14 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
     assert.equal(command?.name, 'faq');
     assert.equal(command?.text_trigger, '!faq');
     assert.equal(command?.enabled, true);
-  test('self-role audit survives the round trip with its per-panel evidence intact', async () => {
+  });
+
+  test('self-role committed target survives the round trip with its audit evidence', async () => {
     await seed();
-    const file = join(dir, 'self-role-audit.ndjson.gz');
+    const file = join(dir, 'self-role-state.ndjson.gz');
     const manifest = await dump(harness.db, file);
     assert.equal(manifest.tables.find((t) => t.name === 'self_role_audit')?.count, 1);
+    assert.equal(manifest.tables.find((t) => t.name === 'self_role_panel_claims')?.count, 1);
 
     await harness.db.exec(`TRUNCATE ${DUMP_TABLES.join(', ')} RESTART IDENTITY`);
     await restore(harness.db, file);
@@ -378,6 +393,19 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
       event_id: 'self-role-event-1', guild_id: G, panel_id: 'colors', member_id: 'm1',
       source: 'button', operation: 'add', outcome: 'assigned',
       added_role_ids: '["role-red"]', removed_role_ids: '[]',
+    });
+    const claim = await harness.db
+      .prepare(
+        `SELECT latest_event_id, latest_option_key, target_committed, latest_event_order
+           FROM self_role_panel_claims
+          WHERE guild_id = ? AND member_id = ? AND panel_id = ?`,
+      )
+      .get(G, 'm1', 'colors');
+    assert.deepEqual({ ...claim }, {
+      latest_event_id: 'self-role-event-1',
+      latest_option_key: 'red',
+      target_committed: true,
+      latest_event_order: '0000000000001:self-role-event-1',
     });
   });
 

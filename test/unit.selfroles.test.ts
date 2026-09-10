@@ -1066,7 +1066,8 @@ test('first exclusive dispatch seeds the committed target from authoritative rol
     `SELECT latest_option_key, target_committed FROM self_role_panel_claims
       WHERE guild_id = ? AND member_id = ? AND panel_id = ?`,
   ).get<Record<string, unknown>>(A, C, panel.id);
-  assert.deepEqual({ ...stored }, { latest_option_key: null, target_committed: 1 });
+  assert.equal(stored?.latest_option_key, null);
+  assert.equal(Boolean(stored?.target_committed), true);
 });
 
 test('an older delayed exclusive selection cannot overwrite a newer completed selection', async () => {

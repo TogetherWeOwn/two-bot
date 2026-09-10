@@ -48,8 +48,8 @@ const COMPATIBLE_CHECKSUMS = new Map([
  * both directions, leaving the stored value untouched.
  */
 const EQUIVALENT_CHECKSUMS = new Set([
-  '0015_self_role_audit:cb0a092fa96c904d:bc32090819445847',
-  '0015_self_role_audit:bc32090819445847:cb0a092fa96c904d',
+  '0018_self_role_audit:cb0a092fa96c904d:bc32090819445847',
+  '0018_self_role_audit:bc32090819445847:cb0a092fa96c904d',
 ]);
 
 export function loadMigrations(dir: string = MIGRATIONS_DIR): Migration[] {
