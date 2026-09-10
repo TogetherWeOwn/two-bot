@@ -115,6 +115,12 @@ describe('inspect: table names it refuses', () => {
 });
 
 describe('inspect: files it refuses for shape', () => {
+  test('a legacy v1 dump cannot omit newly-owned tables', async () => {
+    const objs = goodDump();
+    (objs[0] as { version: number }).version = 1;
+    await assert.rejects(() => inspect(writeDump(objs)), /dump version 1, this build reads 2/);
+  });
+
   test('a dump written by a newer format', async () => {
     const objs = goodDump();
     (objs[0] as { version: number }).version = DUMP_VERSION + 1;

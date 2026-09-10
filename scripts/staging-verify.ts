@@ -43,6 +43,10 @@ import {
   stagingInviteUrl,
 } from '../src/staging/spec.ts';
 import { evaluateHierarchy, type PartialRole } from '../src/staging/provision.ts';
+import {
+  findSelfRoleDisallowedPermission,
+  findSelfRoleUnsafeChannelGrant,
+} from '../src/selfRoles/permissions.ts';
 
 const API = 'https://discord.com/api/v10';
 
@@ -113,10 +117,11 @@ if (weOwnIt) {
 
 // 3. roles exist, and the bot can actually hand them out
 const roles = await api<PartialRole[]>(`/guilds/${guildId}/roles`);
-if (roles.status !== 200 || !roles.body) {
+const hierarchy = roles.body ? evaluateHierarchy({ roles: roles.body, botId, ownerId }) : null;
+if (roles.status !== 200 || !roles.body || !hierarchy) {
   fail('cannot read roles', `HTTP ${roles.status}`);
 } else {
-  const h = evaluateHierarchy({ roles: roles.body, botId, ownerId });
+  const h = hierarchy;
 
   for (const name of h.missing) fail(`role "${name}" is missing`, 'run scripts/staging-provision.ts --apply');
 
@@ -142,9 +147,12 @@ if (roles.status !== 200 || !roles.body) {
 }
 
 // 4. channels
-const channels = await api<Array<{ id: string; name: string; type: number }>>(
-  `/guilds/${guildId}/channels`,
-);
+const channels = await api<Array<{
+  id: string;
+  name: string;
+  type: number;
+  permission_overwrites?: Array<{ id: string; type: number; allow: string; deny: string }>;
+}>>(`/guilds/${guildId}/channels`);
 if (channels.status !== 200 || !channels.body) {
   fail('cannot read channels', `HTTP ${channels.status}`);
 } else {
@@ -255,6 +263,97 @@ if (app.status === 200 && app.body) {
   }
 } else {
   warn('could not read the application flags', `HTTP ${app.status}`);
+}
+
+// 7. Hardened role panels. The reaction-role parity suite must not silently
+// disappear from the staging proof: an empty catalogue or observational-only
+// rollout is a failed deployment because neither proves role mutation parity.
+const panelRaw = process.env.TWO_SELF_ROLE_PANELS ?? '';
+if (process.env.TWO_SELF_ROLE_DRY_RUN === '1') {
+  fail(
+    'TWO_SELF_ROLE_DRY_RUN is enabled',
+    'reaction-role staging proof requires real role mutations in TWO Staging',
+  );
+} else {
+  pass('self-role mutations are enabled');
+}
+if (!panelRaw.trim()) {
+  fail(
+    'TWO_SELF_ROLE_PANELS is empty',
+    'reaction-role staging proof requires the configured button, select, and reaction panels',
+  );
+} else {
+  try {
+    const { loadSelfRolePanels } = await import('../src/selfRoles/config.ts');
+    const panels = loadSelfRolePanels(panelRaw);
+    const modes = new Set(panels.map((panel) => panel.mode));
+    for (const mode of ['button', 'select', 'reaction'] as const) {
+      if (modes.has(mode)) pass(`self-role ${mode} panel is configured`);
+      else fail(`self-role ${mode} panel is missing`, 'reaction-role parity requires every picker mode');
+    }
+    if (panels.length > 1) pass('multiple self-role panels are configured', `${panels.length} panels`);
+    else fail('multiple self-role panels are missing', `expected at least 2, found ${panels.length}`);
+    if (panels.some((panel) => panel.exclusive)) pass('exclusive self-role panel is configured');
+    else fail('exclusive self-role panel is missing', 'reaction-role parity requires exclusive groups');
+    if (panels.some((panel) => panel.color && panel.exclusive)) pass('exclusive color-role panel is configured');
+    else fail('exclusive color-role panel is missing', 'Color-Chan parity requires an exclusive color group');
+
+    const knownRoles = new Map((roles.body ?? []).map((role) => [role.id, role]));
+    for (const panel of panels) {
+      const message = await api<{ id: string }>(`/channels/${panel.channelId}/messages/${panel.messageId}`);
+      if (message.status === 200 && message.body?.id === panel.messageId) {
+        pass(`self-role panel "${panel.id}" message exists`, `${panel.mode} in ${panel.channelId}`);
+      } else {
+        fail(`self-role panel "${panel.id}" message missing`, `HTTP ${message.status}`);
+      }
+      for (const option of panel.options) {
+        const role = knownRoles.get(option.roleId);
+        if (!role) fail(`self-role panel "${panel.id}" role missing`, `${option.label} (${option.roleId})`);
+        else {
+          const livePermissions = BigInt(role.permissions ?? '0');
+          const disallowed = findSelfRoleDisallowedPermission(livePermissions);
+          if (disallowed) {
+            fail(
+              `self-role role "${role.name}" has disallowed permission ${disallowed}`,
+              `panel ${panel.id} allows only explicitly approved member-safe permissions`,
+            );
+          } else if (livePermissions !== BigInt(option.permissions)) {
+            fail(
+              `self-role role "${role.name}" permission mask changed`,
+              `panel ${panel.id} pins ${option.permissions}, Discord reports ${livePermissions}`,
+            );
+          } else {
+            const everyone = knownRoles.get(guildId);
+            const unsafeGrant = channels.body && everyone
+              ? findSelfRoleUnsafeChannelGrant({
+                  guildId,
+                  roleId: role.id,
+                  everyonePermissions: everyone.permissions ?? '0',
+                  rolePermissions: livePermissions,
+                  channels: channels.body.map((channel) => ({
+                    id: channel.id,
+                    name: channel.name,
+                    permissionOverwrites: channel.permission_overwrites,
+                  })),
+                })
+              : null;
+            if (unsafeGrant) {
+              fail(
+                `self-role role "${role.name}" has unsafe channel grant ${unsafeGrant.permission}`,
+                `channel ${unsafeGrant.channelName ?? unsafeGrant.channelId}`,
+              );
+            } else if (!weOwnIt && hierarchy && role.position >= (hierarchy.botPosition ?? -1)) {
+              fail(`self-role role "${role.name}" is above the bot`, `position ${role.position}`);
+            } else {
+              pass(`self-role role "${role.name}" assignable`, `panel ${panel.id}`);
+            }
+          }
+        }
+      }
+    }
+  } catch (err) {
+    fail('TWO_SELF_ROLE_PANELS is invalid', String(err));
+  }
 }
 
 console.log(`\n${fails} fail, ${warns} warn\n`);

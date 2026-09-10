@@ -44,6 +44,8 @@ export interface Config {
   anchorWelcomeChannelId: string | null;
   /** Onboarding observes and logs but changes nothing. */
   onboardingDryRun: boolean;
+  /** Self-role panels observe and audit but change no roles. */
+  selfRoleDryRun: boolean;
   /**
    * Staff channel for join-burst alerts (TWO-56). Null = alerts go to the log
    * only. Never a member-facing channel: this posts member IDs.
@@ -119,6 +121,7 @@ export function loadConfig(): Config {
       .filter(Boolean),
     anchorWelcomeChannelId: process.env.DISCORD_ANCHOR_WELCOME_CHANNEL_ID || null,
     onboardingDryRun: process.env.TWO_ONBOARDING_DRY_RUN === '1',
+    selfRoleDryRun: process.env.TWO_SELF_ROLE_DRY_RUN === '1',
     staffAlertChannelId: process.env.DISCORD_STAFF_ALERT_CHANNEL_ID || null,
     raidJoinThreshold: Number(process.env.TWO_RAID_JOIN_THRESHOLD ?? 5),
     raidWindowSeconds: Number(process.env.TWO_RAID_WINDOW_SECONDS ?? 60),
