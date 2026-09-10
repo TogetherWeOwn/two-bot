@@ -137,7 +137,15 @@ export function checkStagingToken(token: string): { ok: boolean; message: string
 }
 
 /** Text channels the fixtures and the integration suite expect to find. */
-export const STAGING_TEXT_CHANNELS = ['welcome', 'general', 'events', 'bot-log'] as const;
+export const STAGING_TEXT_CHANNELS = [
+  'welcome',
+  'general',
+  'events',
+  'bot-log',
+  'audit-log',
+  'voice-log',
+  'moderation-log',
+] as const;
 
 /**
  * A real voice channel is in the spec deliberately: `first_voice_session` can
@@ -200,13 +208,13 @@ const HIGH_BITS = (1n << 33n) | (1n << 40n) | (1n << 44n); // Manage Events, Mod
 /**
  * What the invite link actually asks for.
  *
- * `STAGING_PERMISSIONS` covers onboarding. It does NOT cover `event.upsert`,
- * which calls `POST /guilds/{id}/scheduled-events` and needs Manage Events -
- * a bit Manage Server does not imply (`docs/INTERNAL_ACTIONS.md` §8). TOG-463
- * measured that gap against a real guild on 2026-09-05: `role.assign` and
- * `event.upsert` returned `422 discord_rejected` wrapping Discord's own 403,
- * with effective mask `2112134023859777`. The endpoint was correct; the
- * invite was short.
+ * `STAGING_PERMISSIONS` covers onboarding and the moderation audit mirror. It
+ * does NOT cover `event.upsert`, which calls
+ * `POST /guilds/{id}/scheduled-events` and needs Manage Events - a bit Manage
+ * Server does not imply (`docs/INTERNAL_ACTIONS.md` §8). TOG-463 measured that
+ * gap against a real guild on 2026-09-05: `role.assign` and `event.upsert`
+ * returned `422 discord_rejected` wrapping Discord's own 403, with effective
+ * mask `2112134023859777`. The endpoint was correct; the invite was short.
  *
  * Since an invited bot can never exceed its invite, shipping the narrow set
  * guarantees a second round-trip to a human to fix a permission we already

@@ -56,6 +56,7 @@ const TABLES = [
   'level_role_rewards',
   'level_import_runs',
   'member_levels',
+  'operational_audit_log',
   // TOG-1642 moderation state. Same treatment as any other test data: the
   // moderation suites and the backup round trip seed these directly, and a
   // leftover row from one fixture would collide with the next one's PKs.
@@ -98,6 +99,7 @@ const SQLITE_TABLES = [
   'level_role_rewards',
   'level_import_runs',
   'member_levels',
+  'operational_audit_log',
   'moderation_warnings',
   'moderation_scheduled_unbans',
   'moderation_audit',

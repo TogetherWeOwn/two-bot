@@ -46,6 +46,8 @@ import { AUTOMATION_COMMAND_DATA, COMMUNITY_COMMAND_DATA } from './discord/comma
 import { loadAutomodConfig } from './automod/config.ts';
 import { AutomodService } from './automod/service.ts';
 import { AutomodStore } from './automod/store.ts';
+import { OperationalAuditStore } from './audit/store.ts';
+import { makeOperationalAudit } from './audit/service.ts';
 import { loadContainmentConfig } from './moderation/containmentConfig.ts';
 import { ContainmentStore } from './moderation/containmentStore.ts';
 import { ContainmentDiscord } from './moderation/containmentDiscord.ts';
@@ -123,7 +125,7 @@ const communityClassifier = new CommunityClassifier(loadCommunityClassifierConfi
 const communityFacts = cfg.communityScorecard ? new CommunityFactStore(db, communityClassifier) : null;
 const handlers = new FunnelHandlers(store, leveling, communityFacts);
 
-const client = createClient();
+const client = createClient(process.env.TWO_AUTOMOD === '1');
 const moderationCfg = loadModerationConfig();
 const moderationStore = new ModerationStore(db);
 const moderationDiscord = new ModerationDiscord({
@@ -137,12 +139,27 @@ const moderationResolver = cfg.guildId && moderationCfg.enabled
       base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
     })
   : null;
+const audit = makeOperationalAudit(client, {
+  guildId: cfg.guildId,
+  channels: {
+    audit: cfg.auditLogChannelId,
+    voice: cfg.voiceLogChannelId,
+    moderation: cfg.moderationLogChannelId,
+  },
+  store: new OperationalAuditStore(db),
+});
+log.info('operational_audit_enabled', {
+  guildId: cfg.guildId ?? 'all joined guilds (Discord mirrors disabled)',
+  auditTarget: cfg.auditLogChannelId ?? 'durable/process log only',
+  voiceTarget: cfg.voiceLogChannelId ?? cfg.auditLogChannelId ?? 'durable/process log only',
+  moderationTarget: cfg.moderationLogChannelId ?? cfg.auditLogChannelId ?? 'durable/process log only',
+});
 const moderationService = moderationResolver
   ? new ModerationService(moderationDiscord, moderationStore, {
       owenUserId: moderationCfg.owenUserId,
       botUserId: moderationCfg.owenUserId,
       protectedRoleIds: moderationCfg.protectedRoleIds,
-    })
+    }, Date.now, audit)
   : null;
 const automodCfg = loadAutomodConfig();
 if (automodCfg.enabled && !moderationService) {
@@ -211,6 +228,7 @@ registerHandlers(client, {
   leveling,
   automod: automodService && cfg.guildId ? { service: automodService, guildId: cfg.guildId } : undefined,
   joinRisk,
+  audit,
 });
 
 if (containmentCfg.enabled && containmentCfg.guildId) {
@@ -546,6 +564,15 @@ if (!cfg.communityScorecard) {
   });
 }
 
+const auditRetry = () => {
+  void audit.retryPending().catch(() => {
+    log.error('operational_audit_retry_failed', { classification: 'audit_retry_failed' });
+  });
+};
+client.once('ready', auditRetry);
+const auditSweep = setInterval(auditRetry, 30_000);
+auditSweep.unref();
+
 const moderationSweep = moderationService
   ? setInterval(() => {
       void moderationService.runDueUnbans().catch((err: unknown) => {
@@ -599,6 +626,7 @@ async function shutdown(signal: string) {
   log.info('shutdown', { signal });
   clearInterval(sweep);
   automationScheduler?.stop();
+  clearInterval(auditSweep);
   if (moderationSweep) clearInterval(moderationSweep);
   presenceProbe?.stop();
   communitySnapshots?.stop();

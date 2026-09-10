@@ -4,6 +4,7 @@ import { ActionError } from '../internal/errors.ts';
 import type { ModerationDiscordClient } from './discord.ts';
 import { assertModerationAllowed } from './policy.ts';
 import type { ModerationStore } from './store.ts';
+import type { AuditSink } from '../audit/service.ts';
 import type { ModerationPolicy, ModerationRequest, ModerationResult } from './types.ts';
 
 const MAX_TIMEOUT_SECONDS = 28 * 24 * 60 * 60;
@@ -22,17 +23,20 @@ export class ModerationService {
   private store: ModerationStore;
   private policy: ModerationPolicy;
   private now: () => number;
+  private audit: AuditSink | null;
 
   constructor(
     discord: ModerationDiscordClient,
     store: ModerationStore,
     policy: ModerationPolicy,
     now: () => number = Date.now,
+    audit: AuditSink | null = null,
   ) {
     this.discord = discord;
     this.store = store;
     this.policy = policy;
     this.now = now;
+    this.audit = audit;
   }
 
   /**
@@ -46,7 +50,12 @@ export class ModerationService {
    * destructive action.
    */
   async execute(request: ModerationExecution): Promise<ModerationResult> {
-    validateRequest(request, this.policy);
+    try {
+      validateRequest(request, this.policy);
+    } catch (err) {
+      await this.recordRefusal(request, err);
+      throw err;
+    }
     if (request.action === 'moderation.tempban') {
       return this.store.serializeMember(request.guildId, request.target!.userId, () => this.executeClaimed(request));
     }
@@ -54,6 +63,27 @@ export class ModerationService {
       return this.store.serializeChannel(request.channel!.channelId, () => this.executeClaimed(request));
     }
     return this.executeClaimed(request);
+  }
+
+  private async recordRefusal(request: ModerationExecution, err: unknown): Promise<void> {
+    if (!(err instanceof ActionError)) return;
+    await this.audit?.record({
+      entryId: `moderation-refusal:${request.guildId}:${request.idempotencyKey}`,
+      kind: 'moderation_action',
+      channel: 'moderation',
+      guildId: request.guildId,
+      occurredAt: new Date(this.now()).toISOString(),
+      actorId: request.actor.userId,
+      targetId: request.target?.userId ?? null,
+      sourceChannelId: request.channel?.channelId ?? null,
+      action: request.action,
+      metadata: { outcome: 'refused', code: err.code, classification: err.logReason },
+    }).catch(() => {
+      log.error('moderation_refusal_audit_failed', {
+        entryId: `moderation-refusal:${request.guildId}:${request.idempotencyKey}`,
+        classification: 'audit_record_failed',
+      });
+    });
   }
 
   private async executeClaimed(request: ModerationExecution): Promise<ModerationResult> {
