@@ -323,6 +323,7 @@ export async function openSqlite(path: string): Promise<Db> {
     '0015_automations',
     '0016_automation_claims',
     '0017_scheduled_occurrence_nonce',
+    '0018_community_scorecard',
     '0018_self_role_audit',
     '0019_self_role_recovery',
     '0020_self_role_ordering',

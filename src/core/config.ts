@@ -68,6 +68,11 @@ export interface Config {
    * collects is ever rendered - see migrations/0004_presence_probe.sql.
    */
   presenceProbe: boolean;
+  communityScorecard: boolean;
+  communityRecommendations: boolean;
+  communityCorrectionCycles: number;
+  communityHumanChannelIds: string[];
+  communityWelcomeChannelIds: string[];
 }
 
 /**
@@ -125,6 +130,17 @@ export function loadConfig(): Config {
     ticketPanelChannelId: process.env.DISCORD_TICKET_PANEL_CHANNEL_ID || null,
     ticketCooldownSeconds: Number(process.env.TWO_TICKET_COOLDOWN_SECONDS ?? 300),
     presenceProbe: process.env.TWO_PRESENCE_PROBE !== '0',
+    communityScorecard: process.env.TWO_COMMUNITY_SCORECARD === '1',
+    communityRecommendations: process.env.TWO_COMMUNITY_RECOMMENDATIONS !== '0',
+    communityCorrectionCycles: Number(process.env.TWO_COMMUNITY_CORRECTION_CYCLES ?? 0),
+    communityHumanChannelIds: (process.env.TWO_COMMUNITY_HUMAN_CHANNEL_IDS || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+    communityWelcomeChannelIds: (process.env.TWO_COMMUNITY_WELCOME_CHANNEL_IDS || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
     dbPath: resolveDbSpec(),
     dbPoolMax: Number(process.env.TWO_DB_POOL_MAX ?? 5),
     inactivityDays: Number(process.env.TWO_INACTIVITY_DAYS ?? 14),
