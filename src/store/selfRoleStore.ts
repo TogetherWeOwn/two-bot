@@ -112,7 +112,6 @@ export class SelfRoleStore {
     memberId: string,
     panelId: string,
     supersedingEventId?: string,
-    supersedingOptionKey?: string | null,
     supersedingEventOrder?: string,
   ): Promise<SelfRolePanelClaim | null> {
     const now = this.now();
@@ -143,7 +142,7 @@ export class SelfRoleStore {
          RETURNING guild_id`,
       ).get(
         guildId, memberId, panelId, token, expiresAt,
-        supersedingEventId ?? null, supersedingOptionKey ?? null, eventOrder,
+        supersedingEventId ?? null, null, eventOrder,
       );
       if (inserted) {
         await supersedeOlderEvents();
@@ -151,7 +150,7 @@ export class SelfRoleStore {
           guildId, memberId, panelId, token, generation: 1,
           latestEventId: supersedingEventId ?? null,
           latestEventOrder: eventOrder,
-          latestOptionKey: supersedingOptionKey ?? null,
+          latestOptionKey: null,
           renewAfterMs: this.renewAfterMs(),
         };
       }
@@ -188,7 +187,7 @@ export class SelfRoleStore {
       const generation = Number(prior.claim_generation) + 1;
       const latestEventId = supersedingEventId ?? prior.latest_event_id;
       const latestEventOrder = eventOrder ?? priorEventOrder;
-      const latestOptionKey = supersedingEventId ? (supersedingOptionKey ?? null) : prior.latest_option_key;
+      const latestOptionKey = prior.latest_option_key;
       const recovered = await tx.prepare(
         `UPDATE self_role_panel_claims
             SET claim_token = ?, claim_generation = ?, processing_expires_at = ?,
@@ -246,6 +245,57 @@ export class SelfRoleStore {
       claim.token, claim.generation, this.now().toISOString(),
     );
     if (result.changes === 1) claim.latestOptionKey = optionKey;
+    return result.changes === 1;
+  }
+
+  async finishAuditAndSetPanelOption(
+    row: SelfRoleAuditRow,
+    claim: SelfRoleClaim,
+    panelClaim: SelfRolePanelClaim,
+    optionKey: string | null,
+  ): Promise<boolean> {
+    const now = this.now().toISOString();
+    const committed = await this.db.transaction(async (tx) => {
+      const panel = await tx.prepare(
+        `UPDATE self_role_panel_claims SET latest_option_key = ?
+          WHERE guild_id = ? AND member_id = ? AND panel_id = ?
+            AND claim_token = ? AND claim_generation = ? AND processing_expires_at > ?`,
+      ).run(
+        optionKey, panelClaim.guildId, panelClaim.memberId, panelClaim.panelId,
+        panelClaim.token, panelClaim.generation, now,
+      );
+      if (panel.changes !== 1) return false;
+      const audit = await tx.prepare(
+        `UPDATE self_role_audit SET
+           guild_id = ?, panel_id = ?, member_id = ?, source_id = ?, option_key = ?, role_id = ?,
+           source = ?, operation = ?, outcome = ?, code = ?, reason = ?,
+           added_role_ids = ?, removed_role_ids = ?,
+           attempted_added_role_ids = ?, attempted_removed_role_ids = ?,
+           compensated_added_role_ids = ?, compensated_removed_role_ids = ?,
+           unresolved_added_role_ids = ?, unresolved_removed_role_ids = ?,
+           processing_expires_at = NULL
+         WHERE event_id = ? AND outcome = 'processing' AND claim_token = ? AND claim_generation = ?`,
+      ).run(
+        row.guildId, row.panelId, row.memberId, row.sourceId, row.optionKey, row.roleId,
+        row.source, row.operation, row.outcome, row.code, row.reason, ...effectValues(row),
+        row.eventId, claim.token, claim.generation,
+      );
+      if (audit.changes !== 1) throw new Error(`self-role audit ${row.eventId} claim is stale`);
+      return true;
+    });
+    if (committed) panelClaim.latestOptionKey = optionKey;
+    return committed;
+  }
+
+  async updateAuditEffects(row: SelfRoleAuditRow, claim: SelfRoleClaim): Promise<boolean> {
+    const result = await this.db.prepare(
+      `UPDATE self_role_audit SET
+         added_role_ids = ?, removed_role_ids = ?,
+         attempted_added_role_ids = ?, attempted_removed_role_ids = ?,
+         compensated_added_role_ids = ?, compensated_removed_role_ids = ?,
+         unresolved_added_role_ids = ?, unresolved_removed_role_ids = ?
+       WHERE event_id = ? AND outcome = 'processing' AND claim_token = ? AND claim_generation = ?`,
+    ).run(...effectValues(row), row.eventId, claim.token, claim.generation);
     return result.changes === 1;
   }
 
