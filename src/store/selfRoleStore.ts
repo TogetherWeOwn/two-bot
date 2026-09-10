@@ -168,11 +168,18 @@ export class SelfRoleStore {
         latest_event_order: string | null;
       }>(guildId, memberId, panelId);
       if (!prior) return null;
-      if (eventOrder && prior.latest_event_order && eventOrder < prior.latest_event_order) {
+      const priorEventOrder = prior.latest_event_order ?? eventOrderFromSnowflake(prior.latest_event_id);
+      if (!prior.latest_event_order && priorEventOrder) {
+        await tx.prepare(
+          `UPDATE self_role_panel_claims SET latest_event_order = ?
+            WHERE guild_id = ? AND member_id = ? AND panel_id = ? AND latest_event_order IS NULL`,
+        ).run(priorEventOrder, guildId, memberId, panelId);
+      }
+      if (eventOrder && priorEventOrder && eventOrder < priorEventOrder) {
         return {
           guildId, memberId, panelId, token, generation: Number(prior.claim_generation),
           latestEventId: prior.latest_event_id,
-          latestEventOrder: prior.latest_event_order,
+          latestEventOrder: priorEventOrder,
           latestOptionKey: prior.latest_option_key,
           superseded: true,
         };
@@ -180,7 +187,7 @@ export class SelfRoleStore {
       if (prior.processing_expires_at > claimedAt) return null;
       const generation = Number(prior.claim_generation) + 1;
       const latestEventId = supersedingEventId ?? prior.latest_event_id;
-      const latestEventOrder = eventOrder ?? prior.latest_event_order;
+      const latestEventOrder = eventOrder ?? priorEventOrder;
       const latestOptionKey = supersedingEventId ? (supersedingOptionKey ?? null) : prior.latest_option_key;
       const recovered = await tx.prepare(
         `UPDATE self_role_panel_claims
@@ -226,6 +233,19 @@ export class SelfRoleStore {
       this.expiresAt(now), claim.guildId, claim.memberId, claim.panelId,
       claim.token, claim.generation, now.toISOString(),
     );
+    return result.changes === 1;
+  }
+
+  async setPanelClaimOption(claim: SelfRolePanelClaim, optionKey: string | null): Promise<boolean> {
+    const result = await this.db.prepare(
+      `UPDATE self_role_panel_claims SET latest_option_key = ?
+        WHERE guild_id = ? AND member_id = ? AND panel_id = ?
+          AND claim_token = ? AND claim_generation = ? AND processing_expires_at > ?`,
+    ).run(
+      optionKey, claim.guildId, claim.memberId, claim.panelId,
+      claim.token, claim.generation, this.now().toISOString(),
+    );
+    if (result.changes === 1) claim.latestOptionKey = optionKey;
     return result.changes === 1;
   }
 
@@ -301,6 +321,14 @@ function claim(
 function parseIds(value: string): string[] {
   const parsed = JSON.parse(value) as unknown;
   return Array.isArray(parsed) && parsed.every((id) => typeof id === 'string') ? parsed : [];
+}
+
+const DISCORD_EPOCH_MS = 1_420_070_400_000n;
+
+function eventOrderFromSnowflake(eventId: string | null): string | null {
+  if (!eventId || !/^\d{17,20}$/.test(eventId)) return null;
+  const timestamp = (BigInt(eventId) >> 22n) + DISCORD_EPOCH_MS;
+  return `${timestamp.toString().padStart(13, '0')}:${eventId.padStart(20, '0')}`;
 }
 
 function effectValues(row: SelfRoleAuditRow): string[] {

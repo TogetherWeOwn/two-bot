@@ -971,6 +971,36 @@ test('independent stores serialize exclusive changes through the shared database
   assert.deepEqual([...roleState], [B]);
 });
 
+test('an older event cannot replace a migrated legacy panel claim with a null event order', async () => {
+  let now = new Date('2026-09-09T00:00:00.000Z');
+  const store = new SelfRoleStore(harness.db, { now: () => now, leaseMs: 1_000 });
+  const newerEventId = '222222222222222222';
+  await harness.db.prepare(
+    `INSERT INTO self_role_panel_claims
+       (guild_id, member_id, panel_id, claim_token, claim_generation, processing_expires_at,
+        latest_event_id, latest_option_key, latest_event_order)
+     VALUES (?, ?, ?, ?, 1, ?, ?, ?, NULL)`,
+  ).run(A, C, panel.id, 'legacy', now.toISOString(), newerEventId, 'blue');
+
+  now = new Date('2026-09-09T00:00:01.001Z');
+  const olderEventId = '111111111111111111';
+  const olderOrder = `${((BigInt(olderEventId) >> 22n) + 1_420_070_400_000n).toString().padStart(13, '0')}:${olderEventId.padStart(20, '0')}`;
+  const claim = await store.claimPanel(A, C, panel.id, olderEventId, 'red', olderOrder);
+
+  assert.ok(claim?.superseded);
+  assert.equal(claim.latestEventId, newerEventId);
+  assert.equal(claim.latestOptionKey, 'blue');
+  const stored = await harness.db.prepare(
+    `SELECT latest_event_id, latest_option_key, latest_event_order
+       FROM self_role_panel_claims WHERE guild_id = ? AND member_id = ? AND panel_id = ?`,
+  ).get<Record<string, unknown>>(A, C, panel.id);
+  assert.deepEqual({ ...stored }, {
+    latest_event_id: newerEventId,
+    latest_option_key: 'blue',
+    latest_event_order: `${((BigInt(newerEventId) >> 22n) + 1_420_070_400_000n).toString().padStart(13, '0')}:${newerEventId.padStart(20, '0')}`,
+  });
+});
+
 test('an older delayed exclusive selection cannot overwrite a newer completed selection', async () => {
   let now = new Date('2026-09-09T00:00:00.000Z');
   const store = new SelfRoleStore(harness.db, { now: () => now, leaseMs: 1_000 });
@@ -1033,6 +1063,71 @@ test('an older delayed exclusive selection cannot overwrite a newer completed se
   const olderAudit = await harness.db.prepare(
     `SELECT outcome, code FROM self_role_audit WHERE event_id = ?`,
   ).get<{ outcome: string; code: string | null }>('older-red');
+  assert.deepEqual({ ...olderAudit }, { outcome: 'rejected', code: 'superseded_by_later_event' });
+});
+
+test('a stale delayed clear restores a newer accepted exclusive selection', async () => {
+  let now = new Date('2026-09-09T00:00:00.000Z');
+  const store = new SelfRoleStore(harness.db, { now: () => now, leaseMs: 1_000 });
+  const roleState = new Set([A]);
+  let releaseOlder!: () => void;
+  const olderBlocked = new Promise<void>((resolve) => { releaseOlder = resolve; });
+  let olderStarted!: () => void;
+  const started = new Promise<void>((resolve) => { olderStarted = resolve; });
+  let blockOlder = true;
+  const roles = new Map(panel.options.map((option) => [
+    option.roleId,
+    { id: option.roleId, managed: false, editable: true, permissions: { bitfield: 0n } },
+  ]));
+  const makeMember = () => {
+    const member = {
+      id: C,
+      guild: {
+        id: A,
+        members: {
+          me: { permissions: { has: () => true } },
+          fetch: async () => ({ ...member, roles: { ...member.roles, cache: new Map([...roleState].map((id) => [id, { id }])) } }),
+        },
+        roles: { fetch: async () => roles },
+        channels: { fetch: async () => new Map() },
+      },
+      roles: {
+        cache: new Map(),
+        remove: async (roleId: string) => {
+          if (roleId === A && blockOlder) {
+            olderStarted();
+            await olderBlocked;
+          }
+          roleState.delete(roleId);
+        },
+        add: async (roleId: string) => { roleState.add(roleId); },
+      },
+    };
+    return member;
+  };
+
+  const older = applyRoleDelta({
+    panel, member: makeMember() as never, source: 'select', sourceId: panel.messageId,
+    eventId: 'older-clear', eventOrder: '0000000000001:000001', optionKey: null, roleId: null,
+    operation: 'replace', addRoleIds: [], removeRoleIds: [], desiredRoleIds: [],
+    deps: { panels: [panel], store },
+  });
+  await started;
+  now = new Date('2026-09-09T00:00:33.001Z');
+  blockOlder = false;
+  await applyRoleDelta({
+    panel, member: makeMember() as never, source: 'select', sourceId: panel.messageId,
+    eventId: 'newer-red', eventOrder: '0000000000002:000001', optionKey: 'red', roleId: A,
+    operation: 'replace', addRoleIds: [], removeRoleIds: [], desiredRoleIds: [A],
+    deps: { panels: [panel], store },
+  });
+  releaseOlder();
+  await older;
+
+  assert.deepEqual([...roleState], [A]);
+  const olderAudit = await harness.db.prepare(
+    `SELECT outcome, code FROM self_role_audit WHERE event_id = ?`,
+  ).get<{ outcome: string; code: string | null }>('older-clear');
   assert.deepEqual({ ...olderAudit }, { outcome: 'rejected', code: 'superseded_by_later_event' });
 });
 

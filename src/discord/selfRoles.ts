@@ -313,6 +313,17 @@ export async function applyRoleDelta(opts: {
         if (orderedOpts.reply) await orderedOpts.reply.editReply({ content: 'This role request was already handled.' });
         return;
       }
+      if (panelClaim && orderedOpts.deps.store.setPanelClaimOption) {
+        const latestOptionKey = panelClaimOptionKey(orderedOpts.panel, claimed.desiredRoleIds);
+        if (!await orderedOpts.deps.store.setPanelClaimOption(panelClaim, latestOptionKey)) {
+          log.error('self_role_panel_claim_stale_before_mutation', {
+            eventId: orderedOpts.eventId,
+            panelId: orderedOpts.panel.id,
+            memberId: orderedOpts.member.id,
+          });
+          return;
+        }
+      }
       if (claimed.recovered) {
         log.info('self_role_dispatch_recovered', {
           eventId: orderedOpts.eventId,
@@ -453,14 +464,18 @@ async function applyClaimedRoleDelta(
           const repair = await acquirePanelClaim(opts);
           if (repair) {
             try {
-              const protectedRoleId = repair.latestOptionKey
-                ? panel.options.find((option) => option.key === repair.latestOptionKey)?.roleId ?? null
-                : null;
-              for (const roleId of claimToken.desiredRoleIds) {
-                if (roleId === protectedRoleId) continue;
+              const desiredRoleIds = new Set(repair.latestOptionKey
+                ? panel.options
+                    .filter((option) => option.key === repair.latestOptionKey)
+                    .map((option) => option.roleId)
+                : []);
+              for (const roleId of panel.options.map((option) => option.roleId)) {
                 try {
                   const current = await member.guild.members.fetch({ user: member.id, force: true });
-                  if (current.roles.cache.has(roleId)) {
+                  const hasRole = current.roles.cache.has(roleId);
+                  if (desiredRoleIds.has(roleId) && !hasRole) {
+                    await member.roles.add(roleId, `${reason} stale reconcile`);
+                  } else if (!desiredRoleIds.has(roleId) && hasRole) {
                     await member.roles.remove(roleId, `${reason} stale reconcile`);
                   }
                 } catch (repairErr) {
@@ -547,6 +562,11 @@ async function applyClaimedRoleDelta(
   } finally {
     ownership.stop();
   }
+}
+
+function panelClaimOptionKey(panel: SelfRolePanel, desiredRoleIds: readonly string[]): string | null {
+  if (!panel.exclusive || desiredRoleIds.length === 0) return null;
+  return panel.options.find((option) => option.roleId === desiredRoleIds[0])?.key ?? null;
 }
 
 function recomputeDelta(
