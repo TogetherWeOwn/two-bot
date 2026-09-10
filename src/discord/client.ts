@@ -249,17 +249,22 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     if (await inspectAutomod(msg, msg.createdTimestamp)) {
       // Automod-rejected messages still belong in raw ingestion and exact
       // reconciliation, but they must not award XP or advance funnel activity.
-      await handlers.onMessage({
-        guildId: msg.guildId,
-        memberId: msg.author.id,
-        isBot: msg.author.bot,
-        messageId: msg.id,
-        webhookId: msg.webhookId,
-        channelId: msg.channelId,
-        channelClass,
-        captureOnly: true,
-        occurredAt,
-      });
+      // Keep this call behind the scorecard feature seam: existing handler
+      // doubles do not implement raw capture, and production has no fact store
+      // to receive it while community capture is disabled.
+      if (community) {
+        await handlers.onMessage({
+          guildId: msg.guildId,
+          memberId: msg.author.id,
+          isBot: msg.author.bot,
+          messageId: msg.id,
+          webhookId: msg.webhookId,
+          channelId: msg.channelId,
+          channelClass,
+          captureOnly: true,
+          occurredAt,
+        });
+      }
       return;
     }
     await handlers.onMessage({
