@@ -694,6 +694,8 @@ CREATE TABLE IF NOT EXISTS feed_deliveries (
   message_id    TEXT,
   first_seen_at TEXT NOT NULL,
   delivered_at  TEXT,
+  claim_token   TEXT,
+  claimed_at    TEXT,
   PRIMARY KEY (feed_id, item_key),
   UNIQUE (feed_id, nonce)
 );

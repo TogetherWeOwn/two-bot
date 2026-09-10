@@ -6,9 +6,11 @@ import {
   type Client,
   type Interaction,
 } from 'discord.js';
+import { XMLParser } from 'fast-xml-parser';
 import type { FeedItem, FeedReader, AnnouncementDiscord } from './service.ts';
 import { parseRoleSpec, AnnouncementsService } from './service.ts';
 import type { FeedRelayRow, RsvpStatus } from './store.ts';
+import { PublicFeedFetcher } from './feedHttp.ts';
 import { log } from '../core/log.ts';
 
 const API = 'https://discord.com/api/v10';
@@ -65,55 +67,77 @@ export class DiscordAnnouncements implements AnnouncementDiscord {
       allowed_mentions: { parse: [] },
     });
   }
+
+  async findMessageByNonce(channelId: string, nonce: string): Promise<string | null> {
+    const json = await this.call('GET', `/channels/${channelId}/messages?limit=100`) as Array<{ id?: unknown; nonce?: unknown }> | null;
+    const message = Array.isArray(json) ? json.find((row) => String(row.nonce ?? '') === nonce) : null;
+    return typeof message?.id === 'string' ? message.id : null;
+  }
+}
+
+interface FeedFetcher {
+  read(source: string, signal: AbortSignal): Promise<{ ok: boolean; status: number; headers: Headers; body: string }>;
 }
 
 export class XmlFeedReader implements FeedReader {
-  private fetchImpl: typeof fetch;
+  private fetcher: FeedFetcher;
 
-  constructor(fetchImpl: typeof fetch = fetch) {
-    this.fetchImpl = fetchImpl;
+  constructor(fetcher: FeedFetcher = new PublicFeedFetcher()) {
+    this.fetcher = fetcher;
   }
 
   async read(feed: FeedRelayRow): Promise<FeedItem[]> {
-    const res = await this.fetchImpl(feed.source, {
-      headers: { 'User-Agent': 'Owen/1.0 (+https://two.gg)' },
-      redirect: 'error',
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
+    const res = await this.fetcher.read(feed.source, AbortSignal.timeout(REQUEST_TIMEOUT_MS));
     if (!res.ok) throw new Error(`Feed fetch failed: HTTP ${res.status}`);
     const type = res.headers.get('content-type')?.toLowerCase() ?? '';
     if (!type.includes('xml') && !type.includes('rss') && !type.includes('atom') && type !== '') {
       throw new Error(`Feed returned unsupported content type ${type}.`);
     }
-    const body = await res.text();
-    if (body.length > 2_000_000) throw new Error('Feed is larger than 2 MB.');
-    return parseXmlFeed(body);
+    return parseXmlFeed(res.body);
   }
 }
 
+const feedParser = new XMLParser({
+  ignoreAttributes: false,
+  attributeNamePrefix: '',
+  parseTagValue: false,
+  parseAttributeValue: false,
+  trimValues: true,
+  processEntities: false,
+});
+
 export function parseXmlFeed(xml: string): FeedItem[] {
-  const blocks = [...xml.matchAll(/<(?:item|entry)(?:\s[^>]*)?>([\s\S]*?)<\/(?:item|entry)>/gi)].map((m) => m[1] ?? '');
-  return blocks.map((block) => {
-    const title = decodeXml(extractTag(block, 'title') ?? 'Untitled');
-    const link = extractLink(block);
-    const key = decodeXml(extractTag(block, 'guid') ?? extractTag(block, 'id') ?? link);
-    const publishedAt = decodeXml(extractTag(block, 'pubDate') ?? extractTag(block, 'published') ?? extractTag(block, 'updated') ?? '');
-    return { key, title, url: decodeXml(link), ...(publishedAt ? { publishedAt } : {}) };
+  if (xml.length > 2_000_000) throw new Error('Feed is larger than 2 MB.');
+  if ((xml.match(/<(?:item|entry)(?:\s|>)/gi)?.length ?? 0) > 200) {
+    throw new Error('Feed contains too many items.');
+  }
+  const parsed = feedParser.parse(xml) as Record<string, unknown>;
+  const rss = asRecord(asRecord(parsed.rss)?.channel);
+  const atom = asRecord(parsed.feed);
+  const entries = [...asArray(rss?.item), ...asArray(atom?.entry)].slice(0, 200);
+  return entries.map((entry) => {
+    const row = asRecord(entry);
+    const linkValue = row?.link;
+    const link = typeof linkValue === 'string' ? linkValue : textValue(asRecord(linkValue)?.href);
+    const key = textValue(row?.guid) || textValue(row?.id) || link;
+    const title = decodeXml(textValue(row?.title) || 'Untitled');
+    const publishedAt = decodeXml(textValue(row?.pubDate) || textValue(row?.published) || textValue(row?.updated));
+    return { key: decodeXml(key), title, url: decodeXml(link), ...(publishedAt ? { publishedAt } : {}) };
   }).filter((item) => item.key && /^https?:\/\//i.test(item.url));
 }
 
-function extractTag(block: string, tag: string): string | null {
-  const match = block.match(new RegExp(`<${tag}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/${tag}>`, 'i'));
-  return match ? stripCdata(match[1] ?? '').trim() : null;
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
-function extractLink(block: string): string {
-  const atom = block.match(/<link\b[^>]*href=["']([^"']+)["'][^>]*>/i)?.[1];
-  return atom ?? extractTag(block, 'link') ?? '';
+function asArray(value: unknown): unknown[] {
+  return value === undefined || value === null ? [] : Array.isArray(value) ? value : [value];
 }
 
-function stripCdata(value: string): string {
-  return value.replace(/^\s*<!\[CDATA\[([\s\S]*)\]\]>\s*$/, '$1');
+function textValue(value: unknown): string {
+  if (typeof value === 'string' || typeof value === 'number') return String(value).trim();
+  const record = asRecord(value);
+  return record ? textValue(record['#text']) : '';
 }
 
 function decodeXml(value: string): string {

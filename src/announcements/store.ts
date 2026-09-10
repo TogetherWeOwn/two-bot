@@ -62,6 +62,8 @@ export interface FeedDeliveryRow {
   messageId: string | null;
   firstSeenAt: string;
   deliveredAt: string | null;
+  claimToken: string | null;
+  claimedAt: string | null;
 }
 
 export interface AnnouncementsAuditInput {
@@ -142,6 +144,8 @@ function mapDelivery(row: Record<string, unknown>): FeedDeliveryRow {
     messageId: row.message_id === null || row.message_id === undefined ? null : String(row.message_id),
     firstSeenAt: String(row.first_seen_at),
     deliveredAt: row.delivered_at === null || row.delivered_at === undefined ? null : String(row.delivered_at),
+    claimToken: row.claim_token === null || row.claim_token === undefined ? null : String(row.claim_token),
+    claimedAt: row.claimed_at === null || row.claimed_at === undefined ? null : String(row.claimed_at),
   };
 }
 
@@ -202,6 +206,11 @@ export class AnnouncementsStore {
   async getLfg(guildId: string, id: string): Promise<LfgPostRow | null> {
     const row = await this.db.prepare(`SELECT * FROM lfg_posts WHERE guild_id = ? AND id = ?`).get(guildId, id);
     return row ? mapLfg(row) : null;
+  }
+
+  async deleteLfg(guildId: string, id: string): Promise<boolean> {
+    const result = await this.db.prepare(`DELETE FROM lfg_posts WHERE guild_id = ? AND id = ?`).run(guildId, id);
+    return result.changes > 0;
   }
 
   listLfgRoles(id: string): Promise<LfgRoleRow[]> {
@@ -277,31 +286,37 @@ export class AnnouncementsStore {
     return result.changes > 0;
   }
 
-  async claimDelivery(row: FeedDeliveryRow): Promise<FeedDeliveryRow> {
-    await this.db.prepare(
+  async claimDelivery(row: FeedDeliveryRow): Promise<FeedDeliveryRow | null> {
+    const inserted = await this.db.prepare(
       `INSERT INTO feed_deliveries
-         (feed_id, item_key, nonce, state, message_id, first_seen_at, delivered_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+         (feed_id, item_key, nonce, state, message_id, first_seen_at, delivered_at, claim_token, claimed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (feed_id, item_key) DO NOTHING`,
-    ).run(row.feedId, row.itemKey, row.nonce, row.state, row.messageId, row.firstSeenAt, row.deliveredAt);
+    ).run(
+      row.feedId, row.itemKey, row.nonce, row.state, row.messageId, row.firstSeenAt,
+      row.deliveredAt, row.claimToken, row.claimedAt,
+    );
+    if (inserted.changes === 0) return null;
     const stored = await this.db.prepare(
-      `SELECT * FROM feed_deliveries WHERE feed_id = ? AND item_key = ?`,
-    ).get(row.feedId, row.itemKey);
+      `SELECT * FROM feed_deliveries WHERE feed_id = ? AND item_key = ? AND claim_token = ?`,
+    ).get(row.feedId, row.itemKey, row.claimToken);
     if (!stored) throw new Error('Feed delivery claim disappeared.');
     return mapDelivery(stored);
   }
 
-  async releaseDelivery(feedId: string, itemKey: string): Promise<void> {
+  async releaseDelivery(feedId: string, itemKey: string, claimToken: string): Promise<void> {
     await this.db.prepare(
-      `DELETE FROM feed_deliveries WHERE feed_id = ? AND item_key = ? AND state = 'pending'`,
-    ).run(feedId, itemKey);
+      `DELETE FROM feed_deliveries
+       WHERE feed_id = ? AND item_key = ? AND state = 'pending' AND claim_token = ?`,
+    ).run(feedId, itemKey, claimToken);
   }
 
-  async markDelivered(feedId: string, itemKey: string, messageId: string, deliveredAt: string): Promise<boolean> {
+  async markDelivered(feedId: string, itemKey: string, claimToken: string, messageId: string, deliveredAt: string): Promise<boolean> {
     const result = await this.db.prepare(
-      `UPDATE feed_deliveries SET state = 'delivered', message_id = ?, delivered_at = ?
-       WHERE feed_id = ? AND item_key = ? AND state = 'pending'`,
-    ).run(messageId, deliveredAt, feedId, itemKey);
+      `UPDATE feed_deliveries
+       SET state = 'delivered', message_id = ?, delivered_at = ?, claim_token = NULL, claimed_at = NULL
+       WHERE feed_id = ? AND item_key = ? AND state = 'pending' AND claim_token = ?`,
+    ).run(messageId, deliveredAt, feedId, itemKey, claimToken);
     return result.changes > 0;
   }
 

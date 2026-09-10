@@ -15,6 +15,7 @@ const MAX_FEED_BODY_CHARS = 2000;
 export interface AnnouncementDiscord {
   postMessage(channelId: string, content: string, options?: { nonce?: string; components?: unknown[] }): Promise<string>;
   editMessage(channelId: string, messageId: string, content: string, components?: unknown[]): Promise<void>;
+  findMessageByNonce?(channelId: string, nonce: string): Promise<string | null>;
 }
 
 export interface FeedItem {
@@ -114,9 +115,21 @@ export class AnnouncementsService {
     }));
     await this.store.putLfg(row, roleRows);
     const rendered = await this.renderLfg(row);
-    const messageId = await this.discord.postMessage(input.channelId, rendered.content, {
-      components: rendered.components,
-    });
+    const nonce = lfgNonce(id);
+    let messageId: string;
+    try {
+      messageId = await this.discord.postMessage(input.channelId, rendered.content, {
+        nonce,
+        components: rendered.components,
+      });
+    } catch (error) {
+      const recovered = await this.discord.findMessageByNonce?.(input.channelId, nonce).catch(() => null);
+      if (!recovered) {
+        await this.store.deleteLfg(input.guildId, id);
+        throw error;
+      }
+      messageId = recovered;
+    }
     const posted = { ...row, messageId };
     await this.store.putLfg(posted, roleRows, false);
     await this.store.audit({
@@ -224,6 +237,7 @@ export class AnnouncementsService {
         for (const item of items.slice(0, 20).reverse()) {
           const itemKey = normalizeItemKey(item);
           const nonce = deliveryNonce(feed.id, itemKey);
+          const claimToken = randomUUID();
           const claim = await this.store.claimDelivery({
             feedId: feed.id,
             itemKey,
@@ -232,14 +246,16 @@ export class AnnouncementsService {
             messageId: null,
             firstSeenAt: now.toISOString(),
             deliveredAt: null,
+            claimToken,
+            claimedAt: now.toISOString(),
           });
-          if (claim.state === 'delivered') continue;
+          if (!claim) continue;
           const content = formatFeedMessage(feed.kind, item);
           try {
             const messageId = await this.discord.postMessage(feed.channelId, content, { nonce });
-            if (await this.store.markDelivered(feed.id, itemKey, messageId, now.toISOString())) delivered++;
+            if (await this.store.markDelivered(feed.id, itemKey, claimToken, messageId, now.toISOString())) delivered++;
           } catch (error) {
-            await this.store.releaseDelivery(feed.id, itemKey);
+            await this.store.releaseDelivery(feed.id, itemKey, claimToken);
             throw error;
           }
         }
@@ -357,6 +373,10 @@ function normalizeItemKey(item: FeedItem): string {
 
 function deliveryNonce(feedId: string, itemKey: string): string {
   return createHash('sha256').update(`${feedId}\0${itemKey}`).digest('hex').slice(0, 24);
+}
+
+function lfgNonce(id: string): string {
+  return createHash('sha256').update(`lfg\0${id}`).digest('hex').slice(0, 24);
 }
 
 function formatFeedMessage(kind: FeedKind, item: FeedItem): string {
