@@ -34,9 +34,9 @@ Classifier precedence is fixed: Discord bot, webhook, configured staff automatio
 - Messages are keyed by `discord-message:<message id>` and preserve channel class, bot flag and webhook id without content.
 - Voice starts and ends use a stable session key. An end with no known start is retained for reconciliation but excluded from duration totals; no duration is invented.
 - Attendance accepts explicit host check-in, durable check-in, or at least 600 seconds of voice proof. RSVP-only calls return without writing an attendance fact.
-- Every required stream must have either a fact in the week or a `community_stream_heartbeats` row covering through the closed boundary.
+- Every required gateway/check-in stream must have a `community_stream_heartbeats` row whose `covered_from` is at or before the week start and whose `covered_through` reaches the closed boundary. The Monday job writes this interval from the process start that actually observed the streams. A restart inside the reporting week therefore fails closed instead of claiming unseen gateway time.
 
-An attendance integration can call `CommunityFactStore.recordAttendance` when its accepted proof is observed. This repository's existing scheduled-event REST mirror contains event definitions, not attendance history, so the scorecard does not treat Discord RSVPs as attendance.
+Hosts with Discord `Manage Events` use `/attendance event-occurrence:<id> member:<member>` to persist explicit host check-in proof. Repeating the same event/member check-in is idempotent. The existing scheduled-event REST mirror contains definitions and RSVPs, not attendance history, so the scorecard never treats an RSVP as attendance.
 
 ## Metrics and thresholds
 
@@ -81,6 +81,6 @@ Undo:
 
 ```bash
 npm run typecheck
-node --test test/unit.communityscorecard.test.ts
+node --test test/unit.communityscorecard.test.ts test/unit.communityscorecardjob.test.ts test/unit.communityattendance.test.ts
 node --test test/unit.store.test.ts test/unit.voicesession.test.ts test/unit.dashboard.test.ts test/unit.joinwiring.test.ts
 ```

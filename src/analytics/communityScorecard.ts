@@ -305,7 +305,7 @@ function attendance(facts: ParsedFact[]) {
   return { participations: participations.size, distinctHumans: humans.size };
 }
 
-function evidenceHumans(facts: ParsedFact[], reply: ReturnType<typeof firstHumanReply>): Set<string> {
+function evidenceHumans(facts: ParsedFact[], voiceSeconds: Map<string, number>): Set<string> {
   const humans = new Set<string>();
   for (const fact of facts) {
     if (
@@ -314,7 +314,7 @@ function evidenceHumans(facts: ParsedFact[], reply: ReturnType<typeof firstHuman
       ['message_created', 'member_joined', 'event_attended'].includes(fact.event_type)
     ) humans.add(fact.actor_id);
   }
-  if (reply.resolvedCount === 0) return humans;
+  for (const [actor, seconds] of voiceSeconds) if (seconds >= 600) humans.add(actor);
   return humans;
 }
 
@@ -353,12 +353,14 @@ async function validateCoverage(
 ): Promise<string[]> {
   const errors: string[] = [];
   const heartbeats = await db
-    .prepare(`SELECT stream, covered_through FROM community_stream_heartbeats WHERE guild_id = ?`)
-    .all<{ stream: string; covered_through: string }>(config.guildId);
-  const covered = new Map(heartbeats.map((row) => [row.stream, row.covered_through]));
+    .prepare(`SELECT stream, covered_from, covered_through FROM community_stream_heartbeats WHERE guild_id = ?`)
+    .all<{ stream: string; covered_from: string; covered_through: string }>(config.guildId);
+  const covered = new Map(heartbeats.map((row) => [row.stream, row]));
   for (const stream of COMMUNITY_FACT_TYPES) {
-    const hasFact = facts.some((fact) => fact.event_type === stream);
-    if (!hasFact && (covered.get(stream) ?? '') < config.weekEnd) errors.push(`missing_stream_coverage:${stream}`);
+    const coverage = covered.get(stream);
+    if (!coverage || coverage.covered_from > config.weekStart || coverage.covered_through < config.weekEnd) {
+      errors.push(`missing_stream_coverage:${stream}`);
+    }
   }
   const duplicateSourceIds = await db
     .prepare(
@@ -443,7 +445,7 @@ export async function buildCommunityScorecard(
   const botRatio = botDenominator === 0 ? null : automatedMessages / botDenominator;
   const botAlert = botRatio !== null && botRatio >= BOT_NOISE_THRESHOLD;
   const reply = firstHumanReply(facts, config.weekEnd);
-  const humans = evidenceHumans(facts, reply);
+  const humans = evidenceHumans(facts, voiceSeconds);
   const evidenceState = humans.size < 5 ? 'insufficient' : 'sufficient';
   const selected = selectIntervention(coverageState, evidenceState, botAlert, reply);
   const invalidRecommendation =

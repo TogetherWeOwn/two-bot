@@ -1,6 +1,7 @@
 import type { Db } from '../store/db.ts';
 import { log } from '../core/log.ts';
-import { runPreviousClosedCommunityWeek } from '../analytics/communityScorecard.ts';
+import { previousClosedCommunityWeek, runPreviousClosedCommunityWeek } from '../analytics/communityScorecard.ts';
+import { COMMUNITY_FACT_TYPES, type CommunityFactStore } from '../analytics/communityFacts.ts';
 
 const MONDAY = 1;
 const RUN_HOUR_UTC = 6;
@@ -10,6 +11,8 @@ export interface CommunityScorecardJobOptions {
   db: Db;
   guildId: string;
   classifierVersion: string;
+  facts: CommunityFactStore;
+  captureStartedAt: string;
   recommendationsEnabled?: boolean;
   correctionCycles?: number;
   intervalMs?: number;
@@ -38,6 +41,15 @@ export function startCommunityScorecardJob(options: CommunityScorecardJobOptions
     lastAttemptedWeek = weekKey;
     queue = queue
       .then(async () => {
+        const week = previousClosedCommunityWeek(at);
+        for (const stream of COMMUNITY_FACT_TYPES) {
+          await options.facts.markStreamCoverage(
+            options.guildId,
+            stream,
+            options.captureStartedAt,
+            week.end,
+          );
+        }
         const result = await runPreviousClosedCommunityWeek(
           options.db,
           options.guildId,

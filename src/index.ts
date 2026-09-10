@@ -39,7 +39,7 @@ import { RestModerationResolver } from './moderation/resolver.ts';
 import { ModerationService } from './moderation/service.ts';
 import { ModerationStore } from './moderation/store.ts';
 import { MODERATION_COMMAND_DATA, registerModerationHandler } from './moderation/commands.ts';
-import { AUTOMATION_COMMAND_DATA } from './discord/commandNames.ts';
+import { AUTOMATION_COMMAND_DATA, COMMUNITY_COMMAND_DATA } from './discord/commandNames.ts';
 import { loadAutomodConfig } from './automod/config.ts';
 import { AutomodService } from './automod/service.ts';
 import { AutomodStore } from './automod/store.ts';
@@ -70,9 +70,11 @@ import {
   startCommunityScorecardJob,
   type CommunityScorecardJobHandle,
 } from './jobs/communityScorecard.ts';
+import { registerCommunityAttendance } from './analytics/communityAttendance.ts';
 
 const cfg = loadConfig();
 const automationCfg = loadAutomationConfig();
+const processStartedAt = new Date().toISOString();
 setLogLevel(cfg.logLevel);
 
 const db = await openDb(cfg.dbPath, { poolMax: cfg.dbPoolMax });
@@ -247,6 +249,10 @@ if (containmentCfg.enabled && containmentCfg.guildId) {
   });
 }
 
+if (communityFacts) {
+  registerCommunityAttendance(client, { facts: communityFacts, guildId: cfg.guildId });
+}
+
 if (cfg.ticketCategoryId && cfg.ticketStaffRoleId && cfg.ticketPanelChannelId) {
   registerTickets(client, {
     db,
@@ -300,6 +306,7 @@ if (cfg.guildId) {
     guildId: cfg.guildId,
     automations: automationStore,
     additionalBuiltins: [
+      ...(communityFacts ? COMMUNITY_COMMAND_DATA : []),
       ...(automationCfg.enabled ? AUTOMATION_COMMAND_DATA : []),
       ...(moderationResolver && moderationService ? MODERATION_COMMAND_DATA : []),
     ],
@@ -480,6 +487,8 @@ if (!cfg.communityScorecard) {
     db,
     guildId: cfg.guildId,
     classifierVersion: communityClassifier.version,
+    facts: communityFacts!,
+    captureStartedAt: processStartedAt,
     recommendationsEnabled: cfg.communityRecommendations,
     correctionCycles: cfg.communityCorrectionCycles,
   });

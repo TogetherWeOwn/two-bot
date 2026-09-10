@@ -34,9 +34,11 @@ CREATE TABLE IF NOT EXISTS community_stream_heartbeats (
     'message_created', 'voice_session_started', 'voice_session_ended',
     'member_joined', 'event_attended', 'rules_accepted'
   )),
+  covered_from    TEXT NOT NULL,
   covered_through TEXT NOT NULL,
   updated_at      TEXT NOT NULL,
-  PRIMARY KEY (guild_id, stream)
+  PRIMARY KEY (guild_id, stream),
+  CHECK (covered_from <= covered_through)
 );
 
 CREATE TABLE IF NOT EXISTS community_scorecard_runs (

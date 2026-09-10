@@ -48,7 +48,7 @@ async function cover(guildId = GUILD) {
     'event_attended',
     'rules_accepted',
   ] as CommunityFactType[]) {
-    await facts.markStreamHeartbeat(guildId, stream, WEEK_END);
+    await facts.markStreamCoverage(guildId, stream, WEEK_START, WEEK_END);
   }
 }
 
@@ -212,6 +212,34 @@ test('weekly active uses one message or 600 deduplicated voice seconds', async (
   assert.equal(scorecard.weeklyActiveHumans, 2, 'both + unioned 600-second actor; 599 is inactive');
 });
 
+test('five qualifying voice-only actors are sufficient evidence', async () => {
+  await cover();
+  for (let i = 0; i < 5; i++) {
+    await voice(`voice-only-${i}`, `voice-only-${i}`, '2026-09-02T10:00:00.000Z', '2026-09-02T10:10:00.000Z');
+  }
+  const { scorecard } = await score();
+  assert.equal(scorecard.weeklyActiveHumans, 5);
+  assert.equal(scorecard.evidenceState, 'sufficient');
+});
+
+test('coverage must span the whole closed week, not merely reach its end', async () => {
+  for (const stream of [
+    'message_created',
+    'voice_session_started',
+    'voice_session_ended',
+    'member_joined',
+    'event_attended',
+    'rules_accepted',
+  ] as CommunityFactType[]) {
+    await facts.markStreamCoverage(GUILD, stream, '2026-09-03T00:00:00.000Z', WEEK_END);
+  }
+  await message('human', 'human', '2026-09-04T10:00:00.000Z');
+  const { scorecard } = await score();
+  assert.equal(scorecard.coverageState, 'incomplete');
+  assert.equal(scorecard.weeklyActiveHumans, null);
+  assert.equal(scorecard.ingestionErrors.includes('missing_stream_coverage:message_created'), true);
+});
+
 test('bot-noise alert is false below 20%, true at 20%, and bot traffic never engages', async () => {
   await cover();
   for (let i = 0; i < 81; i++) await message(`human-${i}`, `human-${i}`, '2026-09-01T10:00:00.000Z');
@@ -250,9 +278,9 @@ test('attendance deduplicates proof methods and rejects RSVP-only', async () => 
   await facts.recordAttendance({
     guildId: GUILD, actorId: 'human', eventOccurrenceId: 'event-1', occurredAt: '2026-09-02T10:00:00.000Z', proof: 'host_checkin',
   });
-  await facts.recordAttendance({
+  assert.equal(await facts.recordAttendance({
     guildId: GUILD, actorId: 'human', eventOccurrenceId: 'event-1', occurredAt: '2026-09-02T10:01:00.000Z', proof: 'voice_600s',
-  });
+  }), false);
   const { scorecard } = await score();
   assert.deepEqual(scorecard.eventAttendance, { participations: 1, distinctHumans: 1 });
 });

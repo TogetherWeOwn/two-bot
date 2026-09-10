@@ -495,9 +495,11 @@ CREATE INDEX IF NOT EXISTS idx_community_facts_type_class
 CREATE TABLE IF NOT EXISTS community_stream_heartbeats (
   guild_id        TEXT NOT NULL,
   stream          TEXT NOT NULL,
+  covered_from    TEXT NOT NULL,
   covered_through TEXT NOT NULL,
   updated_at      TEXT NOT NULL,
-  PRIMARY KEY (guild_id, stream)
+  PRIMARY KEY (guild_id, stream),
+  CHECK (covered_from <= covered_through)
 );
 
 CREATE TABLE IF NOT EXISTS community_scorecard_runs (

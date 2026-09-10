@@ -187,30 +187,34 @@ export class CommunityFactStore {
     return this.record({
       guildId: input.guildId,
       eventType: 'event_attended',
-      sourceEventId: `${input.eventOccurrenceId}:${input.actorId}:${input.proof}`,
+      sourceEventId: `${input.eventOccurrenceId}:${input.actorId}`,
       actorId: input.actorId,
       occurredAt: input.occurredAt,
       source: `event:${input.eventOccurrenceId}`,
-      idempotencyKey: `event-attended:${input.eventOccurrenceId}:${input.actorId}:${input.proof}`,
+      idempotencyKey: `event-attended:${input.eventOccurrenceId}:${input.actorId}`,
       classification: this.classifier.classify(input),
       metadata: { eventOccurrenceId: input.eventOccurrenceId, proof: input.proof },
     });
   }
 
-  async markStreamHeartbeat(guildId: string, stream: CommunityFactType, coveredThrough: string): Promise<void> {
+  async markStreamCoverage(
+    guildId: string,
+    stream: CommunityFactType,
+    coveredFrom: string,
+    coveredThrough: string,
+  ): Promise<void> {
     const at = new Date().toISOString();
     await this.db
       .prepare(
-        `INSERT INTO community_stream_heartbeats (guild_id, stream, covered_through, updated_at)
-         VALUES (?, ?, ?, ?)
+        `INSERT INTO community_stream_heartbeats
+           (guild_id, stream, covered_from, covered_through, updated_at)
+         VALUES (?, ?, ?, ?, ?)
          ON CONFLICT (guild_id, stream) DO UPDATE
-           SET covered_through = CASE
-                 WHEN community_stream_heartbeats.covered_through < excluded.covered_through
-                   THEN excluded.covered_through
-                 ELSE community_stream_heartbeats.covered_through
-               END,
+           SET covered_from = excluded.covered_from,
+               covered_through = excluded.covered_through,
                updated_at = excluded.updated_at`,
       )
-      .run(guildId, stream, coveredThrough, at);
+      .run(guildId, stream, coveredFrom, coveredThrough, at);
   }
+
 }
