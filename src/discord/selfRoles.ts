@@ -296,6 +296,17 @@ export async function applyRoleDelta(opts: {
         return;
       }
       const heldRoleIds = new Set(authoritativeMember.roles.cache.keys());
+      if (panelClaim && !panelClaim.targetCommitted && orderedOpts.deps.store.setPanelClaimOption) {
+        const currentPanelRoleIds = [...heldRoleIds].filter((roleId) =>
+          orderedOpts.panel.options.some((option) => option.roleId === roleId));
+        if (currentPanelRoleIds.length <= 1) {
+          const currentOptionKey = panelClaimOptionKey(orderedOpts.panel, currentPanelRoleIds);
+          if (!await orderedOpts.deps.store.setPanelClaimOption(panelClaim, currentOptionKey)) {
+            await reconcileStalePanel(orderedOpts, panelClaim, `TWO self-role panel ${orderedOpts.panel.id}`, currentPanelRoleIds);
+            return;
+          }
+        }
+      }
       const initialPlan = recomputeDelta(orderedOpts, heldRoleIds);
       if (!initialPlan.ok) {
         if (orderedOpts.reply) await orderedOpts.reply.editReply({ content: 'That role control is invalid.' });
@@ -359,16 +370,28 @@ async function acquirePanelRepairClaim(opts: Parameters<typeof applyRoleDelta>[0
   }
 }
 
+async function checkpointRepairAudit(
+  opts: Parameters<typeof applyRoleDelta>[0],
+  audited: AuditableChange,
+  repairClaim: SelfRoleClaim,
+): Promise<void> {
+  if (!opts.deps.store.updateAuditEffects) return;
+  if (!await opts.deps.store.updateAuditEffects(auditRow(audited, 'processing', null, null), repairClaim)) {
+    throw new StaleSelfRoleClaimError('self-role repair audit claim was superseded');
+  }
+}
+
 async function reconcileStalePanel(
   opts: Parameters<typeof applyRoleDelta>[0],
   stalePanelClaim: SelfRolePanelClaim,
   reason: string,
+  initialTargetRoleIds: readonly string[],
 ): Promise<void> {
   const { panel, member } = opts;
   for (;;) {
     const repair = await acquirePanelRepairClaim(opts);
     const ownership = startPanelOwnershipGuard(opts, repair);
-    const desiredRoleIds = repair.latestOptionKey
+    let desiredRoleIds = repair.latestOptionKey
       ? panel.options.filter((option) => option.key === repair.latestOptionKey).map((option) => option.roleId)
       : [];
     const repairEventId = `stale-reconcile:${opts.eventId}:${repair.generation}`;
@@ -396,7 +419,7 @@ async function reconcileStalePanel(
         };
         repairClaim = await claim({ ...repairOpts, desiredRoleIds, preMutationRoleIds: [] });
         if (repairClaim) {
-          await opts.deps.store.updateAuditEffects?.(auditRow(repairOpts, 'processing', null, null), repairClaim);
+          await checkpointRepairAudit(opts, repairOpts, repairClaim);
           await auditClaimed(repairOpts, repairClaim, 'rejected', 'stale_reconcile_member_fetch_failed', String(err));
         }
         return;
@@ -404,6 +427,7 @@ async function reconcileStalePanel(
 
       const offered = new Set(panel.options.map((option) => option.roleId));
       const preMutationRoleIds = [...current.roles.cache.keys()].filter((roleId) => offered.has(roleId));
+      if (!repair.targetCommitted) desiredRoleIds = [...initialTargetRoleIds].filter((roleId) => offered.has(roleId));
       repairOpts = {
         ...opts,
         eventId: repairEventId,
@@ -419,7 +443,7 @@ async function reconcileStalePanel(
       if (repair.latestOptionKey && desiredRoleIds.length === 0) {
         const effects = unresolvedEffects(panel, desiredRoleIds, preMutationRoleIds);
         const audited = { ...repairOpts, effects };
-        await opts.deps.store.updateAuditEffects?.(auditRow(audited, 'processing', null, null), repairClaim);
+        await checkpointRepairAudit(opts, audited, repairClaim);
         await auditClaimed(
           audited,
           repairClaim,
@@ -461,7 +485,7 @@ async function reconcileStalePanel(
         if (err instanceof StaleSelfRoleClaimError) throw err;
         const effects = unresolvedEffects(panel, desiredRoleIds, preMutationRoleIds);
         const audited = { ...repairOpts, effects };
-        await opts.deps.store.updateAuditEffects?.(auditRow(audited, 'processing', null, null), repairClaim);
+        await checkpointRepairAudit(opts, audited, repairClaim);
         await auditClaimed(
           audited,
           repairClaim,
@@ -472,11 +496,11 @@ async function reconcileStalePanel(
         return;
       }
 
-      const failure = validateSelfRoleDispatch(panel, member, panel.options.map((option) => option.roleId), roles, channels);
+      const failure = validateSelfRoleDispatch(panel, member, desiredRoleIds, roles, channels);
       if (failure) {
         const effects = unresolvedEffects(panel, desiredRoleIds, preMutationRoleIds);
         const audited = { ...repairOpts, effects };
-        await opts.deps.store.updateAuditEffects?.(auditRow(audited, 'processing', null, null), repairClaim);
+        await checkpointRepairAudit(opts, audited, repairClaim);
         await auditClaimed(
           audited,
           repairClaim,
@@ -510,7 +534,7 @@ async function reconcileStalePanel(
               ? 'removed'
               : 'already_held';
       const audited = { ...repairOpts, effects };
-      await opts.deps.store.updateAuditEffects?.(auditRow(audited, 'processing', null, null), repairClaim);
+      await checkpointRepairAudit(opts, audited, repairClaim);
       await auditClaimed(
         audited,
         repairClaim,
@@ -602,6 +626,10 @@ async function applyClaimedRoleDelta(
   if (failure) {
     await auditClaimed(effectiveOpts, claimToken, 'rejected', failure.code, failure.reason);
     log.error('self_role_rejected', { panelId: panel.id, memberId: member.id, code: failure.code });
+    if (claimToken.recovered && panelClaim) {
+      await opts.deps.store.releasePanelClaim?.(panelClaim);
+      await reconcileStalePanel(opts, panelClaim, reason, claimToken.preMutationRoleIds);
+    }
     if (opts.reply) await opts.reply.editReply({ content: failure.publicMessage });
     return;
   }
@@ -636,7 +664,7 @@ async function applyClaimedRoleDelta(
         // A stale worker may have completed an ambiguous Discord mutation. Wait
         // behind the successor, acquire a real maintenance generation, and
         // reconcile to the last target that successfully committed.
-        if (panelClaim) await reconcileStalePanel(opts, panelClaim, reason);
+        if (panelClaim) await reconcileStalePanel(opts, panelClaim, reason, claimToken.preMutationRoleIds);
         log.error('self_role_stale_claim_stopped', {
           eventId: opts.eventId,
           panelId: panel.id,
@@ -696,7 +724,7 @@ async function applyClaimedRoleDelta(
         latestOptionKey,
       );
       if (!committed) {
-        await reconcileStalePanel(opts, panelClaim, reason);
+        await reconcileStalePanel(opts, panelClaim, reason, claimToken.preMutationRoleIds);
         log.error('self_role_panel_claim_stale_after_mutation', {
           eventId: opts.eventId,
           panelId: panel.id,

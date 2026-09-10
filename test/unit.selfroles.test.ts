@@ -1030,6 +1030,45 @@ test('panel chronology advances without publishing an uncommitted option', async
   assert.deepEqual({ ...storedAfterCommit }, { latest_event_id: 'second-blue', latest_option_key: 'blue' });
 });
 
+test('first exclusive dispatch seeds the committed target from authoritative roles', async () => {
+  const store = new SelfRoleStore(harness.db);
+  const roleState = new Set([A]);
+  const roles = new Map(panel.options.map((option) => [
+    option.roleId,
+    { id: option.roleId, managed: false, editable: true, permissions: { bitfield: 0n } },
+  ]));
+  const member = {
+    id: C,
+    guild: {
+      id: A,
+      members: {
+        me: { permissions: { has: () => true } },
+        fetch: async () => ({ ...member, roles: { ...member.roles, cache: new Map([...roleState].map((id) => [id, { id }])) } }),
+      },
+      roles: { fetch: async () => roles },
+      channels: { fetch: async () => new Map() },
+    },
+    roles: {
+      cache: new Map(),
+      remove: async (roleId: string) => { roleState.delete(roleId); },
+      add: async (roleId: string) => { roleState.add(roleId); },
+    },
+  };
+
+  await applyRoleDelta({
+    panel, member: member as never, source: 'select', sourceId: panel.messageId,
+    eventId: 'initial-clear', optionKey: null, roleId: null, operation: 'replace',
+    addRoleIds: [], removeRoleIds: [], desiredRoleIds: [], deps: { panels: [panel], store },
+  });
+
+  assert.deepEqual([...roleState], []);
+  const stored = await harness.db.prepare(
+    `SELECT latest_option_key, target_committed FROM self_role_panel_claims
+      WHERE guild_id = ? AND member_id = ? AND panel_id = ?`,
+  ).get<Record<string, unknown>>(A, C, panel.id);
+  assert.deepEqual({ ...stored }, { latest_option_key: null, target_committed: 1 });
+});
+
 test('an older delayed exclusive selection cannot overwrite a newer completed selection', async () => {
   let now = new Date('2026-09-09T00:00:00.000Z');
   const store = new SelfRoleStore(harness.db, { now: () => now, leaseMs: 1_000 });
@@ -1312,6 +1351,66 @@ test('a rejected successor never becomes the stale-repair target', async () => {
       WHERE guild_id = ? AND member_id = ? AND panel_id = ?`,
   ).get<Record<string, unknown>>(A, C, panel.id);
   assert.deepEqual({ ...stored }, { latest_event_id: 'rejected-target-blue', latest_option_key: 'red' });
+});
+
+test('stale repair removes an unsafe divergent role while restoring only a safe target', async () => {
+  let now = new Date('2026-09-09T00:00:00.000Z');
+  const store = new SelfRoleStore(harness.db, { now: () => now, leaseMs: 1_000 });
+  const roleState = new Set([A]);
+  let releaseOlder!: () => void;
+  const olderBlocked = new Promise<void>((resolve) => { releaseOlder = resolve; });
+  let olderStarted!: () => void;
+  const started = new Promise<void>((resolve) => { olderStarted = resolve; });
+  let blockOlder = true;
+  const roles = new Map(panel.options.map((option) => [
+    option.roleId,
+    { id: option.roleId, managed: false, editable: true, permissions: { bitfield: 0n } },
+  ]));
+  const makeMember = () => {
+    const member = {
+      id: C,
+      guild: {
+        id: A,
+        members: {
+          me: { permissions: { has: () => true } },
+          fetch: async () => ({ ...member, roles: { ...member.roles, cache: new Map([...roleState].map((id) => [id, { id }])) } }),
+        },
+        roles: { fetch: async () => roles },
+        channels: { fetch: async () => new Map() },
+      },
+      roles: {
+        cache: new Map(),
+        remove: async (roleId: string) => {
+          if (roleId === A && blockOlder) {
+            olderStarted();
+            await olderBlocked;
+          }
+          roleState.delete(roleId);
+        },
+        add: async (roleId: string) => { roleState.add(roleId); },
+      },
+    };
+    return member;
+  };
+
+  const seed = await store.claimPanel(A, C, panel.id, 'unsafe-seed', '0000000000000:000001');
+  assert.ok(seed && !seed.superseded);
+  assert.equal(await store.setPanelClaimOption(seed, 'red'), true);
+  await store.releasePanelClaim(seed);
+  const older = applyRoleDelta({
+    panel, member: makeMember() as never, source: 'select', sourceId: panel.messageId,
+    eventId: 'unsafe-clear', eventOrder: '0000000000001:000001', optionKey: null, roleId: null,
+    operation: 'replace', addRoleIds: [], removeRoleIds: [], desiredRoleIds: [], deps: { panels: [panel], store },
+  });
+  await started;
+  now = new Date('2026-09-09T00:00:33.001Z');
+  blockOlder = false;
+  roles.set(B, { id: B, managed: false, editable: true, permissions: { bitfield: 8n } });
+  roleState.add(B);
+  releaseOlder();
+  await older;
+
+  assert.deepEqual([...roleState], [A]);
 });
 
 test('stale in-flight claimant stops before audit or compensation after REST returns', async () => {

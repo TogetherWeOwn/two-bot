@@ -348,6 +348,7 @@ CREATE TABLE IF NOT EXISTS self_role_panel_claims (
   processing_expires_at TEXT NOT NULL,
   latest_event_id       TEXT,
   latest_option_key     TEXT,
+  target_committed      INTEGER NOT NULL DEFAULT 0,
   latest_event_order    TEXT,
   PRIMARY KEY (guild_id, member_id, panel_id)
 );

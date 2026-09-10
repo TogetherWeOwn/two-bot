@@ -22,6 +22,7 @@ export interface SelfRolePanelClaim {
   latestEventId: string | null;
   latestEventOrder: string | null;
   latestOptionKey: string | null;
+  targetCommitted: boolean;
   superseded?: boolean;
   renewAfterMs?: number;
 }
@@ -136,8 +137,8 @@ export class SelfRoleStore {
       const inserted = await tx.prepare(
         `INSERT INTO self_role_panel_claims
            (guild_id, member_id, panel_id, claim_token, claim_generation, processing_expires_at,
-            latest_event_id, latest_option_key, latest_event_order)
-         VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)
+            latest_event_id, latest_option_key, target_committed, latest_event_order)
+         VALUES (?, ?, ?, ?, 1, ?, ?, ?, FALSE, ?)
          ON CONFLICT (guild_id, member_id, panel_id) DO NOTHING
          RETURNING guild_id`,
       ).get(
@@ -151,12 +152,13 @@ export class SelfRoleStore {
           latestEventId: supersedingEventId ?? null,
           latestEventOrder: eventOrder,
           latestOptionKey: null,
+          targetCommitted: false,
           renewAfterMs: this.renewAfterMs(),
         };
       }
 
       const prior = await tx.prepare(
-        `SELECT claim_generation, processing_expires_at, latest_event_id, latest_option_key, latest_event_order
+        `SELECT claim_generation, processing_expires_at, latest_event_id, latest_option_key, target_committed, latest_event_order
            FROM self_role_panel_claims
           WHERE guild_id = ? AND member_id = ? AND panel_id = ?`,
       ).get<{
@@ -164,6 +166,7 @@ export class SelfRoleStore {
         processing_expires_at: string;
         latest_event_id: string | null;
         latest_option_key: string | null;
+        target_committed: boolean | number;
         latest_event_order: string | null;
       }>(guildId, memberId, panelId);
       if (!prior) return null;
@@ -180,6 +183,7 @@ export class SelfRoleStore {
           latestEventId: prior.latest_event_id,
           latestEventOrder: priorEventOrder,
           latestOptionKey: prior.latest_option_key,
+          targetCommitted: !!prior.target_committed,
           superseded: true,
         };
       }
@@ -205,6 +209,7 @@ export class SelfRoleStore {
         latestEventId,
         latestEventOrder,
         latestOptionKey,
+        targetCommitted: !!prior.target_committed,
         renewAfterMs: this.renewAfterMs(),
       };
     });
@@ -237,14 +242,17 @@ export class SelfRoleStore {
 
   async setPanelClaimOption(claim: SelfRolePanelClaim, optionKey: string | null): Promise<boolean> {
     const result = await this.db.prepare(
-      `UPDATE self_role_panel_claims SET latest_option_key = ?
+      `UPDATE self_role_panel_claims SET latest_option_key = ?, target_committed = TRUE
         WHERE guild_id = ? AND member_id = ? AND panel_id = ?
           AND claim_token = ? AND claim_generation = ? AND processing_expires_at > ?`,
     ).run(
       optionKey, claim.guildId, claim.memberId, claim.panelId,
       claim.token, claim.generation, this.now().toISOString(),
     );
-    if (result.changes === 1) claim.latestOptionKey = optionKey;
+    if (result.changes === 1) {
+      claim.latestOptionKey = optionKey;
+      claim.targetCommitted = true;
+    }
     return result.changes === 1;
   }
 
@@ -257,7 +265,7 @@ export class SelfRoleStore {
     const now = this.now().toISOString();
     const committed = await this.db.transaction(async (tx) => {
       const panel = await tx.prepare(
-        `UPDATE self_role_panel_claims SET latest_option_key = ?
+        `UPDATE self_role_panel_claims SET latest_option_key = ?, target_committed = TRUE
           WHERE guild_id = ? AND member_id = ? AND panel_id = ?
             AND claim_token = ? AND claim_generation = ? AND processing_expires_at > ?`,
       ).run(
@@ -283,7 +291,10 @@ export class SelfRoleStore {
       if (audit.changes !== 1) throw new Error(`self-role audit ${row.eventId} claim is stale`);
       return true;
     });
-    if (committed) panelClaim.latestOptionKey = optionKey;
+    if (committed) {
+      panelClaim.latestOptionKey = optionKey;
+      panelClaim.targetCommitted = true;
+    }
     return committed;
   }
 

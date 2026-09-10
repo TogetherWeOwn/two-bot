@@ -172,7 +172,7 @@ function ensureLevelingXpCeiling(raw: DatabaseSync): void {
 
 /** Apply every additive self-role SQLite upgrade under one write lock. */
 function ensureSelfRoleRecovery(raw: DatabaseSync): void {
-  const id = '0018_self_role_event_order';
+  const id = '0019_self_role_committed_target';
   if (raw.prepare(`SELECT 1 FROM schema_migrations WHERE id = ?`).get(id)) return;
   raw.exec('BEGIN IMMEDIATE');
   try {
@@ -194,7 +194,17 @@ function ensureSelfRoleRecovery(raw: DatabaseSync): void {
     ensureColumn(raw, 'self_role_panel_claims', 'latest_event_id', 'TEXT');
     ensureColumn(raw, 'self_role_panel_claims', 'latest_option_key', 'TEXT');
     ensureColumn(raw, 'self_role_panel_claims', 'latest_event_order', 'TEXT');
+    ensureColumn(raw, 'self_role_panel_claims', 'target_committed', 'INTEGER NOT NULL DEFAULT 0');
     ensureColumn(raw, 'self_role_audit', 'event_order', 'TEXT');
+    raw.prepare(`UPDATE self_role_panel_claims AS claims
+      SET target_committed = 1
+      WHERE target_committed = 0 AND EXISTS (
+        SELECT 1 FROM self_role_audit AS audit
+         WHERE audit.guild_id = claims.guild_id
+           AND audit.member_id = claims.member_id
+           AND audit.panel_id = claims.panel_id
+           AND audit.outcome IN ('assigned', 'removed', 'switched', 'already_held', 'already_absent')
+      )`).run();
     raw.prepare(`UPDATE self_role_audit
       SET outcome = 'rejected', code = 'interrupted_before_recovery',
           reason = 'processing row predates persisted self-role intent'
@@ -307,6 +317,7 @@ export async function openSqlite(path: string): Promise<Db> {
     '0016_self_role_recovery',
     '0017_self_role_ordering',
     '0018_self_role_event_order',
+    '0019_self_role_committed_target',
   ]) {
     stamp.run(id, new Date().toISOString());
   }
