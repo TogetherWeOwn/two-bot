@@ -64,6 +64,8 @@ export const DUMP_TABLES = [
   'ticket_transcripts',
   'automod_violations',
   'automod_processed_messages',
+  'self_role_audit',
+  'self_role_panel_claims',
 ] as const;
 export type DumpTable = (typeof DUMP_TABLES)[number];
 
@@ -86,7 +88,7 @@ function assertDumpTable(name: unknown, where: string): asserts name is DumpTabl
   }
 }
 
-export const DUMP_VERSION = 1;
+export const DUMP_VERSION = 2;
 
 export interface DumpTableInfo {
   name: DumpTable;
@@ -147,6 +149,8 @@ function orderFor(table: DumpTable, columns: string[]): string {
   if (table === 'ticket_transcripts') return 'created_at, ticket_id';
   if (table === 'automod_violations') return 'guild_id, user_id';
   if (table === 'automod_processed_messages') return 'guild_id, message_id';
+  if (table === 'self_role_audit') return 'created_at, event_id';
+  if (table === 'self_role_panel_claims') return 'guild_id, member_id, panel_id';
   return columns.slice(0, 1).join(', ');
 }
 

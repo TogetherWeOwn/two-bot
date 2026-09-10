@@ -20,6 +20,7 @@ import type { JoinRiskScorer } from '../moderation/containment.ts';
  *   GuildMembers        - member_join / member_leave        (PRIVILEGED)
  *   GuildMessages       - first_message + tickets + automod events
  *   MessageContent      - ticket transcripts and enabled automod (PRIVILEGED)
+ *   GuildMessageReactions - reaction-role add/remove        (metadata only)
  *   GuildVoiceStates    - first_voice_session + voice_session_start/end
  *   GuildInvites        - invite create/delete for attribution
  *   GuildModeration     - authoritative destructive-action audit entries
@@ -33,6 +34,7 @@ const BASE_INTENTS = [
   GatewayIntentBits.GuildMembers,
   GatewayIntentBits.GuildMessages,
   GatewayIntentBits.MessageContent,
+  GatewayIntentBits.GuildMessageReactions,
   GatewayIntentBits.GuildVoiceStates,
   GatewayIntentBits.GuildInvites,
   GatewayIntentBits.GuildModeration,
@@ -43,6 +45,8 @@ export function intents(_automodEnabled = process.env.TWO_AUTOMOD === '1'): Gate
 }
 
 export const INTENTS = intents();
+/** Required for reaction removals and old panel messages absent from cache. */
+export const PARTIALS = [Partials.Message, Partials.Reaction, Partials.User];
 
 /** Message content is already required by tickets/automod on current main. */
 export function intentsFor(_env: NodeJS.ProcessEnv = process.env): GatewayIntentBits[] {
@@ -77,9 +81,11 @@ export interface BotDeps {
 export function createClient(automodEnabled = process.env.TWO_AUTOMOD === '1'): Client {
   return new Client({
     intents: intentsFor(),
+    partials: automodEnabled
+      ? [...new Set([...PARTIALS, Partials.Channel])]
+      : PARTIALS,
     ...(automodEnabled
       ? {
-          partials: [Partials.Message, Partials.Channel],
           // Message content must not survive the event handler in discord.js's
           // default 200-message-per-channel cache.
           makeCache: Options.cacheWithLimits({ MessageManager: 0 }),

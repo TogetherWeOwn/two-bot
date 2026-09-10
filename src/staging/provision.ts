@@ -36,7 +36,7 @@
  *    effectively dead in production, and the hierarchy check DOES fire. Anyone
  *    who was expecting role assignment to "just work because the bot owns the
  *    guild" should expect the opposite: the bot's role must be dragged above
- *    Moderator/Member/Game: Test, or `evaluateHierarchy` will say so and
+ *    every role in STAGING_ROLES, or `evaluateHierarchy` will say so and
  *    `staging-verify.ts` will fail. The branch is kept because it is correct
  *    for any guild the bot does own, and because it costs nothing.
  */
@@ -514,4 +514,7 @@ export const ROLE_PERMISSIONS: Record<string, string> = {
   Moderator: String((1n << 13n) | (1n << 16n)), // Manage Messages, Read Message History
   Member: '0',
   'Game: Test': '0',
+  'Game: Test 2': '0',
+  'Color: Red': '0',
+  'Color: Blue': '0',
 };

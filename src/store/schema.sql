@@ -299,6 +299,60 @@ CREATE TABLE IF NOT EXISTS join_risk_flags (
 CREATE INDEX IF NOT EXISTS idx_join_risk_flags_time
   ON join_risk_flags (guild_id, joined_at);
 
+-- Per-panel reaction/button/select self-role audit (TOG-1646). event_id is the
+-- Discord interaction id, or a generated reaction dispatch id. Component
+-- gateway replays are claimed before any role mutation.
+CREATE TABLE IF NOT EXISTS self_role_audit (
+  event_id          TEXT PRIMARY KEY,
+  event_order       TEXT,
+  guild_id          TEXT NOT NULL,
+  panel_id          TEXT NOT NULL,
+  member_id         TEXT NOT NULL,
+  source_id         TEXT NOT NULL,
+  option_key        TEXT,
+  role_id           TEXT,
+  source            TEXT NOT NULL,
+  operation         TEXT NOT NULL,
+  outcome           TEXT NOT NULL,
+  code              TEXT,
+  reason            TEXT,
+  added_role_ids                TEXT NOT NULL,
+  removed_role_ids              TEXT NOT NULL,
+  attempted_added_role_ids      TEXT NOT NULL DEFAULT '[]',
+  attempted_removed_role_ids    TEXT NOT NULL DEFAULT '[]',
+  compensated_added_role_ids    TEXT NOT NULL DEFAULT '[]',
+  compensated_removed_role_ids  TEXT NOT NULL DEFAULT '[]',
+  unresolved_added_role_ids     TEXT NOT NULL DEFAULT '[]',
+  unresolved_removed_role_ids   TEXT NOT NULL DEFAULT '[]',
+  desired_role_ids              TEXT NOT NULL DEFAULT '[]',
+  pre_mutation_role_ids         TEXT NOT NULL DEFAULT '[]',
+  claim_token                   TEXT,
+  claim_generation              INTEGER NOT NULL DEFAULT 0,
+  processing_expires_at         TEXT,
+  created_at                    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_self_role_audit_panel_time
+  ON self_role_audit (guild_id, panel_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_self_role_audit_member_time
+  ON self_role_audit (guild_id, member_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_self_role_audit_processing_lease
+  ON self_role_audit (outcome, processing_expires_at);
+
+CREATE TABLE IF NOT EXISTS self_role_panel_claims (
+  guild_id              TEXT NOT NULL,
+  member_id             TEXT NOT NULL,
+  panel_id              TEXT NOT NULL,
+  claim_token           TEXT NOT NULL,
+  claim_generation      INTEGER NOT NULL,
+  processing_expires_at TEXT NOT NULL,
+  latest_event_id       TEXT,
+  latest_option_key     TEXT,
+  target_committed      INTEGER NOT NULL DEFAULT 0,
+  latest_event_order    TEXT,
+  PRIMARY KEY (guild_id, member_id, panel_id)
+);
+
 -- The website's event_key -> Discord's scheduled event id. This is what makes
 -- event.upsert an upsert.
 CREATE TABLE IF NOT EXISTS internal_discord_events (

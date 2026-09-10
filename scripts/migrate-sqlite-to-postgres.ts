@@ -60,6 +60,8 @@ const OPTIONAL_TABLES = [
   'scheduled_messages',
   'sticky_messages',
   'automation_audit_log',
+  'self_role_audit',
+  'self_role_panel_claims',
 ] as const;
 const TABLES = [...REQUIRED_TABLES, ...OPTIONAL_TABLES] as const;
 type Table = (typeof TABLES)[number];
@@ -84,6 +86,8 @@ const PRIMARY_KEYS: Record<Table, readonly string[]> = {
   scheduled_messages: ['id'],
   sticky_messages: ['guild_id', 'channel_id'],
   automation_audit_log: ['id'],
+  self_role_audit: ['event_id'],
+  self_role_panel_claims: ['guild_id', 'member_id', 'panel_id'],
 };
 
 const sqlitePath = process.env.TWO_SQLITE_PATH || process.env.TWO_DB_PATH || './data/two.db';
@@ -225,6 +229,38 @@ try {
     console.log(`  ${t.padEnd(26)} read ${copied}`);
   }
 
+  // Source rows copied after the target's additive migrations never passed
+  // through the target-side normalizations. Finalize pre-lease processing rows,
+  // then derive committed exclusive-panel targets from the exact successful
+  // latest audit. This must run after the copy because a legacy SQLite claims
+  // table has no target_committed column for the shared-column copy to preserve.
+  if (copyableTables.includes('self_role_audit')) {
+    await dst.prepare(
+      `UPDATE self_role_audit
+          SET outcome = 'rejected', code = 'interrupted_before_recovery',
+              reason = 'processing row predates persisted self-role intent'
+        WHERE outcome = 'processing' AND processing_expires_at IS NULL`,
+    ).run();
+  }
+  if (copyableTables.includes('self_role_audit') && copyableTables.includes('self_role_panel_claims')) {
+    await dst.prepare(
+      `UPDATE self_role_panel_claims AS claims
+          SET target_committed = EXISTS (
+            SELECT 1 FROM self_role_audit AS audit
+             WHERE audit.event_id = claims.latest_event_id
+               AND audit.guild_id = claims.guild_id
+               AND audit.member_id = claims.member_id
+               AND audit.panel_id = claims.panel_id
+               AND CASE
+                 WHEN jsonb_array_length(audit.desired_role_ids::jsonb) = 0 THEN NULL
+                 WHEN jsonb_array_length(audit.desired_role_ids::jsonb) = 1 THEN audit.option_key
+                 ELSE '__invalid_multi_target__'
+               END IS NOT DISTINCT FROM claims.latest_option_key
+               AND audit.outcome IN ('assigned', 'removed', 'switched', 'already_held', 'already_absent')
+          )`,
+    ).run();
+  }
+
   // BIGSERIAL does not know about ids we inserted explicitly. Move it past the
   // high-water mark or the next insert collides.
   await dst.exec(
@@ -274,7 +310,10 @@ try {
       const target = await dst
         .prepare(`SELECT ${shared.map((c) => `"${c}"`).join(', ')} FROM ${t} WHERE ${keyColumns.map((c) => `"${c}" = ?`).join(' AND ')}`)
         .get<Record<string, unknown>>(...keyColumns.map((c) => row[c]));
-      if (!target || shared.some((c) => !migrationValuesMatch(t, c, row[c], target[c]))) mismatches++;
+      if (!target || shared.some((c) => {
+        if (t === 'self_role_panel_claims' && c === 'target_committed') return false;
+        return !migrationValuesMatch(t, c, row[c], target[c]);
+      })) mismatches++;
     }
     if (mismatches > 0) {
       failed = true;

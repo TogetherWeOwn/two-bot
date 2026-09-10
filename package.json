@@ -46,6 +46,7 @@
     "staging:check": "node scripts/staging-reset.ts --check",
     "staging:verify": "node scripts/staging-verify.ts",
     "staging:provision": "node scripts/staging-provision.ts",
+    "self-role:panel": "node scripts/self-role-panel.ts",
     "hooks:install": "bash scripts/install-hooks.sh",
     "prepare": "bash scripts/install-hooks.sh >/dev/null 2>&1 || true",
     "migrate": "node scripts/migrate.ts",

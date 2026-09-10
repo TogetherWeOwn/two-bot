@@ -17,7 +17,9 @@ export type MigrationTable =
   | 'automation_commands'
   | 'scheduled_messages'
   | 'sticky_messages'
-  | 'automation_audit_log';
+  | 'automation_audit_log'
+  | 'self_role_audit'
+  | 'self_role_panel_claims';
 
 function isSqliteBooleanColumn(table: MigrationTable, column: string): boolean {
   return (
@@ -25,7 +27,8 @@ function isSqliteBooleanColumn(table: MigrationTable, column: string): boolean {
     (table === 'moderation_lockdowns' && column === 'prior_exists') ||
     (table === 'automation_commands' && column === 'enabled') ||
     (table === 'scheduled_messages' && column === 'enabled') ||
-    (table === 'sticky_messages' && column === 'enabled')
+    (table === 'sticky_messages' && column === 'enabled') ||
+    (table === 'self_role_panel_claims' && column === 'target_committed')
   );
 }
 
