@@ -266,8 +266,17 @@ if (app.status === 200 && app.body) {
 }
 
 // 7. Hardened role panels. The reaction-role parity suite must not silently
-// disappear from the staging proof: an empty catalogue is a failed deployment.
+// disappear from the staging proof: an empty catalogue or observational-only
+// rollout is a failed deployment because neither proves role mutation parity.
 const panelRaw = process.env.TWO_SELF_ROLE_PANELS ?? '';
+if (process.env.TWO_SELF_ROLE_DRY_RUN === '1') {
+  fail(
+    'TWO_SELF_ROLE_DRY_RUN is enabled',
+    'reaction-role staging proof requires real role mutations in TWO Staging',
+  );
+} else {
+  pass('self-role mutations are enabled');
+}
 if (!panelRaw.trim()) {
   fail(
     'TWO_SELF_ROLE_PANELS is empty',

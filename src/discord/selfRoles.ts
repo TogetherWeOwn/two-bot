@@ -635,7 +635,7 @@ async function applyClaimedRoleDelta(
   }
 
   if (opts.deps.dryRun) {
-    await auditClaimed(effectiveOpts, claimToken, 'rejected', 'dry_run', 'TWO_ONBOARDING_DRY_RUN=1');
+    await auditClaimed(effectiveOpts, claimToken, 'rejected', 'dry_run', 'TWO_SELF_ROLE_DRY_RUN=1');
     if (opts.reply) await opts.reply.editReply({ content: 'Dry run: no roles were changed.' });
     return;
   }

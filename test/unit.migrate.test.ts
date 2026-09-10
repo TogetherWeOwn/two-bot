@@ -34,7 +34,8 @@ test('self-role audit migration is immutable and recovery stays additive', () =>
   assert.match(ordering.sql, /ADD COLUMN IF NOT EXISTS latest_event_id/);
   assert.match(eventOrder.sql, /ADD COLUMN IF NOT EXISTS event_order/);
   assert.match(committedTarget.sql, /audit\.event_id = claims\.latest_event_id/);
-  assert.match(committedTarget.sql, /audit\.option_key IS NOT DISTINCT FROM claims\.latest_option_key/);
+  assert.match(committedTarget.sql, /jsonb_array_length\(audit\.desired_role_ids::jsonb\) = 0 THEN NULL/);
+  assert.match(committedTarget.sql, /END IS NOT DISTINCT FROM claims\.latest_option_key/);
   assert.equal(migrations.filter((migration) => migration.id === '0018_self_role_audit').length, 1);
   assert.equal(migrations.some((migration) => migration.id === '0013_self_role_audit'), false);
   assert.equal(migrations.some((migration) => migration.id === '0010_self_role_audit'), false);

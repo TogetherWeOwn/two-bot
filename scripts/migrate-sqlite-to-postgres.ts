@@ -230,15 +230,37 @@ try {
   }
 
   // Source rows copied after the target's additive migrations never passed
-  // through 0016's pre-lease normalization. Finalize those legacy processing
-  // rows here, or their NULL lease can never satisfy claimAudit's recovery
-  // predicate and the event is stranded forever.
+  // through the target-side normalizations. Finalize pre-lease processing rows,
+  // then derive committed exclusive-panel targets from the exact successful
+  // latest audit. This must run after the copy because a legacy SQLite claims
+  // table has no target_committed column for the shared-column copy to preserve.
   if (copyableTables.includes('self_role_audit')) {
     await dst.prepare(
       `UPDATE self_role_audit
           SET outcome = 'rejected', code = 'interrupted_before_recovery',
               reason = 'processing row predates persisted self-role intent'
         WHERE outcome = 'processing' AND processing_expires_at IS NULL`,
+    ).run();
+  }
+  if (copyableTables.includes('self_role_audit') && copyableTables.includes('self_role_panel_claims')) {
+    await dst.prepare(
+      `UPDATE self_role_panel_claims AS claims
+          SET target_committed = TRUE
+        WHERE claims.target_committed = FALSE
+          AND claims.latest_event_id IS NOT NULL
+          AND EXISTS (
+            SELECT 1 FROM self_role_audit AS audit
+             WHERE audit.event_id = claims.latest_event_id
+               AND audit.guild_id = claims.guild_id
+               AND audit.member_id = claims.member_id
+               AND audit.panel_id = claims.panel_id
+               AND CASE
+                 WHEN jsonb_array_length(audit.desired_role_ids::jsonb) = 0 THEN NULL
+                 WHEN jsonb_array_length(audit.desired_role_ids::jsonb) = 1 THEN audit.option_key
+                 ELSE '__invalid_multi_target__'
+               END IS NOT DISTINCT FROM claims.latest_option_key
+               AND audit.outcome IN ('assigned', 'removed', 'switched', 'already_held', 'already_absent')
+          )`,
     ).run();
   }
 

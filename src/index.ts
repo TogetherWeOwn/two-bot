@@ -393,12 +393,12 @@ if (selfRolePanels.length) {
   registerSelfRoles(client, {
     panels: selfRolePanels,
     store: new SelfRoleStore(db),
-    dryRun: cfg.onboardingDryRun,
+    dryRun: cfg.selfRoleDryRun,
   });
   log.info('self_roles_enabled', {
     panels: selfRolePanels.length,
     modes: [...new Set(selfRolePanels.map((panel) => panel.mode))],
-    dryRun: cfg.onboardingDryRun,
+    dryRun: cfg.selfRoleDryRun,
   });
 } else {
   log.info('self_roles_disabled', { reason: 'TWO_SELF_ROLE_PANELS is empty' });

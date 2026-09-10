@@ -197,8 +197,9 @@ function ensureSelfRoleRecovery(raw: DatabaseSync): void {
     ensureColumn(raw, 'self_role_panel_claims', 'target_committed', 'INTEGER NOT NULL DEFAULT 0');
     ensureColumn(raw, 'self_role_audit', 'event_order', 'TEXT');
     // Old builds could publish latest_option_key before the matching audit
-    // committed. Tie the backfill to the exact successful latest event; an
-    // ambiguous lane stays uncommitted and is reseeded from Discord instead.
+    // committed. Tie the backfill to the exact successful latest event and its
+    // persisted desired state. A successful empty desired set commits NULL;
+    // an ambiguous lane stays uncommitted and is reseeded from Discord instead.
     raw.prepare(`UPDATE self_role_panel_claims AS claims
       SET target_committed = 1
       WHERE target_committed = 0
@@ -209,7 +210,11 @@ function ensureSelfRoleRecovery(raw: DatabaseSync): void {
              AND audit.guild_id = claims.guild_id
              AND audit.member_id = claims.member_id
              AND audit.panel_id = claims.panel_id
-             AND audit.option_key IS claims.latest_option_key
+             AND CASE
+               WHEN json_array_length(audit.desired_role_ids) = 0 THEN NULL
+               WHEN json_array_length(audit.desired_role_ids) = 1 THEN audit.option_key
+               ELSE '__invalid_multi_target__'
+             END IS claims.latest_option_key
              AND audit.outcome IN ('assigned', 'removed', 'switched', 'already_held', 'already_absent')
         )`).run();
     raw.prepare(`UPDATE self_role_audit
