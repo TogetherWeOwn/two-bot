@@ -44,6 +44,11 @@ export function intents(_automodEnabled = process.env.TWO_AUTOMOD === '1'): Gate
 
 export const INTENTS = intents();
 
+/** Message content is already required by tickets/automod on current main. */
+export function intentsFor(_env: NodeJS.ProcessEnv = process.env): GatewayIntentBits[] {
+  return [...INTENTS];
+}
+
 export interface BotDeps {
   handlers: FunnelHandlers;
   invites: InviteTracker;
@@ -67,7 +72,7 @@ export interface BotDeps {
 
 export function createClient(automodEnabled = process.env.TWO_AUTOMOD === '1'): Client {
   return new Client({
-    intents: intents(automodEnabled),
+    intents: intentsFor(),
     ...(automodEnabled
       ? {
           partials: [Partials.Message, Partials.Channel],
@@ -242,6 +247,10 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
           ? (level) => applyLevelRoles(msg.member!, leveling, level)
           : undefined,
     });
+    // Downstream message automations run only after automod accepts the event
+    // and the ordinary funnel/leveling path has completed. A private event keeps
+    // those listeners from racing the primary MessageCreate handler.
+    client.emit('automationMessageAccepted' as never, msg as never);
   });
 
   client.on(Events.MessageUpdate, async (_old, partial) => {

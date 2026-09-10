@@ -38,7 +38,8 @@ import { ModerationDiscord } from './moderation/discord.ts';
 import { RestModerationResolver } from './moderation/resolver.ts';
 import { ModerationService } from './moderation/service.ts';
 import { ModerationStore } from './moderation/store.ts';
-import { registerModerationCommands, registerModerationHandler } from './moderation/commands.ts';
+import { MODERATION_COMMAND_DATA, registerModerationHandler } from './moderation/commands.ts';
+import { AUTOMATION_COMMAND_DATA } from './discord/commandNames.ts';
 import { loadAutomodConfig } from './automod/config.ts';
 import { AutomodService } from './automod/service.ts';
 import { AutomodStore } from './automod/store.ts';
@@ -56,8 +57,16 @@ import { GuildConfigDiscordApi } from './discord/guildConfigApi.ts';
 import type { GuildConfigSnapshot } from './redesign/guildConfig.ts';
 import { readFileSync } from 'node:fs';
 import { STAGING_BOT_APPLICATION_ID, TWO_STAGING_GUILD_ID } from './staging/spec.ts';
+import { CommandRegistry } from './discord/commandRegistry.ts';
+import { AutomationStore } from './automations/store.ts';
+import { AutomationDiscord, registerAutomationCommands } from './automations/discord.ts';
+import { AutomationService } from './automations/service.ts';
+import { registerAutomationGateway } from './automations/gateway.ts';
+import { startScheduler } from './automations/scheduler.ts';
+import { loadAutomationConfig } from './automations/config.ts';
 
 const cfg = loadConfig();
+const automationCfg = loadAutomationConfig();
 setLogLevel(cfg.logLevel);
 
 const db = await openDb(cfg.dbPath, { poolMax: cfg.dbPoolMax });
@@ -259,16 +268,51 @@ if (cfg.guildId && moderationResolver && moderationService) {
     resolver: moderationResolver,
     service: moderationService,
   });
-  client.once('ready', async () => {
-    await registerModerationCommands(client, {
-      guildId: cfg.guildId!,
-      resolver: moderationResolver,
-      service: moderationService,
-    });
-    log.info('moderation_enabled', {
-      guildId: cfg.guildId,
-      protectedRoles: moderationCfg.protectedRoleIds.size,
-    });
+
+}
+
+// Automations (TOG-1648): custom commands, scheduled messages, stickies.
+let automationScheduler: ReturnType<typeof startScheduler> | null = null;
+const automationStore = new AutomationStore(db);
+const automationDiscord = new AutomationDiscord({
+  token: cfg.discordToken,
+  base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+});
+const automationService = new AutomationService(automationStore, automationDiscord);
+
+let commandRegistry: CommandRegistry | null = null;
+if (cfg.guildId) {
+  commandRegistry = new CommandRegistry(client, {
+    guildId: cfg.guildId,
+    automations: automationStore,
+    additionalBuiltins: [
+      ...(automationCfg.enabled ? AUTOMATION_COMMAND_DATA : []),
+      ...(moderationResolver && moderationService ? MODERATION_COMMAND_DATA : []),
+    ],
+  });
+  commandRegistry.register();
+}
+if (cfg.guildId && automationCfg.enabled) {
+  registerAutomationCommands(client, {
+    guildId: cfg.guildId,
+    service: automationService,
+    store: automationStore,
+    syncCommands: () => commandRegistry!.sync(),
+  });
+  registerAutomationGateway(client, {
+    guildId: cfg.guildId,
+    service: automationService,
+    textCommandsEnabled: automationCfg.textCommandsEnabled,
+    findTrigger: (guildId, word) => automationStore.findTextTrigger(guildId, word),
+  });
+  automationScheduler = startScheduler(automationService, cfg.guildId);
+  log.info('automations_enabled', {
+    guildId: cfg.guildId,
+    textCommands: automationCfg.textCommandsEnabled ? 'on' : 'off (slash-only)',
+  });
+} else {
+  log.info('automations_disabled', {
+    reason: cfg.guildId ? 'TWO_AUTOMATIONS is not 1' : 'DISCORD_GUILD_ID is unset',
   });
 }
 
@@ -336,6 +380,9 @@ if (internalCfg) {
     // database as everything else, so it is covered by the same backups.
     store: new InternalActionStore(db),
     expectedJoins,
+    automations: automationCfg.enabled ? automationService : null,
+    allowAutomationOverwrite: automationCfg.enabled && internalCfg.allowAutomationOverwrite,
+    syncCommands: automationCfg.enabled && commandRegistry ? () => commandRegistry!.sync() : null,
     moderation: moderationResolver && moderationService
       ? { resolver: moderationResolver, service: moderationService }
       : null,
@@ -461,6 +508,7 @@ if (healthPort > 0) {
 async function shutdown(signal: string) {
   log.info('shutdown', { signal });
   clearInterval(sweep);
+  automationScheduler?.stop();
   if (moderationSweep) clearInterval(moderationSweep);
   presenceProbe?.stop();
   communitySnapshots?.stop();

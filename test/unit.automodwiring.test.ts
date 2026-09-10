@@ -105,18 +105,22 @@ function failingAutomod(failure: 'claim' | 'release'): AutomodService {
   );
 }
 
-test('blocked gateway messages do not earn funnel activity or leveling', async () => {
+test('blocked gateway messages do not earn funnel activity or reach downstream automations', async () => {
   const d = deps();
   const bus = new EventEmitter();
+  const accepted: string[] = [];
+  bus.on('automationMessageAccepted', (msg: { id: string }) => accepted.push(msg.id));
   registerHandlers(bus as unknown as Client, d);
   bus.emit(Events.MessageCreate, message('blocked-1', 'blocked'));
   await settle();
   assert.deepEqual(d.inspected, ['blocked-1:blocked']);
   assert.equal(d.recorded(), 0);
+  assert.deepEqual(accepted, []);
 
   bus.emit(Events.MessageCreate, message('allowed-1', 'allowed'));
   await settle();
   assert.equal(d.recorded(), 1);
+  assert.deepEqual(accepted, ['allowed-1']);
 });
 
 test('matched storage failures do not earn funnel activity or leveling', async () => {
@@ -175,8 +179,9 @@ test('protected-target refusal stays matched and produces one gateway audit', as
     automod: { service, guildId: '1545644954272137297' },
   });
 
-  bus.emit(Events.MessageCreate, message('protected-1', 'blocked'));
-  await settle();
+  await Promise.all(bus.listeners(Events.MessageCreate).map(async (listener) => {
+    await listener(message('protected-1', 'blocked'));
+  }));
   assert.equal(d.recorded(), 0, 'refused sanction remains a matched automod event');
   assert.deepEqual(calls, ['delete:protected-1']);
   const audit = await testDb.db.prepare(
@@ -185,8 +190,9 @@ test('protected-target refusal stays matched and produces one gateway audit', as
   assert.equal(audit?.outcome, 'refused');
   assert.equal(JSON.parse(audit?.metadata_json ?? '{}').refusal_reason, 'target_staff_role');
 
-  bus.emit(Events.MessageCreate, message('protected-1', 'blocked'));
-  await settle();
+  await Promise.all(bus.listeners(Events.MessageCreate).map(async (listener) => {
+    await listener(message('protected-1', 'blocked'));
+  }));
   assert.equal(d.recorded(), 0);
   assert.deepEqual(calls, ['delete:protected-1'], 'gateway replay did not repeat deletion or sanction');
   assert.equal((await testDb.db.prepare(

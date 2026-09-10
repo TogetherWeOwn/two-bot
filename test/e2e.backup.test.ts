@@ -164,6 +164,30 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
         )
         .run(G, `automod-message-${i}`, 'm1', `2026-08-01T10:0${i}:00.000Z`);
     }
+    await harness.db.prepare(
+      `INSERT INTO automation_commands
+         (guild_id, name, description, template, text_trigger, enabled,
+          created_by, created_at, updated_by, updated_at)
+       VALUES (?, 'faq', 'FAQ', 'Read rules', '!faq', TRUE, 'staff', ?, 'staff', ?)`,
+    ).run(G, '2026-08-01T12:00:00.000Z', '2026-08-01T12:00:00.000Z');
+    await harness.db.prepare(
+      `INSERT INTO scheduled_messages
+         (id, guild_id, channel_id, body, next_run_at, interval_seconds, enabled,
+          created_by, created_at, updated_by, updated_at)
+       VALUES ('sched-1', ?, 'chan-1', 'scheduled', '2026-08-02T12:00:00.000Z', NULL, TRUE,
+               'staff', '2026-08-01T12:00:00.000Z', 'staff', '2026-08-01T12:00:00.000Z')`,
+    ).run(G);
+    await harness.db.prepare(
+      `INSERT INTO sticky_messages
+         (guild_id, channel_id, body, debounce_seconds, enabled,
+          created_by, created_at, updated_by, updated_at)
+       VALUES (?, 'chan-1', 'sticky', 5, TRUE, 'staff', ?, 'staff', ?)`,
+    ).run(G, '2026-08-01T12:00:00.000Z', '2026-08-01T12:00:00.000Z');
+    await harness.db.prepare(
+      `INSERT INTO automation_audit_log
+         (id, guild_id, actor_id, action, target_key, outcome, reason, created_at)
+       VALUES ('automation-audit-1', ?, 'staff', 'command.create', 'faq', 'ok', NULL, ?)`,
+    ).run(G, '2026-08-01T12:00:00.000Z');
   }
 
   async function counts(): Promise<Record<string, number>> {
@@ -295,6 +319,32 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
       .get();
     assert.equal(lockdown?.prior_allow, '1024');
     assert.equal(lockdown?.prior_deny, '8192');
+  });
+
+  test('automation durability survives backup and restore', async () => {
+    await seed();
+    const file = join(dir, 'automations.ndjson.gz');
+    const manifest = await dump(harness.db, file);
+    const named = new Set(manifest.tables.map((t) => t.name));
+    for (const t of [
+      'automation_commands', 'scheduled_messages', 'sticky_messages', 'automation_audit_log',
+    ]) {
+      assert.ok(named.has(t as never), `${t} is not in the dump manifest`);
+    }
+
+    await harness.db.exec(`TRUNCATE ${DUMP_TABLES.join(', ')} RESTART IDENTITY`);
+    await restore(harness.db, file);
+    const after = await counts();
+    assert.equal(after.automation_commands, 1);
+    assert.equal(after.scheduled_messages, 1);
+    assert.equal(after.sticky_messages, 1);
+    assert.equal(after.automation_audit_log, 1);
+    const command = await harness.db
+      .prepare(`SELECT name, text_trigger, enabled FROM automation_commands WHERE guild_id = ?`)
+      .get(G);
+    assert.equal(command?.name, 'faq');
+    assert.equal(command?.text_trigger, '!faq');
+    assert.equal(command?.enabled, true);
   });
 
   test('a truncated dump is refused rather than half-restored', async () => {
