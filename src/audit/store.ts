@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Db } from '../store/driver.ts';
 import type { AuditChannel, OperationalAuditEvent, OperationalAuditKind } from './events.ts';
 
-export type AuditDeliveryState = 'none' | 'pending' | 'delivering' | 'delivered';
+export type AuditDeliveryState = 'none' | 'pending' | 'delivering' | 'delivered' | 'quarantined';
 
 export interface StoredOperationalAudit {
   event: OperationalAuditEvent;
@@ -202,6 +202,24 @@ export class OperationalAuditStore {
       )
       .run(new Date().toISOString(), classification.slice(0, 120), clearSearchBefore ? 1 : 0, entryId, claimToken);
     if (result.changes !== 1) throw new Error('audit_delivery_failure_not_persisted');
+  }
+
+  async quarantineDelivery(entryId: string, claimToken: string, classification: string): Promise<void> {
+    const result = await this.db
+      .prepare(
+        `UPDATE operational_audit_log
+            SET delivery_state = 'quarantined',
+                delivery_attempts = delivery_attempts + 1,
+                delivery_attempted_at = ?,
+                delivery_last_error = ?,
+                delivery_lease_until = NULL,
+                delivery_claim_token = NULL
+          WHERE entry_id = ?
+            AND delivery_state = 'delivering'
+            AND delivery_claim_token = ?`,
+      )
+      .run(new Date().toISOString(), classification.slice(0, 120), entryId, claimToken);
+    if (result.changes !== 1) throw new Error('audit_delivery_quarantine_not_persisted');
   }
 
   async eraseMember(memberId: string): Promise<number> {

@@ -94,7 +94,7 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
         // Once the recovery boundary is durable, the Discord post may have
         // succeeded. A missing or edited marker is ambiguous forever: resending
         // could duplicate an accepted message, so every retry must fail closed.
-        await options.store?.markDeliveryFailed(stored.event.entryId, claimToken!, 'discord_marker_missing');
+        await options.store?.quarantineDelivery(stored.event.entryId, claimToken!, 'discord_marker_missing');
         log.error('operational_audit_marker_missing', {
           entryId: stored.event.entryId,
           channelId,
@@ -127,7 +127,12 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
         });
       } else {
         try {
-          await options.store?.markDeliveryFailed(stored.event.entryId, claimToken!, 'discord_send_failed', true);
+          await options.store?.markDeliveryFailed(
+            stored.event.entryId,
+            claimToken!,
+            'discord_send_failed',
+            !stored.deliverySearchBefore,
+          );
         } catch {
           // Another worker may have replaced this claim before send authorization.
           // Its token owns the row now; the stale worker must not mutate it.
