@@ -4,6 +4,11 @@ import assert from 'node:assert/strict';
 import { AuditLogEvent, ChannelType, Collection, Events, GatewayIntentBits, Partials, type Client } from 'discord.js';
 import { createClient, INTENTS, registerHandlers } from '../src/discord/client.ts';
 import { moderationAuditEvent } from '../src/audit/discordEvents.ts';
+import {
+  moderationAuditEntryId,
+  moderationAuditReason,
+  moderationAuditToken,
+} from '../src/audit/moderationIdentity.ts';
 import { formatAuditEvent, hasAuditEventIdentity, type OperationalAuditEvent } from '../src/audit/events.ts';
 import { makeOperationalAudit } from '../src/audit/service.ts';
 import { deliveryNonce, OperationalAuditStore, type StoredOperationalAudit } from '../src/audit/store.ts';
@@ -252,6 +257,77 @@ test('durable audit is idempotent by entry id', async () => {
   const row = await db.prepare(`SELECT COUNT(*) AS n FROM operational_audit_log`).get<{ n: number }>();
   assert.equal(Number(row?.n), 1);
   await db.close();
+});
+
+test('correlated moderation gateway entries converge on the service audit identity', async () => {
+  const guildId = GUILD;
+  const key = 'moderation-key-1';
+  const token = moderationAuditToken(guildId, key);
+  const reason = moderationAuditReason(
+    guildId,
+    key,
+    'moderation.slowmode',
+    '900000000000000003',
+    'human-only reason',
+  );
+  const event = moderationAuditEvent(
+    {
+      id: 'audit-correlated',
+      action: AuditLogEvent.ChannelUpdate,
+      createdTimestamp: 1_700_000_000_000,
+      executorId: 'bot',
+      targetId: CHANNEL_A,
+      reason,
+      extra: null,
+    } as never,
+    guildId,
+    'bot',
+  );
+  assert.ok(event);
+  assert.equal(event.entryId, moderationAuditEntryId(guildId, token));
+  assert.equal(event.action, 'moderation.slowmode');
+  assert.equal(event.actorId, '900000000000000003');
+  assert.equal(event.targetId, null);
+  assert.equal(event.sourceChannelId, CHANNEL_A);
+  assert.deepEqual(event.metadata, {
+    auditLogEntryId: 'audit-correlated',
+    count: null,
+    origin: 'moderation_service',
+    outcome: 'slowmode_updated',
+  });
+  assert.doesNotMatch(JSON.stringify(event), /human-only reason/);
+
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  const serviceEvent = {
+    ...event,
+    occurredAt: '2026-09-08T16:00:00.000Z',
+    metadata: { origin: 'moderation_service', outcome: 'slowmode_updated' },
+  };
+  assert.equal(await store.record(serviceEvent), true);
+  assert.equal(await store.record(event), false);
+  assert.equal(Number((await db.prepare(`SELECT COUNT(*) AS n FROM operational_audit_log`).get<{ n: number }>())?.n), 1);
+  await db.close();
+});
+
+test('another integration cannot forge a moderation service correlation marker', () => {
+  const event = moderationAuditEvent(
+    {
+      id: 'audit-forged',
+      action: AuditLogEvent.MemberKick,
+      createdTimestamp: 1_700_000_000_000,
+      executorId: 'other-integration',
+      targetId: MEMBER,
+      reason: moderationAuditReason(GUILD, 'forged', 'moderation.ban', MEMBER, 'forged'),
+      extra: null,
+    } as never,
+    GUILD,
+    'our-bot',
+  );
+  assert.ok(event);
+  assert.equal(event.entryId, `discord-audit:${GUILD}:audit-forged`);
+  assert.equal(event.action, 'member_kick');
+  assert.deepEqual(event.metadata, { auditLogEntryId: 'audit-forged', count: null });
 });
 
 test('Discord moderation entries discard free-text reasons', () => {

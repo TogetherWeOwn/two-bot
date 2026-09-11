@@ -51,6 +51,7 @@ import {
   AUDIT_ACCEPTANCE_KINDS,
   auditAcceptanceSql,
   auditMarkerRowsSql,
+  auditRouteForKind,
   evaluateAuditChannels,
   evaluateAuditEvidence,
   evaluateAuditMarkers,
@@ -109,6 +110,7 @@ let fails = 0;
 let warns = 0;
 const pass = (m: string, d = '') => console.log(`  PASS  ${m}${d && `  ${d}`}`);
 let stagingChannels: Array<{ id: string; name: string; type: number; permission_overwrites?: Array<{ id: string; type: number; allow: string; deny: string }> }> = [];
+let acceptedAuditChannelIds = { audit: null, voice: null, moderation: null } as Record<'audit' | 'voice' | 'moderation', string | null>;
 const warn = (m: string, d = '') => (warns++, console.log(`  WARN  ${m}${d && `  ${d}`}`));
 const fail = (m: string, d = '') => (fails++, console.log(`  FAIL  ${m}${d && `  ${d}`}`));
 
@@ -207,6 +209,7 @@ if (channels.status !== 200 || !channels.body) {
   }
 
   const auditChannels = evaluateAuditChannels(channels.body, guildId, botId);
+  acceptedAuditChannelIds = auditChannels.channelIds;
   for (const name of auditChannels.missing) fail(`#${name} is missing`, 'the parity suite writes evidence there');
   for (const name of auditChannels.duplicates) {
     fail(`#${name} is duplicated`, 'every matching staff log must be private; reconcile the duplicate explicitly');
@@ -434,7 +437,8 @@ console.log('\nAudit parity acceptance\n');
 let auditDb;
 try {
   auditDb = await openDb(stagingDbUrl, { skipMigrations: true, applicationName: 'two-bot-staging-verify' });
-  const rows = await auditDb.prepare(auditAcceptanceSql(guildId, auditSince)).all<AuditAcceptanceRow>();
+  const acceptedSinkIds = Object.values(acceptedAuditChannelIds).filter((id): id is string => Boolean(id));
+  const rows = await auditDb.prepare(auditAcceptanceSql(guildId, auditSince, acceptedSinkIds)).all<AuditAcceptanceRow>();
   const evidence = evaluateAuditEvidence(rows);
   for (const kind of AUDIT_ACCEPTANCE_KINDS) {
     if (evidence.missing.includes(kind)) fail(`${kind} durable evidence is missing`, `since ${auditSince}`);
@@ -447,31 +451,41 @@ try {
   } else {
     pass('audit-sink tamper evidence', 'durable with delivery_state=none and no recursive mirror');
   }
+  if (evidence.missingModerationSuccess) {
+    fail('successful moderation audit evidence is missing', 'a refusal alone cannot certify moderation parity');
+  } else {
+    pass('successful moderation audit evidence', 'moderation_service outcome is durable and delivered');
+  }
 
   const markerRows = await auditDb.prepare(auditMarkerRowsSql(guildId, auditSince)).all<{
-    entry_id: string; mirror_channel_id: string; mirror_message_id: string | null;
+    entry_id: string; event_kind: (typeof AUDIT_ACCEPTANCE_KINDS)[number];
+    mirror_channel_id: string; mirror_message_id: string | null;
   }>();
   const channelById = new Map(stagingChannels.map((channel) => [channel.id, channel]));
   const markerCounts: AuditMarkerCount[] = [];
   for (const row of markerRows) {
-    const channel = channelById.get(row.mirror_channel_id);
-    if (!channel) {
-      markerCounts.push({ entryId: row.entry_id, mirrorMessageId: row.mirror_message_id, channelId: row.mirror_channel_id, messageIds: [] });
-      continue;
-    }
+    const expectedChannelId = acceptedAuditChannelIds[auditRouteForKind(row.event_kind)];
+    const channel = row.mirror_channel_id === expectedChannelId
+      ? channelById.get(row.mirror_channel_id)
+      : undefined;
     markerCounts.push({
       entryId: row.entry_id,
+      eventKind: row.event_kind,
       mirrorMessageId: row.mirror_message_id,
       channelId: row.mirror_channel_id,
-      messageIds: await discordMarkerMessageIds(row.mirror_channel_id, row.entry_id, auditSince),
+      expectedChannelId,
+      messageIds: channel
+        ? await discordMarkerMessageIds(row.mirror_channel_id, row.entry_id, auditSince)
+        : [],
     });
   }
   const markers = evaluateAuditMarkers(markerCounts);
+  for (const entryId of markers.channelMismatches) fail('audit mirror used an unapproved sink channel', entryId);
   for (const entryId of markers.missing) fail('audit mirror marker is missing', entryId);
   for (const entryId of markers.duplicates) fail('audit mirror marker is duplicated', entryId);
   for (const entryId of markers.messageIdMismatches) fail('audit mirror message id does not match Discord', entryId);
-  if (!markers.missing.length && !markers.duplicates.length && !markers.messageIdMismatches.length) {
-    pass('Discord audit mirror reconciliation', `${markerCounts.length} durable rows each have exactly one matching marker`);
+  if (!markers.channelMismatches.length && !markers.missing.length && !markers.duplicates.length && !markers.messageIdMismatches.length) {
+    pass('Discord audit mirror reconciliation', `${markerCounts.length} durable rows each have exactly one matching marker in its private sink`);
   }
 } catch (err) {
   fail('audit evidence query failed', String(err));

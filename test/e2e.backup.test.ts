@@ -557,6 +557,35 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
     );
   });
 
+  test('an incomplete current-version dump is refused before it can erase audit data', async () => {
+    await seed();
+    const file = join(dir, 'incomplete-source.ndjson.gz');
+    await dump(harness.db, file);
+    const objs = gunzipSync(readFileSync(file))
+      .toString('utf8')
+      .trimEnd()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    const manifest = objs.find((obj) => obj.kind === 'manifest');
+    manifest.tables = manifest.tables.filter((table: { name: string }) => table.name !== 'operational_audit_log');
+    const removedRows = objs.filter((obj) => obj.kind === 'row' && obj.table === 'operational_audit_log').length;
+    const kept = objs.filter((obj) => !(obj.kind === 'row' && obj.table === 'operational_audit_log'));
+    kept.find((obj) => obj.kind === 'end').rows -= removedRows;
+    const incomplete = join(dir, 'incomplete.ndjson.gz');
+    writeFileSync(incomplete, gzipSync(kept.map((obj) => JSON.stringify(obj)).join('\n') + '\n'));
+
+    const before = await counts();
+    const auditBefore = await harness.db
+      .prepare(`SELECT entry_id, delivery_state FROM operational_audit_log ORDER BY entry_id`)
+      .all();
+    await assert.rejects(() => restore(harness.db, incomplete), /missing tables: operational_audit_log/);
+    assert.deepEqual(await counts(), before);
+    assert.deepEqual(
+      await harness.db.prepare(`SELECT entry_id, delivery_state FROM operational_audit_log ORDER BY entry_id`).all(),
+      auditBefore,
+    );
+  });
+
   test('a dump naming a table the bot does not own is refused', async () => {
     await seed();
     const file = join(dir, 'foreign-source.ndjson.gz');

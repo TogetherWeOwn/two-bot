@@ -33,7 +33,10 @@ test('all accepted log channels must be unique and deny member visibility', () =
       [channel('audit-log'), channel('voice-log'), channel('moderation-log')],
       GUILD,
     ),
-    { missing: [], memberReadable: [], duplicates: [] },
+    {
+      missing: [], memberReadable: [], duplicates: [],
+      channelIds: { audit: 'id-audit-log', voice: 'id-voice-log', moderation: 'id-moderation-log' },
+    },
   );
 });
 
@@ -51,6 +54,7 @@ test('missing, duplicated, or member-readable log channels fail the privacy gate
       missing: ['moderation-log'],
       memberReadable: ['voice-log'],
       duplicates: ['audit-log'],
+      channelIds: { audit: null, voice: null, moderation: null },
     },
   );
 });
@@ -69,7 +73,10 @@ test('the provisioned bot overwrite is private while every other ViewChannel all
       GUILD,
       botId,
     ),
-    { missing: [], memberReadable: [], duplicates: [] },
+    {
+      missing: [], memberReadable: [], duplicates: [],
+      channelIds: { audit: 'id-audit-log', voice: 'id-voice-log', moderation: 'id-moderation-log' },
+    },
   );
 
   for (const unsafe of [
@@ -110,9 +117,11 @@ test('acceptance evidence requires every kind, unique entry ids and completed mi
     distinct_entries: 1,
     incomplete_deliveries: 0,
     sink_tamper_rows: event_kind === 'message_delete' ? 1 : 0,
+    successful_moderation_rows: event_kind === 'moderation_action' ? 1 : 0,
   }));
   assert.deepEqual(evaluateAuditEvidence(rows), {
-    missing: [], duplicates: [], pendingDeliveries: [], missingSinkTamper: false,
+    missing: [], duplicates: [], pendingDeliveries: [],
+    missingSinkTamper: false, missingModerationSuccess: false,
   });
 
   assert.deepEqual(evaluateAuditEvidence(rows.slice(1)).missing, ['message_edit']);
@@ -122,28 +131,38 @@ test('acceptance evidence requires every kind, unique entry ids and completed mi
   assert.deepEqual(evaluateAuditEvidence(pending).pendingDeliveries, ['voice_move']);
   const none = rows.map((row) => row.event_kind === 'member_update' ? { ...row, incomplete_deliveries: 1 } : row);
   assert.deepEqual(evaluateAuditEvidence(none).pendingDeliveries, ['member_update']);
+  const refusalOnly = rows.map((row) => row.event_kind === 'moderation_action'
+    ? { ...row, successful_moderation_rows: 0 }
+    : row);
+  assert.equal(evaluateAuditEvidence(refusalOnly).missingModerationSuccess, true);
 });
 
-test('acceptance SQL enumerates every logging parity event and the staging guild', () => {
+test('acceptance SQL enumerates every logging parity event and binds tamper to private sinks', () => {
   const since = '2026-09-09T00:00:00.000Z';
-  const sql = auditAcceptanceSql(GUILD, since);
+  const sql = auditAcceptanceSql(GUILD, since, ['audit-private', 'voice-private', 'moderation-private']);
   assert.match(sql, new RegExp(GUILD));
   assert.match(sql, new RegExp(since.replaceAll('.', '\\.')));
   for (const kind of AUDIT_ACCEPTANCE_KINDS) assert.match(sql, new RegExp(kind));
   assert.match(sql, /COUNT\(DISTINCT entry_id\)/);
   assert.match(sql, /delivery_state <> 'delivered'/);
-  assert.match(sql, /incomplete_deliveries/);
-  assert.match(sql, /sink_tamper_rows/);
+  assert.match(sql, /event_kind = 'moderation_action' AND mirror_channel_id IS NOT NULL AND delivery_state = 'delivered'/);
+  assert.match(sql, /source_channel_id IN \('audit-private', 'voice-private', 'moderation-private'\)/);
   const markerSql = auditMarkerRowsSql(GUILD, since);
-  assert.match(markerSql, /mirror_channel_id IS NOT NULL/);
-  assert.match(markerSql, /mirror_message_id/);
+  assert.match(markerSql, /SELECT entry_id, event_kind, mirror_channel_id, mirror_message_id/);
 });
 
-test('Discord marker reconciliation requires exactly one message matching the persisted id', () => {
+test('Discord marker reconciliation requires the expected private sink and exact message id', () => {
   assert.deepEqual(evaluateAuditMarkers([
-    { entryId: 'ok', mirrorMessageId: 'm1', channelId: 'c', messageIds: ['m1'] },
-    { entryId: 'missing', mirrorMessageId: 'm2', channelId: 'c', messageIds: [] },
-    { entryId: 'duplicate', mirrorMessageId: 'm3', channelId: 'c', messageIds: ['m3', 'm4'] },
-    { entryId: 'wrong-id', mirrorMessageId: 'm5', channelId: 'c', messageIds: ['m6'] },
-  ]), { missing: ['missing'], duplicates: ['duplicate'], messageIdMismatches: ['wrong-id'] });
+    { entryId: 'ok', eventKind: 'message_edit', mirrorMessageId: 'm1', channelId: 'audit', expectedChannelId: 'audit', messageIds: ['m1'] },
+    { entryId: 'missing', eventKind: 'voice_join', mirrorMessageId: 'm2', channelId: 'voice', expectedChannelId: 'voice', messageIds: [] },
+    { entryId: 'duplicate', eventKind: 'voice_move', mirrorMessageId: 'm3', channelId: 'voice', expectedChannelId: 'voice', messageIds: ['m3', 'm4'] },
+    { entryId: 'wrong-id', eventKind: 'moderation_action', mirrorMessageId: 'm5', channelId: 'moderation', expectedChannelId: 'moderation', messageIds: ['m6'] },
+    { entryId: 'public', eventKind: 'message_delete', mirrorMessageId: 'm7', channelId: 'general', expectedChannelId: 'audit', messageIds: ['m7'] },
+    { entryId: 'wrong-private', eventKind: 'voice_leave', mirrorMessageId: 'm8', channelId: 'audit', expectedChannelId: 'voice', messageIds: ['m8'] },
+  ]), {
+    missing: ['missing'],
+    duplicates: ['duplicate'],
+    messageIdMismatches: ['wrong-id'],
+    channelMismatches: ['public', 'wrong-private'],
+  });
 });

@@ -5,6 +5,7 @@ const API = 'https://discord.com/api/v10';
 /** PermissionFlagsBits.SendMessages, as the decimal string Discord expects. */
 const SEND_MESSAGES = '2048';
 const EVERYONE_OVERWRITE_TYPE = 0;
+const MAX_AUDIT_REASON_BYTES = 512;
 
 export interface EveryoneOverwrite {
   allow: string;
@@ -142,7 +143,7 @@ export class ModerationDiscord implements ModerationDiscordClient {
         signal: ctrl.signal,
         headers: {
           Authorization: `Bot ${this.options.token}`,
-          'X-Audit-Log-Reason': encodeURIComponent(reason).slice(0, 512),
+          'X-Audit-Log-Reason': encodeAuditReason(reason),
           ...(body === undefined ? {} : { 'content-type': 'application/json' }),
         },
         body: body === undefined ? undefined : JSON.stringify(body),
@@ -163,6 +164,16 @@ export class ModerationDiscord implements ModerationDiscordClient {
       clearTimeout(timer);
     }
   }
+}
+
+function encodeAuditReason(reason: string): string {
+  reason = reason.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '�');
+  let encoded = encodeURIComponent(reason);
+  while (encoded.length > MAX_AUDIT_REASON_BYTES) {
+    reason = [...reason].slice(0, -1).join('');
+    encoded = encodeURIComponent(reason);
+  }
+  return encoded;
 }
 
 function isAbort(error: unknown): boolean {

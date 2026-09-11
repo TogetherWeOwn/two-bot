@@ -457,7 +457,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
   });
 
   client.on(Events.GuildAuditLogEntryCreate, (entry, guild) => {
-    const event = moderationAuditEvent(entry, guild.id);
+    const event = moderationAuditEvent(entry, guild.id, client.user?.id);
     if (event) auditSafely(event);
   });
 
