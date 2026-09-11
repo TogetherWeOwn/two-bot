@@ -30,6 +30,7 @@ import { registerAutomationGateway, triggerWord } from '../src/automations/gatew
 import { CommandRegistry, mergedCommandData } from '../src/discord/commandRegistry.ts';
 import { MODERATION_COMMAND_DATA } from '../src/moderation/commands.ts';
 import {
+  ANNOUNCEMENT_COMMAND_DATA,
   AUTOMATION_COMMAND_DATA,
   COMMUNITY_COMMAND_DATA,
   MAX_CUSTOM_COMMANDS,
@@ -214,6 +215,7 @@ test('command registry rejects overflow instead of silently truncating definitio
     () => mergedCommandData(custom, [
       ...COMMUNITY_COMMAND_DATA,
       ...AUTOMATION_COMMAND_DATA,
+      ...ANNOUNCEMENT_COMMAND_DATA,
       ...MODERATION_COMMAND_DATA,
     ] as ApplicationCommandDataResolvable[]),
     /above Discord's guild limit/,
