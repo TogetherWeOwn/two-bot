@@ -703,6 +703,72 @@ test('a failed pre-send recovery-bound write prevents the Discord send', async (
   await db.close();
 });
 
+test('a transient recovery scan failure retains its boundary and never duplicates an accepted mirror', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  const preSendMessageId = '900000000000000000';
+  const acceptedMessageId = (BigInt(preSendMessageId) + 1n).toString();
+  let sends = 0;
+  let failRecoveryFetch = true;
+  let acceptedMessage: { id: string; author: { id: string }; content: string } | null = null;
+  const preSendMessage = { id: preSendMessageId, author: { id: 'other' }, content: 'pre-send' };
+  const channel = {
+    id: CHANNEL_A,
+    guild: { id: GUILD, members: { me: { id: 'bot' } } },
+    isTextBased: () => true,
+    isDMBased: () => false,
+    permissionsFor: () => ({ has: () => true }),
+    messages: {
+      fetch: async ({ limit = 50 }: { limit?: number }) => {
+        if (acceptedMessage && failRecoveryFetch && limit === 100) {
+          failRecoveryFetch = false;
+          throw new Error('transient Discord history failure');
+        }
+        const history = acceptedMessage ? [acceptedMessage, preSendMessage] : [preSendMessage];
+        return new Collection(history.slice(0, limit).map((message) => [message.id, message]));
+      },
+    },
+    client: { user: { id: 'bot' } },
+    send: async (body: { content?: string }) => {
+      sends++;
+      acceptedMessage = { id: acceptedMessageId, author: { id: 'bot' }, content: body.content ?? '' };
+      return { id: acceptedMessageId };
+    },
+  };
+  const client = { channels: { cache: new Map([[CHANNEL_A, channel]]), fetch: async () => channel } } as unknown as Client;
+  const sink = makeOperationalAudit(client, {
+    guildId: GUILD, channels: { audit: CHANNEL_A, voice: null, moderation: null }, store,
+  });
+  const realMarkDelivered = store.markDelivered.bind(store);
+  let acknowledgements = 0;
+  store.markDelivered = async (entryId, claimToken, messageId) => {
+    acknowledgements++;
+    if (acknowledgements === 1) throw new Error('database disconnected after Discord accepted the post');
+    await realMarkDelivered(entryId, claimToken, messageId);
+  };
+
+  await sink.record({
+    entryId: 'recovery-fetch-failure', kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
+  });
+  await db.prepare(`UPDATE operational_audit_log SET delivery_lease_until = ? WHERE entry_id = ?`).run(
+    '2000-01-01T00:00:00.000Z', 'recovery-fetch-failure',
+  );
+
+  assert.equal(await sink.retryPending(), 1);
+  const pending = await store.get('recovery-fetch-failure');
+  assert.equal(pending?.deliveryState, 'pending');
+  assert.equal(pending?.deliverySearchBefore, acceptedMessageId);
+  assert.equal(sends, 1);
+
+  assert.equal(await sink.retryPending(), 1);
+  const delivered = await store.get('recovery-fetch-failure');
+  assert.equal(delivered?.deliveryState, 'delivered');
+  assert.equal(delivered?.mirrorMessageId, acceptedMessageId);
+  assert.equal(sends, 1);
+  await db.close();
+});
+
 test('a post-send rejection retains its recovery bound for marker reconciliation', async () => {
   const db = await openDb(':memory:');
   const store = new OperationalAuditStore(db);
@@ -745,6 +811,7 @@ test('a post-send rejection retains its recovery bound for marker reconciliation
   await store.markAcknowledgementFailed('post-send-rejection', row!.deliveryClaimToken!, -1);
   assert.equal(await sink.retryPending(), 1);
   assert.equal(sends, 1);
+  assert.equal((await store.get('post-send-rejection'))?.deliveryState, 'quarantined');
   assert.equal((await store.get('post-send-rejection'))?.deliveryLastError, 'discord_marker_missing');
   await db.close();
 });
@@ -874,10 +941,35 @@ test('an edited ambiguous marker fails closed through a long scan and overlappin
   assert.ok(leaseExtensions >= 6);
   assert.equal(sends, 1);
   const row = await store.get(event.entryId);
-  assert.equal(row?.deliveryState, 'pending');
+  assert.equal(row?.deliveryState, 'quarantined');
   assert.equal(row?.deliveryLastError, 'discord_marker_missing');
   assert.equal(row?.deliverySearchBefore, acceptedMessageId);
   assert.equal(row?.deliveryAttempts, 2);
+  await db.close();
+});
+
+test('quarantined ambiguous rows cannot starve newer pending audit deliveries', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  for (let index = 0; index < 25; index++) {
+    const entryId = `poison-${String(index).padStart(2, '0')}`;
+    await store.record({
+      entryId, kind: 'message_delete', channel: 'audit', guildId: GUILD,
+      occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
+    }, CHANNEL_A);
+    const claim = await store.claim(entryId);
+    assert.ok(claim?.deliveryClaimToken);
+    await store.prepareDeliverySend(entryId, claim.deliveryClaimToken, '1');
+    await store.quarantineDelivery(entryId, claim.deliveryClaimToken, 'discord_marker_missing');
+  }
+  await store.record({
+    entryId: 'fresh', kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:01.000Z', sourceChannelId: CHANNEL_B,
+  }, CHANNEL_A);
+
+  const claimed = await store.claimPending();
+  assert.deepEqual(claimed.map((item) => item.event.entryId), ['fresh']);
+  assert.equal((await store.get('poison-00'))?.deliveryState, 'quarantined');
   await db.close();
 });
 
@@ -937,6 +1029,7 @@ test('audit database write errors redact thrown text from process logs', async (
     async claim() { return null; },
     async claimPending() { return []; },
     async markDeliveryFailed() {},
+    async quarantineDelivery() {},
     async prepareDeliverySend() {},
     async markDelivered() {},
     async markAcknowledgementFailed() {},
