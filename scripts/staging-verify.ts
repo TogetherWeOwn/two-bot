@@ -452,9 +452,15 @@ try {
     pass('audit-sink tamper evidence', 'durable with delivery_state=none and no recursive mirror');
   }
   if (evidence.missingModerationSuccess) {
-    fail('successful moderation audit evidence is missing', 'a refusal alone cannot certify moderation parity');
+    fail(
+      'successful moderation audit evidence is missing',
+      'drive a Discord-mutating action such as moderation.slowmode; moderation.warn or a refusal cannot certify parity',
+    );
   } else {
-    pass('successful moderation audit evidence', 'moderation_service outcome is durable and delivered');
+    pass(
+      'successful moderation audit evidence',
+      'Discord-mutating moderation_service outcome is correlated to a bot-executed Discord audit entry',
+    );
   }
 
   const markerRows = await auditDb.prepare(auditMarkerRowsSql(guildId, auditSince)).all<{
@@ -497,6 +503,7 @@ console.log('\nRequired controlled scenarios:');
 console.log('  - repeat one event and prove entry_id dedupe keeps one durable row and one mirror');
 console.log('  - remove Send Messages from one log channel and prove the durable row survives, then retries');
 console.log('  - attempt a protected/higher-role moderation target and prove refusal is mirrored');
+console.log('  - run moderation.slowmode with a reversible value and prove the bot-executed Discord audit entry is correlated');
 console.log('  - inspect payloads for absence of message content, usernames, nicknames and mentions');
 
 console.log(`\n${fails} fail, ${warns} warn\n`);

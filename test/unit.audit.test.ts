@@ -1,9 +1,9 @@
 import { EventEmitter } from 'node:events';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { AuditLogEvent, ChannelType, Collection, Events, GatewayIntentBits, Partials, type Client } from 'discord.js';
+import { AuditLogEvent, ChannelType, Collection, Events, GatewayIntentBits, Partials, PermissionsBitField, type Client } from 'discord.js';
 import { createClient, INTENTS, registerHandlers } from '../src/discord/client.ts';
-import { moderationAuditEvent } from '../src/audit/discordEvents.ts';
+import { moderationAuditEvent, rawMessageAuditEvent } from '../src/audit/discordEvents.ts';
 import {
   moderationAuditEntryId,
   moderationAuditReason,
@@ -61,66 +61,92 @@ test('gateway requests moderation and partial messages for complete audit delive
   client.destroy();
 });
 
-test('uncached delete and update gateway actions emit partial messages', async () => {
+test('discord.js drops high-level uncached-channel messages while Raw still produces audit', async () => {
   const client = createClient();
   const internals = client as unknown as {
     guilds: { _add(data: unknown): unknown };
-    channels: { _add(data: unknown): unknown };
     actions: {
       MessageDelete: { handle(data: unknown): unknown };
       MessageUpdate: { handle(data: unknown): { old?: never; updated?: never } };
     };
   };
   internals.guilds._add({ id: GUILD, unavailable: false });
-  internals.channels._add({ id: CHANNEL_A, guild_id: GUILD, type: ChannelType.GuildText, name: 'general' });
+  const deleted: string[] = [];
+  const updated: string[] = [];
+  client.on(Events.MessageDelete, (message) => deleted.push(message.id));
+  client.on(Events.MessageUpdate, (_oldMessage, newMessage) => updated.push(newMessage.id));
+  const deletePacket = { op: 0, t: 'MESSAGE_DELETE', s: 3, d: { id: 'uncached-delete', channel_id: CHANNEL_A, guild_id: GUILD } };
+  const updatePacket = { op: 0, t: 'MESSAGE_UPDATE', s: 4, d: { id: 'uncached-edit', channel_id: CHANNEL_A, guild_id: GUILD } };
 
-  const deleted: Array<{ id: string; partial: boolean }> = [];
-  const updated: Array<{ oldPartial: boolean; newPartial: boolean }> = [];
-  client.on(Events.MessageDelete, (message) => deleted.push({ id: message.id, partial: message.partial }));
-  client.on(Events.MessageUpdate, (oldMessage, newMessage) => {
-    updated.push({ oldPartial: oldMessage.partial, newPartial: newMessage.partial });
-  });
-
-  internals.actions.MessageDelete.handle({ id: 'uncached-delete', channel_id: CHANNEL_A, guild_id: GUILD });
-  const edit = internals.actions.MessageUpdate.handle({
-    id: 'uncached-edit',
-    channel_id: CHANNEL_A,
-    guild_id: GUILD,
-    edited_timestamp: '2026-09-09T00:00:00.000Z',
-  });
+  internals.actions.MessageDelete.handle(deletePacket.d);
+  const edit = internals.actions.MessageUpdate.handle(updatePacket.d);
   if (edit.old && edit.updated) client.emit(Events.MessageUpdate, edit.old, edit.updated);
 
-  assert.deepEqual(deleted, [{ id: 'uncached-delete', partial: true }]);
-  assert.deepEqual(updated, [{ oldPartial: true, newPartial: true }]);
+  assert.deepEqual(deleted, []);
+  assert.deepEqual(updated, []);
+  assert.equal(rawMessageAuditEvent(deletePacket, 0)?.kind, 'message_delete');
+  assert.equal(rawMessageAuditEvent(updatePacket, 0)?.kind, 'message_edit');
   client.destroy();
 });
 
-test('gateway logging covers edit/delete, member deltas and voice move without content or nicknames', async () => {
+test('raw message dispatch converter handles minimal and timestamp update variants', () => {
+  assert.deepEqual(rawMessageAuditEvent({
+    op: 0, t: 'MESSAGE_DELETE', s: 12,
+    d: { guild_id: GUILD, channel_id: CHANNEL_A, id: 'raw-delete' },
+  }, 2, '2026-09-09T00:00:00.000Z'), {
+    entryId: `message-delete:${GUILD}:raw-delete`, kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z', actorId: null, targetId: null,
+    sourceChannelId: CHANNEL_A, messageId: 'raw-delete',
+  });
+  const minimal = rawMessageAuditEvent({
+    op: 0, t: 'MESSAGE_UPDATE', s: 13,
+    d: { guild_id: GUILD, channel_id: CHANNEL_A, id: 'raw-edit' },
+  }, 2, '2026-09-09T00:00:01.000Z');
+  assert.equal(minimal?.entryId, `message-edit:${GUILD}:raw-edit:shard-2:sequence-13`);
+  assert.equal(minimal?.occurredAt, '2026-09-09T00:00:01.000Z');
+  assert.equal(minimal?.actorId, null);
+  const timestamped = rawMessageAuditEvent({
+    op: 0, t: 'MESSAGE_UPDATE', s: 14,
+    d: {
+      guild_id: GUILD, channel_id: CHANNEL_A, id: 'raw-edit',
+      author: { id: MEMBER }, edited_timestamp: '2026-09-09T00:00:02.000Z',
+    },
+  }, 2);
+  assert.equal(timestamped?.entryId, `message-edit:${GUILD}:raw-edit:2026-09-09T00:00:02.000Z`);
+  assert.equal(timestamped?.actorId, MEMBER);
+  assert.equal(timestamped?.targetId, MEMBER);
+  assert.equal(rawMessageAuditEvent({ op: 1, t: 'MESSAGE_DELETE', s: 1, d: {} }, 0), null);
+});
+
+test('gateway logging covers raw edit/delete, member deltas and voice move without content or nicknames', async () => {
   const events: OperationalAuditEvent[] = [];
   const bus = new EventEmitter();
   registerHandlers(bus as unknown as Client, { ...deps(events), auditGuildId: GUILD });
 
+  bus.emit(Events.Raw, {
+    op: 0, t: 'MESSAGE_UPDATE', s: 20,
+    d: {
+      id: 'message-1', guild_id: GUILD, channel_id: CHANNEL_A,
+      author: { id: MEMBER }, edited_timestamp: '2023-11-14T22:13:20.000Z', content: 'new secret',
+    },
+  }, 0);
+  bus.emit(Events.Raw, {
+    op: 0, t: 'MESSAGE_DELETE', s: 21,
+    d: { id: 'message-2', guild_id: GUILD, channel_id: CHANNEL_A, content: 'deleted secret' },
+  }, 0);
+  // High-level events may follow Raw, but audit production lives only on Raw.
   bus.emit(
     Events.MessageUpdate,
     { id: 'message-1', guildId: GUILD, channelId: CHANNEL_A, partial: false, author: { id: MEMBER }, content: 'old secret' },
     {
-      id: 'message-1',
-      guildId: GUILD,
-      channelId: CHANNEL_A,
-      partial: false,
-      author: { id: MEMBER },
-      editedTimestamp: 1_700_000_000_000,
-      editedAt: new Date(1_700_000_000_000),
-      content: 'new secret',
+      id: 'message-1', guildId: GUILD, channelId: CHANNEL_A, partial: false,
+      author: { id: MEMBER }, editedTimestamp: 1_700_000_000_000,
+      editedAt: new Date(1_700_000_000_000), content: 'new secret',
     },
   );
   bus.emit(Events.MessageDelete, {
-    id: 'message-2',
-    guildId: GUILD,
-    channelId: CHANNEL_A,
-    partial: false,
-    author: { id: MEMBER },
-    content: 'deleted secret',
+    id: 'message-2', guildId: GUILD, channelId: CHANNEL_A, partial: false,
+    author: { id: MEMBER }, content: 'deleted secret',
   });
   bus.emit(
     Events.GuildMemberUpdate,
@@ -156,13 +182,14 @@ test('gateway audit ignores events outside the configured guild', async () => {
   const bus = new EventEmitter();
   registerHandlers(bus as unknown as Client, { ...deps(events), auditGuildId: GUILD });
 
-  bus.emit(Events.MessageDelete, {
-    id: 'outside-message',
-    guildId: OTHER_GUILD,
-    channelId: CHANNEL_A,
-    partial: false,
-    author: { id: MEMBER },
-  });
+  bus.emit(Events.Raw, {
+    op: 0, t: 'MESSAGE_DELETE', s: 1,
+    d: { id: 'outside-message', guild_id: OTHER_GUILD, channel_id: CHANNEL_A },
+  }, 0);
+  bus.emit(Events.Raw, {
+    op: 0, t: 'MESSAGE_DELETE', s: 2,
+    d: { id: 'dm-message', channel_id: CHANNEL_A },
+  }, 0);
   bus.emit(
     Events.GuildMemberUpdate,
     { id: MEMBER, guild: { id: OTHER_GUILD }, partial: false, nickname: null, roles: roles([OTHER_GUILD]) },
@@ -302,11 +329,56 @@ test('correlated moderation gateway entries converge on the service audit identi
   const serviceEvent = {
     ...event,
     occurredAt: '2026-09-08T16:00:00.000Z',
-    metadata: { origin: 'moderation_service', outcome: 'slowmode_updated' },
+    metadata: { origin: 'moderation_service', outcome: 'slowmode_updated', seconds: 5 },
   };
   assert.equal(await store.record(serviceEvent), true);
   assert.equal(await store.record(event), false);
   assert.equal(Number((await db.prepare(`SELECT COUNT(*) AS n FROM operational_audit_log`).get<{ n: number }>())?.n), 1);
+  assert.deepEqual((await store.get(event.entryId))?.event.metadata, {
+    origin: 'moderation_service', outcome: 'slowmode_updated', seconds: 5,
+    auditLogEntryId: 'audit-correlated', count: null,
+  });
+  assert.equal((await store.get(event.entryId))?.event.occurredAt, serviceEvent.occurredAt);
+  await db.close();
+});
+
+test('gateway-first correlated moderation keeps gateway identity and gains service metadata', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  const entryId = moderationAuditEntryId(GUILD, moderationAuditToken(GUILD, 'gateway-first'));
+  const gatewayEvent: OperationalAuditEvent = {
+    entryId, kind: 'moderation_action', channel: 'moderation', guildId: GUILD,
+    occurredAt: '2026-09-08T16:00:00.000Z', actorId: 'staff', sourceChannelId: CHANNEL_A,
+    action: 'moderation.purge',
+    metadata: { origin: 'moderation_service', outcome: 'purged', auditLogEntryId: 'audit-first', count: 3 },
+  };
+  const serviceEvent: OperationalAuditEvent = {
+    ...gatewayEvent,
+    occurredAt: '2026-09-08T16:00:01.000Z',
+    metadata: { origin: 'moderation_service', outcome: 'purged', count: 5, affected: 3 },
+  };
+  await store.record(gatewayEvent);
+  assert.equal(await store.record(serviceEvent), false);
+  const stored = await store.get(entryId);
+  assert.equal(stored?.event.occurredAt, gatewayEvent.occurredAt);
+  assert.deepEqual(stored?.event.metadata, {
+    origin: 'moderation_service', outcome: 'purged', auditLogEntryId: 'audit-first', count: 3, affected: 3,
+  });
+  await db.close();
+});
+
+test('unrelated duplicate audit metadata remains immutable', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  const original: OperationalAuditEvent = {
+    entryId: 'immutable-duplicate', kind: 'moderation_action', channel: 'moderation', guildId: GUILD,
+    occurredAt: '2026-09-08T16:00:00.000Z', action: 'member_kick', metadata: { auditLogEntryId: 'original' },
+  };
+  await store.record(original);
+  await store.record({
+    ...original, action: 'moderation.kick', metadata: { origin: 'moderation_service', outcome: 'kicked', auditLogEntryId: 'forged' },
+  });
+  assert.deepEqual((await store.get(original.entryId))?.event.metadata, original.metadata);
   await db.close();
 });
 
@@ -442,6 +514,254 @@ test('audit-sink message tampering is stored but never remirrored', async () => 
   assert.equal(row?.deliveryState, 'none');
   await db.close();
 });
+
+test('delivered audit mirrors are checked exactly and checkpointed when intact', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  const entryId = 'delivered-intact';
+  const messageId = '900000000000000501';
+  const event: OperationalAuditEvent = {
+    entryId, kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
+  };
+  await store.record(event, CHANNEL_A);
+  const claim = await store.claim(entryId);
+  await store.markDelivered(entryId, claim!.deliveryClaimToken!, messageId);
+  const fetches: unknown[] = [];
+  const channel = auditChannel(async (options) => {
+    fetches.push(options);
+    return { id: messageId, author: { id: 'bot' }, content: formatAuditEvent(event), editedTimestamp: null };
+  });
+  const sink = makeOperationalAudit(auditClient(channel), {
+    guildId: GUILD, channels: { audit: CHANNEL_A, voice: null, moderation: null }, store,
+  });
+
+  assert.equal(await sink.retryPending(), 0);
+  assert.deepEqual(fetches, [{ message: messageId, force: true, cache: false }]);
+  assert.ok((await store.get(entryId))?.mirrorCheckedAt);
+  assert.equal((await store.get(entryId))?.deliveryState, 'delivered');
+  await db.close();
+});
+
+test('delivered reconciliation needs ViewChannel but not SendMessages', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  const event: OperationalAuditEvent = {
+    entryId: 'delivered-read-only', kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
+  };
+  await store.record(event, CHANNEL_A);
+  const claim = await store.claim(event.entryId);
+  await store.markDelivered(event.entryId, claim!.deliveryClaimToken!, 'mirror-read-only');
+  const channel = {
+    ...auditChannel(async () => ({
+      id: 'mirror-read-only', author: { id: 'bot' }, content: formatAuditEvent(event), editedTimestamp: null,
+    })),
+    permissionsFor: () => ({
+      has: (permission?: bigint) => permission === PermissionsBitField.Flags.ViewChannel,
+    }),
+  };
+  const sink = makeOperationalAudit(auditClient(channel), {
+    guildId: GUILD, channels: { audit: CHANNEL_A, voice: null, moderation: null }, store,
+  });
+
+  assert.equal(await sink.retryPending(), 0);
+  assert.ok((await store.get(event.entryId))?.mirrorCheckedAt);
+  assert.equal((await store.get(event.entryId))?.deliveryState, 'delivered');
+  await db.close();
+});
+
+test('deleted delivered mirror records deterministic evidence and quarantines without recursion', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  const event: OperationalAuditEvent = {
+    entryId: 'delivered-deleted', kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
+  };
+  await store.record(event, CHANNEL_A);
+  const claim = await store.claim(event.entryId);
+  await store.markDelivered(event.entryId, claim!.deliveryClaimToken!, 'mirror-delete');
+  const channel = auditChannel(async () => { throw Object.assign(new Error('secret Discord text'), { status: 404 }); });
+  const sink = makeOperationalAudit(auditClient(channel), {
+    guildId: GUILD, channels: { audit: CHANNEL_A, voice: null, moderation: null }, store,
+  });
+
+  assert.equal(await sink.retryPending(), 0);
+  const original = await store.get(event.entryId);
+  assert.equal(original?.deliveryState, 'quarantined');
+  assert.equal(original?.deliveryLastError, 'mirror_deleted');
+  const evidence = await db.prepare(
+    `SELECT event_kind, delivery_state, source_channel_id, message_id, metadata_json
+       FROM operational_audit_log WHERE entry_id <> ?`,
+  ).all<Record<string, unknown>>(event.entryId);
+  assert.equal(evidence.length, 1);
+  assert.deepEqual(evidence.map((row) => ({ ...row })), [{
+    event_kind: 'message_delete', delivery_state: 'none', source_channel_id: CHANNEL_A,
+    message_id: 'mirror-delete', metadata_json: JSON.stringify({ auditMirrorEntryId: event.entryId }),
+  }]);
+  assert.equal(await sink.retryPending(), 0);
+  assert.equal(Number((await db.prepare(`SELECT COUNT(*) AS n FROM operational_audit_log`).get<{ n: number }>())?.n), 2);
+  await db.close();
+});
+
+test('edited delivered mirror records evidence even when restored before the next pass', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  const event: OperationalAuditEvent = {
+    entryId: 'delivered-edited', kind: 'message_edit', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
+  };
+  await store.record(event, CHANNEL_A);
+  const claim = await store.claim(event.entryId);
+  await store.markDelivered(event.entryId, claim!.deliveryClaimToken!, 'mirror-edit');
+  const editedAt = Date.parse('2026-09-09T00:00:01.000Z');
+  const channel = auditChannel(async () => ({
+    id: 'mirror-edit', author: { id: 'bot' }, content: formatAuditEvent(event), editedTimestamp: editedAt,
+  }));
+  const sink = makeOperationalAudit(auditClient(channel), {
+    guildId: GUILD, channels: { audit: CHANNEL_A, voice: null, moderation: null }, store,
+  });
+
+  await sink.retryPending();
+  assert.equal((await store.get(event.entryId))?.deliveryLastError, 'mirror_edited');
+  const evidence = await db.prepare(
+    `SELECT entry_id, event_kind, occurred_at, delivery_state FROM operational_audit_log WHERE entry_id <> ?`,
+  ).all<Record<string, unknown>>(event.entryId);
+  assert.deepEqual(evidence.map((row) => ({ ...row })), [{
+    entry_id: `message-edit:${GUILD}:mirror-edit:2026-09-09T00:00:01.000Z`,
+    event_kind: 'message_edit',
+    occurred_at: '2026-09-09T00:00:01.000Z',
+    delivery_state: 'none',
+  }]);
+  await db.close();
+});
+
+test('transient delivered mirror failures are bounded, fair, checkpointed and redacted', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  for (let index = 0; index < 12; index++) {
+    const entryId = `delivered-${String(index).padStart(2, '0')}`;
+    await store.record({
+      entryId, kind: 'message_delete', channel: 'audit', guildId: GUILD,
+      occurredAt: `2026-09-09T00:00:${String(index).padStart(2, '0')}.000Z`, sourceChannelId: CHANNEL_B,
+    }, CHANNEL_A);
+    const claim = await store.claim(entryId);
+    await store.markDelivered(entryId, claim!.deliveryClaimToken!, `mirror-${index}`);
+  }
+  const fetched: string[] = [];
+  const sentinel = 'SENTINEL_MIRROR_FETCH_SECRET';
+  const channel = auditChannel(async ({ message }: { message: string }) => {
+    fetched.push(message);
+    throw Object.assign(new Error(sentinel), { status: 503 });
+  });
+  const sink = makeOperationalAudit(auditClient(channel), {
+    guildId: GUILD, channels: { audit: CHANNEL_A, voice: null, moderation: null }, store,
+  });
+  let stderr = '';
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string | Uint8Array) => { stderr += String(chunk); return true; }) as typeof process.stderr.write;
+  try {
+    assert.equal(await sink.retryPending(), 0);
+    assert.deepEqual(fetched, Array.from({ length: 10 }, (_, index) => `mirror-${index}`));
+    assert.equal(await sink.retryPending(), 0);
+    await db.prepare(`UPDATE operational_audit_log SET mirror_checked_at = ? WHERE delivery_state = 'delivered'`).run(
+      '2000-01-01T00:00:00.000Z',
+    );
+    assert.equal(await sink.retryPending(), 0);
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+  assert.deepEqual(fetched.slice(10), [
+    'mirror-10', 'mirror-11', 'mirror-0', 'mirror-1', 'mirror-2', 'mirror-3',
+    'mirror-4', 'mirror-5', 'mirror-6', 'mirror-7', 'mirror-8', 'mirror-9',
+  ]);
+  assert.doesNotMatch(stderr, new RegExp(sentinel));
+  assert.equal((await store.get('delivered-00'))?.deliveryState, 'delivered');
+  assert.ok((await store.get('delivered-11'))?.mirrorCheckedAt);
+  await db.close();
+});
+
+test('tamper evidence failure rolls back quarantine and leaves the delivered row retryable', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  await store.record({
+    entryId: 'atomic-tamper', kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
+  }, CHANNEL_A);
+  const claim = await store.claim('atomic-tamper');
+  await store.markDelivered('atomic-tamper', claim!.deliveryClaimToken!, 'atomic-mirror');
+
+  await assert.rejects(store.quarantineDeliveredMirrorWithEvidence(
+    'atomic-tamper', 'atomic-mirror', null, '2026-09-09T01:00:00.000Z', 'mirror_deleted', {
+      entryId: `message-delete:${GUILD}:atomic-mirror`, kind: 'message_delete', channel: 'audit',
+      guildId: GUILD, occurredAt: '2026-09-09T01:00:00.000Z', sourceChannelId: CHANNEL_A,
+      messageId: 'atomic-mirror', metadata: { auditMirrorEntryId: 'atomic-tamper' },
+    }, async () => { throw new Error('injected evidence write failure'); },
+  ), /injected evidence write failure/);
+  assert.equal((await store.get('atomic-tamper'))?.deliveryState, 'delivered');
+  assert.equal((await store.get('atomic-tamper'))?.mirrorCheckedAt, null);
+  assert.equal(await store.get(`message-delete:${GUILD}:atomic-mirror`), null);
+  assert.deepEqual((await store.selectDeliveredForReconciliation()).map((row) => row.event.entryId), ['atomic-tamper']);
+  assert.equal(await store.quarantineDeliveredMirrorWithEvidence(
+    'atomic-tamper', 'atomic-mirror', null, '2026-09-09T01:00:01.000Z', 'mirror_deleted', {
+      entryId: `message-delete:${GUILD}:atomic-mirror`, kind: 'message_delete', channel: 'audit',
+      guildId: GUILD, occurredAt: '2026-09-09T01:00:01.000Z', sourceChannelId: CHANNEL_A,
+      messageId: 'atomic-mirror', metadata: { auditMirrorEntryId: 'atomic-tamper' },
+    },
+  ), true);
+  assert.equal((await store.get('atomic-tamper'))?.deliveryState, 'quarantined');
+  assert.ok(await store.get(`message-delete:${GUILD}:atomic-mirror`));
+  await db.close();
+});
+
+test('stale delivered mirror CAS cannot quarantine a newer checkpoint', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  await store.record({
+    entryId: 'stale-mirror-cas', kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
+  }, CHANNEL_A);
+  const claim = await store.claim('stale-mirror-cas');
+  await store.markDelivered('stale-mirror-cas', claim!.deliveryClaimToken!, 'mirror-cas');
+  const selected = (await store.selectDeliveredForReconciliation(1))[0];
+  assert.equal(await store.checkpointMirrorCheck('stale-mirror-cas', 'mirror-cas', null, '2026-09-09T01:00:00.000Z'), true);
+  assert.equal(await store.quarantineDeliveredMirrorWithEvidence(
+    'stale-mirror-cas', 'mirror-cas', selected.mirrorCheckedAt,
+    '2026-09-09T01:00:01.000Z', 'mirror_deleted', {
+      entryId: `message-delete:${GUILD}:mirror-cas`, kind: 'message_delete', channel: 'audit',
+      guildId: GUILD, occurredAt: '2026-09-09T01:00:01.000Z', sourceChannelId: CHANNEL_A,
+      messageId: 'mirror-cas', metadata: { auditMirrorEntryId: 'stale-mirror-cas' },
+    },
+  ), false);
+  assert.equal((await store.get('stale-mirror-cas'))?.deliveryState, 'delivered');
+  await db.close();
+});
+
+function auditChannel(fetch: (options: any) => Promise<any>): {
+  id: string;
+  guild: { id: string; members: { me: { id: string } } };
+  isTextBased: () => boolean;
+  isDMBased: () => boolean;
+  permissionsFor: () => { has: (permission: bigint) => boolean };
+  messages: { fetch: (options: any) => Promise<any> };
+  client: { user: { id: string } };
+  send: () => Promise<{ id: string }>;
+} {
+  return {
+    id: CHANNEL_A,
+    guild: { id: GUILD, members: { me: { id: 'bot' } } },
+    isTextBased: () => true,
+    isDMBased: () => false,
+    permissionsFor: () => ({ has: () => true }),
+    messages: { fetch },
+    client: { user: { id: 'bot' } },
+    send: async () => ({ id: 'unused' }),
+  };
+}
+
+function auditClient(channel: ReturnType<typeof auditChannel>): Client {
+  return { channels: { cache: new Map([[CHANNEL_A, channel]]), fetch: async () => channel } } as unknown as Client;
+}
 
 test('failed audit delivery is retryable without duplicating the durable row', async () => {
   const db = await openDb(':memory:');
@@ -879,7 +1199,38 @@ test('a transient recovery scan failure retains its boundary and never duplicate
   await db.close();
 });
 
-test('a post-send rejection retains its recovery bound for marker reconciliation', async () => {
+test('a definite 403 send rejection clears its boundary and retries after recovery', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  let sends = 0;
+  const messageId = '900000000000000601';
+  const channel = {
+    ...auditChannel(async () => new Collection()),
+    send: async () => {
+      sends++;
+      if (sends === 1) throw Object.assign(new Error('Forbidden'), { status: 403 });
+      return { id: messageId };
+    },
+  };
+  const sink = makeOperationalAudit(auditClient(channel), {
+    guildId: GUILD, channels: { audit: CHANNEL_A, voice: null, moderation: null }, store,
+  });
+
+  await sink.record({
+    entryId: 'definite-403', kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
+  });
+  const rejected = await store.get('definite-403');
+  assert.equal(rejected?.deliveryState, 'pending');
+  assert.equal(rejected?.deliverySearchBefore, null);
+  assert.equal(rejected?.deliveryLastError, 'discord_send_rejected_403');
+  assert.equal(await sink.retryPending(), 1);
+  assert.equal(sends, 2);
+  assert.equal((await store.get('definite-403'))?.deliveryState, 'delivered');
+  await db.close();
+});
+
+test('a generic post-send failure retains its recovery bound for marker reconciliation', async () => {
   const db = await openDb(':memory:');
   const store = new OperationalAuditStore(db);
   const preSendMessageId = '900000000000000000';

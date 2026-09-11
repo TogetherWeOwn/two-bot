@@ -424,7 +424,7 @@ function createLegacyAuditDb(path: string): DatabaseSync {
 const AUDIT_DELIVERY_COLUMNS = [
   'mirror_channel_id', 'delivery_state', 'delivery_attempts', 'delivery_attempted_at',
   'delivery_last_error', 'delivery_lease_until', 'delivery_claim_token', 'delivery_nonce',
-  'delivery_search_before', 'mirror_message_id', 'mirrored_at',
+  'delivery_search_before', 'mirror_message_id', 'mirror_checked_at', 'mirrored_at',
 ];
 const AUDIT_MIGRATIONS = [
   '0011_operational_audit',
@@ -432,6 +432,8 @@ const AUDIT_MIGRATIONS = [
   '0013_operational_audit_delivery_message',
   '0014_operational_audit_delivery_search',
   '0015_operational_audit_delivery_claim',
+  '0016_operational_audit_mirror_checked',
+  '0017_operational_audit_mirror_check_index',
 ];
 
 async function assertAuditUpgrade(db: Awaited<ReturnType<typeof openSqlite>>): Promise<void> {
@@ -439,6 +441,7 @@ async function assertAuditUpgrade(db: Awaited<ReturnType<typeof openSqlite>>): P
   for (const name of AUDIT_DELIVERY_COLUMNS) assert.ok(columns.some((column) => column.name === name), name);
   const indexes = await db.prepare(`PRAGMA index_list(operational_audit_log)`).all<{ name: string }>();
   assert.ok(indexes.some((index) => index.name === 'idx_operational_audit_delivery'));
+  assert.ok(indexes.some((index) => index.name === 'idx_operational_audit_mirror_check'));
   const migrations = await db.prepare(
     `SELECT id FROM schema_migrations WHERE id IN (${AUDIT_MIGRATIONS.map(() => '?').join(', ')}) ORDER BY id`,
   ).all<{ id: string }>(...AUDIT_MIGRATIONS);

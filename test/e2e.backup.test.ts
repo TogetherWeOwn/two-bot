@@ -142,8 +142,8 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
            (entry_id, event_kind, guild_id, occurred_at, target_id, source_channel_id,
             message_id, metadata_json, created_at, mirror_channel_id, delivery_state,
             delivery_attempts, delivery_attempted_at, delivery_last_error,
-            delivery_nonce, mirror_message_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            delivery_nonce, mirror_message_id, mirror_checked_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         'audit-backup-1',
@@ -162,6 +162,7 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
         'discord_send_failed',
         'audit-backup-1',
         null,
+        '2026-08-09T00:00:03.000Z',
       );
     await harness.db
       .prepare(
@@ -260,7 +261,7 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
         `SELECT entry_id, event_kind, guild_id, occurred_at, target_id, source_channel_id,
                 message_id, metadata_json, mirror_channel_id, delivery_state,
                 delivery_attempts, delivery_attempted_at, delivery_last_error,
-                delivery_nonce, mirror_message_id
+                delivery_nonce, mirror_message_id, mirror_checked_at
            FROM operational_audit_log ORDER BY entry_id`,
       )
       .all();
@@ -310,7 +311,7 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
         `SELECT entry_id, event_kind, guild_id, occurred_at, target_id, source_channel_id,
                 message_id, metadata_json, mirror_channel_id, delivery_state,
                 delivery_attempts, delivery_attempted_at, delivery_last_error,
-                delivery_nonce, mirror_message_id
+                delivery_nonce, mirror_message_id, mirror_checked_at
            FROM operational_audit_log ORDER BY entry_id`,
       )
       .all();

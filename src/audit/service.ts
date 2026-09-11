@@ -28,7 +28,7 @@ export interface AuditSink {
   retryPending(): Promise<number>;
 }
 
-async function botCanPost(
+async function readableMirrorChannel(
   client: Client,
   channelId: string,
   guildId: string,
@@ -39,14 +39,96 @@ async function botCanPost(
   if (channel.guild.id !== guildId) return null;
   const me = channel.guild.members.me ?? (await channel.guild.members.fetchMe().catch(() => null));
   if (!me) return null;
-  const permissions = channel.permissionsFor(me);
-  if (!permissions?.has(PermissionsBitField.Flags.ViewChannel)) return null;
-  if (!permissions.has(PermissionsBitField.Flags.SendMessages)) return null;
-  return channel;
+  return channel.permissionsFor(me)?.has(PermissionsBitField.Flags.ViewChannel) ? channel : null;
+}
+
+async function botCanPost(
+  client: Client,
+  channelId: string,
+  guildId: string,
+): Promise<GuildTextBasedChannel | null> {
+  const channel = await readableMirrorChannel(client, channelId, guildId);
+  if (!channel) return null;
+  const me = channel.guild.members.me ?? (await channel.guild.members.fetchMe().catch(() => null));
+  return me && channel.permissionsFor(me)?.has(PermissionsBitField.Flags.SendMessages) ? channel : null;
 }
 
 export function makeOperationalAudit(client: Client, options: OperationalAuditOptions): AuditSink {
   const configured = new Set(Object.values(options.channels).filter((id): id is string => Boolean(id)));
+
+  const reconcileDelivered = async (stored: StoredOperationalAudit): Promise<void> => {
+    const channelId = stored.mirrorChannelId;
+    const messageId = stored.mirrorMessageId;
+    if (!options.store || !channelId || !messageId) return;
+    const checkedAt = new Date().toISOString();
+    const checkpoint = () => options.store!.checkpointMirrorCheck(
+      stored.event.entryId,
+      messageId,
+      stored.mirrorCheckedAt,
+      checkedAt,
+    );
+    const channel = await readableMirrorChannel(client, channelId, stored.event.guildId);
+    if (!channel) {
+      await checkpoint();
+      log.error('operational_audit_mirror_check_failed', {
+        entryId: stored.event.entryId, channelId, classification: 'mirror_channel_unavailable',
+      });
+      return;
+    }
+
+    let message: Message<true>;
+    try {
+      message = await channel.messages.fetch({ message: messageId, force: true, cache: false });
+    } catch (err) {
+      if (errorStatus(err) === 404) {
+        await options.store.quarantineDeliveredMirrorWithEvidence(
+          stored.event.entryId,
+          messageId,
+          stored.mirrorCheckedAt,
+          checkedAt,
+          'mirror_deleted',
+          {
+            entryId: `message-delete:${stored.event.guildId}:${messageId}`,
+            kind: 'message_delete', channel: 'audit', guildId: stored.event.guildId,
+            occurredAt: checkedAt, actorId: null, targetId: null,
+            sourceChannelId: channelId, messageId,
+            metadata: { auditMirrorEntryId: stored.event.entryId },
+          },
+        );
+        return;
+      }
+      await checkpoint();
+      log.error('operational_audit_mirror_check_failed', {
+        entryId: stored.event.entryId, channelId, classification: 'mirror_fetch_transient',
+      });
+      return;
+    }
+
+    const intact = message.author.id === channel.client.user?.id
+      && hasAuditEventIdentity(message.content, stored.event.entryId)
+      && message.editedTimestamp === null;
+    if (intact) {
+      await checkpoint();
+      return;
+    }
+    const editedAt = message.editedTimestamp === null
+      ? checkedAt
+      : new Date(message.editedTimestamp).toISOString();
+    await options.store.quarantineDeliveredMirrorWithEvidence(
+      stored.event.entryId,
+      messageId,
+      stored.mirrorCheckedAt,
+      checkedAt,
+      'mirror_edited',
+      {
+        entryId: `message-edit:${stored.event.guildId}:${messageId}:${editedAt}`,
+        kind: 'message_edit', channel: 'audit', guildId: stored.event.guildId,
+        occurredAt: editedAt, actorId: null, targetId: null,
+        sourceChannelId: channelId, messageId,
+        metadata: { auditMirrorEntryId: stored.event.entryId },
+      },
+    );
+  };
 
   const deliver = async (stored: StoredOperationalAudit): Promise<void> => {
     const channelId = stored.mirrorChannelId;
@@ -113,8 +195,24 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
         });
         messageId = message.id;
       }
-    } catch {
-      if (sendStarted) {
+    } catch (err) {
+      if (sendStarted && isDefiniteSendRejection(err)) {
+        try {
+          await options.store?.markDeliveryFailed(
+            stored.event.entryId,
+            claimToken!,
+            `discord_send_rejected_${errorStatus(err)}`,
+            true,
+          );
+        } catch {
+          // Another worker may own the row after the definite rejection.
+        }
+        log.error('operational_audit_post_failed', {
+          entryId: stored.event.entryId,
+          channelId,
+          classification: 'discord_send_rejected',
+        });
+      } else if (sendStarted) {
         try {
           await options.store?.markAcknowledgementFailed(stored.event.entryId, claimToken!);
         } catch {
@@ -218,6 +316,7 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
           deliveryNonce: deliveryNonce(event.entryId),
           deliverySearchBefore: null,
           mirrorMessageId: null,
+          mirrorCheckedAt: null,
           deliveryLastError: null,
         };
         await deliver(ephemeral);
@@ -233,6 +332,18 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
       if (!options.store) return 0;
       const pending = await options.store.claimPending();
       for (const item of pending) await deliver(item);
+      const delivered = await options.store.selectDeliveredForReconciliation();
+      for (const item of delivered) {
+        try {
+          await reconcileDelivered(item);
+        } catch {
+          log.error('operational_audit_mirror_check_failed', {
+            entryId: item.event.entryId,
+            channelId: item.mirrorChannelId,
+            classification: 'mirror_reconciliation_failed',
+          });
+        }
+      }
       return pending.length;
     },
   };
@@ -275,6 +386,17 @@ async function findMirror(
 
 function nextSnowflake(messageId: string): string {
   return (BigInt(messageId) + 1n).toString();
+}
+
+function errorStatus(error: unknown): number | null {
+  if (!error || typeof error !== 'object') return null;
+  const value = (error as { status?: unknown }).status;
+  return typeof value === 'number' ? value : null;
+}
+
+function isDefiniteSendRejection(error: unknown): boolean {
+  const status = errorStatus(error);
+  return status !== null && Number.isInteger(status) && status >= 400 && status < 500;
 }
 
 function channelFor(channels: AuditChannelIds, type: AuditChannel): string | null {

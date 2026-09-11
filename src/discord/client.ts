@@ -13,7 +13,7 @@ import type { AutomodService } from '../automod/service.ts';
 import { AutomodProcessingError } from '../automod/types.ts';
 import type { JoinRiskScorer } from '../moderation/containment.ts';
 import type { AuditSink } from '../audit/service.ts';
-import { moderationAuditEvent } from '../audit/discordEvents.ts';
+import { moderationAuditEvent, rawMessageAuditEvent } from '../audit/discordEvents.ts';
 
 /**
  * Intents we ask Discord for, and why. Keep this list minimal - each one is a
@@ -339,23 +339,13 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     client.emit('automationMessageAccepted' as never, msg as never);
   });
 
-  client.on(Events.MessageUpdate, async (oldMessage, newMessage) => {
+  client.on(Events.Raw, (packet, shardId) => {
+    const event = rawMessageAuditEvent(packet as never, shardId);
+    if (event) auditSafely(event);
+  });
+
+  client.on(Events.MessageUpdate, async (_oldMessage, newMessage) => {
     if (!newMessage.guildId) return;
-    // Audit before fetching a partial so metadata logging does not depend on the
-    // MessageContent read that automod needs for edited messages.
-    const occurredAt = newMessage.editedAt?.toISOString() ?? nowIso();
-    auditSafely({
-      entryId: `message-edit:${newMessage.guildId}:${newMessage.id}:${newMessage.editedTimestamp ?? occurredAt}`,
-      kind: 'message_edit',
-      channel: 'audit',
-      guildId: newMessage.guildId,
-      occurredAt,
-      actorId: newMessage.author?.id ?? oldMessage?.author?.id ?? null,
-      targetId: newMessage.author?.id ?? oldMessage?.author?.id ?? null,
-      sourceChannelId: newMessage.channelId,
-      messageId: newMessage.id,
-      metadata: { cachedBefore: oldMessage ? !oldMessage.partial : false },
-    });
     try {
       const msg = newMessage.partial ? await newMessage.fetch() : newMessage;
       if (!msg.author) return;
@@ -368,22 +358,6 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
         err: String(err),
       });
     }
-  });
-
-  client.on(Events.MessageDelete, (message) => {
-    if (!message.guildId) return;
-    auditSafely({
-      entryId: `message-delete:${message.guildId}:${message.id}`,
-      kind: 'message_delete',
-      channel: 'audit',
-      guildId: message.guildId,
-      occurredAt: nowIso(),
-      actorId: null,
-      targetId: message.author?.id ?? null,
-      sourceChannelId: message.channelId,
-      messageId: message.id,
-      metadata: { cached: !message.partial },
-    });
   });
 
   client.on(Events.VoiceStateUpdate, async (oldState, newState) => {

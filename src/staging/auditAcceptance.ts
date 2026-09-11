@@ -1,4 +1,5 @@
 import type { OperationalAuditKind } from '../audit/events.ts';
+import { MODERATION_ACTIONS } from '../moderation/types.ts';
 
 export const AUDIT_ACCEPTANCE_CHANNELS = ['audit-log', 'voice-log', 'moderation-log'] as const;
 
@@ -172,6 +173,10 @@ export function auditAcceptanceSql(
   const tamperSql = sinks
     ? `mirror_channel_id IS NULL AND delivery_state = 'none' AND source_channel_id IN (${sinks})`
     : 'FALSE';
+  const mutatingModerationActions = [
+    ...MODERATION_ACTIONS.filter((action) => action !== 'moderation.warn'),
+    'moderation.unban_scheduled',
+  ].map((action) => `'${action}'`).join(', ');
   return `SELECT event_kind,\n` +
     `       COUNT(*) FILTER (WHERE mirror_channel_id IS NOT NULL) AS rows,\n` +
     `       COUNT(DISTINCT entry_id) FILTER (WHERE mirror_channel_id IS NOT NULL) AS distinct_entries,\n` +
@@ -180,7 +185,8 @@ export function auditAcceptanceSql(
     `       COUNT(*) FILTER (WHERE event_kind = 'moderation_action' ` +
     `AND mirror_channel_id IS NOT NULL AND delivery_state = 'delivered' ` +
     `AND metadata_json LIKE '%\"origin\":\"moderation_service\"%' ` +
-    `AND metadata_json NOT LIKE '%\"outcome\":\"refused\"%') AS successful_moderation_rows\n` +
+    `AND metadata_json LIKE '%\"auditLogEntryId\":%' ` +
+    `AND action IN (${mutatingModerationActions})) AS successful_moderation_rows\n` +
     `FROM operational_audit_log\n` +
     `WHERE guild_id = '${quotedGuild}' AND event_kind IN (${kinds})${sinceSql}\n` +
     `GROUP BY event_kind ORDER BY event_kind;`;

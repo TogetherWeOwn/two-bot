@@ -174,6 +174,7 @@ CREATE TABLE IF NOT EXISTS operational_audit_log (
   delivery_nonce          TEXT,
   delivery_search_before  TEXT,
   mirror_message_id       TEXT,
+  mirror_checked_at       TEXT,
   mirrored_at             TEXT
 );
 
@@ -183,6 +184,11 @@ CREATE INDEX IF NOT EXISTS idx_operational_audit_kind
   ON operational_audit_log (guild_id, event_kind, occurred_at);
 CREATE INDEX IF NOT EXISTS idx_operational_audit_target
   ON operational_audit_log (guild_id, target_id, occurred_at);
+CREATE INDEX IF NOT EXISTS idx_operational_audit_mirror_check
+  ON operational_audit_log (mirror_checked_at, mirrored_at, entry_id)
+  WHERE delivery_state = 'delivered'
+    AND mirror_channel_id IS NOT NULL
+    AND mirror_message_id IS NOT NULL;
 CREATE TABLE IF NOT EXISTS moderation_warnings (
   id         TEXT PRIMARY KEY,
   guild_id   TEXT NOT NULL,

@@ -146,6 +146,9 @@ test('acceptance SQL enumerates every logging parity event and binds tamper to p
   assert.match(sql, /COUNT\(DISTINCT entry_id\)/);
   assert.match(sql, /delivery_state <> 'delivered'/);
   assert.match(sql, /event_kind = 'moderation_action' AND mirror_channel_id IS NOT NULL AND delivery_state = 'delivered'/);
+  assert.match(sql, /metadata_json LIKE '%\"auditLogEntryId\":%'/);
+  assert.match(sql, /action IN \('moderation\.ban'.*'moderation\.slowmode'/);
+  assert.doesNotMatch(sql, /action IN \([^)]*moderation\.warn/);
   assert.match(sql, /source_channel_id IN \('audit-private', 'voice-private', 'moderation-private'\)/);
   const markerSql = auditMarkerRowsSql(GUILD, since);
   assert.match(markerSql, /SELECT entry_id, event_kind, mirror_channel_id, mirror_message_id/);
