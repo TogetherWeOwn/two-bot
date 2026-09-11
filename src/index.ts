@@ -229,6 +229,7 @@ registerHandlers(client, {
   automod: automodService && cfg.guildId ? { service: automodService, guildId: cfg.guildId } : undefined,
   joinRisk,
   audit,
+  auditGuildId: cfg.guildId,
 });
 
 if (containmentCfg.enabled && containmentCfg.guildId) {

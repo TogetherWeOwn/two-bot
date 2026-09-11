@@ -81,6 +81,8 @@ export interface BotDeps {
   joinRisk?: JoinRiskScorer;
   /** Metadata-only staff audit. Optional so the funnel remains independently usable. */
   audit?: AuditSink;
+  /** Audit gateway events are retained only for this configured guild. */
+  auditGuildId?: string | null;
 }
 
 export function createClient(automodEnabled = process.env.TWO_AUTOMOD === '1'): Client {
@@ -124,10 +126,10 @@ async function snapshotInvites(guild: Guild, invites: InviteTracker): Promise<st
 
 /** Wire gateway events to the framework-free handlers. */
 export function registerHandlers(client: Client, deps: BotDeps): void {
-  const { handlers, invites, community, raid, expectedJoins, leveling, automod, joinRisk, audit } = deps;
+  const { handlers, invites, community, raid, expectedJoins, leveling, automod, joinRisk, audit, auditGuildId } = deps;
 
   const auditSafely = (event: Parameters<NonNullable<BotDeps['audit']>['record']>[0]) => {
-    if (!audit) return;
+    if (!audit || (auditGuildId && event.guildId !== auditGuildId)) return;
     void audit.record(event).catch(() => {
       log.error('operational_audit_failed', {
         entryId: event.entryId,

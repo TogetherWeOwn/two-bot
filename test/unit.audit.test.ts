@@ -93,7 +93,7 @@ test('uncached delete and update gateway actions emit partial messages', async (
 test('gateway logging covers edit/delete, member deltas and voice move without content or nicknames', async () => {
   const events: OperationalAuditEvent[] = [];
   const bus = new EventEmitter();
-  registerHandlers(bus as unknown as Client, deps(events));
+  registerHandlers(bus as unknown as Client, { ...deps(events), auditGuildId: GUILD });
 
   bus.emit(
     Events.MessageUpdate,
@@ -144,6 +144,40 @@ test('gateway logging covers edit/delete, member deltas and voice move without c
   assert.equal(events[3].destinationChannelId, CHANNEL_B);
   const serialized = JSON.stringify(events);
   assert.doesNotMatch(serialized, /old secret|new secret|deleted secret|before nick|after nick/);
+});
+
+test('gateway audit ignores events outside the configured guild', async () => {
+  const events: OperationalAuditEvent[] = [];
+  const bus = new EventEmitter();
+  registerHandlers(bus as unknown as Client, { ...deps(events), auditGuildId: GUILD });
+
+  bus.emit(Events.MessageDelete, {
+    id: 'outside-message',
+    guildId: OTHER_GUILD,
+    channelId: CHANNEL_A,
+    partial: false,
+    author: { id: MEMBER },
+  });
+  bus.emit(
+    Events.GuildMemberUpdate,
+    { id: MEMBER, guild: { id: OTHER_GUILD }, partial: false, nickname: null, roles: roles([OTHER_GUILD]) },
+    { id: MEMBER, guild: { id: OTHER_GUILD }, nickname: 'changed', roles: roles([OTHER_GUILD]), user: { bot: false } },
+  );
+  bus.emit(
+    Events.VoiceStateUpdate,
+    { id: MEMBER, guild: { id: OTHER_GUILD }, channelId: null, member: { user: { bot: false } } },
+    { id: MEMBER, guild: { id: OTHER_GUILD }, channelId: CHANNEL_B, member: { user: { bot: false } } },
+  );
+  bus.emit(Events.GuildAuditLogEntryCreate, {
+    id: 'outside-audit',
+    action: AuditLogEvent.MemberKick,
+    createdTimestamp: 1_700_000_000_000,
+    executorId: 'moderator-1',
+    targetId: MEMBER,
+  }, { id: OTHER_GUILD });
+  await settle();
+
+  assert.deepEqual(events, []);
 });
 
 test('role-heavy member updates use a bounded occurrence key', async () => {
@@ -970,6 +1004,32 @@ test('quarantined ambiguous rows cannot starve newer pending audit deliveries', 
   const claimed = await store.claimPending();
   assert.deepEqual(claimed.map((item) => item.event.entryId), ['fresh']);
   assert.equal((await store.get('poison-00'))?.deliveryState, 'quarantined');
+  await db.close();
+});
+
+test('retryable failures yield the next sweep to newer unattempted deliveries', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  for (let index = 0; index < 25; index++) {
+    await store.record({
+      entryId: `retry-${String(index).padStart(2, '0')}`, kind: 'message_delete', channel: 'audit', guildId: GUILD,
+      occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
+    }, CHANNEL_A);
+  }
+  await store.record({
+    entryId: 'z-fresh-after-retries', kind: 'voice_join', channel: 'voice', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:01.000Z', targetId: MEMBER,
+  }, CHANNEL_B);
+
+  const firstSweep = await store.claimPending();
+  assert.equal(firstSweep.length, 25);
+  assert.ok(firstSweep.every((item) => item.event.entryId.startsWith('retry-')));
+  for (const item of firstSweep) {
+    await store.markDeliveryFailed(item.event.entryId, item.deliveryClaimToken!, 'channel_unavailable');
+  }
+
+  const secondSweep = await store.claimPending();
+  assert.equal(secondSweep[0]?.event.entryId, 'z-fresh-after-retries');
   await db.close();
 });
 

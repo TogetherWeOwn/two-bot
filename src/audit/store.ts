@@ -87,7 +87,10 @@ export class OperationalAuditStore {
           WHERE mirror_channel_id IS NOT NULL
             AND (delivery_state = 'pending'
               OR (delivery_state = 'delivering' AND delivery_lease_until < ?))
-          ORDER BY created_at, entry_id LIMIT ?`,
+          ORDER BY CASE WHEN delivery_attempted_at IS NULL THEN 0 ELSE 1 END,
+                   delivery_attempted_at,
+                   created_at,
+                   entry_id LIMIT ?`,
       )
       .all<Record<string, unknown>>(new Date().toISOString(), limit);
     const claimed: StoredOperationalAudit[] = [];
