@@ -88,6 +88,45 @@ function ensureColumn(raw: DatabaseSync, table: string, column: string, type: st
   raw.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
 }
 
+/** Apply every operational-audit SQLite upgrade under one write lock. */
+function ensureOperationalAuditDelivery(raw: DatabaseSync, deliveryIndex: string): void {
+  raw.exec('BEGIN IMMEDIATE');
+  try {
+    ensureColumn(raw, 'operational_audit_log', 'mirror_channel_id', 'TEXT');
+    ensureColumn(raw, 'operational_audit_log', 'delivery_state', "TEXT NOT NULL DEFAULT 'none'");
+    ensureColumn(raw, 'operational_audit_log', 'delivery_attempts', 'INTEGER NOT NULL DEFAULT 0');
+    ensureColumn(raw, 'operational_audit_log', 'delivery_attempted_at', 'TEXT');
+    ensureColumn(raw, 'operational_audit_log', 'delivery_last_error', 'TEXT');
+    ensureColumn(raw, 'operational_audit_log', 'delivery_lease_until', 'TEXT');
+    ensureColumn(raw, 'operational_audit_log', 'delivery_claim_token', 'TEXT');
+    ensureColumn(raw, 'operational_audit_log', 'delivery_nonce', 'TEXT');
+    ensureColumn(raw, 'operational_audit_log', 'delivery_search_before', 'TEXT');
+    ensureColumn(raw, 'operational_audit_log', 'mirror_message_id', 'TEXT');
+    ensureColumn(raw, 'operational_audit_log', 'mirrored_at', 'TEXT');
+    raw.exec(deliveryIndex);
+
+    const stamp = raw.prepare(`INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?, ?)`);
+    const appliedAt = new Date().toISOString();
+    for (const id of [
+      '0011_operational_audit',
+      '0012_operational_audit_delivery',
+      '0013_operational_audit_delivery_message',
+      '0014_operational_audit_delivery_search',
+      '0015_operational_audit_delivery_claim',
+    ]) {
+      stamp.run(id, appliedAt);
+    }
+    raw.exec('COMMIT');
+  } catch (err) {
+    try {
+      raw.exec('ROLLBACK');
+    } catch {
+      /* already unwound */
+    }
+    throw err;
+  }
+}
+
 /** Mirrors migrations/0011_leveling_xp_ceiling.sql for existing SQLite files. */
 function ensureLevelingXpCeiling(raw: DatabaseSync): void {
   const id = '0011_leveling_xp_ceiling';
@@ -293,19 +332,10 @@ export async function openSqlite(path: string): Promise<Db> {
   ensureColumn(raw, 'members', 'third_message_at', 'TEXT');
   // Existing SQLite databases may already have the 0011 operational audit
   // table, so schema.sql's CREATE TABLE IF NOT EXISTS cannot add delivery state.
-  ensureColumn(raw, 'operational_audit_log', 'mirror_channel_id', 'TEXT');
-  ensureColumn(raw, 'operational_audit_log', 'delivery_state', "TEXT NOT NULL DEFAULT 'none'");
-  ensureColumn(raw, 'operational_audit_log', 'delivery_attempts', 'INTEGER NOT NULL DEFAULT 0');
-  ensureColumn(raw, 'operational_audit_log', 'delivery_attempted_at', 'TEXT');
-  ensureColumn(raw, 'operational_audit_log', 'delivery_last_error', 'TEXT');
-  ensureColumn(raw, 'operational_audit_log', 'delivery_lease_until', 'TEXT');
-  ensureColumn(raw, 'operational_audit_log', 'delivery_claim_token', 'TEXT');
-  ensureColumn(raw, 'operational_audit_log', 'delivery_nonce', 'TEXT');
-  ensureColumn(raw, 'operational_audit_log', 'delivery_search_before', 'TEXT');
-  ensureColumn(raw, 'operational_audit_log', 'mirror_message_id', 'TEXT');
-  ensureColumn(raw, 'operational_audit_log', 'mirrored_at', 'TEXT');
+  // Serialize the check-and-ALTER sequence: a busy timeout only waits for the
+  // competing DDL, while the write lock makes this connection recheck after it.
+  ensureOperationalAuditDelivery(raw, auditDeliveryIndex);
   ensureLevelingXpCeiling(raw);
-  raw.exec(auditDeliveryIndex);
   // Existing SQLite databases already have the 0010 table, so schema.sql's
   // CREATE TABLE IF NOT EXISTS cannot add the 0011/0012 claim columns.
   ensureColumn(raw, 'moderation_scheduled_unbans', 'claimed_at', 'TEXT');
@@ -332,9 +362,6 @@ export async function openSqlite(path: string): Promise<Db> {
     '0002_internal_actions',
     '0008_members_third_message_at',
     '0010_leveling',
-    '0011_operational_audit',
-    '0012_operational_audit_delivery',
-    '0013_operational_audit_delivery_message',
     '0011_leveling_xp_ceiling',
     '0010_moderation',
     '0011_moderation_durability',

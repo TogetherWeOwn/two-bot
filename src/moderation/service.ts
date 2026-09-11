@@ -5,6 +5,11 @@ import type { ModerationDiscordClient } from './discord.ts';
 import { assertModerationAllowed } from './policy.ts';
 import type { ModerationStore } from './store.ts';
 import type { AuditSink } from '../audit/service.ts';
+import {
+  moderationAuditEntryId,
+  moderationAuditReason,
+  moderationAuditToken,
+} from '../audit/moderationIdentity.ts';
 import type { ModerationPolicy, ModerationRequest, ModerationResult } from './types.ts';
 
 const MAX_TIMEOUT_SECONDS = 28 * 24 * 60 * 60;
@@ -94,7 +99,9 @@ export class ModerationService {
       hashOf(request),
     );
     if (claim.state === 'replayed') {
-      return storedResult(claim.stored);
+      const result = storedResult(claim.stored);
+      await this.recordSuccess(request, result);
+      return result;
     }
     if (claim.state === 'in_flight') {
       throw new ActionError('in_progress', 'An earlier attempt at this moderation action has an uncertain outcome', {
@@ -121,7 +128,46 @@ export class ModerationService {
       outcome: result.outcome,
       result: { outcome: result.outcome, affected: result.affected ?? null },
     });
+    await this.recordSuccess(request, result);
     return result;
+  }
+
+  private async recordSuccess(request: ModerationExecution, result: ModerationResult): Promise<void> {
+    const token = moderationAuditToken(request.guildId, request.idempotencyKey);
+    await this.audit?.record({
+      entryId: moderationAuditEntryId(request.guildId, token),
+      kind: 'moderation_action',
+      channel: 'moderation',
+      guildId: request.guildId,
+      occurredAt: new Date(this.now()).toISOString(),
+      actorId: request.actor.userId,
+      targetId: request.target?.userId ?? null,
+      sourceChannelId: request.channel?.channelId ?? null,
+      action: request.action,
+      metadata: {
+        origin: 'moderation_service',
+        outcome: result.outcome,
+        durationSeconds: request.durationSeconds,
+        count: request.count,
+        seconds: request.seconds,
+        affected: result.affected,
+      },
+    }).catch(() => {
+      log.error('moderation_operational_audit_failed', {
+        entryId: moderationAuditEntryId(request.guildId, token),
+        classification: 'audit_record_failed',
+      });
+    });
+  }
+
+  private auditReason(request: ModerationExecution): string {
+    return moderationAuditReason(
+      request.guildId,
+      request.idempotencyKey,
+      request.action,
+      request.actor.userId,
+      request.reason,
+    );
   }
 
   private async carryOut(request: ModerationExecution): Promise<ModerationResult> {
@@ -131,7 +177,7 @@ export class ModerationService {
 
     switch (request.action) {
       case 'moderation.ban':
-        await this.discord.ban(request.guildId, targetId!, request.reason);
+        await this.discord.ban(request.guildId, targetId!, this.auditReason(request));
         result = { outcome: 'banned' };
         break;
       case 'moderation.tempban': {
@@ -148,7 +194,7 @@ export class ModerationService {
           request.requestId,
         );
         try {
-          await this.discord.ban(request.guildId, targetId!, request.reason);
+          await this.discord.ban(request.guildId, targetId!, this.auditReason(request));
         } catch (err) {
           if (isSafePreMutationFailure(err)) await this.store.cancelStagedUnban(request.requestId);
           throw err;
@@ -158,13 +204,13 @@ export class ModerationService {
         break;
       }
       case 'moderation.kick':
-        await this.discord.kick(request.guildId, targetId!, request.reason);
+        await this.discord.kick(request.guildId, targetId!, this.auditReason(request));
         result = { outcome: 'kicked' };
         break;
       case 'moderation.timeout': {
         const seconds = Number(request.durationSeconds);
         const until = new Date(this.now() + seconds * 1000).toISOString();
-        await this.discord.timeout(request.guildId, targetId!, until, request.reason);
+        await this.discord.timeout(request.guildId, targetId!, until, this.auditReason(request));
         result = { outcome: 'timed_out' };
         break;
       }
@@ -174,13 +220,13 @@ export class ModerationService {
         break;
       case 'moderation.purge': {
         const count = Number(request.count);
-        const affected = await this.discord.purge(channelId!, count, request.reason);
+        const affected = await this.discord.purge(channelId!, count, this.auditReason(request));
         result = { outcome: 'purged', affected };
         break;
       }
       case 'moderation.slowmode': {
         const seconds = Number(request.seconds);
-        await this.discord.setSlowmode(channelId!, seconds, request.reason);
+        await this.discord.setSlowmode(channelId!, seconds, this.auditReason(request));
         result = { outcome: 'slowmode_updated' };
         break;
       }
@@ -239,7 +285,7 @@ export class ModerationService {
     const denied = setBit(prior.deny, SEND_MESSAGES_BIT);
     const allowed = clearBit(prior.allow, SEND_MESSAGES_BIT);
     try {
-      await this.discord.putEveryoneOverwrite(channelId, request.guildId, { allow: allowed, deny: denied }, request.reason);
+      await this.discord.putEveryoneOverwrite(channelId, request.guildId, { allow: allowed, deny: denied }, this.auditReason(request));
     } catch (err) {
       if (!existing && isSafePreMutationFailure(err)) {
         await this.store.clearLockdown(channelId).catch(() => undefined);
@@ -262,10 +308,10 @@ export class ModerationService {
           channelId,
           request.guildId,
           { allow: recorded.priorAllow, deny: recorded.priorDeny },
-          request.reason,
+          this.auditReason(request),
         );
       } else {
-        await this.discord.deleteEveryoneOverwrite(channelId, request.guildId, request.reason);
+        await this.discord.deleteEveryoneOverwrite(channelId, request.guildId, this.auditReason(request));
       }
       await this.store.clearLockdown(channelId);
       return 'unlocked';
@@ -276,7 +322,7 @@ export class ModerationService {
       channelId,
       request.guildId,
       { allow: clearBit(prior.allow, SEND_MESSAGES_BIT), deny: clearBit(prior.deny, SEND_MESSAGES_BIT) },
-      request.reason,
+      this.auditReason(request),
     );
     return 'unlocked';
   }
@@ -292,9 +338,20 @@ export class ModerationService {
     let firstError: unknown;
     for (const job of jobs) {
       try {
+        const token = moderationAuditToken(job.guildId, job.requestId);
         const acted = await this.store.serializeMember(job.guildId, job.userId, async () => {
           if (!await this.store.ownsUnbanClaim(job.requestId, job.claimToken)) return false;
-          await this.discord.unban(job.guildId, job.userId, job.reason);
+          await this.discord.unban(
+            job.guildId,
+            job.userId,
+            moderationAuditReason(
+              job.guildId,
+              job.requestId,
+              'moderation.unban_scheduled',
+              this.policy.botUserId ?? this.policy.owenUserId,
+              job.reason,
+            ),
+          );
           await this.store.completeUnban(job.requestId, job.claimToken);
           return true;
         });
@@ -310,6 +367,22 @@ export class ModerationService {
           idempotencyKey: job.requestId,
         }).catch((err: unknown) => {
           log.error('moderation_unban_audit_failed', { requestId: job.requestId, err: String(err) });
+        });
+        await this.audit?.record({
+          entryId: moderationAuditEntryId(job.guildId, token),
+          kind: 'moderation_action',
+          channel: 'moderation',
+          guildId: job.guildId,
+          occurredAt: new Date(this.now()).toISOString(),
+          actorId: this.policy.botUserId ?? this.policy.owenUserId,
+          targetId: job.userId,
+          action: 'moderation.unban_scheduled',
+          metadata: { origin: 'moderation_service', outcome: 'unbanned' },
+        }).catch(() => {
+          log.error('moderation_operational_audit_failed', {
+            entryId: moderationAuditEntryId(job.guildId, token),
+            classification: 'audit_record_failed',
+          });
         });
         completed++;
       } catch (err) {
