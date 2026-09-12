@@ -330,6 +330,8 @@ export async function openSqlite(path: string): Promise<Db> {
     '0021_self_role_event_order',
     '0022_self_role_committed_target',
     '0023_self_role_committed_target_repair',
+    '0024_announcements_feeds',
+    '0025_feed_delivery_claims',
   ]) {
     stamp.run(id, new Date().toISOString());
   }
