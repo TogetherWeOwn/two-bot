@@ -112,6 +112,16 @@ export const BOT_TABLES = [
   // member-level, but it names every place we advertise the server, which is
   // marketing posture rather than anything a visitor's browser should see.
   'invite_campaigns',
+  // 0024/0025 — announcements, LFG sign-ups, and feed relays (TOG-1649).
+  // RSVP state and raid rosters are member activity, and the audit log plus
+  // delivery claims are operational internals; none of it is public.
+  'event_rsvps',
+  'lfg_posts',
+  'lfg_roles',
+  'lfg_signups',
+  'feed_relays',
+  'feed_deliveries',
+  'announcements_audit_log',
 ];
 
 function ident(schema: string, name: string): string {
