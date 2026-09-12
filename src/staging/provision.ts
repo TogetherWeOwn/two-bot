@@ -50,6 +50,7 @@ import {
   STAGING_VOICE_CHANNELS,
   stagingInviteUrl,
 } from './spec.ts';
+import { staffChannelIsMemberReadable } from './auditAcceptance.ts';
 
 export const CHANNEL_TYPE_TEXT = 0;
 export const CHANNEL_TYPE_VOICE = 2;
@@ -401,13 +402,11 @@ export function auditChannelExports(channels: PartialChannel[]): string[] {
 
 function needsStaffPrivacyRepair(channel: PartialChannel, guildId: string, botId?: string): boolean {
   if (channel.type !== CHANNEL_TYPE_TEXT || !channel.name.endsWith('-log')) return false;
-  const overwrites = channel.permission_overwrites ?? [];
-  const everyone = overwrites.find((overwrite) => overwrite.id === guildId);
-  const view = 1n << 10n;
-  if (!everyone || (BigInt(everyone.deny) & view) === 0n) return true;
+  if (staffChannelIsMemberReadable(channel, guildId, botId)) return true;
   if (!botId) return false;
+  const overwrites = channel.permission_overwrites ?? [];
   const bot = overwrites.find((overwrite) => overwrite.id === botId);
-  return !bot || (BigInt(bot.allow) & ((1n << 10n) | (1n << 11n))) !== ((1n << 10n) | (1n << 11n));
+  return !bot || (BigInt(bot.allow ?? '0') & ((1n << 10n) | (1n << 11n))) !== ((1n << 10n) | (1n << 11n));
 }
 
 export type ChannelPlan = {

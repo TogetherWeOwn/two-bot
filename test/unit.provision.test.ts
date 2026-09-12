@@ -283,6 +283,37 @@ test('reconcile repairs present member-readable staff logs and leaves private on
   assert.deepEqual(plan.repair.map((channel) => channel.name), ['audit-log']);
 });
 
+test('TOG-2223 #9: reconcile repairs a role/member ViewChannel allow even when @everyone is correctly denied', () => {
+  // needsStaffPrivacyRepair used to check only the @everyone deny and the
+  // bot's own allow, matching evaluateAuditChannels' `readable` predicate on
+  // those two overwrites but not on a stray role/member allow. A channel with
+  // @everyone denied, the bot correctly allowed, AND an extra role granted
+  // ViewChannel used to plan `present` with an empty repair list - silently
+  // shipping a staff log any member with that role could read - while
+  // acceptance would separately fail it as memberReadable. Provisioning must
+  // catch and repair what acceptance would reject.
+  const view = String(1n << 10n);
+  const sendAndView = String((1n << 10n) | (1n << 11n));
+  const plan = planChannels(
+    [
+      {
+        id: 'audit',
+        name: 'audit-log',
+        type: CHANNEL_TYPE_TEXT,
+        permission_overwrites: [
+          { id: STAGING, type: 0, allow: '0', deny: view },
+          { id: BOT, type: 1, allow: sendAndView, deny: '0' },
+          { id: 'some-role', type: 0, allow: view, deny: '0' },
+        ],
+      },
+    ],
+    STAGING,
+    BOT,
+  );
+  assert.deepEqual(plan.repair.map((channel) => channel.name), ['audit-log']);
+  assert.deepEqual(plan.present, ['audit-log']);
+});
+
 // --- planChannels / planRoles ----------------------------------------------
 
 test('an empty guild plans every spec channel and role', () => {

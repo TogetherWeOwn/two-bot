@@ -83,6 +83,12 @@ export interface BotDeps {
   audit?: AuditSink;
   /** Audit gateway events are retained only for this configured guild. */
   auditGuildId?: string | null;
+  /**
+   * Secret keying the moderation-service correlation MAC (TOG-2223 #8). Null
+   * means moderation markers are never trusted, even if one is present -
+   * `parseModerationAuditReason` refuses to verify without it.
+   */
+  moderationAuditSecret?: string | null;
 }
 
 export function createClient(automodEnabled = process.env.TWO_AUTOMOD === '1'): Client {
@@ -126,7 +132,10 @@ async function snapshotInvites(guild: Guild, invites: InviteTracker): Promise<st
 
 /** Wire gateway events to the framework-free handlers. */
 export function registerHandlers(client: Client, deps: BotDeps): void {
-  const { handlers, invites, community, raid, expectedJoins, leveling, automod, joinRisk, audit, auditGuildId } = deps;
+  const {
+    handlers, invites, community, raid, expectedJoins, leveling, automod, joinRisk, audit, auditGuildId,
+    moderationAuditSecret,
+  } = deps;
 
   const auditSafely = (event: Parameters<NonNullable<BotDeps['audit']>['record']>[0]) => {
     if (!audit || (auditGuildId && event.guildId !== auditGuildId)) return;
@@ -431,7 +440,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
   });
 
   client.on(Events.GuildAuditLogEntryCreate, (entry, guild) => {
-    const event = moderationAuditEvent(entry, guild.id, client.user?.id);
+    const event = moderationAuditEvent(entry, guild.id, client.user?.id, moderationAuditSecret);
     if (event) auditSafely(event);
   });
 

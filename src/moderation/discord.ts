@@ -1,3 +1,4 @@
+import { log } from '../core/log.ts';
 import { ActionError } from '../internal/errors.ts';
 
 const API = 'https://discord.com/api/v10';
@@ -167,11 +168,26 @@ export class ModerationDiscord implements ModerationDiscordClient {
 }
 
 function encodeAuditReason(reason: string): string {
-  reason = reason.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '�');
-  let encoded = encodeURIComponent(reason);
+  const scrubbed = reason.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '�');
+  let truncated = scrubbed;
+  let encoded = encodeURIComponent(truncated);
+  // requireModerationReason bounds the caller's own text to 512 UTF-16 units,
+  // but URL-encoding can expand it well past Discord's 512-*byte* header
+  // limit - the mismatch that let already-accepted content vanish with no
+  // trace (TOG-2223 #4). Truncation still has to happen (Discord will 400 an
+  // over-length header outright), but it must never happen silently: log
+  // exactly what was cut so an operator reading an audit-log entry months
+  // later isn't staring at reason text that quietly isn't what was recorded.
   while (encoded.length > MAX_AUDIT_REASON_BYTES) {
-    reason = [...reason].slice(0, -1).join('');
-    encoded = encodeURIComponent(reason);
+    truncated = [...truncated].slice(0, -1).join('');
+    encoded = encodeURIComponent(truncated);
+  }
+  if (truncated.length !== scrubbed.length) {
+    log.error('moderation_audit_reason_truncated', {
+      originalLength: scrubbed.length,
+      truncatedLength: truncated.length,
+      encodedLength: encoded.length,
+    });
   }
   return encoded;
 }

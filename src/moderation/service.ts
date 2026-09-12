@@ -162,6 +162,7 @@ export class ModerationService {
 
   private auditReason(request: ModerationExecution): string {
     return moderationAuditReason(
+      this.policy.moderationAuditSecret ?? null,
       request.guildId,
       request.idempotencyKey,
       request.action,
@@ -345,6 +346,7 @@ export class ModerationService {
             job.guildId,
             job.userId,
             moderationAuditReason(
+              this.policy.moderationAuditSecret ?? null,
               job.guildId,
               job.requestId,
               'moderation.unban_scheduled',

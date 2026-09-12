@@ -63,6 +63,7 @@ export function moderationAuditEvent(
   entry: GuildAuditLogsEntry,
   guildId: string,
   botUserId?: string | null,
+  moderationAuditSecret?: string | null,
 ): OperationalAuditEvent | null {
   const action = MODERATION_ACTIONS.get(entry.action);
   if (!action) return null;
@@ -70,7 +71,7 @@ export function moderationAuditEvent(
   const extra = entry.extra as Record<string, unknown> | null;
   const extraChannel = extra?.channel as { id?: unknown } | undefined;
   const count = numberOrNull(extra?.count ?? extra?.removed);
-  const marker = parseModerationAuditReason(entry.reason);
+  const marker = parseModerationAuditReason(moderationAuditSecret ?? null, guildId, entry.reason);
   const correlated = marker && botUserId && entry.executorId === botUserId ? marker : null;
 
   const correlatedChannel = correlated && isChannelAction(correlated.action)

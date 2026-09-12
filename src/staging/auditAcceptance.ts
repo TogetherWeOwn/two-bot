@@ -31,6 +31,29 @@ export interface AuditAcceptanceResult {
 }
 
 /**
+ * Whether ANY member could still view this staff-log channel: @everyone must
+ * be explicitly denied ViewChannel, and no other role/member overwrite (the
+ * bot's own excepted) may allow it back in. Shared between acceptance
+ * (`evaluateAuditChannels`) and provisioning (`needsStaffPrivacyRepair` in
+ * `provision.ts`) so a stray role/member ViewChannel allow that acceptance
+ * would fail on is caught and repaired at provision time too, rather than
+ * provisioning reporting the channel `present` while acceptance calls it a
+ * privacy failure.
+ */
+export function staffChannelIsMemberReadable(channel: StagingChannel, guildId: string, botId?: string): boolean {
+  const VIEW_CHANNEL = 1n << 10n;
+  const overwrites = channel.permission_overwrites ?? [];
+  const everyone = overwrites.find((overwrite) => overwrite.id === guildId);
+  const denied = everyone ? BigInt(everyone.deny) : 0n;
+  if ((denied & VIEW_CHANNEL) === 0n) return true;
+  return overwrites.some(
+    (overwrite) =>
+      !(overwrite.id === botId && overwrite.type === 1) &&
+      (BigInt(overwrite.allow ?? '0') & VIEW_CHANNEL) !== 0n,
+  );
+}
+
+/**
  * Logging channels are not just names: every matching channel must be unique,
  * @everyone must be explicitly denied ViewChannel, and no role/member overwrite
  * may allow it back. A readable duplicate is still a privacy failure.
@@ -44,7 +67,6 @@ export function evaluateAuditChannels(
   const memberReadable: string[] = [];
   const duplicates: string[] = [];
   const channelIds: AuditChannelIds = { audit: null, voice: null, moderation: null };
-  const VIEW_CHANNEL = 1n << 10n;
 
   for (const name of AUDIT_ACCEPTANCE_CHANNELS) {
     const matches = channels.filter((candidate) => candidate.type === 0 && candidate.name === name);
@@ -54,17 +76,7 @@ export function evaluateAuditChannels(
     }
     if (matches.length > 1) duplicates.push(name);
 
-    const readable = matches.some((channel) => {
-      const overwrites = channel.permission_overwrites ?? [];
-      const everyone = overwrites.find((overwrite) => overwrite.id === guildId);
-      const denied = everyone ? BigInt(everyone.deny) : 0n;
-      if ((denied & VIEW_CHANNEL) === 0n) return true;
-      return overwrites.some(
-        (overwrite) =>
-          !(overwrite.id === botId && overwrite.type === 1) &&
-          (BigInt(overwrite.allow ?? '0') & VIEW_CHANNEL) !== 0n,
-      );
-    });
+    const readable = matches.some((channel) => staffChannelIsMemberReadable(channel, guildId, botId));
     if (readable) memberReadable.push(name);
     if (matches.length === 1 && !readable) channelIds[routeForName(name)] = matches[0].id;
   }

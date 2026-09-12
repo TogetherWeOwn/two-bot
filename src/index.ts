@@ -159,8 +159,15 @@ const moderationService = moderationResolver
       owenUserId: moderationCfg.owenUserId,
       botUserId: moderationCfg.owenUserId,
       protectedRoleIds: moderationCfg.protectedRoleIds,
+      moderationAuditSecret: moderationCfg.moderationAuditSecret,
     }, Date.now, audit)
   : null;
+if (moderationCfg.enabled && !moderationCfg.moderationAuditSecret) {
+  log.error('moderation_audit_secret_missing', {
+    hint: 'provide the systemd credential `moderation_audit_secret` or TWO_MODERATION_AUDIT_SECRET; '
+      + 'without it, moderation-service gateway correlation (TOG-2223 #8) is disabled',
+  });
+}
 const automodCfg = loadAutomodConfig();
 if (automodCfg.enabled && !moderationService) {
   throw new Error('TWO_AUTOMOD=1 requires TWO_MODERATION=1 so sanctions use the reviewed moderation path.');
@@ -230,6 +237,7 @@ registerHandlers(client, {
   joinRisk,
   audit,
   auditGuildId: cfg.guildId,
+  moderationAuditSecret: moderationCfg.moderationAuditSecret,
 });
 
 if (containmentCfg.enabled && containmentCfg.guildId) {

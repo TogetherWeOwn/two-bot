@@ -21,6 +21,7 @@ const OTHER_GUILD = '326474832151838730';
 const MEMBER = '900000000000000001';
 const CHANNEL_A = '900000000000000101';
 const CHANNEL_B = '900000000000000102';
+const MODERATION_SECRET = 'm'.repeat(32);
 
 function deps(events: OperationalAuditEvent[]) {
   return {
@@ -291,6 +292,7 @@ test('correlated moderation gateway entries converge on the service audit identi
   const key = 'moderation-key-1';
   const token = moderationAuditToken(guildId, key);
   const reason = moderationAuditReason(
+    MODERATION_SECRET,
     guildId,
     key,
     'moderation.slowmode',
@@ -309,6 +311,7 @@ test('correlated moderation gateway entries converge on the service audit identi
     } as never,
     guildId,
     'bot',
+    MODERATION_SECRET,
   );
   assert.ok(event);
   assert.equal(event.entryId, moderationAuditEntryId(guildId, token));
@@ -390,16 +393,68 @@ test('another integration cannot forge a moderation service correlation marker',
       createdTimestamp: 1_700_000_000_000,
       executorId: 'other-integration',
       targetId: MEMBER,
-      reason: moderationAuditReason(GUILD, 'forged', 'moderation.ban', MEMBER, 'forged'),
+      reason: moderationAuditReason(MODERATION_SECRET, GUILD, 'forged', 'moderation.ban', MEMBER, 'forged'),
       extra: null,
     } as never,
     GUILD,
     'our-bot',
+    MODERATION_SECRET,
   );
   assert.ok(event);
   assert.equal(event.entryId, `discord-audit:${GUILD}:audit-forged`);
   assert.equal(event.action, 'member_kick');
   assert.deepEqual(event.metadata, { auditLogEntryId: 'audit-forged', count: null });
+});
+
+test('a same-bot writer outside ModerationService cannot forge a correlation marker without the secret', () => {
+  // TOG-2223 #8: raid-remove.ts / kick.ts share the bot's Discord token with
+  // ModerationService but never see moderationAuditSecret. Hand-crafting a
+  // syntactically valid marker (a real 32-hex token/action/actor, but with an
+  // all-zero MAC an attacker without the secret would guess) must not
+  // converge on the reviewed service identity, even though the executor is
+  // literally this bot.
+  const forgedReason = `[two-audit:v1:${'a'.repeat(32)}:moderation.ban:${MEMBER}:${'0'.repeat(16)}] forged by raid-remove --reason`;
+  const event = moderationAuditEvent(
+    {
+      id: 'audit-same-bot-forged',
+      action: AuditLogEvent.MemberBanAdd,
+      createdTimestamp: 1_700_000_000_000,
+      executorId: 'our-bot',
+      targetId: MEMBER,
+      reason: forgedReason,
+      extra: null,
+    } as never,
+    GUILD,
+    'our-bot',
+    MODERATION_SECRET,
+  );
+  assert.ok(event);
+  assert.equal(event.entryId, `discord-audit:${GUILD}:audit-same-bot-forged`);
+  assert.equal(event.actorId, 'our-bot');
+  assert.deepEqual(event.metadata, { auditLogEntryId: 'audit-same-bot-forged', count: null });
+});
+
+test('a null moderationAuditSecret refuses to trust even a validly-signed marker', () => {
+  // If the secret was never provisioned, the gateway listener is handed
+  // `null` too (src/index.ts) - the two must agree, or a marker minted before
+  // a secret rotation removed it would still be trusted after the rotation.
+  const reason = moderationAuditReason(MODERATION_SECRET, GUILD, 'rotated-away', 'moderation.ban', MEMBER, 'reason');
+  const event = moderationAuditEvent(
+    {
+      id: 'audit-secret-rotated',
+      action: AuditLogEvent.MemberBanAdd,
+      createdTimestamp: 1_700_000_000_000,
+      executorId: 'our-bot',
+      targetId: MEMBER,
+      reason,
+      extra: null,
+    } as never,
+    GUILD,
+    'our-bot',
+    null,
+  );
+  assert.ok(event);
+  assert.deepEqual(event.metadata, { auditLogEntryId: 'audit-secret-rotated', count: null });
 });
 
 test('Discord moderation entries discard free-text reasons', () => {
@@ -414,6 +469,8 @@ test('Discord moderation entries discard free-text reasons', () => {
       extra: { channel: { id: CHANNEL_A }, count: 3 },
     } as never,
     GUILD,
+    undefined,
+    MODERATION_SECRET,
   );
 
   assert.ok(event);
@@ -558,7 +615,9 @@ test('delivered reconciliation needs ViewChannel but not SendMessages', async ()
       id: 'mirror-read-only', author: { id: 'bot' }, content: formatAuditEvent(event), editedTimestamp: null,
     })),
     permissionsFor: () => ({
-      has: (permission?: bigint) => permission === PermissionsBitField.Flags.ViewChannel,
+      has: (permission?: bigint) =>
+        permission === PermissionsBitField.Flags.ViewChannel
+        || permission === PermissionsBitField.Flags.ReadMessageHistory,
     }),
   };
   const sink = makeOperationalAudit(auditClient(channel), {
@@ -569,6 +628,55 @@ test('delivered reconciliation needs ViewChannel but not SendMessages', async ()
   assert.ok((await store.get(event.entryId))?.mirrorCheckedAt);
   assert.equal((await store.get(event.entryId))?.deliveryState, 'delivered');
   await db.close();
+});
+
+test('reconciliation quarantines instead of checkpointing forever when ReadMessageHistory is revoked', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  const event: OperationalAuditEvent = {
+    entryId: 'delivered-no-history', kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
+  };
+  await store.record(event, CHANNEL_A);
+  const claim = await store.claim(event.entryId);
+  await store.markDelivered(event.entryId, claim!.deliveryClaimToken!, 'mirror-no-history');
+  let fetched = false;
+  const channel = {
+    ...auditChannel(async () => { fetched = true; return {}; }),
+    permissionsFor: () => ({
+      has: (permission?: bigint) => permission === PermissionsBitField.Flags.ViewChannel,
+    }),
+  };
+  const sink = makeOperationalAudit(auditClient(channel), {
+    guildId: GUILD, channels: { audit: CHANNEL_A, voice: null, moderation: null }, store,
+  });
+
+  assert.equal(await sink.retryPending(), 0);
+  assert.equal(fetched, false);
+  const row = await store.get(event.entryId);
+  assert.equal(row?.deliveryState, 'quarantined');
+  assert.equal(row?.deliveryLastError, 'mirror_channel_permission_revoked');
+});
+
+test('reconciliation quarantines a permanent 403 fetch rejection instead of checkpointing it as transient', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  const event: OperationalAuditEvent = {
+    entryId: 'delivered-forbidden', kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
+  };
+  await store.record(event, CHANNEL_A);
+  const claim = await store.claim(event.entryId);
+  await store.markDelivered(event.entryId, claim!.deliveryClaimToken!, 'mirror-forbidden');
+  const channel = auditChannel(async () => { throw Object.assign(new Error('forbidden'), { status: 403 }); });
+  const sink = makeOperationalAudit(auditClient(channel), {
+    guildId: GUILD, channels: { audit: CHANNEL_A, voice: null, moderation: null }, store,
+  });
+
+  assert.equal(await sink.retryPending(), 0);
+  const row = await store.get(event.entryId);
+  assert.equal(row?.deliveryState, 'quarantined');
+  assert.equal(row?.deliveryLastError, 'mirror_fetch_rejected_403');
 });
 
 test('deleted delivered mirror records deterministic evidence and quarantines without recursion', async () => {
@@ -814,6 +922,80 @@ test('failed audit delivery is retryable without duplicating the durable row', a
   assert.equal(row?.mirrorMessageId, '900000000000000001');
   const count = await db.prepare(`SELECT COUNT(*) AS n FROM operational_audit_log`).get<{ n: number }>();
   assert.equal(Number(count?.n), 1);
+  await db.close();
+});
+
+test('pre-send delivery quarantines instead of retrying forever when ReadMessageHistory is revoked', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  let sent = false;
+  const channel = {
+    id: CHANNEL_A,
+    guild: { id: GUILD, members: { me: { id: 'bot' } } },
+    isTextBased: () => true,
+    isDMBased: () => false,
+    permissionsFor: () => ({
+      has: (permission?: bigint) => permission === PermissionsBitField.Flags.ViewChannel,
+    }),
+    messages: { fetch: async () => new Collection() },
+    client: { user: { id: 'bot' } },
+    send: async () => {
+      sent = true;
+      return { id: '900000000000000001' };
+    },
+  };
+  const client = { channels: { cache: new Map([[CHANNEL_A, channel]]), fetch: async () => channel } } as unknown as Client;
+  const sink = makeOperationalAudit(client, {
+    guildId: GUILD,
+    channels: { audit: CHANNEL_A, voice: null, moderation: null },
+    store,
+  });
+  const event: OperationalAuditEvent = {
+    entryId: 'predelivery-no-history', kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
+  };
+
+  assert.equal(await sink.record(event), true);
+  assert.equal(sent, false);
+  const row = await store.get(event.entryId);
+  assert.equal(row?.deliveryState, 'quarantined');
+  assert.equal(row?.deliveryLastError, 'mirror_channel_permission_revoked');
+  await db.close();
+});
+
+test('pre-send delivery quarantines a definite 4xx from the pre-send scan instead of retrying forever', async () => {
+  const db = await openDb(':memory:');
+  const store = new OperationalAuditStore(db);
+  let sent = false;
+  const channel = {
+    id: CHANNEL_A,
+    guild: { id: GUILD, members: { me: { id: 'bot' } } },
+    isTextBased: () => true,
+    isDMBased: () => false,
+    permissionsFor: () => ({ has: () => true }),
+    messages: { fetch: async () => { throw Object.assign(new Error('forbidden'), { status: 403 }); } },
+    client: { user: { id: 'bot' } },
+    send: async () => {
+      sent = true;
+      return { id: '900000000000000001' };
+    },
+  };
+  const client = { channels: { cache: new Map([[CHANNEL_A, channel]]), fetch: async () => channel } } as unknown as Client;
+  const sink = makeOperationalAudit(client, {
+    guildId: GUILD,
+    channels: { audit: CHANNEL_A, voice: null, moderation: null },
+    store,
+  });
+  const event: OperationalAuditEvent = {
+    entryId: 'predelivery-forbidden-scan', kind: 'message_delete', channel: 'audit', guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z', sourceChannelId: CHANNEL_B,
+  };
+
+  assert.equal(await sink.record(event), true);
+  assert.equal(sent, false);
+  const row = await store.get(event.entryId);
+  assert.equal(row?.deliveryState, 'quarantined');
+  assert.equal(row?.deliveryLastError, 'discord_fetch_rejected_403');
   await db.close();
 });
 

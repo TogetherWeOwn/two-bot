@@ -12,6 +12,7 @@ import { join } from 'node:path';
 
 import { readSecret, credentialSource } from '../src/core/credentials.ts';
 import { loadInternalActionsConfig } from '../src/internal/config.ts';
+import { loadModerationConfig } from '../src/moderation/config.ts';
 
 function credDir(files: Record<string, string>): string {
   const dir = mkdtempSync(join(tmpdir(), 'two-creds-'));
@@ -125,4 +126,18 @@ test('internal actions with no keys at all still refuses to start', () => {
     () => loadInternalActionsConfig({ TWO_INTERNAL_ACTIONS: '1' } as NodeJS.ProcessEnv),
     /internal_keys|TWO_INTERNAL_KEYS/,
   );
+});
+
+test('moderation audit secret loads from a credential, and is null when unprovisioned', () => {
+  const dir = credDir({ moderation_audit_secret: 'mac-secret\n' });
+  const cfg = loadModerationConfig({ CREDENTIALS_DIRECTORY: dir } as NodeJS.ProcessEnv);
+  assert.equal(cfg.moderationAuditSecret, 'mac-secret');
+
+  const unset = loadModerationConfig({} as NodeJS.ProcessEnv);
+  assert.equal(unset.moderationAuditSecret, null);
+});
+
+test('moderation audit secret falls back to TWO_MODERATION_AUDIT_SECRET', () => {
+  const cfg = loadModerationConfig({ TWO_MODERATION_AUDIT_SECRET: 'from-env' } as NodeJS.ProcessEnv);
+  assert.equal(cfg.moderationAuditSecret, 'from-env');
 });

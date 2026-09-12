@@ -98,7 +98,11 @@ export class OperationalAuditStore {
     const now = new Date();
     const leaseUntil = new Date(now.getTime() + leaseMs).toISOString();
     const claimToken = randomUUID();
-    const result = await this.db
+    // The row is returned from the same UPDATE that wins the claim. A separate
+    // unfenced re-read here would let a racing claimant replace the token
+    // between the write and the read, so both callers could observe the
+    // replacement claimant's token instead of their own (TOG-2223 #6).
+    const row = await this.db
       .prepare(
         `UPDATE operational_audit_log
             SET delivery_state = 'delivering',
@@ -108,10 +112,15 @@ export class OperationalAuditStore {
           WHERE entry_id = ?
             AND mirror_channel_id IS NOT NULL
             AND (delivery_state = 'pending'
-              OR (delivery_state = 'delivering' AND delivery_lease_until < ?))`,
+              OR (delivery_state = 'delivering' AND delivery_lease_until < ?))
+          RETURNING entry_id, event_kind, guild_id, occurred_at, actor_id, target_id,
+                    source_channel_id, destination_channel_id, message_id, action,
+                    metadata_json, mirror_channel_id, delivery_state, delivery_attempts,
+                    delivery_claim_token, delivery_nonce, delivery_search_before,
+                    mirror_message_id, mirror_checked_at, delivery_last_error`,
       )
-      .run(leaseUntil, claimToken, deliveryNonce(entryId), entryId, now.toISOString());
-    return result.changes === 1 ? await this.get(entryId) : null;
+      .get<Record<string, unknown>>(leaseUntil, claimToken, deliveryNonce(entryId), entryId, now.toISOString());
+    return row ? storedAudit(row) : null;
   }
 
   async claimPending(limit = 25, leaseMs = AUDIT_DELIVERY_LEASE_MS): Promise<StoredOperationalAudit[]> {
@@ -224,6 +233,29 @@ export class OperationalAuditStore {
         WHERE entry_id = ? AND delivery_state = 'delivered' AND mirror_message_id = ?
           AND mirror_checked_at IS NOT DISTINCT FROM ?`,
     ).run(checkedAt, entryId, mirrorMessageId, expectedCheckedAt);
+    return result.changes === 1;
+  }
+
+  /**
+   * Fail closed when a delivered mirror can no longer be read back at all - a
+   * permanent authorization loss (e.g. a revoked ReadMessageHistory grant)
+   * looks identical to a transient fetch hiccup unless the caller has already
+   * classified it, so this never runs on its own: the caller decides when the
+   * error is definite rather than retryable (TOG-2240).
+   */
+  async quarantineDeliveredMirrorUnreadable(
+    entryId: string,
+    mirrorMessageId: string,
+    expectedCheckedAt: string | null,
+    checkedAt: string,
+    classification: string,
+  ): Promise<boolean> {
+    const result = await this.db.prepare(
+      `UPDATE operational_audit_log
+          SET delivery_state = 'quarantined', delivery_last_error = ?, mirror_checked_at = ?
+        WHERE entry_id = ? AND delivery_state = 'delivered' AND mirror_message_id = ?
+          AND mirror_checked_at IS NOT DISTINCT FROM ?`,
+    ).run(classification.slice(0, 120), checkedAt, entryId, mirrorMessageId, expectedCheckedAt);
     return result.changes === 1;
   }
 

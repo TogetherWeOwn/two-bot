@@ -28,29 +28,51 @@ export interface AuditSink {
   retryPending(): Promise<number>;
 }
 
+interface MirrorChannelAccess {
+  channel: GuildTextBasedChannel | null;
+  /**
+   * True only when the channel/guild/member resolved fine and a specific
+   * permission bit was observed missing - a fact we can act on. False for
+   * every other reason a channel comes back unusable (not found, fetch threw,
+   * wrong guild, no member record): those are indistinguishable from a
+   * transient hiccup and must not be treated as a standing denial.
+   */
+  deniedPermanently: boolean;
+}
+
 async function readableMirrorChannel(
   client: Client,
   channelId: string,
   guildId: string,
-): Promise<GuildTextBasedChannel | null> {
+): Promise<MirrorChannelAccess> {
   const cached = client.channels.cache.get(channelId);
   const channel = cached ?? (await client.channels.fetch(channelId).catch(() => null));
-  if (!channel || !channel.isTextBased() || channel.isDMBased()) return null;
-  if (channel.guild.id !== guildId) return null;
+  if (!channel || !channel.isTextBased() || channel.isDMBased()) return { channel: null, deniedPermanently: false };
+  if (channel.guild.id !== guildId) return { channel: null, deniedPermanently: false };
   const me = channel.guild.members.me ?? (await channel.guild.members.fetchMe().catch(() => null));
-  if (!me) return null;
-  return channel.permissionsFor(me)?.has(PermissionsBitField.Flags.ViewChannel) ? channel : null;
+  if (!me) return { channel: null, deniedPermanently: false };
+  const perms = channel.permissionsFor(me);
+  // ReadMessageHistory is not optional here: every reconciliation and every
+  // pre-send dedup scan calls messages.fetch, and ViewChannel alone does not
+  // grant that. Missing it is the exact gap that let a revoked read grant
+  // masquerade as a healthy mirror (TOG-2240).
+  const readable = Boolean(
+    perms?.has(PermissionsBitField.Flags.ViewChannel) && perms.has(PermissionsBitField.Flags.ReadMessageHistory),
+  );
+  return readable ? { channel, deniedPermanently: false } : { channel: null, deniedPermanently: true };
 }
 
 async function botCanPost(
   client: Client,
   channelId: string,
   guildId: string,
-): Promise<GuildTextBasedChannel | null> {
-  const channel = await readableMirrorChannel(client, channelId, guildId);
-  if (!channel) return null;
-  const me = channel.guild.members.me ?? (await channel.guild.members.fetchMe().catch(() => null));
-  return me && channel.permissionsFor(me)?.has(PermissionsBitField.Flags.SendMessages) ? channel : null;
+): Promise<MirrorChannelAccess> {
+  const access = await readableMirrorChannel(client, channelId, guildId);
+  if (!access.channel) return access;
+  const me = access.channel.guild.members.me ?? (await access.channel.guild.members.fetchMe().catch(() => null));
+  if (!me) return { channel: null, deniedPermanently: false };
+  const canSend = access.channel.permissionsFor(me)?.has(PermissionsBitField.Flags.SendMessages);
+  return canSend ? { channel: access.channel, deniedPermanently: false } : { channel: null, deniedPermanently: true };
 }
 
 export function makeOperationalAudit(client: Client, options: OperationalAuditOptions): AuditSink {
@@ -67,14 +89,28 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
       stored.mirrorCheckedAt,
       checkedAt,
     );
-    const channel = await readableMirrorChannel(client, channelId, stored.event.guildId);
-    if (!channel) {
+    const access = await readableMirrorChannel(client, channelId, stored.event.guildId);
+    if (!access.channel) {
+      if (access.deniedPermanently) {
+        await options.store.quarantineDeliveredMirrorUnreadable(
+          stored.event.entryId,
+          messageId,
+          stored.mirrorCheckedAt,
+          checkedAt,
+          'mirror_channel_permission_revoked',
+        );
+        log.error('operational_audit_mirror_check_failed', {
+          entryId: stored.event.entryId, channelId, classification: 'mirror_channel_permission_revoked',
+        });
+        return;
+      }
       await checkpoint();
       log.error('operational_audit_mirror_check_failed', {
         entryId: stored.event.entryId, channelId, classification: 'mirror_channel_unavailable',
       });
       return;
     }
+    const channel = access.channel;
 
     let message: Message<true>;
     try {
@@ -95,6 +131,22 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
             metadata: { auditMirrorEntryId: stored.event.entryId },
           },
         );
+        return;
+      }
+      // A definite 4xx here (403, 401, ...) means the fetch was authoritatively
+      // refused, not merely delayed - treating it as transient is exactly what
+      // let a revoked read grant checkpoint forever with no alarm (TOG-2240).
+      if (isDefiniteSendRejection(err)) {
+        await options.store.quarantineDeliveredMirrorUnreadable(
+          stored.event.entryId,
+          messageId,
+          stored.mirrorCheckedAt,
+          checkedAt,
+          `mirror_fetch_rejected_${errorStatus(err)}`,
+        );
+        log.error('operational_audit_mirror_check_failed', {
+          entryId: stored.event.entryId, channelId, classification: 'mirror_fetch_rejected',
+        });
         return;
       }
       await checkpoint();
@@ -148,8 +200,26 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
       return;
     }
 
-    const channel = await botCanPost(client, channelId, stored.event.guildId);
-    if (!channel) {
+    const access = await botCanPost(client, channelId, stored.event.guildId);
+    if (!access.channel) {
+      if (access.deniedPermanently) {
+        // A resolved channel/guild/member with a specific bit observed missing
+        // is authoritative, not a hiccup - retrying it forever is exactly the
+        // gap that let a revoked grant post nothing while never raising an
+        // alarm (TOG-2240, widened by TOG-2239 review to the pre-send path).
+        await options.store?.quarantineDelivery(
+          stored.event.entryId,
+          claimToken!,
+          'mirror_channel_permission_revoked',
+        );
+        log.error('operational_audit_undeliverable', {
+          entryId: stored.event.entryId,
+          channelId,
+          reason: 'bot permanently lacks View/ReadHistory/Send on the mirror channel',
+          classification: 'mirror_channel_permission_revoked',
+        });
+        return;
+      }
       await options.store?.markDeliveryFailed(stored.event.entryId, claimToken!, 'channel_unavailable');
       log.error('operational_audit_undeliverable', {
         entryId: stored.event.entryId,
@@ -158,6 +228,7 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
       });
       return;
     }
+    const channel = access.channel;
 
     let messageId: string | null = null;
     let sendStarted = false;
@@ -222,6 +293,26 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
           entryId: stored.event.entryId,
           channelId,
           classification: 'discord_post_ambiguous',
+        });
+      } else if (isDefiniteSendRejection(err)) {
+        // findMirror/newestMessageCursor throwing a definite 4xx before any
+        // send means Discord authoritatively refused the read - identical in
+        // kind to the reconciliation-side permission revocation above, and
+        // markDeliveryFailed would requeue it as 'pending' to retry forever.
+        try {
+          await options.store?.quarantineDelivery(
+            stored.event.entryId,
+            claimToken!,
+            `discord_fetch_rejected_${errorStatus(err)}`,
+          );
+        } catch {
+          // Another worker may have replaced this claim before send authorization.
+          // Its token owns the row now; the stale worker must not mutate it.
+        }
+        log.error('operational_audit_post_failed', {
+          entryId: stored.event.entryId,
+          channelId,
+          classification: 'discord_fetch_rejected',
         });
       } else {
         try {

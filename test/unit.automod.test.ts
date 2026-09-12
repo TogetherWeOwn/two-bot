@@ -126,6 +126,7 @@ test('deletes, warns, then times out through the reviewed moderation service', a
     owenUserId: OWEN,
     botUserId: OWEN,
     protectedRoleIds: new Set(),
+    moderationAuditSecret: 's'.repeat(32),
   });
   const service = new AutomodService(
     discord,
@@ -143,7 +144,7 @@ test('deletes, warns, then times out through the reviewed moderation service', a
   assert.deepEqual(calls.slice(0, 3), ['delete:m1', 'delete:m2', 'delete:m3']);
   assert.match(
     calls[3]!,
-    new RegExp(`^timeout:${USER}:\\[two-audit:v1:[a-f0-9]{32}:moderation\\.timeout:${OWEN}\\] Automod bad words; violation 3$`),
+    new RegExp(`^timeout:${USER}:\\[two-audit:v1:[a-f0-9]{32}:moderation\\.timeout:${OWEN}:[a-f0-9]{16}\\] Automod bad words; violation 3$`),
   );
   assert.equal((await testDb.db.prepare('SELECT COUNT(*) AS n FROM moderation_warnings').get<{ n: number }>())?.n, 1);
   assert.equal((await testDb.db.prepare('SELECT COUNT(*) AS n FROM moderation_audit').get<{ n: number }>())?.n, 5);
