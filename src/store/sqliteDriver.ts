@@ -88,6 +88,53 @@ function ensureColumn(raw: DatabaseSync, table: string, column: string, type: st
   raw.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
 }
 
+/** Apply every operational-audit SQLite upgrade under one write lock. */
+function ensureOperationalAuditDelivery(
+  raw: DatabaseSync,
+  deliveryIndex: string,
+  mirrorCheckIndex: string,
+): void {
+  raw.exec('BEGIN IMMEDIATE');
+  try {
+    ensureColumn(raw, 'operational_audit_log', 'mirror_channel_id', 'TEXT');
+    ensureColumn(raw, 'operational_audit_log', 'delivery_state', "TEXT NOT NULL DEFAULT 'none'");
+    ensureColumn(raw, 'operational_audit_log', 'delivery_attempts', 'INTEGER NOT NULL DEFAULT 0');
+    ensureColumn(raw, 'operational_audit_log', 'delivery_attempted_at', 'TEXT');
+    ensureColumn(raw, 'operational_audit_log', 'delivery_last_error', 'TEXT');
+    ensureColumn(raw, 'operational_audit_log', 'delivery_lease_until', 'TEXT');
+    ensureColumn(raw, 'operational_audit_log', 'delivery_claim_token', 'TEXT');
+    ensureColumn(raw, 'operational_audit_log', 'delivery_nonce', 'TEXT');
+    ensureColumn(raw, 'operational_audit_log', 'delivery_search_before', 'TEXT');
+    ensureColumn(raw, 'operational_audit_log', 'mirror_message_id', 'TEXT');
+    ensureColumn(raw, 'operational_audit_log', 'mirror_checked_at', 'TEXT');
+    ensureColumn(raw, 'operational_audit_log', 'mirrored_at', 'TEXT');
+    raw.exec(deliveryIndex);
+    raw.exec(mirrorCheckIndex);
+
+    const stamp = raw.prepare(`INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?, ?)`);
+    const appliedAt = new Date().toISOString();
+    for (const id of [
+      '0011_operational_audit',
+      '0012_operational_audit_delivery',
+      '0013_operational_audit_delivery_message',
+      '0014_operational_audit_delivery_search',
+      '0015_operational_audit_delivery_claim',
+      '0016_operational_audit_mirror_checked',
+      '0017_operational_audit_mirror_check_index',
+    ]) {
+      stamp.run(id, appliedAt);
+    }
+    raw.exec('COMMIT');
+  } catch (err) {
+    try {
+      raw.exec('ROLLBACK');
+    } catch {
+      /* already unwound */
+    }
+    throw err;
+  }
+}
+
 /** Mirrors migrations/0011_leveling_xp_ceiling.sql for existing SQLite files. */
 function ensureLevelingXpCeiling(raw: DatabaseSync): void {
   const id = '0011_leveling_xp_ceiling';
@@ -279,13 +326,29 @@ export async function openSqlite(path: string): Promise<Db> {
   ON moderation_scheduled_unbans (guild_id, user_id) WHERE state = 'pending';`;
   const selfRoleLeaseIndex = `CREATE INDEX IF NOT EXISTS idx_self_role_audit_processing_lease
   ON self_role_audit (outcome, processing_expires_at);`;
-  // Old databases may contain duplicates that were legal before 0011, and the
-  // self-role lease column may not exist yet. Defer both indexes until their
-  // prerequisite data/column upgrades finish below.
-  schema = schema.replace(pendingIndex, '').replace(selfRoleLeaseIndex, '');
+  const auditDeliveryIndex = `CREATE INDEX IF NOT EXISTS idx_operational_audit_delivery
+  ON operational_audit_log (delivery_state, created_at);`;
+  const auditMirrorCheckIndex = `CREATE INDEX IF NOT EXISTS idx_operational_audit_mirror_check
+  ON operational_audit_log (mirror_checked_at, mirrored_at, entry_id)
+  WHERE delivery_state = 'delivered'
+    AND mirror_channel_id IS NOT NULL
+    AND mirror_message_id IS NOT NULL;`;
+  // Old databases may contain duplicates that were legal before 0011, while
+  // audit delivery and self-role lease columns may not exist yet. Defer all
+  // three indexes until their prerequisite data/column upgrades finish below.
+  schema = schema
+    .replace(pendingIndex, '')
+    .replace(selfRoleLeaseIndex, '')
+    .replace(auditDeliveryIndex, '')
+    .replace(auditMirrorCheckIndex, '');
   raw.exec(schema);
   // Mirrors migrations/0008_members_third_message_at.sql (TWO-95).
   ensureColumn(raw, 'members', 'third_message_at', 'TEXT');
+  // Existing SQLite databases may already have the 0011 operational audit
+  // table, so schema.sql's CREATE TABLE IF NOT EXISTS cannot add delivery state.
+  // Serialize the check-and-ALTER sequence: a busy timeout only waits for the
+  // competing DDL, while the write lock makes this connection recheck after it.
+  ensureOperationalAuditDelivery(raw, auditDeliveryIndex, auditMirrorCheckIndex);
   ensureLevelingXpCeiling(raw);
   // Existing SQLite databases already have the 0010 table, so schema.sql's
   // CREATE TABLE IF NOT EXISTS cannot add the 0011/0012 claim columns.

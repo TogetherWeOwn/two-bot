@@ -54,6 +54,7 @@ export interface ModerationRequest {
   actor: ModerationActor;
   target?: ModerationTarget;
   channel?: ModerationChannel;
+  botHighestRolePosition?: number;
   reason: string;
   durationSeconds?: number;
   count?: number;
@@ -70,6 +71,13 @@ export interface ModerationPolicy {
   owenUserId: string;
   protectedRoleIds: ReadonlySet<string>;
   botUserId?: string | null;
+  /**
+   * Keys the moderation-service correlation MAC (TOG-2223 #8). Null disables
+   * marker minting - `moderationAuditReason` then returns the plain reason,
+   * so the gateway listener (which must be given the same null) never
+   * mistakes an unmarked same-bot action for a reviewed one.
+   */
+  moderationAuditSecret?: string | null;
 }
 
 export function requireModerationReason(value: unknown): string {

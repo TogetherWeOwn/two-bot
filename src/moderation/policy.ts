@@ -9,7 +9,8 @@ export type ModerationPolicyRefusalReason =
   | 'target_owen'
   | 'target_bot'
   | 'target_staff_role'
-  | 'actor_hierarchy';
+  | 'actor_hierarchy'
+  | 'bot_hierarchy';
 
 const MODERATION_POLICY_REFUSAL_REASONS = new Set<ModerationPolicyRefusalReason>([
   'actor_missing_permission',
@@ -19,6 +20,7 @@ const MODERATION_POLICY_REFUSAL_REASONS = new Set<ModerationPolicyRefusalReason>
   'target_bot',
   'target_staff_role',
   'actor_hierarchy',
+  'bot_hierarchy',
 ]);
 
 const PERMISSION_FOR: Record<ModerationActionName, bigint> = {
@@ -62,6 +64,9 @@ export function assertModerationAllowed(request: ModerationRequest, policy: Mode
   if (target.isBot) refuse('Bots are protected', 'target_bot');
   if (target.roleIds.some((roleId) => policy.protectedRoleIds.has(roleId))) {
     refuse('Staff roles are protected', 'target_staff_role');
+  }
+  if (request.botHighestRolePosition !== undefined && request.botHighestRolePosition <= target.highestRolePosition) {
+    refuse('The target is equal to or above Owen\'s highest role', 'bot_hierarchy');
   }
   if (request.actor.highestRolePosition <= target.highestRolePosition) {
     refuse('The target is equal to or above your highest role', 'actor_hierarchy');

@@ -138,6 +138,34 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
       .run('join-risk-1', G, 'm-risk', '2026-08-01T11:59:00.000Z', '2026-08-01T12:00:00.000Z', 'unknown', 3, '["new account"]', false, true, '2026-08-01T12:00:00.000Z');
     await harness.db
       .prepare(
+        `INSERT INTO operational_audit_log
+           (entry_id, event_kind, guild_id, occurred_at, target_id, source_channel_id,
+            message_id, metadata_json, created_at, mirror_channel_id, delivery_state,
+            delivery_attempts, delivery_attempted_at, delivery_last_error,
+            delivery_nonce, mirror_message_id, mirror_checked_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'audit-backup-1',
+        'message_delete',
+        G,
+        '2026-08-09T00:00:00.000Z',
+        'm0',
+        'c1',
+        'message-1',
+        '{"cached":false}',
+        '2026-08-09T00:00:01.000Z',
+        'audit-channel',
+        'pending',
+        1,
+        '2026-08-09T00:00:02.000Z',
+        'discord_send_failed',
+        'audit-backup-1',
+        null,
+        '2026-08-09T00:00:03.000Z',
+      );
+    await harness.db
+      .prepare(
         `INSERT INTO tickets (id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closed_at)
          VALUES (?, ?, ?, ?, ?, 'closed', ?, ?)`,
       )
@@ -228,10 +256,33 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
     const events = await harness.db
       .prepare(`SELECT id, event_type, occurred_at, idempotency_key FROM events ORDER BY id`)
       .all();
+    const audit = await harness.db
+      .prepare(
+        `SELECT entry_id, event_kind, guild_id, occurred_at, target_id, source_channel_id,
+                message_id, metadata_json, mirror_channel_id, delivery_state,
+                delivery_attempts, delivery_attempted_at, delivery_last_error,
+                delivery_nonce, mirror_message_id, mirror_checked_at
+           FROM operational_audit_log ORDER BY entry_id`,
+      )
+      .all();
+    const tickets = await harness.db
+      .prepare(
+        `SELECT id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closed_at
+           FROM tickets ORDER BY id`,
+      )
+      .all();
+    const transcripts = await harness.db
+      .prepare(
+        `SELECT ticket_id, guild_id, channel_id, opener_id, claimed_by, content,
+                message_count, created_at, purge_after
+           FROM ticket_transcripts ORDER BY ticket_id`,
+      )
+      .all();
 
     const file = join(dir, 'roundtrip.ndjson.gz');
     const manifest = await dump(harness.db, file);
     assert.equal(manifest.tables.find((t) => t.name === 'events')?.count, before.events);
+    assert.equal(manifest.tables.find((t) => t.name === 'operational_audit_log')?.count, 1);
     assert.equal(manifest.tables.find((t) => t.name === 'tickets')?.count, 1);
     assert.equal(manifest.tables.find((t) => t.name === 'ticket_transcripts')?.count, 1);
     assert.equal(manifest.tables.find((t) => t.name === 'automod_violations')?.count, 1);
@@ -255,6 +306,31 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
       .prepare(`SELECT id, event_type, occurred_at, idempotency_key FROM events ORDER BY id`)
       .all();
     assert.deepEqual(after, events);
+    const restoredAudit = await harness.db
+      .prepare(
+        `SELECT entry_id, event_kind, guild_id, occurred_at, target_id, source_channel_id,
+                message_id, metadata_json, mirror_channel_id, delivery_state,
+                delivery_attempts, delivery_attempted_at, delivery_last_error,
+                delivery_nonce, mirror_message_id, mirror_checked_at
+           FROM operational_audit_log ORDER BY entry_id`,
+      )
+      .all();
+    assert.deepEqual(restoredAudit, audit);
+    const restoredTickets = await harness.db
+      .prepare(
+        `SELECT id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closed_at
+           FROM tickets ORDER BY id`,
+      )
+      .all();
+    assert.deepEqual(restoredTickets, tickets);
+    const restoredTranscripts = await harness.db
+      .prepare(
+        `SELECT ticket_id, guild_id, channel_id, opener_id, claimed_by, content,
+                message_count, created_at, purge_after
+           FROM ticket_transcripts ORDER BY ticket_id`,
+      )
+      .all();
+    assert.deepEqual(restoredTranscripts, transcripts);
     const automod = await harness.db
       .prepare(`SELECT user_id, violation_count, last_message_id FROM automod_violations WHERE guild_id = ?`)
       .get(G);
@@ -479,6 +555,35 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
       await counts(),
       before,
       'the TRUNCATE must have rolled back with the failed INSERT',
+    );
+  });
+
+  test('an incomplete current-version dump is refused before it can erase audit data', async () => {
+    await seed();
+    const file = join(dir, 'incomplete-source.ndjson.gz');
+    await dump(harness.db, file);
+    const objs = gunzipSync(readFileSync(file))
+      .toString('utf8')
+      .trimEnd()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    const manifest = objs.find((obj) => obj.kind === 'manifest');
+    manifest.tables = manifest.tables.filter((table: { name: string }) => table.name !== 'operational_audit_log');
+    const removedRows = objs.filter((obj) => obj.kind === 'row' && obj.table === 'operational_audit_log').length;
+    const kept = objs.filter((obj) => !(obj.kind === 'row' && obj.table === 'operational_audit_log'));
+    kept.find((obj) => obj.kind === 'end').rows -= removedRows;
+    const incomplete = join(dir, 'incomplete.ndjson.gz');
+    writeFileSync(incomplete, gzipSync(kept.map((obj) => JSON.stringify(obj)).join('\n') + '\n'));
+
+    const before = await counts();
+    const auditBefore = await harness.db
+      .prepare(`SELECT entry_id, delivery_state FROM operational_audit_log ORDER BY entry_id`)
+      .all();
+    await assert.rejects(() => restore(harness.db, incomplete), /missing tables: operational_audit_log/);
+    assert.deepEqual(await counts(), before);
+    assert.deepEqual(
+      await harness.db.prepare(`SELECT entry_id, delivery_state FROM operational_audit_log ORDER BY entry_id`).all(),
+      auditBefore,
     );
   });
 

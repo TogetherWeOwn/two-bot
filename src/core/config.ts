@@ -54,6 +54,11 @@ export interface Config {
   /** Joins inside `raidWindowSeconds` that raise an alert. */
   raidJoinThreshold: number;
   raidWindowSeconds: number;
+  /** Metadata-only Discord event mirrors. Null means durable/process audit only. */
+  auditLogChannelId: string | null;
+  voiceLogChannelId: string | null;
+  moderationLogChannelId: string | null;
+  /** Ticket support is enabled only when all three Discord ids are configured. */
   ticketCategoryId: string | null;
   ticketStaffRoleId: string | null;
   ticketPanelChannelId: string | null;
@@ -125,6 +130,9 @@ export function loadConfig(): Config {
     staffAlertChannelId: process.env.DISCORD_STAFF_ALERT_CHANNEL_ID || null,
     raidJoinThreshold: Number(process.env.TWO_RAID_JOIN_THRESHOLD ?? 5),
     raidWindowSeconds: Number(process.env.TWO_RAID_WINDOW_SECONDS ?? 60),
+    auditLogChannelId: process.env.DISCORD_AUDIT_LOG_CHANNEL_ID || null,
+    voiceLogChannelId: process.env.DISCORD_VOICE_LOG_CHANNEL_ID || null,
+    moderationLogChannelId: process.env.DISCORD_MODERATION_LOG_CHANNEL_ID || null,
     ticketCategoryId: process.env.DISCORD_TICKET_CATEGORY_ID || null,
     ticketStaffRoleId: process.env.DISCORD_TICKET_STAFF_ROLE_ID || null,
     ticketPanelChannelId: process.env.DISCORD_TICKET_PANEL_CHANNEL_ID || null,

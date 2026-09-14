@@ -126,6 +126,7 @@ test('deletes, warns, then times out through the reviewed moderation service', a
     owenUserId: OWEN,
     botUserId: OWEN,
     protectedRoleIds: new Set(),
+    moderationAuditSecret: 's'.repeat(32),
   });
   const service = new AutomodService(
     discord,
@@ -140,7 +141,11 @@ test('deletes, warns, then times out through the reviewed moderation service', a
   const second = await service.inspect(message({ messageId: 'm2', content: 'very bad' }));
   const third = await service.inspect(message({ messageId: 'm3', content: 'very bad' }));
   assert.deepEqual([first.sanction, second.sanction, third.sanction], ['delete', 'warn', 'timeout']);
-  assert.deepEqual(calls, ['delete:m1', 'delete:m2', 'delete:m3', `timeout:${USER}:Automod bad words; violation 3`]);
+  assert.deepEqual(calls.slice(0, 3), ['delete:m1', 'delete:m2', 'delete:m3']);
+  assert.match(
+    calls[3]!,
+    new RegExp(`^timeout:${USER}:\\[two-audit:v1:[a-f0-9]{32}:moderation\\.timeout:${OWEN}:[a-f0-9]{16}\\] Automod bad words; violation 3$`),
+  );
   assert.equal((await testDb.db.prepare('SELECT COUNT(*) AS n FROM moderation_warnings').get<{ n: number }>())?.n, 1);
   assert.equal((await testDb.db.prepare('SELECT COUNT(*) AS n FROM moderation_audit').get<{ n: number }>())?.n, 5);
   const audit = await testDb.db.prepare(`SELECT metadata_json FROM moderation_audit WHERE action = 'automod.bad_words' ORDER BY created_at`).all<{ metadata_json: string }>();

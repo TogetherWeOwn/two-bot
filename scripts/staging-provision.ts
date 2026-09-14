@@ -62,6 +62,8 @@
 import {
   CHANNEL_TYPE_TEXT,
   CHANNEL_TYPE_VOICE,
+  auditChannelExports,
+  channelCreateBody,
   ROLE_PERMISSIONS,
   chooseGuild,
   evaluateHierarchy,
@@ -217,18 +219,26 @@ const channels = channelsRes.body ?? [];
 const roles = rolesRes.body ?? [];
 
 // --- channels ---------------------------------------------------------------
-const cp = planChannels(channels);
+const cp = planChannels(channels, guildId, botId);
 console.log('\nchannels');
 if (cp.present.length) console.log(`  ok     already there: ${cp.present.join(', ')}`);
 for (const d of cp.duplicates) console.log(`  WARN   more than one "${d}" - tests may pick the wrong one`);
 if (cp.extra.length) console.log(`  note   not in the spec, left alone: ${cp.extra.join(', ')}`);
-if (!cp.create.length) console.log('  ok     nothing to create');
+if (!cp.create.length && !cp.repair.length) console.log('  ok     nothing to create or repair');
 for (const c of cp.create) {
   await write(
     `create ${c.type === CHANNEL_TYPE_VOICE ? 'voice' : 'text'} channel "${c.name}"`,
     'POST',
     `/guilds/${guildId}/channels`,
-    { name: c.name, type: c.type },
+    channelCreateBody(c, guildId, botId),
+  );
+}
+for (const c of cp.repair) {
+  await write(
+    `repair private overwrites on #${c.name}`,
+    'PATCH',
+    `/channels/${c.id}`,
+    { permission_overwrites: c.permission_overwrites },
   );
 }
 
@@ -323,7 +333,16 @@ if (!APPLY) {
   process.exit(0);
 }
 console.log(`Done, ${failures} error(s).`);
+const channelsAfter = (await api<PartialChannel[]>('GET', `/guilds/${guildId}/channels`)).body ?? [];
+let auditExports: string[] = [];
+try {
+  auditExports = auditChannelExports(channelsAfter);
+} catch (err) {
+  console.log(`  ERROR  cannot generate audit channel configuration: ${String(err)}`);
+  failures++;
+}
 console.log(`\n  export DISCORD_STAGING_GUILD_ID=${guildId}`);
+for (const line of auditExports) console.log(`  ${line}`);
 console.log('  node scripts/staging-verify.ts     # confirm it against the spec');
 console.log('  node scripts/staging-reset.ts      # seed the fixtures\n');
 process.exit(failures ? 1 : 0);

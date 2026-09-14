@@ -48,6 +48,7 @@ export const DUMP_TABLES = [
   'events',
   'members',
   'invite_snapshots',
+  'operational_audit_log',
   'moderation_warnings',
   'moderation_scheduled_unbans',
   'moderation_audit',
@@ -88,7 +89,7 @@ function assertDumpTable(name: unknown, where: string): asserts name is DumpTabl
   }
 }
 
-export const DUMP_VERSION = 2;
+export const DUMP_VERSION = 3;
 
 export interface DumpTableInfo {
   name: DumpTable;
@@ -133,6 +134,7 @@ function orderFor(table: DumpTable, columns: string[]): string {
   if (table === 'events') return 'id';
   if (table === 'members') return 'guild_id, member_id';
   if (table === 'invite_snapshots') return 'guild_id, code';
+  if (table === 'operational_audit_log') return 'entry_id';
   if (table === 'moderation_warnings') return 'created_at, id';
   if (table === 'moderation_scheduled_unbans') return 'execute_at, request_id';
   if (table === 'moderation_audit') return 'created_at, request_id';
@@ -274,15 +276,19 @@ export async function inspect(inPath: string): Promise<DumpContents> {
   for await (const line of rl) {
     if (!line.trim()) continue;
     const obj = JSON.parse(line);
+    if (sawEnd) throw new Error('dump contains data after its end marker');
     if (obj.kind === 'manifest') {
+      if (manifest) throw new Error('dump contains more than one manifest');
       if (obj.version !== DUMP_VERSION) {
         throw new Error(`dump version ${obj.version}, this build reads ${DUMP_VERSION}`);
       }
-      if (!Array.isArray(obj.tables)) throw new Error('manifest has no table list');
-      for (const t of obj.tables) assertDumpTable(t?.name, 'manifest table');
-      manifest = obj as DumpManifest;
+      manifest = validateManifest(obj);
     } else if (obj.kind === 'row') {
+      if (!manifest) throw new Error('dump row appears before the manifest');
       assertDumpTable(obj.table, 'row');
+      if (!manifest.tables.some((table) => table.name === obj.table)) {
+        throw new Error(`row table ${obj.table} is not declared in the manifest`);
+      }
       let buf = buffers.get(obj.table);
       if (!buf) buffers.set(obj.table, (buf = []));
       buf.push(obj.data as Record<string, unknown>);
@@ -297,12 +303,43 @@ export async function inspect(inPath: string): Promise<DumpContents> {
   // restoring a prefix of the data and calling it a success.
   if (!sawEnd) throw new Error('dump has no end marker - it is truncated, treat it as lost');
 
-  const readRows = [...buffers.values()].reduce((n, b) => n + b.length, 0);
+  let readRows = 0;
+  for (const table of manifest.tables) {
+    const actual = buffers.get(table.name)?.length ?? 0;
+    if (actual !== table.count) {
+      throw new Error(`${table.name}: manifest declares ${table.count} rows, file contains ${actual}`);
+    }
+    readRows += actual;
+  }
   if (readRows !== declaredRows) {
     throw new Error(`dump declares ${declaredRows} rows, file contains ${readRows}`);
   }
 
   return { manifest, buffers, rows: readRows };
+}
+
+function validateManifest(obj: Record<string, unknown>): DumpManifest {
+  if (!Array.isArray(obj.tables)) throw new Error('manifest has no table list');
+  const names = new Set<DumpTable>();
+  for (const table of obj.tables) {
+    if (!table || typeof table !== 'object') throw new Error('manifest table is not an object');
+    const row = table as Record<string, unknown>;
+    assertDumpTable(row.name, 'manifest table');
+    if (names.has(row.name)) throw new Error(`manifest table ${row.name} is duplicated`);
+    names.add(row.name);
+    if (!Array.isArray(row.columns) || row.columns.some((column) => typeof column !== 'string')) {
+      throw new Error(`manifest table ${row.name} has an invalid column list`);
+    }
+    if (new Set(row.columns).size !== row.columns.length) {
+      throw new Error(`manifest table ${row.name} has duplicate columns`);
+    }
+    if (!Number.isSafeInteger(row.count) || Number(row.count) < 0) {
+      throw new Error(`manifest table ${row.name} has an invalid row count`);
+    }
+  }
+  const missing = DUMP_TABLES.filter((name) => !names.has(name));
+  if (missing.length > 0) throw new Error(`manifest is missing tables: ${missing.join(', ')}`);
+  return obj as unknown as DumpManifest;
 }
 
 /**

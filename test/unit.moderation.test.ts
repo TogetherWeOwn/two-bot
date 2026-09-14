@@ -51,6 +51,7 @@ const REFUSALS: Array<[string, (r: ModerationRequest) => void, string]> = [
   ['Owen', (r) => { r.target!.userId = OWEN; }, 'target_owen'],
   ['bot', (r) => { r.target!.isBot = true; }, 'target_bot'],
   ['staff role', (r) => { r.target!.roleIds = [STAFF_ROLE]; }, 'target_staff_role'],
+  ['bot hierarchy', (r) => { r.botHighestRolePosition = 1; }, 'bot_hierarchy'],
   ['actor hierarchy', (r) => { r.target!.highestRolePosition = 10; }, 'actor_hierarchy'],
 ];
 
@@ -101,7 +102,14 @@ test('executes every verb and writes warnings, audits, and scheduled tempban exp
     async putEveryoneOverwrite(_c, _g, ow) { calls.push(`over:${ow.allow}/${ow.deny}`); },
   };
   const store = new ModerationStore(testDb.db, () => Date.parse('2026-09-08T12:00:00.000Z'));
-  const service = new ModerationService(discord, store, policy, () => Date.parse('2026-09-08T12:00:00.000Z'));
+  const operational: any[] = [];
+  const service = new ModerationService(
+    discord,
+    store,
+    policy,
+    () => Date.parse('2026-09-08T12:00:00.000Z'),
+    { async record(event: any) { operational.push(event); return true; }, async retryPending() { return 0; } },
+  );
   const actions: ModerationActionName[] = [
     'moderation.ban', 'moderation.tempban', 'moderation.kick', 'moderation.timeout',
     'moderation.warn', 'moderation.purge', 'moderation.slowmode', 'moderation.lockdown', 'moderation.unlock',
@@ -122,12 +130,47 @@ test('executes every verb and writes warnings, audits, and scheduled tempban exp
   assert.equal((await testDb.db.prepare('SELECT * FROM moderation_audit').all()).length, 9);
   assert.equal((await testDb.db.prepare('SELECT * FROM moderation_warnings').all()).length, 1);
   assert.equal((await testDb.db.prepare('SELECT * FROM moderation_scheduled_unbans').all()).length, 1);
+  assert.deepEqual(operational.map((event) => event.action), actions);
+  assert.equal(new Set(operational.map((event) => event.entryId)).size, actions.length);
+  assert.ok(operational.every((event) => event.metadata.origin === 'moderation_service'));
+  assert.ok(operational.every((event) => !JSON.stringify(event).includes('QA moderation proof')));
+  const firstEntryId = operational[0].entryId;
   const replay = await service.execute({ ...request('moderation.ban'), requestId: 'request-retry', idempotencyKey: 'interaction-0' });
   assert.deepEqual(replay, { outcome: 'banned', replayed: true });
   assert.equal(calls.filter((call) => call === `ban:${TARGET}`).length, 2, 'interaction replay made no new call');
+  assert.equal(operational.at(-1).entryId, firstEntryId, 'replay repairs the same stable operational identity');
   await testDb.cleanup();
 });
 
+
+
+test('protected moderation refusals are mirrored without a Discord mutation', async () => {
+  const testDb = await openTestDb(import.meta.filename);
+  let callsMade = 0;
+  const events: Array<{ kind: string; action?: string | null; metadata?: Record<string, unknown> }> = [];
+  const discord: ModerationDiscordClient = {
+    async ban() { callsMade++; }, async unban() {}, async kick() {}, async timeout() {},
+    async purge(_c, count) { return count; }, async setSlowmode() {},
+    async getEveryoneOverwrite() { return { allow: '0', deny: '0' }; },
+    async deleteEveryoneOverwrite() {}, async putEveryoneOverwrite() {},
+  };
+  const audit = {
+    async record(event: any) { events.push(event); return true; },
+    async retryPending() { return 0; },
+  };
+  const service = new ModerationService(discord, new ModerationStore(testDb.db), policy,
+    () => Date.parse('2026-09-09T07:00:00.000Z'), audit);
+  const refused = request('moderation.ban');
+  refused.botHighestRolePosition = 1;
+  await assert.rejects(() => service.execute({ ...refused, requestId: 'r-refuse', idempotencyKey: 'k-refuse' }),
+    (error: unknown) => error instanceof ActionError && error.code === 'action_not_allowed');
+  assert.equal(callsMade, 0);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].kind, 'moderation_action');
+  assert.equal(events[0].action, 'moderation.ban');
+  assert.deepEqual(events[0].metadata, { outcome: 'refused', code: 'action_not_allowed', classification: 'bot_hierarchy' });
+  await testDb.cleanup();
+});
 test('concurrent executes of one idempotency key make exactly one Discord call (TOG-1659 High 3)', async () => {
   const testDb = await openTestDb(import.meta.filename);
   let bans = 0;
@@ -361,12 +404,20 @@ test('runDueUnbans claims atomically: two sweeps never process the same job (TOG
   };
   let t = Date.parse('2026-09-08T12:00:00.000Z');
   const store = new ModerationStore(testDb.db, () => t);
-  const service = new ModerationService(discord, store, policy, () => t);
+  const operational: any[] = [];
+  const service = new ModerationService(
+    discord,
+    store,
+    policy,
+    () => t,
+    { async record(event: any) { operational.push(event); return true; }, async retryPending() { return 0; } },
+  );
   await service.execute({ ...request('moderation.tempban'), requestId: 'r-u1', idempotencyKey: 'k-u1' });
   t += 120_000; // past expiry
   const [a, b] = await Promise.all([service.runDueUnbans(), service.runDueUnbans()]);
   assert.equal(unbans, 1, `one unban, got ${unbans}`);
   assert.equal(a + b, 1, 'exactly one sweep reports the job');
+  assert.equal(operational.filter((event) => event.action === 'moderation.unban_scheduled').length, 1);
   await testDb.cleanup();
 });
 

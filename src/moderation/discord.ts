@@ -1,3 +1,4 @@
+import { log } from '../core/log.ts';
 import { ActionError } from '../internal/errors.ts';
 
 const API = 'https://discord.com/api/v10';
@@ -5,6 +6,7 @@ const API = 'https://discord.com/api/v10';
 /** PermissionFlagsBits.SendMessages, as the decimal string Discord expects. */
 const SEND_MESSAGES = '2048';
 const EVERYONE_OVERWRITE_TYPE = 0;
+const MAX_AUDIT_REASON_BYTES = 512;
 
 export interface EveryoneOverwrite {
   allow: string;
@@ -142,7 +144,7 @@ export class ModerationDiscord implements ModerationDiscordClient {
         signal: ctrl.signal,
         headers: {
           Authorization: `Bot ${this.options.token}`,
-          'X-Audit-Log-Reason': encodeURIComponent(reason).slice(0, 512),
+          'X-Audit-Log-Reason': encodeAuditReason(reason),
           ...(body === undefined ? {} : { 'content-type': 'application/json' }),
         },
         body: body === undefined ? undefined : JSON.stringify(body),
@@ -163,6 +165,31 @@ export class ModerationDiscord implements ModerationDiscordClient {
       clearTimeout(timer);
     }
   }
+}
+
+function encodeAuditReason(reason: string): string {
+  const scrubbed = reason.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, '�');
+  let truncated = scrubbed;
+  let encoded = encodeURIComponent(truncated);
+  // requireModerationReason bounds the caller's own text to 512 UTF-16 units,
+  // but URL-encoding can expand it well past Discord's 512-*byte* header
+  // limit - the mismatch that let already-accepted content vanish with no
+  // trace (TOG-2223 #4). Truncation still has to happen (Discord will 400 an
+  // over-length header outright), but it must never happen silently: log
+  // exactly what was cut so an operator reading an audit-log entry months
+  // later isn't staring at reason text that quietly isn't what was recorded.
+  while (encoded.length > MAX_AUDIT_REASON_BYTES) {
+    truncated = [...truncated].slice(0, -1).join('');
+    encoded = encodeURIComponent(truncated);
+  }
+  if (truncated.length !== scrubbed.length) {
+    log.error('moderation_audit_reason_truncated', {
+      originalLength: scrubbed.length,
+      truncatedLength: truncated.length,
+      encodedLength: encoded.length,
+    });
+  }
+  return encoded;
 }
 
 function isAbort(error: unknown): boolean {
