@@ -406,3 +406,73 @@ test('opening a pre-durability SQLite database adds claim columns and reconciles
   await db.close();
   await rm(dir, { recursive: true, force: true });
 });
+
+
+function createLegacyAuditDb(path: string): DatabaseSync {
+  const raw = new DatabaseSync(path);
+  raw.exec(`
+    CREATE TABLE operational_audit_log (
+      entry_id TEXT PRIMARY KEY, event_kind TEXT NOT NULL, guild_id TEXT NOT NULL,
+      occurred_at TEXT NOT NULL, actor_id TEXT, target_id TEXT, source_channel_id TEXT,
+      destination_channel_id TEXT, message_id TEXT, action TEXT, metadata_json TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+  `);
+  return raw;
+}
+
+const AUDIT_DELIVERY_COLUMNS = [
+  'mirror_channel_id', 'delivery_state', 'delivery_attempts', 'delivery_attempted_at',
+  'delivery_last_error', 'delivery_lease_until', 'delivery_claim_token', 'delivery_nonce',
+  'delivery_search_before', 'mirror_message_id', 'mirror_checked_at', 'mirrored_at',
+];
+const AUDIT_MIGRATIONS = [
+  '0011_operational_audit',
+  '0012_operational_audit_delivery',
+  '0013_operational_audit_delivery_message',
+  '0014_operational_audit_delivery_search',
+  '0015_operational_audit_delivery_claim',
+  '0016_operational_audit_mirror_checked',
+  '0017_operational_audit_mirror_check_index',
+];
+
+async function assertAuditUpgrade(db: Awaited<ReturnType<typeof openSqlite>>): Promise<void> {
+  const columns = await db.prepare(`PRAGMA table_info(operational_audit_log)`).all<{ name: string }>();
+  for (const name of AUDIT_DELIVERY_COLUMNS) assert.ok(columns.some((column) => column.name === name), name);
+  const indexes = await db.prepare(`PRAGMA index_list(operational_audit_log)`).all<{ name: string }>();
+  assert.ok(indexes.some((index) => index.name === 'idx_operational_audit_delivery'));
+  assert.ok(indexes.some((index) => index.name === 'idx_operational_audit_mirror_check'));
+  const migrations = await db.prepare(
+    `SELECT id FROM schema_migrations WHERE id IN (${AUDIT_MIGRATIONS.map(() => '?').join(', ')}) ORDER BY id`,
+  ).all<{ id: string }>(...AUDIT_MIGRATIONS);
+  assert.deepEqual(migrations.map((row) => row.id), AUDIT_MIGRATIONS);
+}
+
+test('opening a pre-delivery SQLite audit database adds and stamps the delivery schema', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'two-bot-audit-upgrade-'));
+  const path = join(dir, 'two.db');
+  createLegacyAuditDb(path).close();
+
+  const db = await openSqlite(path);
+  await assertAuditUpgrade(db);
+  await db.close();
+  const reopened = await openSqlite(path);
+  await assertAuditUpgrade(reopened);
+  await reopened.close();
+  await rm(dir, { recursive: true, force: true });
+});
+
+test('concurrent SQLite opens serialize the operational audit delivery upgrade', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'two-bot-audit-concurrent-'));
+  const path = join(dir, 'two.db');
+  const raw = createLegacyAuditDb(path);
+  raw.exec('PRAGMA journal_mode = WAL');
+  raw.close();
+
+  await Promise.all(Array.from({ length: 4 }, () => run(process.execPath, [OPEN_HELPER, path])));
+
+  const checked = await openSqlite(path);
+  await assertAuditUpgrade(checked);
+  await checked.close();
+  await rm(dir, { recursive: true, force: true });
+});

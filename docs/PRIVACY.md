@@ -78,9 +78,12 @@ DELETE FROM automod_violations         WHERE user_id = '<id>';
 DELETE FROM automod_processed_messages WHERE user_id = '<id>';
 DELETE FROM moderation_warnings        WHERE user_id = '<id>';
 DELETE FROM moderation_audit           WHERE target_id = '<id>' OR actor_id = '<id>';
+DELETE FROM operational_audit_log      WHERE target_id = '<id>' OR actor_id = '<id>';
 ```
 
 `TicketStore.eraseMember()` performs the ticket-table portion in one transaction.
+`OperationalAuditStore.eraseMember()` performs the operational-audit portion in one transaction;
+its opaque `entry_id` may still contain a member ID for event identity, so matching rows are deleted rather than anonymized.
 This makes historical counts drop slightly, which is correct.
 
 ## Boundaries this codebase enforces

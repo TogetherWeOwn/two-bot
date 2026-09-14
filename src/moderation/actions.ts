@@ -24,14 +24,9 @@ export async function runModerationAction(
   const target = targetId ? await ctx.resolver.target(ctx.guildId, targetId) : undefined;
   const channel = channelId ? await ctx.resolver.channel(channelId) : undefined;
 
-  if (target) {
-    const botHighest = await ctx.resolver.botHighestRolePosition(ctx.guildId);
-    if (botHighest <= target.highestRolePosition) {
-      throw new ActionError('action_not_allowed', 'The target is equal to or above Owen\'s highest role', {
-        logReason: 'bot_hierarchy',
-      });
-    }
-  }
+  const botHighestRolePosition = target
+    ? await ctx.resolver.botHighestRolePosition(ctx.guildId)
+    : undefined;
 
   const result = await ctx.service.execute({
     action,
@@ -39,6 +34,7 @@ export async function runModerationAction(
     actor,
     target,
     channel,
+    botHighestRolePosition,
     reason,
     requestId: randomUUID(),
     idempotencyKey: ctx.idempotencyKey,

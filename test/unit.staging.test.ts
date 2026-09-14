@@ -8,6 +8,8 @@
  * itself, which re-checks every count after seeding and exits non-zero on a
  * mismatch.
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openDb } from '../src/store/db.ts';
@@ -380,6 +382,36 @@ test('the invite never asks for Administrator', () => {
   assert.equal(STAGING_INVITE_PERMISSIONS & (1n << 5n), 0n, 'Manage Server');
 });
 
+test('staging verification fails when the bot holds Administrator', () => {
+  const verifier = readFileSync(join(import.meta.dirname, '..', 'scripts', 'staging-verify.ts'), 'utf8');
+  const adminBranch = verifier.slice(verifier.indexOf('if (mask & ADMIN)'), verifier.indexOf('} else if (missing.length)'));
+  assert.match(adminBranch, /fail\(\s*'Administrator permission is held'/);
+});
+
+test('the bot runtime schedules persisted audit retries and clears the timer on shutdown', () => {
+  const index = readFileSync(join(import.meta.dirname, '..', 'src', 'index.ts'), 'utf8');
+  assert.match(index, /client\.once\('ready', auditRetry\)/);
+  assert.match(index, /setInterval\(auditRetry, 30_000\)/);
+  assert.match(index, /clearInterval\(auditSweep\)/);
+  assert.match(index, /operational_audit_retry_failed/);
+});
+
+test('staging provisioning prints all audit channel ids for runtime configuration', () => {
+  const provision = readFileSync(join(import.meta.dirname, '..', 'scripts', 'staging-provision.ts'), 'utf8');
+  assert.match(provision, /auditChannelExports\(channelsAfter\)/);
+  assert.match(provision, /DISCORD_STAGING_GUILD_ID/);
+});
+
+test('staging marker verification requires the leading audit identity field', () => {
+  const verifier = readFileSync(join(import.meta.dirname, '..', 'scripts', 'staging-verify.ts'), 'utf8');
+  const markerScanner = verifier.slice(
+    verifier.indexOf('async function discordMarkerMessageIds'),
+    verifier.indexOf('// 7. Reconcile'),
+  );
+  assert.match(markerScanner, /hasAuditEventIdentity\(message\.content, entryId\)/);
+  assert.doesNotMatch(markerScanner, /message\.content\.includes\(/);
+});
+
 test('the invite is the low-bit set plus events and timeout permissions', () => {
   // Pins the relationship rather than the number, so widening the invite is a
   // deliberate edit here and not a silently larger grant. Manage Messages and
@@ -388,7 +420,7 @@ test('the invite is the low-bit set plus events and timeout permissions', () => 
     STAGING_INVITE_PERMISSIONS,
     BigInt(STAGING_PERMISSIONS) | (1n << 33n) | (1n << 40n) | (1n << 44n),
   );
-  assert.equal(STAGING_PERMISSIONS, 268528832, 'low-bit set adds Manage Messages and View Audit Log');
+  assert.equal(STAGING_PERMISSIONS, 268528832, 'the low-bit set adds Manage Messages and View Audit Log');
   assert.equal(STAGING_INVITE_PERMISSIONS, 18700556135616n);
 });
 

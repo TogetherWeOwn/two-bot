@@ -75,11 +75,9 @@ async function executeInteraction(interaction: ChatInputCommandInteraction, opti
   const reason = requireModerationReason(interaction.options.getString('reason', true));
   const targetUser = interaction.options.getUser('target');
   const target = targetUser ? await options.resolver.target(options.guildId, targetUser.id) : undefined;
-  if (target && (await options.resolver.botHighestRolePosition(options.guildId)) <= target.highestRolePosition) {
-    throw new ActionError('action_not_allowed', 'The target is equal to or above Owen\'s highest role', {
-      logReason: 'bot_hierarchy',
-    });
-  }
+  const botHighestRolePosition = target
+    ? await options.resolver.botHighestRolePosition(options.guildId)
+    : undefined;
   const channel = channelAction(action) ? await options.resolver.channel(interaction.channelId) : undefined;
 
   return options.service.execute({
@@ -88,6 +86,7 @@ async function executeInteraction(interaction: ChatInputCommandInteraction, opti
     actor,
     target,
     channel,
+    botHighestRolePosition,
     reason,
     requestId: randomUUID(),
     idempotencyKey: interaction.id,
