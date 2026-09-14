@@ -374,6 +374,28 @@ if (cfg.guildId && automationCfg.enabled) {
   });
 }
 
+// Announcements / scheduled-event RSVP / LFG / feed relays (TOG-1649).
+let feedPoller: ReturnType<typeof startFeedPoller> | null = null;
+if (cfg.guildId && announcementsCfg.enabled) {
+  const announcementsStore = new AnnouncementsStore(db);
+  const announcementsService = new AnnouncementsService(
+    announcementsStore,
+    new DiscordAnnouncements({ token: cfg.discordToken, base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined }),
+    new XmlFeedReader(),
+  );
+  registerAnnouncementCommands(client, {
+    guildId: cfg.guildId,
+    service: announcementsService,
+    store: announcementsStore,
+  });
+  feedPoller = startFeedPoller(announcementsService, cfg.guildId, announcementsCfg.feedPollSeconds);
+  log.info('announcements_enabled', { guildId: cfg.guildId, feedPollSeconds: announcementsCfg.feedPollSeconds });
+} else {
+  log.info('announcements_disabled', {
+    reason: cfg.guildId ? 'TWO_ANNOUNCEMENTS is not 1' : 'DISCORD_GUILD_ID is unset',
+  });
+}
+
 // Onboarding (TWO-7). Skipped entirely if no landing channel is configured -
 // better to run the funnel with onboarding off than to post into a guessed
 // channel on a live 100-member server.
@@ -642,6 +664,7 @@ async function shutdown(signal: string) {
   clearInterval(sweep);
   automationScheduler?.stop();
   clearInterval(auditSweep);
+  feedPoller?.stop();
   if (moderationSweep) clearInterval(moderationSweep);
   presenceProbe?.stop();
   communitySnapshots?.stop();
