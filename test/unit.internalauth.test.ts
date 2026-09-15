@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import { KeyRing, canonicalString, parseKeys, sign, signaturesMatch } from '../src/internal/signing.ts';
 import { NonceCache, withinSkew } from '../src/internal/nonce.ts';
 import { ADD_MEMBER_BUCKET, DEFAULT_BUCKET, TokenBuckets } from '../src/internal/rateLimit.ts';
-import { assertPrivateBind, isPrivateAddress, resolvePrivateBindHost } from '../src/internal/bind.ts';
+import { assertPrivateBind, discoverPrivateBindHost, isPrivateAddress, resolvePrivateBindHost } from '../src/internal/bind.ts';
 import { retryableFor, statusFor, type ErrorCode } from '../src/internal/errors.ts';
 import { buildRoleKeys } from '../src/internal/actions.ts';
 
@@ -155,6 +155,23 @@ test('binding to a public or wildcard address is a startup crash', () => {
   assert.throws(() => assertPrivateBind('::'), /wildcard/);
   assert.throws(() => assertPrivateBind(''), /wildcard/);
   assert.throws(() => assertPrivateBind('203.0.113.10'), /public address/);
+});
+
+test('the private sentinel discovers a deterministic non-loopback container address', async () => {
+  const interfaces = () => ({
+    lo: [{ address: '127.0.0.1', netmask: '255.0.0.0', family: 'IPv4' as const, mac: '', internal: true, cidr: '127.0.0.1/8' }],
+    eth0: [{ address: '10.0.1.23', netmask: '255.255.255.0', family: 'IPv4' as const, mac: '', internal: false, cidr: '10.0.1.23/24' }],
+  });
+  assert.equal(discoverPrivateBindHost(interfaces), '10.0.1.23');
+  assert.equal(await resolvePrivateBindHost('private', undefined, interfaces), '10.0.1.23');
+});
+
+test('private discovery fails closed without a usable private interface', () => {
+  const interfaces = () => ({
+    lo: [{ address: '127.0.0.1', netmask: '255.0.0.0', family: 'IPv4' as const, mac: '', internal: true, cidr: '127.0.0.1/8' }],
+    eth0: [{ address: '203.0.113.10', netmask: '255.255.255.0', family: 'IPv4' as const, mac: '', internal: false, cidr: '203.0.113.10/24' }],
+  });
+  assert.throws(() => discoverPrivateBindHost(interfaces), /no private IPv4 interface/);
 });
 
 test('a private DNS name resolves once to the exact address the server binds', async () => {

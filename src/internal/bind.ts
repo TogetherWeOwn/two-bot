@@ -12,6 +12,7 @@
 
 import { lookup } from 'node:dns/promises';
 import { isIP } from 'node:net';
+import { networkInterfaces } from 'node:os';
 
 interface BindAddress {
   address: string;
@@ -19,6 +20,22 @@ interface BindAddress {
 }
 
 export type BindLookup = (host: string) => Promise<BindAddress[]>;
+export type BindInterfaces = typeof networkInterfaces;
+
+/** Select the first non-loopback private IPv4 address from the container NICs. */
+export function discoverPrivateBindHost(interfaces: BindInterfaces = networkInterfaces): string {
+  for (const addresses of Object.values(interfaces())) {
+    for (const address of addresses ?? []) {
+      if (!address.internal && address.family === 'IPv4' && isPrivateAddress(address.address)) {
+        return normalise(address.address);
+      }
+    }
+  }
+  throw new Error(
+    'Refusing to start the internal actions endpoint because no private IPv4 interface was found. ' +
+      'Set TWO_INTERNAL_BIND_HOST to a specific private address or private DNS name.',
+  );
+}
 
 /** Loopback, RFC1918, CGNAT, link-local, and IPv6 loopback / unique-local. */
 export function isPrivateAddress(addr: string): boolean {
@@ -78,8 +95,10 @@ export function assertPrivateBind(host: string): void {
 export async function resolvePrivateBindHost(
   host: string,
   resolve: BindLookup = (name) => lookup(name, { all: true, verbatim: true }),
+  interfaces: BindInterfaces = networkInterfaces,
 ): Promise<string> {
   const h = normalise(host);
+  if (h === 'private') return discoverPrivateBindHost(interfaces);
   if (isIP(h)) {
     assertPrivateBind(h);
     return h;

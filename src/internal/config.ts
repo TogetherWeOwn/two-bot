@@ -9,7 +9,7 @@
  * | Variable | Meaning |
  * |---|---|
  * | `TWO_INTERNAL_ACTIONS` | `1` to run the listener at all. |
- * | `TWO_INTERNAL_BIND_HOST` | Private address to bind. Default `127.0.0.1`. A public address refuses to start. |
+ * | `TWO_INTERNAL_BIND_HOST` | Private address or DNS name to bind; `private` discovers a private container NIC. Default `127.0.0.1`. Public/wildcard binds refuse to start. |
  * | `TWO_INTERNAL_PORT` | Default `8787`. |
  * | `TWO_INTERNAL_KEYS` | `key-id:secret,key-id:secret`. A real secret - see docs/SECRETS.md. In production it arrives as the systemd credential `internal_keys` instead. |
  * | `TWO_INTERNAL_ROLE_KEYS` | Extra `role-key:snowflake` pairs beyond the self-assignable set. |
