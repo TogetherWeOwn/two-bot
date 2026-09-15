@@ -16,7 +16,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { log } from '../core/log.ts';
-import { assertPrivateBind } from './bind.ts';
+import { resolvePrivateBindHost } from './bind.ts';
 import {
   ActionError,
   authFailure,
@@ -101,8 +101,9 @@ export interface InternalServer {
 
 export async function startInternalActions(opts: InternalServerOptions): Promise<InternalServer> {
   // Before a socket exists. A config mistake should be a crash, not a quietly
-  // exposed remote control for the Discord server.
-  assertPrivateBind(opts.host);
+  // exposed remote control for the Discord server. Resolve once and bind the
+  // exact address validated here so DNS cannot change between check and use.
+  const bindHost = await resolvePrivateBindHost(opts.host);
 
   if (opts.keys.size === 0) {
     throw new Error('Refusing to start the internal actions endpoint with no signing keys.');
@@ -118,7 +119,7 @@ export async function startInternalActions(opts: InternalServerOptions): Promise
 
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(opts.port, opts.host, () => {
+    server.listen(opts.port, bindHost, () => {
       server.removeListener('error', reject);
       resolve();
     });
@@ -126,7 +127,8 @@ export async function startInternalActions(opts: InternalServerOptions): Promise
 
   const addr = server.address() as AddressInfo;
   log.info('internal_actions_listening', {
-    host: opts.host,
+    host: bindHost,
+    configuredHost: opts.host === bindHost ? undefined : opts.host,
     port: addr.port,
     keyIds: opts.keys.size,
     enabled: [...opts.enabled].sort(),
@@ -138,7 +140,7 @@ export async function startInternalActions(opts: InternalServerOptions): Promise
 
   return {
     port: addr.port,
-    url: `http://${opts.host}:${addr.port}${ACTIONS_PATH}`,
+    url: `http://${bindHost}:${addr.port}${ACTIONS_PATH}`,
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());
