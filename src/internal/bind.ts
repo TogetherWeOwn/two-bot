@@ -10,6 +10,16 @@
  * control for the Discord server on the public internet.
  */
 
+import { lookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
+
+interface BindAddress {
+  address: string;
+  family: number;
+}
+
+export type BindLookup = (host: string) => Promise<BindAddress[]>;
+
 /** Loopback, RFC1918, CGNAT, link-local, and IPv6 loopback / unique-local. */
 export function isPrivateAddress(addr: string): boolean {
   const host = normalise(addr);
@@ -62,4 +72,35 @@ export function assertPrivateBind(host: string): void {
         'reachable from the internet. See docs/INTERNAL_ACTIONS.md §1.',
     );
   }
+}
+
+/** Resolve a private DNS name once, then bind the exact address we validated. */
+export async function resolvePrivateBindHost(
+  host: string,
+  resolve: BindLookup = (name) => lookup(name, { all: true, verbatim: true }),
+): Promise<string> {
+  const h = normalise(host);
+  if (isIP(h)) {
+    assertPrivateBind(h);
+    return h;
+  }
+  // Keep the wildcard error distinct before asking DNS about an empty or magic name.
+  if (h === '' || h === '*') assertPrivateBind(h);
+
+  let addresses: BindAddress[];
+  try {
+    addresses = await resolve(h);
+  } catch (error) {
+    throw new Error(
+      `Refusing to start the internal actions endpoint because bind host "${host}" could not be resolved. ` +
+        'A DNS failure must not weaken the private-interface guard.',
+      { cause: error },
+    );
+  }
+
+  if (addresses.length === 0) {
+    throw new Error(`Refusing to start the internal actions endpoint because bind host "${host}" resolved to no addresses.`);
+  }
+  for (const { address } of addresses) assertPrivateBind(address);
+  return normalise(addresses[0].address);
 }

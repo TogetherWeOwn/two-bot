@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import { KeyRing, canonicalString, parseKeys, sign, signaturesMatch } from '../src/internal/signing.ts';
 import { NonceCache, withinSkew } from '../src/internal/nonce.ts';
 import { ADD_MEMBER_BUCKET, DEFAULT_BUCKET, TokenBuckets } from '../src/internal/rateLimit.ts';
-import { assertPrivateBind, isPrivateAddress } from '../src/internal/bind.ts';
+import { assertPrivateBind, isPrivateAddress, resolvePrivateBindHost } from '../src/internal/bind.ts';
 import { retryableFor, statusFor, type ErrorCode } from '../src/internal/errors.ts';
 import { buildRoleKeys } from '../src/internal/actions.ts';
 
@@ -155,6 +155,24 @@ test('binding to a public or wildcard address is a startup crash', () => {
   assert.throws(() => assertPrivateBind('::'), /wildcard/);
   assert.throws(() => assertPrivateBind(''), /wildcard/);
   assert.throws(() => assertPrivateBind('203.0.113.10'), /public address/);
+});
+
+test('a private DNS name resolves once to the exact address the server binds', async () => {
+  const lookup = async () => [{ address: '10.0.1.23', family: 4 }];
+  assert.equal(await resolvePrivateBindHost('two-bot', lookup), '10.0.1.23');
+});
+
+test('a DNS name fails closed if any answer is public or resolution fails', async () => {
+  const mixed = async () => [
+    { address: '10.0.1.23', family: 4 },
+    { address: '203.0.113.10', family: 4 },
+  ];
+  await assert.rejects(resolvePrivateBindHost('two-bot', mixed), /public address/);
+
+  const unavailable = async (): Promise<never> => {
+    throw new Error('DNS unavailable');
+  };
+  await assert.rejects(resolvePrivateBindHost('two-bot', unavailable), /could not be resolved/);
 });
 
 test('every error code has the status and retryable flag the spec published', () => {
