@@ -53,9 +53,10 @@ services:
       # --- Internal actions endpoint. Off by default. ----------------------
       # Turning this on opens a remote control for the Discord server. The
       # default is loopback INSIDE this container. For a website on a deliberately
-      # shared private Docker network, set this to the bot's stable network alias;
-      # startup resolves that name once and refuses any public or wildcard answer.
-      # Never publish port 8787. See docs/INTERNAL_ACTIONS.md §1.
+      # shared private Docker network, set this to `private`; startup discovers a
+      # private container NIC and refuses to start if none exists. A private DNS
+      # name is also accepted only when every answer is private. Never publish
+      # port 8787. See docs/INTERNAL_ACTIONS.md §1.
       TWO_INTERNAL_ACTIONS: ${TWO_INTERNAL_ACTIONS:-0}
       TWO_INTERNAL_BIND_HOST: ${TWO_INTERNAL_BIND_HOST:-127.0.0.1}
       TWO_INTERNAL_KEYS: ${TWO_INTERNAL_KEYS:-}
