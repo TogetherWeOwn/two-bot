@@ -2,8 +2,8 @@
 #
 # The first two entries are the ones that matter. A .env in the context would be
 # copied by `COPY src/`-adjacent globs and baked into a layer, where deleting it
-# later does not remove it; data/ holds the local SQLite funnel log, which is
-# member data that has no business in an image. See docs/SECRETS.md.
+# later does not remove it; data/ holds local reports and operator exports that
+# have no business in an image. See docs/SECRETS.md.
 .env
 .env.*
 !.env.example

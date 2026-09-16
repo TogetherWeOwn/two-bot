@@ -1,9 +1,9 @@
 /**
  * Backfill the message milestones by reading the server's conversation history.
  *
- *   node scripts/backfill-messages.ts --dry-run
- *   node scripts/backfill-messages.ts
- *   node scripts/backfill-messages.ts --max-pages=80
+ *   TWO_DATABASE_URL=postgres://... node scripts/backfill-messages.ts --dry-run
+ *   TWO_DATABASE_URL=postgres://... node scripts/backfill-messages.ts
+ *   TWO_DATABASE_URL=postgres://... node scripts/backfill-messages.ts --max-pages=80
  *
  * Companion to scripts/backfill.ts, which recovers joins, leaves and voice.
  * This one is separate because it is the expensive half: joins come from one
@@ -32,7 +32,11 @@ const flag = (name: string): string | null => {
 const dryRun = flag('dry-run') !== null;
 const maxPages = Number(flag('max-pages') || 60);
 const since = flag('since');
-const dbPath = flag('db') ?? process.env.TWO_DB_PATH ?? './data/two.db';
+if (flag('db') !== null) {
+  console.error('The --db option has been removed. Set TWO_DATABASE_URL instead.');
+  process.exit(2);
+}
+const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
 
 setLogLevel((process.env.LOG_LEVEL as 'debug' | 'info' | 'error') || 'error');
 
@@ -42,6 +46,10 @@ if (!token) {
   console.error('Missing DISCORD_TOKEN (or DISCORD_BOT_TOKEN). See docs/SECRETS.md.');
   process.exit(2);
 }
+if (!databaseUrl) {
+  console.error('Missing TWO_DATABASE_URL. See docs/SECRETS.md.');
+  process.exit(2);
+}
 if (!guildId) {
   console.error('Missing DISCORD_GUILD_ID.');
   process.exit(2);
@@ -49,11 +57,11 @@ if (!guildId) {
 
 const t0 = Date.now();
 const rest = new DiscordRest({ token });
-const db = await openDb(dbPath);
+const db = await openDb(databaseUrl);
 const store = new EventStore(db);
 
 console.log(`\nTWO message backfill${dryRun ? '  (DRY RUN - nothing will be written)' : ''}`);
-console.log(`  guild ${guildId}   db ${dbPath}   max ${maxPages} pages/channel\n`);
+console.log(`  guild ${guildId}   max ${maxPages} pages/channel\n`);
 
 const { early, lastActive, summary } = await findEarlyMessages(rest, {
   guildId,

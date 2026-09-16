@@ -5,21 +5,15 @@
  *
  * The bot under test is unmodified src/index.ts. The only things injected are
  * DISCORD_API_BASE, which points discord.js at the mock instead of discord.com,
- * and the datastore location.
- *
- * Runs against SQLite by default and against Postgres when
- * TWO_TEST_DATABASE_URL is set - which is how we know the shipped bot process,
- * not just the store class, works on Postgres.
+ * and an isolated Postgres schema.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { startMockDiscord } from '../tools/mock-discord/server.ts';
-import { openDb, type Db } from '../src/store/db.ts';
-import { openTestDb, usingPostgres, type TestDb } from './helpers/testDb.ts';
+import type { Db } from '../src/store/db.ts';
+import { openTestDb, TEST_PG_URL } from './helpers/testDb.ts';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const MEMBER_A = '900000000000001111';
@@ -29,13 +23,7 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/**
- * Poll the datastore until `fn` returns truthy or we run out of patience.
- *
- * `reader` is a connection owned by the test, separate from the bot's own -
- * which on Postgres means this is also a live check that a second process can
- * read the tables while the bot is writing them.
- */
+/** Poll the datastore until `fn` returns truthy or we run out of patience. */
 async function waitFor<T>(reader: Db, fn: (db: Db) => Promise<T>, timeoutMs = 20_000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   let last: unknown;
@@ -53,36 +41,15 @@ async function waitFor<T>(reader: Db, fn: (db: Db) => Promise<T>, timeoutMs = 20
 
 test('bot records the full funnel end to end over a gateway socket', { timeout: 90_000 }, async (t) => {
   const mock = await startMockDiscord();
-  const dir = mkdtempSync(join(tmpdir(), 'two-e2e-'));
-  const dbPath = join(dir, 'two.db');
+  const harness = await openTestDb(import.meta.filename);
+  const schema = harness.schema;
   let bot: ChildProcess | null = null;
   const botLog: string[] = [];
-
-  // On Postgres the bot writes into a schema of its own so this test cannot
-  // collide with the others running in parallel.
-  let harness: TestDb | null = null;
-  let reader: Db;
-  let botDbEnv: Record<string, string>;
-  if (usingPostgres) {
-    harness = await openTestDb(import.meta.filename);
-    const schema = (await harness.db.prepare(`SELECT current_schema() AS s`).get<{ s: string }>())!.s;
-    reader = harness.db;
-    botDbEnv = {
-      TWO_DATABASE_URL: process.env.TWO_TEST_DATABASE_URL!,
-      // The bot process needs to land in the same schema as the reader.
-      PGOPTIONS: `-c search_path=${schema}`,
-    };
-  } else {
-    reader = await openDb(dbPath);
-    botDbEnv = { TWO_DB_PATH: dbPath };
-  }
 
   t.after(async () => {
     bot?.kill('SIGKILL');
     await mock.close();
-    if (harness) await harness.cleanup();
-    else await reader.close();
-    rmSync(dir, { recursive: true, force: true });
+    await harness.cleanup();
   });
 
   bot = spawn(process.execPath, ['src/index.ts'], {
@@ -93,7 +60,9 @@ test('bot records the full funnel end to end over a gateway socket', { timeout: 
       DISCORD_TOKEN: 'mock.token.value',
       DISCORD_API_BASE: mock.apiBase,
       DISCORD_GUILD_ID: mock.guildId,
-      ...botDbEnv,
+      TWO_DATABASE_URL: TEST_PG_URL,
+      // The bot process needs to land in the same schema as the reader.
+      PGOPTIONS: `-c search_path=${schema}`,
       LOG_LEVEL: 'debug',
     },
   });
@@ -114,7 +83,7 @@ test('bot records the full funnel end to end over a gateway socket', { timeout: 
   mock.invites[0].uses = 6;
   mock.memberJoin(MEMBER_A, 'newcomer');
 
-  const joinEvent = await waitFor(reader, (db) =>
+  const joinEvent = await waitFor(harness.db, (db) =>
     db
       .prepare(`SELECT * FROM events WHERE event_type = 'member_join' AND member_id = ?`)
       .get(MEMBER_A),
@@ -132,7 +101,7 @@ test('bot records the full funnel end to end over a gateway socket', { timeout: 
 
   // First message, then a second message that must NOT create a second milestone.
   mock.message(MEMBER_A);
-  const firstMsg = (await waitFor(reader, (db) =>
+  const firstMsg = (await waitFor(harness.db, (db) =>
     db.prepare(`SELECT * FROM events WHERE event_type='first_message' AND member_id=?`).get(MEMBER_A),
   )) as Record<string, unknown>;
   // occurred_at must be the real send time. discord.js decodes this from the
@@ -143,44 +112,48 @@ test('bot records the full funnel end to end over a gateway socket', { timeout: 
   mock.message(MEMBER_A);
   await sleep(600);
   const msgCount = await db_count(
-    reader,
+    harness.db,
     `SELECT COUNT(*) AS n FROM events WHERE event_type='first_message' AND member_id='${MEMBER_A}'`,
   );
   assert.equal(msgCount, 1, 'first_message must fire exactly once per member');
 
   // First voice session.
   mock.voiceJoin(MEMBER_A);
-  const voice = (await waitFor(reader, (db) =>
+  const voice = (await waitFor(harness.db, (db) =>
     db.prepare(`SELECT * FROM events WHERE event_type='first_voice_session' AND member_id=?`).get(MEMBER_A),
   )) as Record<string, unknown>;
   assert.equal(voice.source, `channel:${mock.voiceChannelId}`);
 
   // A second member joining with no invite delta is honestly marked unknown.
   mock.memberJoin(MEMBER_B, 'lurker');
-  const joinB = (await waitFor(reader, (db) =>
+  const joinB = (await waitFor(harness.db, (db) =>
     db.prepare(`SELECT * FROM events WHERE event_type='member_join' AND member_id=?`).get(MEMBER_B),
   )) as Record<string, unknown>;
   assert.equal(joinB.source, 'unknown');
 
   // The members projection should now describe the funnel without touching events.
-  const m = await db_row(reader, `SELECT * FROM members WHERE member_id='${MEMBER_A}'`);
-  assert.ok(m.joined_at, 'joined_at set');
-  assert.ok(m.first_message_at, 'first_message_at set');
-  assert.ok(m.first_voice_at, 'first_voice_at set');
-  assert.equal(m.join_source, 'invite:twodev01');
+  const member = await db_row(
+    harness.db,
+    `SELECT * FROM members WHERE member_id='${MEMBER_A}'`,
+  );
+  assert.ok(member.joined_at, 'joined_at set');
+  assert.ok(member.first_message_at, 'first_message_at set');
+  assert.ok(member.first_voice_at, 'first_voice_at set');
+  assert.equal(member.join_source, 'invite:twodev01');
 
   // MEMBER_B joined and never posted - this is the re-engagement list.
   const neverPosted = await db_row(
-    reader,
+    harness.db,
     `SELECT COUNT(*) AS n FROM members WHERE first_message_at IS NULL AND first_voice_at IS NULL AND joined_at IS NOT NULL`,
   );
   assert.equal(Number(neverPosted.n), 1);
 });
 
 async function db_count(db: Db, sql: string): Promise<number> {
-  return Number((await db.prepare(sql).get<{ n: number }>())!.n);
+  const row = await db.prepare(sql).get<{ n: number }>();
+  return Number(row?.n ?? 0);
 }
 
-async function db_row(db: Db, sql: string): Promise<Record<string, any>> {
-  return (await db.prepare(sql).get()) as Record<string, any>;
+async function db_row(db: Db, sql: string): Promise<Record<string, unknown>> {
+  return (await db.prepare(sql).get()) as Record<string, unknown>;
 }

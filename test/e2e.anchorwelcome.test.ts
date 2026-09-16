@@ -15,12 +15,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { startMockDiscord, type MockDiscord } from '../tools/mock-discord/server.ts';
-import { openDb, type Db } from '../src/store/db.ts';
-import { openTestDb, usingPostgres, type TestDb } from './helpers/testDb.ts';
+import type { Db } from '../src/store/db.ts';
+import { openTestDb } from './helpers/testDb.ts';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const NEWBIE = '900000000000005555';
@@ -41,26 +39,16 @@ let harnessSeq = 0;
 
 async function startHarness(t: { after: (fn: () => unknown) => void }): Promise<Harness> {
   const mock = await startMockDiscord({ lighting: 'dark' });
-  const dir = mkdtempSync(join(tmpdir(), 'two-anchor-'));
-  const dbPath = join(dir, 'two.db');
   const botLog: string[] = [];
 
-  let harness: TestDb | null = null;
-  let reader: Db;
-  let botDbEnv: Record<string, string>;
-  if (usingPostgres) {
-    harnessSeq++;
-    harness = await openTestDb(`${import.meta.filename}_${harnessSeq}`);
-    const schema = (await harness.db.prepare(`SELECT current_schema() AS s`).get<{ s: string }>())!.s;
-    reader = harness.db;
-    botDbEnv = {
-      TWO_DATABASE_URL: process.env.TWO_TEST_DATABASE_URL!,
-      PGOPTIONS: `-c search_path=${schema}`,
-    };
-  } else {
-    reader = await openDb(dbPath);
-    botDbEnv = { TWO_DB_PATH: dbPath };
-  }
+  harnessSeq++;
+  const harness = await openTestDb(`${import.meta.filename}_${harnessSeq}`);
+  const schema = (await harness.db.prepare(`SELECT current_schema() AS s`).get<{ s: string }>())!.s;
+  const reader: Db = harness.db;
+  const botDbEnv = {
+    TWO_DATABASE_URL: process.env.TWO_TEST_DATABASE_URL!,
+    PGOPTIONS: `-c search_path=${schema}`,
+  };
 
   // The landing channel is still configured. That is the point: with the anchor
   // channel set, the picker's own welcome must NOT also fire, and the only way
@@ -86,9 +74,7 @@ async function startHarness(t: { after: (fn: () => unknown) => void }): Promise<
   t.after(async () => {
     bot.kill('SIGKILL');
     await mock.close();
-    if (harness) await harness.cleanup();
-    else await reader.close();
-    rmSync(dir, { recursive: true, force: true });
+    await harness.cleanup();
   });
 
   try {

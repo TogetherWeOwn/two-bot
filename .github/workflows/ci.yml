@@ -15,10 +15,37 @@ concurrency:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 10
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: two
+          POSTGRES_PASSWORD: two
+          POSTGRES_DB: two_test
+        ports:
+          - 5432
+        options: >-
+          --health-cmd "pg_isready -U two"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v5
+
+      # Five runners share one host, so Docker assigns an unused host port
+      # instead of every job fighting over 5432. Set the database URLs at
+      # runtime so every later step reads the mapped port.
+      - name: Configure Postgres connection
+        env:
+          PGPORT: ${{ job.services.postgres.ports['5432'] }}
+        run: |
+          echo "PGPORT=$PGPORT" >> "$GITHUB_ENV"
+          echo "TWO_TEST_DATABASE_URL=postgres://two:two@127.0.0.1:$PGPORT/two_test" >> "$GITHUB_ENV"
+          echo "TWO_DATABASE_URL=postgres://two:two@127.0.0.1:$PGPORT/two_test" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -32,7 +59,8 @@ jobs:
       # errors reach production perfectly happily.
       - run: npm run typecheck
 
-      - run: npm test
+      # The required `check` context runs the complete Postgres-backed suite.
+      - run: npm run test:postgres
 
       # The TOG-64 grant check ships its own six cases and needs neither a token
       # nor the network, so there is no reason for it to rot untested. It is the
@@ -40,14 +68,11 @@ jobs:
       # breaks, the de-escalation silently stops being verifiable.
       - run: npm run verify:grant:selftest
 
-  # The same suite against a real Postgres, plus the website's grants.
-  #
-  # This job exists because the `check` job above cannot see any of it. Every
-  # Postgres-only test skips itself when TWO_TEST_DATABASE_URL is unset - which
-  # is every run of `check` - so the backup round trip, the concurrent-writer
-  # test and the whole web_v1 contract were green by absence, not by passing.
+  # Exercise the website views and least-privilege grants end to end after the
+  # required check has proved the full Postgres-backed suite.
   postgres:
-    runs-on: ubuntu-latest
+    needs: check
+    runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 10
 
     services:
@@ -58,7 +83,7 @@ jobs:
           POSTGRES_PASSWORD: two
           POSTGRES_DB: two_test
         ports:
-          - 5432:5432
+          - 5432
         options: >-
           --health-cmd "pg_isready -U two"
           --health-interval 5s
@@ -66,43 +91,45 @@ jobs:
           --health-retries 10
 
     env:
-      TWO_TEST_DATABASE_URL: postgres://two:two@localhost:5432/two_test
-      TWO_DATABASE_URL: postgres://two:two@localhost:5432/two_test
       # Only ever reaches this throwaway container. The real one goes to the
       # Web Lead through docs/SECRETS.md and never near a repo or a log.
       TWO_WEB_RO_PASSWORD: ci-throwaway-not-a-secret
 
     steps:
       - uses: actions/checkout@v5
+
+      # Five runners share one host, so Docker assigns an unused host port
+      # instead of every job fighting over 5432. Set the database URLs at
+      # runtime so every later step reads the mapped port.
+      - name: Configure Postgres connection
+        env:
+          PGPORT: ${{ job.services.postgres.ports['5432'] }}
+        run: |
+          echo "PGPORT=$PGPORT" >> "$GITHUB_ENV"
+          echo "TWO_TEST_DATABASE_URL=postgres://two:two@127.0.0.1:$PGPORT/two_test" >> "$GITHUB_ENV"
+          echo "TWO_DATABASE_URL=postgres://two:two@127.0.0.1:$PGPORT/two_test" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
           cache: npm
 
+      # --include=dev matters: some environments set NODE_ENV=production,
+      # which makes npm silently skip devDependencies and typecheck disappears.
       - run: npm ci --include=dev
 
       # `npm test`, plus an assertion that the Postgres-only suites actually ran.
+      # Then execute the deploy sequence from docs/WEBSITE_CONTRACT.md §7 and
+      # prove the website role can read the views and nothing else.
       #
-      # Without that assertion this job proves the database was reachable, not
-      # that anything used it. The suites skip themselves when
-      # TWO_TEST_DATABASE_URL is unset, and a skipped suite reports
-      # `# tests 0 # skipped 0` and exit 0 - so renaming the env var above, or
-      # growing a second skip condition, would leave this job green with the
-      # suites silently back to skipping. That is the exact failure the job
-      # exists to kill, reintroduced without anyone touching CI (TOG-475).
-      #
-      # It asserts from inside the job because it has to: the broker profile
-      # withholds `actions:read` (TOG-247), so nothing can read this log from
-      # outside to check afterwards.
-      - run: npm run test:postgres
+      # The wrapper is intentionally a checked-in script rather than five opaque
+      # workflow steps: its self-test pins their order and fail-fast behavior,
+      # and a failure annotation can name the exact command sequence to reproduce.
+      - name: Verify Postgres contract and website role
+        run: |
+          if ! ./scripts/ci/run-postgres-job.sh; then
+            echo "::error title=Postgres contract failed::Run ./scripts/ci/run-postgres-job.sh with TWO_TEST_DATABASE_URL and TWO_DATABASE_URL set to reproduce."
+            exit 1
+          fi
 
-      # The deploy sequence from docs/WEBSITE_CONTRACT.md §7, run end to end.
-      # Documented steps that nothing executes are how a runbook rots.
-      - run: npm run migrate
-      - run: npm run web:views
-
-      # "The website role can read the views and nothing else", attempted rather
-      # than asserted. This is the step that stops a future migration quietly
-      # handing the website more access than it needs.
-      - run: npm run web:role
-      - run: npm run verify:web-role
+      - name: Verify the Postgres workflow wrapper
+        run: ./scripts/ci/run-postgres-job.test.sh

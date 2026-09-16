@@ -1,11 +1,11 @@
 import { afterEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
-import { openSqlite } from '../src/store/sqliteDriver.ts';
+import { openTestDb } from './helpers/testDb.ts';
 import { LIVE_GUILD_ID } from '../src/staging/spec.ts';
 
 const run = promisify(execFile);
@@ -22,17 +22,16 @@ afterEach(() => {
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'two-bot-leveling-scripts-'));
   dirs.push(dir);
-  const dbPath = join(dir, 'two.db');
   const exportPath = join(dir, 'mee6.json');
   writeFileSync(exportPath, JSON.stringify([{ id: '100000000000000001', xp: 100 }]));
-  return { dbPath, exportPath };
+  return { exportPath };
 }
 
-async function runScript(script: string, args: string[], dbPath: string) {
+async function runScript(script: string, args: string[], dbEnv: Record<string, string>) {
   try {
     const result = await run('node', [script, ...args], {
       cwd: REPO,
-      env: { ...process.env, TWO_DATABASE_URL: '', TWO_DB_PATH: dbPath },
+      env: { ...process.env, ...dbEnv },
     });
     return { code: 0, output: result.stdout + result.stderr };
   } catch (error) {
@@ -42,31 +41,39 @@ async function runScript(script: string, args: string[], dbPath: string) {
 }
 
 test('leveling operator scripts default-deny the live guild before opening the database', async () => {
-  const { dbPath, exportPath } = fixture();
+  const { exportPath } = fixture();
+  const unreachableDb = { TWO_DATABASE_URL: 'postgres://127.0.0.1:1/must-not-connect' };
   const imported = await runScript(
     IMPORT_SCRIPT,
     ['--guild', LIVE_GUILD_ID, '--file', exportPath],
-    dbPath,
+    unreachableDb,
   );
   const rewards = await runScript(
     REWARDS_SCRIPT,
     ['--guild', LIVE_GUILD_ID, '--set', '5:400000000000000005'],
-    dbPath,
+    unreachableDb,
   );
 
   assert.equal(imported.code, 2, imported.output);
   assert.equal(rewards.code, 2, rewards.output);
   assert.match(imported.output, /Refusing live guild/);
   assert.match(rewards.output, /Refusing live guild/);
-  assert.equal(existsSync(dbPath), false, 'refusal must happen before the database is opened');
+  assert.doesNotMatch(imported.output + rewards.output, /ECONNREFUSED|database/i);
 });
 
-test('the explicit live rollout override works only when supplied', async () => {
-  const { dbPath, exportPath } = fixture();
+test('the explicit live rollout override works only when supplied', async (t) => {
+  const { exportPath } = fixture();
+  const harness = await openTestDb(`${import.meta.filename}_override`);
+  t.after(() => harness.cleanup());
+  const schema = (await harness.db.prepare(`SELECT current_schema() AS s`).get<{ s: string }>())!.s;
+  const dbEnv = {
+    TWO_DATABASE_URL: process.env.TWO_TEST_DATABASE_URL!,
+    PGOPTIONS: `-c search_path=${schema}`,
+  };
   const imported = await runScript(
     IMPORT_SCRIPT,
     ['--guild', LIVE_GUILD_ID, '--file', exportPath, '--allow-live-guild'],
-    dbPath,
+    dbEnv,
   );
   const rewards = await runScript(
     REWARDS_SCRIPT,
@@ -77,29 +84,33 @@ test('the explicit live rollout override works only when supplied', async () => 
       '5:400000000000000005',
       '--allow-live-guild',
     ],
-    dbPath,
+    dbEnv,
   );
 
   assert.equal(imported.code, 0, imported.output);
   assert.equal(rewards.code, 0, rewards.output);
-  const db = await openSqlite(dbPath);
   assert.equal(
-    Number((await db.prepare(`SELECT xp FROM member_levels WHERE guild_id = ?`).get<{ xp: number }>(LIVE_GUILD_ID))?.xp),
+    Number((await harness.db.prepare(`SELECT xp FROM member_levels WHERE guild_id = ?`).get<{ xp: number }>(LIVE_GUILD_ID))?.xp),
     100,
   );
   assert.equal(
-    Number((await db.prepare(`SELECT level FROM level_role_rewards WHERE guild_id = ?`).get<{ level: number }>(LIVE_GUILD_ID))?.level),
+    Number((await harness.db.prepare(`SELECT level FROM level_role_rewards WHERE guild_id = ?`).get<{ level: number }>(LIVE_GUILD_ID))?.level),
     5,
   );
-  await db.close();
 });
 
-test('staging remains accepted without the live rollout override', async () => {
-  const { dbPath, exportPath } = fixture();
+test('staging remains accepted without the live rollout override', async (t) => {
+  const { exportPath } = fixture();
+  const harness = await openTestDb(`${import.meta.filename}_staging`);
+  t.after(() => harness.cleanup());
+  const schema = (await harness.db.prepare(`SELECT current_schema() AS s`).get<{ s: string }>())!.s;
   const result = await runScript(
     IMPORT_SCRIPT,
     ['--guild', STAGING_GUILD_ID, '--file', exportPath],
-    dbPath,
+    {
+      TWO_DATABASE_URL: process.env.TWO_TEST_DATABASE_URL!,
+      PGOPTIONS: `-c search_path=${schema}`,
+    },
   );
 
   assert.equal(result.code, 0, result.output);

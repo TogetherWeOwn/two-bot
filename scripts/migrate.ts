@@ -4,8 +4,7 @@
  *   node scripts/migrate.ts --status    # what is applied, what is pending
  *   node scripts/migrate.ts             # apply everything pending
  *
- * Reads TWO_DATABASE_URL. Postgres only - the SQLite path bootstraps from
- * src/store/schema.sql and is on its way out (TOG-37).
+ * Reads TWO_DATABASE_URL.
  *
  * The bot also migrates at startup, so on a normal deploy this script is
  * belt-and-braces. It exists for the case that matters: applying a migration
@@ -29,7 +28,7 @@ if (!url) {
   process.exit(1);
 }
 if (!isPostgresSpec(url)) {
-  console.error(`migrate: TWO_DATABASE_URL is not a Postgres URL (${url.split(':')[0]}:...).`);
+  console.error('migrate: TWO_DATABASE_URL must use postgres:// or postgresql://.');
   process.exit(1);
 }
 

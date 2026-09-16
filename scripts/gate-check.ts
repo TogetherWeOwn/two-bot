@@ -124,15 +124,15 @@ const homepageHtml = publicSite.homepageHtml;
 // explicit that this works without a deployed bot - it reads whatever
 // `npm run capture` has written - so an unbound URL here means "nobody gave us
 // the database", not "the bot is down".
-const dbSpec = process.env.TWO_DATABASE_URL || process.env.TWO_DB_PATH;
-if (!dbSpec) {
-  const why = 'neither TWO_DATABASE_URL nor TWO_DB_PATH is bound in this environment.';
+const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
+if (!databaseUrl) {
+  const why = 'TWO_DATABASE_URL is not bound in this environment.';
   o.funnelDetail = why;
   o.webCodeRowDetail = why;
 } else {
   let db;
   try {
-    db = await openDb(dbSpec, { skipMigrations: true, poolMax: 2, applicationName: 'two-bot-gate-check' });
+    db = await openDb(databaseUrl, { skipMigrations: true, poolMax: 2, applicationName: 'two-bot-gate-check' });
   } catch (err) {
     const why = `the funnel database could not be opened: ${err instanceof Error ? err.message : String(err)}`;
     o.funnelDetail = why;

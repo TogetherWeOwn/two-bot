@@ -1,6 +1,6 @@
 import { after, before, beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { openTestDb, usingPostgres, type TestDb } from './helpers/testDb.ts';
+import { openTestDb, type TestDb } from './helpers/testDb.ts';
 import { DestructiveContainment } from '../src/moderation/containment.ts';
 import { ContainmentStore } from '../src/moderation/containmentStore.ts';
 import type { ContainmentConfig } from '../src/moderation/containmentConfig.ts';
@@ -26,7 +26,7 @@ const config: ContainmentConfig = {
   bulkJoinWindowUntil: null,
 };
 
-describe('Postgres containment concurrency', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE_URL' }, () => {
+describe('Postgres containment concurrency', () => {
   let harness: TestDb;
   before(async () => { harness = await openTestDb(import.meta.filename); });
   after(async () => harness.cleanup());

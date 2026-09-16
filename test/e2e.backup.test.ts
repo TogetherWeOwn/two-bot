@@ -8,8 +8,7 @@
  * that are easy to lose and hard to notice - the `events` id sequence, and the
  * idempotency keys that stop a join being counted twice.
  *
- * Skipped unless TWO_TEST_DATABASE_URL is set. There is no SQLite dump format;
- * the SQLite path keeps `scripts/backup.sh` until it is deleted (TOG-37).
+ * Run with TWO_TEST_DATABASE_URL pointing at an isolated Postgres database.
  */
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -19,11 +18,11 @@ import { join } from 'node:path';
 import { gunzipSync, gzipSync } from 'node:zlib';
 import { EventStore } from '../src/store/eventStore.ts';
 import { dump, restore, DUMP_TABLES } from '../src/store/dump.ts';
-import { openTestDb, usingPostgres, type TestDb } from './helpers/testDb.ts';
+import { openTestDb, type TestDb } from './helpers/testDb.ts';
 
 const G = 'guild-backup';
 
-describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE_URL' }, () => {
+describe('backup round trip', () => {
   let harness: TestDb;
   let store: EventStore;
   let dir: string;
