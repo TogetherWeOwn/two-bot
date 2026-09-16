@@ -119,7 +119,7 @@ async function stubDiscord(): Promise<Stub> {
   let partialNextWrite = false;
   let partialWriteTarget: string | null = null;
   let onboardingStatus = 200;
-  let onboardingRaw: { contentType: string; payload: string | null } | null = null;
+  let onboardingRaw: { contentType: string; payload: string | null; status: number } | null = null;
   const server: Server = createServer((req, res) => {
     const method = req.method ?? 'GET';
     const path = req.url ?? '';
@@ -197,9 +197,9 @@ async function stubDiscord(): Promise<Stub> {
       // with nothing the derivation can read, so the stub has to serve the raw bytes
       // rather than a JSON value the test helper would re-encode.
       if (onboardingRaw !== null) {
-        const { contentType, payload } = onboardingRaw;
-        if (payload === null) return res.writeHead(200, { 'content-type': contentType }).end();
-        res.writeHead(200, { 'content-type': contentType, 'content-length': Buffer.byteLength(payload) });
+        const { contentType, payload, status } = onboardingRaw;
+        if (payload === null) return res.writeHead(status, { 'content-type': contentType }).end();
+        res.writeHead(status, { 'content-type': contentType, 'content-length': Buffer.byteLength(payload) });
         return res.end(payload);
       }
       return onboardingStatus === 200 ? send(200, references.onboarding) : send(onboardingStatus, { message: 'stubbed failure', code: 0 });
@@ -220,7 +220,7 @@ async function stubDiscord(): Promise<Stub> {
     writeOrder,
     rollbackOrder,
     failOnboardingRead(status: number) { onboardingStatus = status; },
-    serveOnboardingRaw(contentType: string, payload: string | null) { onboardingRaw = { contentType, payload }; },
+    serveOnboardingRaw(contentType: string, payload: string | null, status = 200) { onboardingRaw = { contentType, payload, status }; },
     failNextWrite(status: number) { nextFailure = status; },
     partialNextWrite() { partialNextWrite = true; },
     partialWriteOn(objectId: string) { partialNextWrite = true; partialWriteTarget = objectId; },
@@ -434,7 +434,10 @@ test('guild references exclude too, and a Server Guide that is off pins nothing'
     // A Server Guide that is switched off pins nothing, so excluding its channels
     // would leave them visible for no reason. Without this the `enabled` gate is free
     // to be vacuous.
-    delete stub.state.guild.rules_channel_id;
+    // `null`, not `delete`: Discord sends the key on every guild read and answers `null`
+    // when the guild pins nothing. Absence means the read did not answer, which the
+    // planner now refuses — see the guild-reference readability test below.
+    stub.state.guild.rules_channel_id = null;
     stub.references.onboarding = {
       enabled: false,
       default_channel_ids: [pinned],
@@ -540,6 +543,80 @@ test('a 200 that is not a Server Guide payload refuses the plan', async () => {
       assert.notEqual(result.code, 0, `${label} produced a plan`);
       assert.equal(stub.writes.length, 0, label);
       assert.match(result.stderr, /is not a Server Guide payload/, label);
+      assert.ok(!existsSync(planManifestPath(dir)), `${label} produced a plan manifest`);
+      // Refusing still has to leave the stop evidence behind.
+      assert.ok(existsSync(join(dir, 'snapshot', 'pre.json')), label);
+    } finally { await stub.close(); }
+  }
+});
+
+/**
+ * The status half of the Server Guide gate, pinned on its own.
+ *
+ * Readability subsumes the status check for every body Discord actually sends with an
+ * error, so deleting `onboardingStatus !== 200 ||` left the suite green — genuine
+ * defence in depth, but unpinned, which means a refactor can delete it and stay green.
+ * This is the case that needs it: a non-200 carrying a well-formed Server Guide payload,
+ * the shape a caching proxy or an edge that replays a stale body produces. A 429 is not
+ * an authoritative answer about what the guild pins right now no matter how well-formed
+ * its body is, so readability alone must not be enough to clear it.
+ */
+test('a non-200 carrying a well-formed Server Guide payload still refuses the plan', async () => {
+  const stub = await stubDiscord();
+  try {
+    const drifted = new Set(PERMISSION_DRIFT.mismatches.map((mismatch) => mismatch.channelId));
+    const synchronized = LEGACY_CHANNEL_IDS.find((id) => !drifted.has(id))!;
+    // Read at 200 this pins a synchronized legacy channel, which refuses loudly; the
+    // point is that the refusal must come from the status, not from that.
+    stub.serveOnboardingRaw('application/json', JSON.stringify({
+      guild_id: LIVE_GUILD_ID,
+      enabled: true,
+      default_channel_ids: [synchronized],
+      prompts: [],
+    }), 429);
+    const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-guide-stale-'));
+    const result = await plan(stub, dir);
+    assert.notEqual(result.code, 0);
+    assert.equal(stub.writes.length, 0);
+    assert.match(result.stderr, /Server Guide .* answered HTTP 429/);
+    assert.ok(!existsSync(planManifestPath(dir)));
+    assert.ok(existsSync(join(dir, 'snapshot', 'pre.json')));
+  } finally { await stub.close(); }
+});
+
+/**
+ * The same defect class as the two tests above, on the source that actually pins channels
+ * on this guild: all five TOG-2907 pre-snapshots have `onboarding.enabled === false`, so
+ * the Server Guide contributes 0 exclusions and both real ones come from `guildReferences`.
+ *
+ * `guild` is a `mustGet`, so no transport failure reaches the derivation — what does is
+ * field-level absence inside a 200, which a status code does not rule out. Before the
+ * gate, on the live 2026-09-16T12:20:52Z pre-snapshot: 67 operations excluding
+ * 1132448261253369939 and 1138590808715571300, against 69 with both PATCHed — and those
+ * two PATCHes are the 400/350003 that stopped the TOG-2806 apply on operation 31.
+ *
+ * Driven, like the Server Guide cases, off a channel *synchronized* with its category:
+ * that is the silent half, where losing the exclusion loses a refusal rather than
+ * producing a PATCH Discord would have rejected.
+ */
+test('an unreadable guild reference block refuses the plan', async () => {
+  const variants: Array<{ label: string; wreck: (guild: JsonObject) => void }> = [
+    { label: 'all three keys absent', wreck: (guild) => { delete guild.rules_channel_id; delete guild.public_updates_channel_id; delete guild.safety_alerts_channel_id; } },
+    { label: 'one key absent', wreck: (guild) => { delete guild.public_updates_channel_id; } },
+    { label: 'key present but not a channel id', wreck: (guild) => { guild.safety_alerts_channel_id = { id: '1' }; } },
+  ];
+  for (const { label, wreck } of variants) {
+    const stub = await stubDiscord();
+    try {
+      const drifted = new Set(PERMISSION_DRIFT.mismatches.map((mismatch) => mismatch.channelId));
+      const synchronized = LEGACY_CHANNEL_IDS.find((id) => !drifted.has(id))!;
+      stub.state.guild.rules_channel_id = synchronized;
+      wreck(stub.state.guild);
+      const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-guild-refs-'));
+      const result = await plan(stub, dir);
+      assert.notEqual(result.code, 0, `${label} produced a plan`);
+      assert.equal(stub.writes.length, 0, label);
+      assert.match(result.stderr, /Guild references \(GET \/guilds\/\{id\}\) carried no/, label);
       assert.ok(!existsSync(planManifestPath(dir)), `${label} produced a plan manifest`);
       // Refusing still has to leave the stop evidence behind.
       assert.ok(existsSync(join(dir, 'snapshot', 'pre.json')), label);

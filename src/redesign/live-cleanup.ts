@@ -726,6 +726,63 @@ function jsonObject(value: unknown): JsonObject | undefined {
 }
 
 /**
+ * The three guild-level channel references of the 350003 class, paired with the key
+ * Discord answers them under and the source label the exclusion list reports.
+ *
+ * Kept in one place because three call sites build this block — `captureSnapshot`, and
+ * both of the rollback script's re-derivations — and all three feed the same semantic
+ * hash. A field added to one and not the others is a hash mismatch at rollback time; a
+ * field dropped from one is the derivation reading "unknown" as "pins nothing".
+ */
+export const PINNED_GUILD_REFERENCES = [
+  { field: 'rulesChannelId', discordKey: 'rules_channel_id', source: 'guild.rules_channel_id' },
+  { field: 'publicUpdatesChannelId', discordKey: 'public_updates_channel_id', source: 'guild.public_updates_channel_id' },
+  { field: 'safetyAlertsChannelId', discordKey: 'safety_alerts_channel_id', source: 'guild.safety_alerts_channel_id' },
+] as const;
+
+/**
+ * The `references.guildReferences` block, built from a raw `GET /guilds/{id}` body.
+ *
+ * An absent key is copied as absent rather than collapsed to `null`. Discord sends all
+ * three on every guild read — `null` when the guild pins nothing — so absence means the
+ * read did not answer the question, and `null` means it answered "nothing". Collapsing
+ * the first into the second here would destroy the distinction *before* the semantic
+ * hash is taken, after which no downstream check can recover it: dry-run and apply read
+ * the same collapsed field and agree on the wrong answer. That is the round-9 defect
+ * (TOG-3074) one source to the left, and on the live guild it is the source that matters
+ * — every TOG-2907 pre-snapshot has `onboarding.enabled === false`, so the Server Guide
+ * contributes 0 exclusions and both real ones come from this block.
+ */
+export function guildReferenceBlock(guild: JsonObject): JsonObject {
+  const block: JsonObject = {
+    applicationId: guild.application_id ?? null,
+    systemChannelId: guild.system_channel_id ?? null,
+  };
+  for (const { field, discordKey } of PINNED_GUILD_REFERENCES) {
+    if (!(discordKey in guild)) continue;
+    block[field] = guild[discordKey];
+  }
+  return block;
+}
+
+/**
+ * Why this block is unreadable, or `null` when it answered the question.
+ *
+ * Readable means: the block is an object, and each of the three fields is present and is
+ * either a channel id string or `null`. Anything else — an absent key, `undefined`, a
+ * number, a nested object — is a read that did not answer, and `note()` would silently
+ * no-op on it.
+ */
+export function unreadableGuildReferences(references: JsonObject): string | null {
+  const block = jsonObject(references.guildReferences);
+  if (block === undefined) return 'no `guildReferences` block at all';
+  const unreadable = PINNED_GUILD_REFERENCES
+    .filter(({ field }) => !(field in block) || !(block[field] === null || typeof block[field] === 'string'))
+    .map(({ discordKey }) => `\`${discordKey}\``);
+  return unreadable.length === 0 ? null : `no readable ${unreadable.join(', ')}`;
+}
+
+/**
  * Channel IDs the live guild pins as publicly readable, read out of the references
  * block `captureSnapshot` already stores beside the snapshot.
  *
@@ -753,10 +810,20 @@ export function onboardingReferencedChannels(snapshot: Pick<LiveCleanupSnapshot,
     sources.set(channelId, existing);
   };
   const references = snapshot.references ?? {};
-  const guildReferences = jsonObject(references.guildReferences);
-  note(guildReferences?.rulesChannelId, 'guild.rules_channel_id');
-  note(guildReferences?.publicUpdatesChannelId, 'guild.public_updates_channel_id');
-  note(guildReferences?.safetyAlertsChannelId, 'guild.safety_alerts_channel_id');
+  // Same argument as the Server Guide gate below, on the source that actually pins
+  // channels on this guild. `guild` is a `mustGet`, so a transport failure cannot reach
+  // here — what can is field-level absence inside a 200, which a status code does not
+  // rule out. Unguarded, `jsonObject()` returns `undefined` and all three `note()` calls
+  // no-op, which reads identically to a guild that pins nothing: measured on the live
+  // 2026-09-16T12:20:52Z pre-snapshot, 67 operations excluding 1132448261253369939 and
+  // 1138590808715571300, against 69 with both of them PATCHed — and those two PATCHes
+  // are the 400/350003 that stopped the TOG-2806 apply on operation 31.
+  const unreadable = unreadableGuildReferences(references);
+  if (unreadable !== null) {
+    throw new Error(`Guild references (GET /guilds/{id}) carried ${unreadable}, so the set of channels Discord pins publicly readable is unknown. Planning refuses rather than treat an unreadable guild reference block as one that pins nothing. Re-run the dry-run from a snapshot whose guild read carries \`rules_channel_id\`, \`public_updates_channel_id\` and \`safety_alerts_channel_id\`, each a channel id or null.`);
+  }
+  const guildReferences = jsonObject(references.guildReferences)!;
+  for (const { field, source } of PINNED_GUILD_REFERENCES) note(guildReferences[field], source);
   // `captureSnapshot` reads onboarding with best-effort `api()`, not `mustGet()`, because
   // losing the pre-snapshot to a transient 429 costs more than it buys. That is fine while
   // the read is only evidence. It is not fine here, where it decides which channels this

@@ -15,6 +15,7 @@ import {
   assertLatestCheckpoint,
   type Channel,
   type CleanupManifest,
+  guildReferenceBlock,
   type JsonObject,
   inFlightDriftIsOurs,
   inFlightExceptionIsAvailable,
@@ -223,13 +224,7 @@ function nonChannelSemantic(
       welcomeScreen: { status: currentWelcome.status, body: currentWelcome.body },
       onboarding: { status: currentOnboarding.status, body: currentOnboarding.body },
       membershipScreening: { status: currentScreening.status, body: currentScreening.body },
-      guildReferences: {
-        applicationId: currentGuild.application_id ?? null,
-        systemChannelId: currentGuild.system_channel_id ?? null,
-        rulesChannelId: currentGuild.rules_channel_id ?? null,
-        publicUpdatesChannelId: currentGuild.public_updates_channel_id ?? null,
-        safetyAlertsChannelId: currentGuild.safety_alerts_channel_id ?? null,
-      },
+      guildReferences: guildReferenceBlock(currentGuild),
     },
   });
   return nonChannel;
@@ -433,13 +428,7 @@ const restored = {
     welcomeScreen: { status: postWelcome.status, body: postWelcome.body },
     onboarding: { status: postOnboarding.status, body: postOnboarding.body },
     membershipScreening: { status: postScreening.status, body: postScreening.body },
-    guildReferences: {
-      applicationId: postGuild.application_id ?? null,
-      systemChannelId: postGuild.system_channel_id ?? null,
-      rulesChannelId: postGuild.rules_channel_id ?? null,
-      publicUpdatesChannelId: postGuild.public_updates_channel_id ?? null,
-      safetyAlertsChannelId: postGuild.safety_alerts_channel_id ?? null,
-    },
+    guildReferences: guildReferenceBlock(postGuild),
   },
 };
 const restoredHash = sha256(semanticSnapshot(restored));

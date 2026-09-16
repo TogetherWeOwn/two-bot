@@ -64,12 +64,16 @@ function fixtureSnapshot(): LiveCleanupSnapshot {
       pending: Boolean(member.pending),
     })).sort((a, b) => a.id.localeCompare(b.id)),
     integrations: [],
-    // Readable Server Guide that pins nothing, in the `{status, body}` shape
-    // `captureSnapshot` records. `planArchiveOperations` refuses an unreadable one, so
-    // `references: {}` made the documented default invocation above throw before it
-    // audited anything (TOG-3059/TOG-3060). `--snapshot <real pre.json>` carries the
-    // live references and is unaffected either way.
-    references: { onboarding: { status: 200, body: { enabled: false, default_channel_ids: [], prompts: [] } } },
+    // A readable Server Guide that pins nothing, and a readable guild reference block that
+    // pins nothing, both in the shapes `captureSnapshot` records. `planArchiveOperations`
+    // refuses an unreadable one of either, so `references: {}` made this throw and the
+    // operator's pin unregenerable (TOG-3059/TOG-3060); omitting `guildReferences` alone
+    // would do it again. Declaring both readable-and-empty keeps the output a pure function
+    // of the channel/category fixture.
+    references: {
+      onboarding: { status: 200, body: { enabled: false, default_channel_ids: [], prompts: [] } },
+      guildReferences: { applicationId: null, systemChannelId: null, rulesChannelId: null, publicUpdatesChannelId: null, safetyAlertsChannelId: null },
+    },
   });
 }
 

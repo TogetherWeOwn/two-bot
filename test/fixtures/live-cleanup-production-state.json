@@ -4,6 +4,10 @@
     "name": "TogetherWeOwn",
     "owner_id": "275483498603741184",
     "application_id": null,
+    "system_channel_id": null,
+    "rules_channel_id": null,
+    "public_updates_channel_id": null,
+    "safety_alerts_channel_id": null,
     "features": [
       "ROLE_SUBSCRIPTIONS_ENABLED",
       "VIDEO_BITRATE_ENHANCED",

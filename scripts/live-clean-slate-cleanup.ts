@@ -25,6 +25,7 @@ import {
   buildManifest,
   type Channel,
   type CleanupManifest,
+  guildReferenceBlock,
   type JsonObject,
   inFlightDriftIsOurs,
   inFlightExceptionIsAvailable,
@@ -253,13 +254,7 @@ async function captureSnapshot(): Promise<LiveCleanupSnapshot> {
     welcomeScreen: { status: welcome.status, body: welcome.body },
     onboarding: { status: onboarding.status, body: onboarding.body },
     membershipScreening: { status: screening.status, body: screening.body },
-    guildReferences: {
-      applicationId: guild.application_id ?? null,
-      systemChannelId: guild.system_channel_id ?? null,
-      rulesChannelId: guild.rules_channel_id ?? null,
-      publicUpdatesChannelId: guild.public_updates_channel_id ?? null,
-      safetyAlertsChannelId: guild.safety_alerts_channel_id ?? null,
-    },
+    guildReferences: guildReferenceBlock(guild),
   };
   return withSemanticHash({
     version: 1,
