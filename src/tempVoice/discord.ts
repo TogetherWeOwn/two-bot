@@ -233,6 +233,26 @@ export class DiscordTempVoiceGateway implements TempVoiceGateway {
     const guild = await this.client.guilds.fetch(guildId);
     return guild.maximumBitrate;
   }
+
+  /**
+   * Effective permissions in the category, which is what Discord actually
+   * checks - a guild-wide role grant and a category overwrite both satisfy it,
+   * and the narrower one is the one to ask an operator for.
+   */
+  async missingPermissions(
+    guildId: string,
+    categoryId: string,
+    flags: readonly OverwriteFlag[],
+  ): Promise<OverwriteFlag[]> {
+    const guild = await this.client.guilds.fetch(guildId);
+    const me = guild.members.me ?? (await guild.members.fetchMe());
+    const category = await this.client.channels.fetch(categoryId);
+    if (!category || category.type !== ChannelType.GuildCategory) {
+      throw new TempVoiceGatewayError(`category ${categoryId} is not a category channel`, null);
+    }
+    const held = category.permissionsFor(me);
+    return flags.filter((flag) => !held?.has(FLAGS[flag]));
+  }
 }
 
 // ------------------------------------------------------------------ commands

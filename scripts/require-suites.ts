@@ -52,7 +52,7 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
   },
   {
     file: 'test/unit.tempvoice.test.ts',
-    minTests: 50,
+    minTests: 54,
     why: 'the "no persisted row, no delete" invariant, and the atomic per-user cap claim behind it',
   },
 ];

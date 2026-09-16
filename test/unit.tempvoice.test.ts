@@ -18,8 +18,11 @@ import { RenameThrottle, RENAME_MIN_INTERVAL_MS } from '../src/tempVoice/rename.
 import { TempVoiceStore } from '../src/tempVoice/store.ts';
 import {
   CATEGORY_FULL_CODE,
+  MISSING_PERMISSIONS_CODE,
+  TEMP_VOICE_REQUIRED_PERMISSIONS,
   TempVoiceGatewayError,
   TempVoiceService,
+  tempVoiceOverwrites,
   type ControlContext,
   type OverwriteFlag,
   type OverwriteSpec,
@@ -175,6 +178,17 @@ class FakeGateway implements TempVoiceGateway {
   }
 
   async maxBitrate(): Promise<number> { return 96000; }
+
+  /** Permissions the bot is pretending NOT to hold on the category. */
+  lackedPermissions = new Set<OverwriteFlag>();
+
+  async missingPermissions(
+    _guildId: string,
+    _categoryId: string,
+    flags: readonly OverwriteFlag[],
+  ): Promise<OverwriteFlag[]> {
+    return flags.filter((flag) => this.lackedPermissions.has(flag));
+  }
 }
 
 const dbFixture = await openTestDb(import.meta.filename);
@@ -408,6 +422,48 @@ describe('creating a channel', () => {
 
     gateway.failCreate = null;
     assert.equal((await join(svc, OWNER)).status, 'created');
+  });
+
+  test('refuses a 50013 without telling the member to retry', async () => {
+    const svc = service();
+    gateway.failCreate = new TempVoiceGatewayError('missing permissions', MISSING_PERMISSIONS_CODE);
+    const outcome = await join(svc, OWNER);
+    assert.equal(outcome.status, 'refused');
+    const reason = outcome.status === 'refused' ? outcome.reason : '';
+    // Discord returns 50013 when the bot tries to grant a permission it does
+    // not hold. No amount of retrying changes that, so "please try again" is
+    // advice that can never work - the message has to name the real fix.
+    assert.doesNotMatch(reason, /try again/i);
+    assert.match(reason, /admin/i);
+    assert.match(reason, /MoveMembers/);
+    assert.equal(await store.countForOwner(GUILD, OWNER), 0, 'a failed create must roll its reservation back');
+  });
+});
+
+describe('permission preflight', () => {
+  test('the required set is exactly what the overwrites grant', () => {
+    const granted = new Set<OverwriteFlag>();
+    for (const spec of tempVoiceOverwrites(GUILD, '1469137636663758888', OWNER)) {
+      for (const flag of spec.allow ?? []) granted.add(flag);
+    }
+    // Drift here is the 50013 above, deferred until a member hits the
+    // generator in production. Any flag added to the overwrites is a flag the
+    // bot must hold, and therefore a flag the preflight must check.
+    assert.deepEqual([...granted].sort(), [...TEMP_VOICE_REQUIRED_PERMISSIONS].sort());
+  });
+
+  test('names the missing permission rather than failing opaquely', async () => {
+    gateway.lackedPermissions = new Set<OverwriteFlag>(['MoveMembers']);
+    const result = await service().preflight(GUILD);
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.missing, ['MoveMembers']);
+  });
+
+  test('passes when the bot holds everything, and is a no-op when disabled', async () => {
+    assert.deepEqual(await service().preflight(GUILD), { ok: true, missing: [] });
+    gateway.lackedPermissions = new Set<OverwriteFlag>(['ManageChannels']);
+    const off = await service(config({ enabled: false })).preflight(GUILD);
+    assert.deepEqual(off, { ok: true, missing: [] }, 'a disabled feature must not report a setup fault');
   });
 });
 
