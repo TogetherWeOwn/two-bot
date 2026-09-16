@@ -9,12 +9,14 @@
  * | Variable | Meaning |
  * |---|---|
  * | `TWO_INTERNAL_ACTIONS` | `1` to run the listener at all. |
- * | `TWO_INTERNAL_BIND_HOST` | Private address to bind. Default `127.0.0.1`. A public address refuses to start. |
+ * | `TWO_INTERNAL_BIND_HOST` | Private address or DNS name to bind; `private` discovers a private container NIC. Default `127.0.0.1`. Public/wildcard binds refuse to start. |
  * | `TWO_INTERNAL_PORT` | Default `8787`. |
  * | `TWO_INTERNAL_KEYS` | `key-id:secret,key-id:secret`. A real secret - see docs/SECRETS.md. In production it arrives as the systemd credential `internal_keys` instead. |
  * | `TWO_INTERNAL_ROLE_KEYS` | Extra `role-key:snowflake` pairs beyond the self-assignable set. |
  * | `TWO_INTERNAL_CHANNEL_KEYS` | `channel-key:snowflake` pairs. Empty by default, and `announcement.post` can address nothing without it. |
  * | `TWO_INTERNAL_ALLOW_ADD_MEMBER` | `1` to enable `guild.add_member`. **Requires the CEO's sign-off (TOG-44).** |
+ * | `TWO_INTERNAL_ALLOW_AUTOMATIONS` | `1` to enable non-destructive `automations.import` and `automations.export`. Default off pending allowlist approval. |
+ * | `TWO_INTERNAL_ALLOW_AUTOMATIONS_OVERWRITE` | `1` to permit destructive imports. Requires the base automations flag too. |
  */
 import { parseKeys, type SigningKey } from './signing.ts';
 import { buildRoleKeys, buildChannelKeys, type ActionName } from './actions.ts';
@@ -27,6 +29,7 @@ export interface InternalActionsConfig {
   roleKeys: Map<string, string>;
   channelKeys: Map<string, string>;
   enabled: Set<ActionName>;
+  allowAutomationOverwrite: boolean;
 }
 
 /** Null when the endpoint is switched off, which is the default. */
@@ -53,6 +56,26 @@ export function loadInternalActionsConfig(env: NodeJS.ProcessEnv = process.env):
   // address, so an unconfigured bot refuses every post by key lookup.
   const enabled = new Set<ActionName>(['role.assign', 'announcement.post', 'event.upsert']);
   if (env.TWO_INTERNAL_ALLOW_ADD_MEMBER === '1') enabled.add('guild.add_member');
+  // These verbs widen the website key's fixed allowlist, so merely shipping the
+  // implementation must not enable them. The flag is the approval record and
+  // defaults off. Destructive overwrite is checked separately at action time.
+  if (env.TWO_INTERNAL_ALLOW_AUTOMATIONS === '1') {
+    enabled.add('automations.import');
+    enabled.add('automations.export');
+  }
+  if (env.TWO_INTERNAL_ALLOW_MODERATION === '1' && env.TWO_MODERATION === '1') {
+    for (const action of [
+      'moderation.ban',
+      'moderation.tempban',
+      'moderation.kick',
+      'moderation.timeout',
+      'moderation.warn',
+      'moderation.purge',
+      'moderation.slowmode',
+      'moderation.lockdown',
+      'moderation.unlock',
+    ] as const) enabled.add(action);
+  }
 
   return {
     host: env.TWO_INTERNAL_BIND_HOST || '127.0.0.1',
@@ -61,5 +84,8 @@ export function loadInternalActionsConfig(env: NodeJS.ProcessEnv = process.env):
     roleKeys: buildRoleKeys(env.TWO_INTERNAL_ROLE_KEYS ?? ''),
     channelKeys: buildChannelKeys(env.TWO_INTERNAL_CHANNEL_KEYS ?? ''),
     enabled,
+    allowAutomationOverwrite:
+      env.TWO_INTERNAL_ALLOW_AUTOMATIONS === '1' &&
+      env.TWO_INTERNAL_ALLOW_AUTOMATIONS_OVERWRITE === '1',
   };
 }

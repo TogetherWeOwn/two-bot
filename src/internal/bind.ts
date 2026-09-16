@@ -10,6 +10,33 @@
  * control for the Discord server on the public internet.
  */
 
+import { lookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
+import { networkInterfaces } from 'node:os';
+
+interface BindAddress {
+  address: string;
+  family: number;
+}
+
+export type BindLookup = (host: string) => Promise<BindAddress[]>;
+export type BindInterfaces = typeof networkInterfaces;
+
+/** Select the first non-loopback private IPv4 address from the container NICs. */
+export function discoverPrivateBindHost(interfaces: BindInterfaces = networkInterfaces): string {
+  for (const addresses of Object.values(interfaces())) {
+    for (const address of addresses ?? []) {
+      if (!address.internal && address.family === 'IPv4' && isPrivateAddress(address.address)) {
+        return normalise(address.address);
+      }
+    }
+  }
+  throw new Error(
+    'Refusing to start the internal actions endpoint because no private IPv4 interface was found. ' +
+      'Set TWO_INTERNAL_BIND_HOST to a specific private address or private DNS name.',
+  );
+}
+
 /** Loopback, RFC1918, CGNAT, link-local, and IPv6 loopback / unique-local. */
 export function isPrivateAddress(addr: string): boolean {
   const host = normalise(addr);
@@ -62,4 +89,37 @@ export function assertPrivateBind(host: string): void {
         'reachable from the internet. See docs/INTERNAL_ACTIONS.md §1.',
     );
   }
+}
+
+/** Resolve a private DNS name once, then bind the exact address we validated. */
+export async function resolvePrivateBindHost(
+  host: string,
+  resolve: BindLookup = (name) => lookup(name, { all: true, verbatim: true }),
+  interfaces: BindInterfaces = networkInterfaces,
+): Promise<string> {
+  const h = normalise(host);
+  if (h === 'private') return discoverPrivateBindHost(interfaces);
+  if (isIP(h)) {
+    assertPrivateBind(h);
+    return h;
+  }
+  // Keep the wildcard error distinct before asking DNS about an empty or magic name.
+  if (h === '' || h === '*') assertPrivateBind(h);
+
+  let addresses: BindAddress[];
+  try {
+    addresses = await resolve(h);
+  } catch (error) {
+    throw new Error(
+      `Refusing to start the internal actions endpoint because bind host "${host}" could not be resolved. ` +
+        'A DNS failure must not weaken the private-interface guard.',
+      { cause: error },
+    );
+  }
+
+  if (addresses.length === 0) {
+    throw new Error(`Refusing to start the internal actions endpoint because bind host "${host}" resolved to no addresses.`);
+  }
+  for (const { address } of addresses) assertPrivateBind(address);
+  return normalise(addresses[0].address);
 }

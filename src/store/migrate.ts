@@ -32,6 +32,26 @@ export interface Migration {
   checksum: string;
 }
 
+/**
+ * Main briefly shipped a constrained rewrite of 0010 before its immutability
+ * violation was caught. Accept only that exact known checksum, then normalize
+ * it to the restored migration so 0011 can make the constraint additive.
+ */
+const COMPATIBLE_CHECKSUMS = new Map([
+  ['0010_leveling:199003b7e199c4f4', 'dce57869e8d97bad'],
+]);
+
+/**
+ * A previously-applied rewrite cannot safely have its recorded checksum moved:
+ * older binaries only understand the checksum they shipped and must still be
+ * able to start during rollback. Treat the exact known pair as equivalent in
+ * both directions, leaving the stored value untouched.
+ */
+const EQUIVALENT_CHECKSUMS = new Set([
+  '0018_self_role_audit:cb0a092fa96c904d:bc32090819445847',
+  '0018_self_role_audit:bc32090819445847:cb0a092fa96c904d',
+]);
+
 export function loadMigrations(dir: string = MIGRATIONS_DIR): Migration[] {
   return readdirSync(dir)
     .filter((f) => f.endsWith('.sql'))
@@ -88,11 +108,18 @@ export async function migrate(db: Db, dir: string = MIGRATIONS_DIR): Promise<str
             .prepare(`UPDATE schema_migrations SET checksum = ? WHERE id = ?`)
             .run(m.checksum, m.id);
         } else if (seen !== m.checksum) {
-          throw new Error(
-            `Migration ${m.id} has changed since it was applied ` +
-              `(recorded ${seen}, file ${m.checksum}). Migrations are immutable - ` +
-              `add a new one instead. See migrations/README.md.`,
-          );
+          const compatible = COMPATIBLE_CHECKSUMS.get(`${m.id}:${seen}`);
+          if (compatible === m.checksum) {
+            await tx
+              .prepare(`UPDATE schema_migrations SET checksum = ? WHERE id = ?`)
+              .run(m.checksum, m.id);
+          } else if (!EQUIVALENT_CHECKSUMS.has(`${m.id}:${seen}:${m.checksum}`)) {
+            throw new Error(
+              `Migration ${m.id} has changed since it was applied ` +
+                `(recorded ${seen}, file ${m.checksum}). Migrations are immutable - ` +
+                `add a new one instead. See migrations/README.md.`,
+            );
+          }
         }
         continue;
       }

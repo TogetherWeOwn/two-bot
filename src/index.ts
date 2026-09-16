@@ -9,6 +9,7 @@ import { FunnelHandlers } from './core/handlers.ts';
 import { createClient, registerHandlers } from './discord/client.ts';
 import { registerOnboarding, registerGameSelect } from './discord/onboarding.ts';
 import { registerSessionWelcome } from './discord/sessionWelcome.ts';
+import { registerSelfRoles } from './discord/selfRoles.ts';
 import { SessionRecorder, buildSessionPicks } from './onboarding/session.ts';
 import { actionsForOnboardingMode } from './onboarding/mode.ts';
 import { registerAnchorWelcome } from './discord/anchorWelcome.ts';
@@ -32,9 +33,62 @@ import { startInternalActions, type InternalServer } from './internal/server.ts'
 import { KeyRing } from './internal/signing.ts';
 import { DiscordActions } from './internal/discordActions.ts';
 import { InternalActionStore } from './internal/store.ts';
+import { registerTickets } from './discord/tickets.ts';
+import { loadSelfRolePanels, validateSelfRolePanelRoles } from './selfRoles/config.ts';
+import { SelfRoleStore } from './store/selfRoleStore.ts';
 import { startHealthServer, type HealthServer } from './core/health.ts';
+import { LevelingService } from './leveling/service.ts';
+import { registerLeveling } from './leveling/discord.ts';
+import { loadModerationConfig } from './moderation/config.ts';
+import { ModerationDiscord } from './moderation/discord.ts';
+import { RestModerationResolver } from './moderation/resolver.ts';
+import { ModerationService } from './moderation/service.ts';
+import { ModerationStore } from './moderation/store.ts';
+import { MODERATION_COMMAND_DATA, registerModerationHandler } from './moderation/commands.ts';
+import { ANNOUNCEMENT_COMMAND_DATA, AUTOMATION_COMMAND_DATA, COMMUNITY_COMMAND_DATA } from './discord/commandNames.ts';
+import { loadAutomodConfig } from './automod/config.ts';
+import { AutomodService } from './automod/service.ts';
+import { AutomodStore } from './automod/store.ts';
+import { OperationalAuditStore } from './audit/store.ts';
+import { makeOperationalAudit } from './audit/service.ts';
+import { loadContainmentConfig } from './moderation/containmentConfig.ts';
+import { ContainmentStore } from './moderation/containmentStore.ts';
+import { ContainmentDiscord } from './moderation/containmentDiscord.ts';
+import {
+  DestructiveContainment,
+  JoinRiskScorer,
+  SnapshotRestoreAdvisor,
+  registerContainment,
+} from './moderation/containment.ts';
+import { makeContainmentAnnouncer, makeJoinRiskAnnouncer } from './discord/containmentAlert.ts';
+import { GuildConfigDiscordApi } from './discord/guildConfigApi.ts';
+import type { GuildConfigSnapshot } from './redesign/guildConfig.ts';
+import { readFileSync } from 'node:fs';
+import { STAGING_BOT_APPLICATION_ID, TWO_STAGING_GUILD_ID } from './staging/spec.ts';
+import { assertSelfRoleStagingBoundary } from './selfRoles/stagingFence.ts';
+import { CommandRegistry } from './discord/commandRegistry.ts';
+import { AutomationStore } from './automations/store.ts';
+import { AutomationDiscord, registerAutomationCommands } from './automations/discord.ts';
+import { AutomationService } from './automations/service.ts';
+import { registerAutomationGateway } from './automations/gateway.ts';
+import { startScheduler } from './automations/scheduler.ts';
+import { loadAutomationConfig } from './automations/config.ts';
+import { CommunityClassifier, loadCommunityClassifierConfig } from './analytics/communityClassifier.ts';
+import { CommunityFactStore } from './analytics/communityFacts.ts';
+import {
+  startCommunityScorecardJob,
+  type CommunityScorecardJobHandle,
+} from './jobs/communityScorecard.ts';
+import { registerCommunityAttendance } from './analytics/communityAttendance.ts';
+import { loadAnnouncementsConfig } from './announcements/config.ts';
+import { AnnouncementsStore } from './announcements/store.ts';
+import { AnnouncementsService } from './announcements/service.ts';
+import { DiscordAnnouncements, XmlFeedReader, registerAnnouncementCommands, startFeedPoller } from './announcements/discord.ts';
 
 const cfg = loadConfig();
+const automationCfg = loadAutomationConfig();
+const processStartedAt = new Date().toISOString();
+const announcementsCfg = loadAnnouncementsConfig();
 setLogLevel(cfg.logLevel);
 
 if (
@@ -84,9 +138,73 @@ const invites = new InviteTracker(db);
 // One instance, two ends: guild.add_member writes the "expect this member"
 // note, the gateway join handler consumes it. docs/INTERNAL_ACTIONS.md §7.
 const expectedJoins = new ExpectedJoins();
-const handlers = new FunnelHandlers(store);
+const leveling = new LevelingService(db);
+const communityClassifier = new CommunityClassifier(loadCommunityClassifierConfig());
+const communityFacts = cfg.communityScorecard ? new CommunityFactStore(db, communityClassifier) : null;
+const handlers = new FunnelHandlers(store, leveling, communityFacts);
 
-const client = createClient();
+const client = createClient(process.env.TWO_AUTOMOD === '1');
+const moderationCfg = loadModerationConfig();
+const moderationStore = new ModerationStore(db);
+const moderationDiscord = new ModerationDiscord({
+  token: cfg.discordToken,
+  base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+});
+const moderationResolver = cfg.guildId && moderationCfg.enabled
+  ? new RestModerationResolver({
+      token: cfg.discordToken,
+      botUserId: moderationCfg.owenUserId,
+      base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+    })
+  : null;
+const audit = makeOperationalAudit(client, {
+  guildId: cfg.guildId,
+  channels: {
+    audit: cfg.auditLogChannelId,
+    voice: cfg.voiceLogChannelId,
+    moderation: cfg.moderationLogChannelId,
+  },
+  store: new OperationalAuditStore(db),
+});
+log.info('operational_audit_enabled', {
+  guildId: cfg.guildId ?? 'all joined guilds (Discord mirrors disabled)',
+  auditTarget: cfg.auditLogChannelId ?? 'durable/process log only',
+  voiceTarget: cfg.voiceLogChannelId ?? cfg.auditLogChannelId ?? 'durable/process log only',
+  moderationTarget: cfg.moderationLogChannelId ?? cfg.auditLogChannelId ?? 'durable/process log only',
+});
+const moderationService = moderationResolver
+  ? new ModerationService(moderationDiscord, moderationStore, {
+      owenUserId: moderationCfg.owenUserId,
+      botUserId: moderationCfg.owenUserId,
+      protectedRoleIds: moderationCfg.protectedRoleIds,
+      moderationAuditSecret: moderationCfg.moderationAuditSecret,
+    }, Date.now, audit)
+  : null;
+if (moderationCfg.enabled && !moderationCfg.moderationAuditSecret) {
+  log.error('moderation_audit_secret_missing', {
+    hint: 'provide the systemd credential `moderation_audit_secret` or TWO_MODERATION_AUDIT_SECRET; '
+      + 'without it, moderation-service gateway correlation (TOG-2223 #8) is disabled',
+  });
+}
+const automodCfg = loadAutomodConfig();
+if (automodCfg.enabled && !moderationService) {
+  throw new Error('TWO_AUTOMOD=1 requires TWO_MODERATION=1 so sanctions use the reviewed moderation path.');
+}
+const automodService = cfg.guildId && automodCfg.enabled && moderationResolver && moderationService
+  ? new AutomodService(
+      moderationDiscord,
+      moderationService,
+      moderationStore,
+      new AutomodStore(db),
+      moderationResolver,
+      {
+        dryRun: automodCfg.dryRun,
+        owenUserId: moderationCfg.owenUserId,
+        botHighestRolePosition: await moderationResolver.botHighestRolePosition(cfg.guildId),
+        policy: automodCfg.policy,
+      },
+    )
+  : null;
 
 // Point discord.js at a different API host. Only used by tools/mock-discord.
 if (cfg.apiBase) {
@@ -111,7 +229,185 @@ log.info('raid_watch_enabled', {
   alertTarget: cfg.staffAlertChannelId ?? 'log only (DISCORD_STAFF_ALERT_CHANNEL_ID unset)',
 });
 
-registerHandlers(client, { handlers, invites, raid, expectedJoins });
+const containmentCfg = loadContainmentConfig();
+const containmentStore = new ContainmentStore(db);
+const joinRisk = containmentCfg.enabled
+  ? new JoinRiskScorer({
+      store: containmentStore,
+      config: containmentCfg,
+      announce: makeJoinRiskAnnouncer(client, containmentCfg.alertChannelId),
+    })
+  : undefined;
+
+registerHandlers(client, {
+  handlers,
+  invites,
+  community: communityFacts
+    ? {
+        humanChannelIds: new Set(cfg.communityHumanChannelIds),
+        welcomeChannelIds: new Set(cfg.communityWelcomeChannelIds),
+      }
+    : undefined,
+  raid,
+  expectedJoins,
+  leveling,
+  automod: automodService && cfg.guildId ? { service: automodService, guildId: cfg.guildId } : undefined,
+  joinRisk,
+  audit,
+  auditGuildId: cfg.guildId,
+  moderationAuditSecret: moderationCfg.moderationAuditSecret,
+});
+
+if (containmentCfg.enabled && containmentCfg.guildId) {
+  if (containmentCfg.guildId !== TWO_STAGING_GUILD_ID || containmentCfg.botUserId !== STAGING_BOT_APPLICATION_ID) {
+    throw new Error(
+      `TOG-1650 is staging-only: expected guild ${TWO_STAGING_GUILD_ID} and application ${STAGING_BOT_APPLICATION_ID}.`,
+    );
+  }
+  const guildConfigApi = new GuildConfigDiscordApi({
+    token: cfg.discordToken,
+    applicationId: STAGING_BOT_APPLICATION_ID,
+    guildId: TWO_STAGING_GUILD_ID,
+    apiBase: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+  });
+  await guildConfigApi.assertIdentity();
+  const restore = containmentCfg.snapshotPath
+    ? new SnapshotRestoreAdvisor(
+        JSON.parse(readFileSync(containmentCfg.snapshotPath, 'utf8')) as GuildConfigSnapshot,
+        async () => guildConfigApi.capture(),
+      )
+    : null;
+  const containment = new DestructiveContainment({
+    store: containmentStore,
+    discord: new ContainmentDiscord({
+      token: cfg.discordToken,
+      botUserId: containmentCfg.botUserId,
+      base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+    }),
+    config: containmentCfg,
+    announce: makeContainmentAnnouncer(client, containmentCfg.alertChannelId),
+    restore,
+  });
+  registerContainment(client, containment, containmentCfg.guildId);
+  log.info('anti_nuke_enabled', {
+    guildId: containmentCfg.guildId,
+    dryRun: containmentCfg.dryRun,
+    heatThreshold: containmentCfg.heatThreshold,
+    windowSeconds: containmentCfg.windowSeconds,
+    snapshot: containmentCfg.snapshotPath ? 'configured' : 'not configured',
+  });
+}
+
+if (communityFacts) {
+  registerCommunityAttendance(client, { facts: communityFacts, guildId: cfg.guildId });
+}
+
+if (cfg.ticketCategoryId && cfg.ticketStaffRoleId && cfg.ticketPanelChannelId) {
+  registerTickets(client, {
+    db,
+    guildId: cfg.guildId,
+    categoryId: cfg.ticketCategoryId,
+    staffRoleId: cfg.ticketStaffRoleId,
+    panelChannelId: cfg.ticketPanelChannelId,
+    cooldownSeconds: cfg.ticketCooldownSeconds,
+  });
+  log.info('tickets_enabled', {
+    guildId: cfg.guildId ?? 'all',
+    panelChannelId: cfg.ticketPanelChannelId,
+    categoryId: cfg.ticketCategoryId,
+    staffRoleId: cfg.ticketStaffRoleId,
+    cooldownSeconds: cfg.ticketCooldownSeconds,
+  });
+} else {
+  log.info('tickets_disabled', { reason: 'ticket channel, category, and staff role are not all configured' });
+}
+registerLeveling(client, { service: leveling, guildId: cfg.guildId });
+if (automodService) {
+  log.info('automod_enabled', {
+    guildId: cfg.guildId,
+    dryRun: automodCfg.dryRun,
+    badWords: automodCfg.policy.badWords.length,
+    bypassRoles: automodCfg.policy.bypassRoleIds.size,
+    exemptChannels: automodCfg.policy.exemptChannelIds.size,
+  });
+}
+if (cfg.guildId && moderationResolver && moderationService) {
+  registerModerationHandler(client, {
+    guildId: cfg.guildId,
+    resolver: moderationResolver,
+    service: moderationService,
+  });
+
+}
+
+// Automations (TOG-1648): custom commands, scheduled messages, stickies.
+let automationScheduler: ReturnType<typeof startScheduler> | null = null;
+const automationStore = new AutomationStore(db);
+const automationDiscord = new AutomationDiscord({
+  token: cfg.discordToken,
+  base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+});
+const automationService = new AutomationService(automationStore, automationDiscord);
+
+let commandRegistry: CommandRegistry | null = null;
+if (cfg.guildId) {
+  commandRegistry = new CommandRegistry(client, {
+    guildId: cfg.guildId,
+    automations: automationStore,
+    additionalBuiltins: [
+      ...(communityFacts ? COMMUNITY_COMMAND_DATA : []),
+      ...(automationCfg.enabled ? AUTOMATION_COMMAND_DATA : []),
+      ...(announcementsCfg.enabled ? ANNOUNCEMENT_COMMAND_DATA : []),
+      ...(moderationResolver && moderationService ? MODERATION_COMMAND_DATA : []),
+    ],
+  });
+  commandRegistry.register();
+}
+if (cfg.guildId && automationCfg.enabled) {
+  registerAutomationCommands(client, {
+    guildId: cfg.guildId,
+    service: automationService,
+    store: automationStore,
+    syncCommands: () => commandRegistry!.sync(),
+  });
+  registerAutomationGateway(client, {
+    guildId: cfg.guildId,
+    service: automationService,
+    textCommandsEnabled: automationCfg.textCommandsEnabled,
+    findTrigger: (guildId, word) => automationStore.findTextTrigger(guildId, word),
+  });
+  automationScheduler = startScheduler(automationService, cfg.guildId);
+  log.info('automations_enabled', {
+    guildId: cfg.guildId,
+    textCommands: automationCfg.textCommandsEnabled ? 'on' : 'off (slash-only)',
+  });
+} else {
+  log.info('automations_disabled', {
+    reason: cfg.guildId ? 'TWO_AUTOMATIONS is not 1' : 'DISCORD_GUILD_ID is unset',
+  });
+}
+
+// Announcements / scheduled-event RSVP / LFG / feed relays (TOG-1649).
+let feedPoller: ReturnType<typeof startFeedPoller> | null = null;
+if (cfg.guildId && announcementsCfg.enabled) {
+  const announcementsStore = new AnnouncementsStore(db);
+  const announcementsService = new AnnouncementsService(
+    announcementsStore,
+    new DiscordAnnouncements({ token: cfg.discordToken, base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined }),
+    new XmlFeedReader(),
+  );
+  registerAnnouncementCommands(client, {
+    guildId: cfg.guildId,
+    service: announcementsService,
+    store: announcementsStore,
+  });
+  feedPoller = startFeedPoller(announcementsService, cfg.guildId, announcementsCfg.feedPollSeconds);
+  log.info('announcements_enabled', { guildId: cfg.guildId, feedPollSeconds: announcementsCfg.feedPollSeconds });
+} else {
+  log.info('announcements_disabled', {
+    reason: cfg.guildId ? 'TWO_ANNOUNCEMENTS is not 1' : 'DISCORD_GUILD_ID is unset',
+  });
+}
 
 // Onboarding (TWO-7). Skipped entirely if no landing channel is configured -
 // better to run the funnel with onboarding off than to post into a guessed
@@ -173,6 +469,54 @@ if (cfg.onboardingMode === 'session') {
   });
 }
 
+// Hardened self-role panels (TOG-1646). The panel catalogue is deployment data:
+// ids are never guessed from the live guild, and an empty catalogue is a clean
+// disable rather than an implicit panel with production ids.
+const selfRolePanels = loadSelfRolePanels();
+if (selfRolePanels.length) {
+  if (!cfg.guildId) {
+    throw new Error('TWO_SELF_ROLE_PANELS requires DISCORD_GUILD_ID - every panel belongs to one guild.');
+  }
+  assertSelfRoleStagingBoundary(cfg.guildId, cfg.discordToken);
+  const selfRoleRest = new DiscordRest({
+    token: cfg.discordToken,
+    base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+  });
+  const [selfRoleRoles, selfRoleChannels] = await Promise.all([
+    selfRoleRest.get<Array<{ id: string; name?: string; permissions: string }>>(`/guilds/${cfg.guildId}/roles`),
+    selfRoleRest.get<Array<{
+      id: string;
+      name?: string;
+      permission_overwrites?: Array<{ id: string; type: number; allow: string; deny: string }>;
+    }>>(`/guilds/${cfg.guildId}/channels`),
+  ]);
+  if (!selfRoleRoles || !selfRoleChannels) {
+    throw new Error(`TWO_SELF_ROLE_PANELS roles or channels could not be resolved for guild ${cfg.guildId}`);
+  }
+  validateSelfRolePanelRoles(
+    selfRolePanels,
+    selfRoleRoles,
+    selfRoleChannels.map((channel) => ({
+      id: channel.id,
+      name: channel.name,
+      permissionOverwrites: channel.permission_overwrites,
+    })),
+    cfg.guildId,
+  );
+  registerSelfRoles(client, {
+    panels: selfRolePanels,
+    store: new SelfRoleStore(db),
+    dryRun: cfg.selfRoleDryRun,
+  });
+  log.info('self_roles_enabled', {
+    panels: selfRolePanels.length,
+    modes: [...new Set(selfRolePanels.map((panel) => panel.mode))],
+    dryRun: cfg.selfRoleDryRun,
+  });
+} else {
+  log.info('self_roles_disabled', { reason: 'TWO_SELF_ROLE_PANELS is empty' });
+}
+
 // The internal actions endpoint (TWO-24 / TWO-59). Off unless
 // TWO_INTERNAL_ACTIONS=1 - a bot without it runs exactly as before and opens
 // no port. When it is on, a bad bind address or a missing key is a startup
@@ -200,6 +544,12 @@ if (internalCfg) {
     // database as everything else, so it is covered by the same backups.
     store: new InternalActionStore(db),
     expectedJoins,
+    automations: automationCfg.enabled ? automationService : null,
+    allowAutomationOverwrite: automationCfg.enabled && internalCfg.allowAutomationOverwrite,
+    syncCommands: automationCfg.enabled && commandRegistry ? () => commandRegistry!.sync() : null,
+    moderation: moderationResolver && moderationService
+      ? { resolver: moderationResolver, service: moderationService }
+      : null,
   });
 }
 
@@ -270,6 +620,41 @@ if (!cfg.guildId) {
   });
 }
 
+let communityScorecard: CommunityScorecardJobHandle | null = null;
+if (!cfg.communityScorecard) {
+  log.info('community_scorecard_disabled', { reason: 'TWO_COMMUNITY_SCORECARD is not 1' });
+} else if (!cfg.guildId) {
+  log.info('community_scorecard_disabled', { reason: 'DISCORD_GUILD_ID is unset' });
+} else {
+  communityScorecard = startCommunityScorecardJob({
+    db,
+    guildId: cfg.guildId,
+    classifierVersion: communityClassifier.version,
+    facts: communityFacts!,
+    captureStartedAt: processStartedAt,
+    recommendationsEnabled: cfg.communityRecommendations,
+    correctionCycles: cfg.communityCorrectionCycles,
+  });
+}
+
+const auditRetry = () => {
+  void audit.retryPending().catch(() => {
+    log.error('operational_audit_retry_failed', { classification: 'audit_retry_failed' });
+  });
+};
+client.once('ready', auditRetry);
+const auditSweep = setInterval(auditRetry, 30_000);
+auditSweep.unref();
+
+const moderationSweep = moderationService
+  ? setInterval(() => {
+      void moderationService.runDueUnbans().catch((err: unknown) => {
+        log.error('moderation_unban_sweep_failed', { err: String(err) });
+      });
+    }, 30_000)
+  : null;
+moderationSweep?.unref();
+
 // Inactivity sweep once an hour. Cheap query; no outbound messages.
 const sweep = setInterval(
   () => {
@@ -313,9 +698,14 @@ if (healthPort > 0) {
 async function shutdown(signal: string) {
   log.info('shutdown', { signal });
   clearInterval(sweep);
+  automationScheduler?.stop();
+  clearInterval(auditSweep);
+  feedPoller?.stop();
+  if (moderationSweep) clearInterval(moderationSweep);
   presenceProbe?.stop();
   communitySnapshots?.stop();
   scheduledEvents?.stop();
+  communityScorecard?.stop();
   // Health goes down first: while the rest is closing, the bot must already be
   // reporting itself out of service so the platform stops routing to it.
   if (health) await health.close();

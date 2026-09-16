@@ -19,7 +19,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
-import { inspect, DUMP_VERSION } from '../src/store/dump.ts';
+import { inspect, DUMP_TABLES, DUMP_VERSION } from '../src/store/dump.ts';
 
 const dir = mkdtempSync(join(tmpdir(), 'two-dumpread-'));
 process.on('exit', () => rmSync(dir, { recursive: true, force: true }));
@@ -33,7 +33,13 @@ function writeDump(objs: unknown[]): string {
   return p;
 }
 
-function manifest(tables: { name: string; columns: string[]; count: number }[]) {
+function completeTables(
+  overrides: Partial<Record<(typeof DUMP_TABLES)[number], { columns: string[]; count: number }>> = {},
+) {
+  return DUMP_TABLES.map((name) => ({ name, columns: [], count: 0, ...overrides[name] }));
+}
+
+function manifest(tables: { name: string; columns: string[]; count: number }[] = completeTables()) {
   return {
     kind: 'manifest',
     version: DUMP_VERSION,
@@ -47,7 +53,7 @@ function manifest(tables: { name: string; columns: string[]; count: number }[]) 
 /** A minimal well-formed dump: one events row, counts consistent throughout. */
 function goodDump(): unknown[] {
   return [
-    manifest([{ name: 'events', columns: ['id', 'guild_id'], count: 1 }]),
+    manifest(completeTables({ events: { columns: ['id', 'guild_id'], count: 1 } })),
     { kind: 'row', table: 'events', data: { id: 1, guild_id: 'g' } },
     { kind: 'end', rows: 1 },
   ];
@@ -62,7 +68,7 @@ describe('inspect: files it accepts', () => {
   });
 
   test('an empty but complete dump is fine', async () => {
-    const got = await inspect(writeDump([manifest([]), { kind: 'end', rows: 0 }]));
+    const got = await inspect(writeDump([manifest(), { kind: 'end', rows: 0 }]));
     assert.equal(got.rows, 0);
   });
 });
@@ -108,13 +114,24 @@ describe('inspect: table names it refuses', () => {
 
   test('a manifest with no table list at all', async () => {
     await assert.rejects(
-      () => inspect(writeDump([{ ...manifest([]), tables: undefined }, { kind: 'end', rows: 0 }])),
+      () => inspect(writeDump([{ ...manifest(), tables: undefined }, { kind: 'end', rows: 0 }])),
       /no table list/,
     );
   });
 });
 
 describe('inspect: files it refuses for shape', () => {
+  test('legacy dumps cannot omit newly-owned tables', async () => {
+    for (const version of [1, 2]) {
+      const objs = goodDump();
+      (objs[0] as { version: number }).version = version;
+      await assert.rejects(
+        () => inspect(writeDump(objs)),
+        new RegExp(`dump version ${version}, this build reads ${DUMP_VERSION}`),
+      );
+    }
+  });
+
   test('a dump written by a newer format', async () => {
     const objs = goodDump();
     (objs[0] as { version: number }).version = DUMP_VERSION + 1;
@@ -124,7 +141,7 @@ describe('inspect: files it refuses for shape', () => {
   test('no manifest', async () => {
     await assert.rejects(
       () => inspect(writeDump([{ kind: 'row', table: 'events', data: {} }, { kind: 'end', rows: 1 }])),
-      /no manifest/,
+      /before the manifest/,
     );
   });
 
@@ -137,5 +154,39 @@ describe('inspect: files it refuses for shape', () => {
     const objs = goodDump();
     (objs[objs.length - 1] as { rows: number }).rows = 99;
     await assert.rejects(() => inspect(writeDump(objs)), /declares 99 rows, file contains 1/);
+  });
+
+  test('a manifest must contain every owned table exactly once', async () => {
+    const missing = goodDump();
+    const missingManifest = missing[0] as ReturnType<typeof manifest>;
+    missingManifest.tables = missingManifest.tables.filter((table) => table.name !== 'operational_audit_log');
+    await assert.rejects(() => inspect(writeDump(missing)), /missing tables: operational_audit_log/);
+
+    const duplicate = goodDump();
+    const duplicateManifest = duplicate[0] as ReturnType<typeof manifest>;
+    duplicateManifest.tables.push({ ...duplicateManifest.tables[0] });
+    await assert.rejects(() => inspect(writeDump(duplicate)), /manifest table events is duplicated/);
+  });
+
+  test('per-table counts must match even when the aggregate count does', async () => {
+    const objs = goodDump();
+    const m = objs[0] as ReturnType<typeof manifest>;
+    m.tables.find((table) => table.name === 'events')!.count = 0;
+    m.tables.find((table) => table.name === 'members')!.count = 1;
+    await assert.rejects(() => inspect(writeDump(objs)), /events: manifest declares 0 rows, file contains 1/);
+  });
+
+  test('rows cannot precede the manifest, follow the end, or share a second manifest', async () => {
+    const before = goodDump();
+    before.unshift(before.splice(1, 1)[0]);
+    await assert.rejects(() => inspect(writeDump(before)), /row appears before the manifest/);
+
+    const after = goodDump();
+    after.push({ kind: 'row', table: 'events', data: { id: 2 } });
+    await assert.rejects(() => inspect(writeDump(after)), /data after its end marker/);
+
+    const duplicate = goodDump();
+    duplicate.splice(1, 0, manifest());
+    await assert.rejects(() => inspect(writeDump(duplicate)), /more than one manifest/);
   });
 });

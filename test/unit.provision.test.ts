@@ -14,7 +14,9 @@ import {
   CHANNEL_TYPE_TEXT,
   CHANNEL_TYPE_VOICE,
   GUILD_CREATE_HEADROOM,
+  auditChannelExports,
   GUILD_CREATE_LIMIT,
+  channelCreateBody,
   chooseGuild,
   evaluateHierarchy,
   guildCreatePayload,
@@ -212,17 +214,104 @@ test('the live TWO guild is refused outright', () => {
 
 // --- the create payload -----------------------------------------------------
 
-test('the create payload asks for exactly the spec channels and no roles', () => {
-  const p = guildCreatePayload();
+test('the create payload asks for exactly the spec channels, with private staff logs, and no roles', () => {
+  const p = guildCreatePayload(STAGING);
   assert.equal(p.name, STAGING_SERVER_NAME);
   assert.equal(p.channels.length, STAGING_TEXT_CHANNELS.length + STAGING_VOICE_CHANNELS.length);
   for (const n of STAGING_TEXT_CHANNELS) {
-    assert.ok(p.channels.some((c) => c.name === n && c.type === CHANNEL_TYPE_TEXT), `missing #${n}`);
+    const channel = p.channels.find((c) => c.name === n && c.type === CHANNEL_TYPE_TEXT);
+    assert.ok(channel, `missing #${n}`);
+    if (n.endsWith('-log')) {
+      assert.deepEqual(channel.permission_overwrites, [
+        { id: STAGING, type: 0, allow: '0', deny: String(1n << 10n) },
+      ]);
+    }
   }
   for (const n of STAGING_VOICE_CHANNELS) {
     assert.ok(p.channels.some((c) => c.name === n && c.type === CHANNEL_TYPE_VOICE), `missing voice ${n}`);
   }
   assert.equal((p as Record<string, unknown>).roles, undefined);
+});
+
+test('staff log channels deny members and explicitly allow the bot to view and post', () => {
+  const staff = channelCreateBody({ name: 'audit-log', type: CHANNEL_TYPE_TEXT }, STAGING, BOT);
+  assert.deepEqual(staff.permission_overwrites, [
+    { id: STAGING, type: 0, allow: '0', deny: String(1n << 10n) },
+    { id: BOT, type: 1, allow: String((1n << 10n) | (1n << 11n)), deny: '0' },
+  ]);
+  assert.equal(channelCreateBody({ name: 'general', type: CHANNEL_TYPE_TEXT }, STAGING, BOT).permission_overwrites, undefined);
+  assert.equal(channelCreateBody({ name: 'Voice 1', type: CHANNEL_TYPE_VOICE }, STAGING, BOT).permission_overwrites, undefined);
+});
+
+test('provisioning emits exact runtime configuration for the three audit channels', () => {
+  const channels = [
+    { id: 'audit', name: 'audit-log', type: CHANNEL_TYPE_TEXT },
+    { id: 'voice', name: 'voice-log', type: CHANNEL_TYPE_TEXT },
+    { id: 'moderation', name: 'moderation-log', type: CHANNEL_TYPE_TEXT },
+    { id: 'general', name: 'general', type: CHANNEL_TYPE_TEXT },
+  ];
+  assert.deepEqual(auditChannelExports(channels), [
+    'export DISCORD_AUDIT_LOG_CHANNEL_ID=audit',
+    'export DISCORD_VOICE_LOG_CHANNEL_ID=voice',
+    'export DISCORD_MODERATION_LOG_CHANNEL_ID=moderation',
+  ]);
+  assert.throws(
+    () => auditChannelExports([...channels, { id: 'duplicate', name: 'audit-log', type: CHANNEL_TYPE_TEXT }]),
+    /expected exactly one #audit-log, found 2/,
+  );
+});
+
+test('reconcile repairs present member-readable staff logs and leaves private ones alone', () => {
+  const view = String(1n << 10n);
+  const sendAndView = String((1n << 10n) | (1n << 11n));
+  const plan = planChannels(
+    [
+      { id: 'audit', name: 'audit-log', type: CHANNEL_TYPE_TEXT },
+      {
+        id: 'voice',
+        name: 'voice-log',
+        type: CHANNEL_TYPE_TEXT,
+        permission_overwrites: [
+          { id: STAGING, type: 0, allow: '0', deny: view },
+          { id: BOT, type: 1, allow: sendAndView, deny: '0' },
+        ],
+      },
+    ],
+    STAGING,
+    BOT,
+  );
+  assert.deepEqual(plan.repair.map((channel) => channel.name), ['audit-log']);
+});
+
+test('TOG-2223 #9: reconcile repairs a role/member ViewChannel allow even when @everyone is correctly denied', () => {
+  // needsStaffPrivacyRepair used to check only the @everyone deny and the
+  // bot's own allow, matching evaluateAuditChannels' `readable` predicate on
+  // those two overwrites but not on a stray role/member allow. A channel with
+  // @everyone denied, the bot correctly allowed, AND an extra role granted
+  // ViewChannel used to plan `present` with an empty repair list - silently
+  // shipping a staff log any member with that role could read - while
+  // acceptance would separately fail it as memberReadable. Provisioning must
+  // catch and repair what acceptance would reject.
+  const view = String(1n << 10n);
+  const sendAndView = String((1n << 10n) | (1n << 11n));
+  const plan = planChannels(
+    [
+      {
+        id: 'audit',
+        name: 'audit-log',
+        type: CHANNEL_TYPE_TEXT,
+        permission_overwrites: [
+          { id: STAGING, type: 0, allow: '0', deny: view },
+          { id: BOT, type: 1, allow: sendAndView, deny: '0' },
+          { id: 'some-role', type: 0, allow: view, deny: '0' },
+        ],
+      },
+    ],
+    STAGING,
+    BOT,
+  );
+  assert.deepEqual(plan.repair.map((channel) => channel.name), ['audit-log']);
+  assert.deepEqual(plan.present, ['audit-log']);
 });
 
 // --- planChannels / planRoles ----------------------------------------------

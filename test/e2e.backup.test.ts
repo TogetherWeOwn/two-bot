@@ -69,6 +69,176 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
          VALUES (?, ?, ?, ?, ?, ?)`,
       )
       .run(G, 'abc', 12, 'owner', 'c1', '2026-08-09T00:00:00.000Z');
+    // TOG-1659 High 5: the moderation state must survive backup/restore the
+    // same way the funnel does - a lost pending unban is a tempban that
+    // became permanent.
+    for (let i = 0; i < members; i++) {
+      const req = `mod-seed-${i}`;
+      await harness.db
+        .prepare(
+          `INSERT INTO moderation_audit
+             (request_id, guild_id, actor_id, action, target_id, channel_id, reason,
+              outcome, idempotency_key, metadata_json, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(req, G, 'staff', 'moderation.warn', `m${i}`, null, 'seed', 'warned', req, '{}', '2026-08-01T10:00:00.000Z');
+      await harness.db
+        .prepare(
+          `INSERT INTO moderation_warnings
+             (id, guild_id, user_id, actor_id, reason, request_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(`warn-${i}`, G, `m${i}`, 'staff', 'seed warn', req, '2026-08-01T10:00:00.000Z');
+    }
+    await harness.db
+      .prepare(
+        `INSERT INTO moderation_scheduled_unbans
+           (guild_id, user_id, execute_at, reason, request_id, state, created_at, claimed_at)
+         VALUES (?, ?, ?, ?, ?, 'pending', ?, NULL)`,
+      )
+      .run(G, 'm1', '2026-08-02T10:00:00.000Z', 'expiry', 'mod-seed-unban-1', '2026-08-01T10:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO moderation_lockdowns
+           (channel_id, guild_id, prior_allow, prior_deny, reason, locked_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run('chan-1', G, '1024', '8192', 'raid lockdown', '2026-08-01T11:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO moderation_idempotency
+           (guild_id, idempotency_key, action, request_hash, state, outcome, result_json,
+            claimed_at, completed_at)
+         VALUES (?, ?, ?, ?, 'done', 'banned', '{}', ?, ?)`,
+      )
+      .run(G, 'mod-key-1', 'moderation.ban', 'deadbeef', '2026-08-01T10:00:00.000Z', '2026-08-01T10:00:01.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO containment_events
+           (audit_entry_id, guild_id, executor_id, action, target_id, weight,
+            occurred_at, state, reason, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('audit-1', G, 'staff', 'channel.delete', 'channel-1', 3, '2026-08-01T12:00:00.000Z', 'contain', 'threshold crossed', '2026-08-01T12:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO containment_incidents
+           (id, guild_id, executor_id, trigger_audit_entry_id, heat, state,
+            result_json, started_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('incident-1', G, 'staff', 'audit-1', 5, 'contained', '{"removedRoleIds":["danger"]}', '2026-08-01T12:00:00.000Z', '2026-08-01T12:00:01.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO join_risk_flags
+           (event_id, guild_id, member_id, account_created_at, joined_at, source, score,
+            reasons_json, bulk_join_window, flagged, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('join-risk-1', G, 'm-risk', '2026-08-01T11:59:00.000Z', '2026-08-01T12:00:00.000Z', 'unknown', 3, '["new account"]', false, true, '2026-08-01T12:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO operational_audit_log
+           (entry_id, event_kind, guild_id, occurred_at, target_id, source_channel_id,
+            message_id, metadata_json, created_at, mirror_channel_id, delivery_state,
+            delivery_attempts, delivery_attempted_at, delivery_last_error,
+            delivery_nonce, mirror_message_id, mirror_checked_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'audit-backup-1',
+        'message_delete',
+        G,
+        '2026-08-09T00:00:00.000Z',
+        'm0',
+        'c1',
+        'message-1',
+        '{"cached":false}',
+        '2026-08-09T00:00:01.000Z',
+        'audit-channel',
+        'pending',
+        1,
+        '2026-08-09T00:00:02.000Z',
+        'discord_send_failed',
+        'audit-backup-1',
+        null,
+        '2026-08-09T00:00:03.000Z',
+      );
+    await harness.db
+      .prepare(
+        `INSERT INTO tickets (id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closed_at)
+         VALUES (?, ?, ?, ?, ?, 'closed', ?, ?)`,
+      )
+      .run('ticket-1', G, 'ticket-channel', 'm0', 'staff', '2026-08-09T01:00:00.000Z', '2026-08-09T02:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO ticket_transcripts
+           (ticket_id, guild_id, channel_id, opener_id, claimed_by, content, message_count, created_at, purge_after)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('ticket-1', G, 'ticket-channel', 'm0', 'staff', 'member asked for help', 1, '2026-08-09T02:00:00.000Z', '2026-11-07T02:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO automod_violations
+           (guild_id, user_id, violation_count, last_filter, last_message_id, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(G, 'm1', 3, 'bad_words', 'automod-message-3', '2026-08-01T10:02:00.000Z');
+    for (let i = 1; i <= 3; i++) {
+      await harness.db
+        .prepare(
+          `INSERT INTO automod_processed_messages (guild_id, message_id, user_id, processed_at)
+           VALUES (?, ?, ?, ?)`,
+        )
+        .run(G, `automod-message-${i}`, 'm1', `2026-08-01T10:0${i}:00.000Z`);
+    }
+    await harness.db.prepare(
+      `INSERT INTO automation_commands
+         (guild_id, name, description, template, text_trigger, enabled,
+          created_by, created_at, updated_by, updated_at)
+       VALUES (?, 'faq', 'FAQ', 'Read rules', '!faq', TRUE, 'staff', ?, 'staff', ?)`,
+    ).run(G, '2026-08-01T12:00:00.000Z', '2026-08-01T12:00:00.000Z');
+    await harness.db.prepare(
+      `INSERT INTO scheduled_messages
+         (id, guild_id, channel_id, body, next_run_at, interval_seconds, enabled,
+          created_by, created_at, updated_by, updated_at)
+       VALUES ('sched-1', ?, 'chan-1', 'scheduled', '2026-08-02T12:00:00.000Z', NULL, TRUE,
+               'staff', '2026-08-01T12:00:00.000Z', 'staff', '2026-08-01T12:00:00.000Z')`,
+    ).run(G);
+    await harness.db.prepare(
+      `INSERT INTO sticky_messages
+         (guild_id, channel_id, body, debounce_seconds, enabled,
+          created_by, created_at, updated_by, updated_at)
+       VALUES (?, 'chan-1', 'sticky', 5, TRUE, 'staff', ?, 'staff', ?)`,
+    ).run(G, '2026-08-01T12:00:00.000Z', '2026-08-01T12:00:00.000Z');
+    await harness.db.prepare(
+      `INSERT INTO automation_audit_log
+         (id, guild_id, actor_id, action, target_key, outcome, reason, created_at)
+       VALUES ('automation-audit-1', ?, 'staff', 'command.create', 'faq', 'ok', NULL, ?)`,
+    ).run(G, '2026-08-01T12:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO self_role_audit
+           (event_id, event_order, guild_id, panel_id, member_id, source_id, option_key, role_id,
+            source, operation, outcome, code, reason, added_role_ids, removed_role_ids, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        'self-role-event-1', '0000000000001:self-role-event-1', G, 'colors', 'm1',
+        'panel-message', 'red', 'role-red', 'button', 'add', 'assigned', null, null,
+        '["role-red"]', '[]', '2026-08-01T12:00:00.000Z',
+      );
+    await harness.db
+      .prepare(
+        `INSERT INTO self_role_panel_claims
+           (guild_id, member_id, panel_id, claim_token, claim_generation, processing_expires_at,
+            latest_event_id, latest_option_key, target_committed, latest_event_order)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        G, 'm1', 'colors', 'released-claim', 4, '2026-08-01T12:00:00.000Z',
+        'self-role-event-1', 'red', true, '0000000000001:self-role-event-1',
+      );
   }
 
   async function counts(): Promise<Record<string, number>> {
@@ -86,10 +256,42 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
     const events = await harness.db
       .prepare(`SELECT id, event_type, occurred_at, idempotency_key FROM events ORDER BY id`)
       .all();
+    const audit = await harness.db
+      .prepare(
+        `SELECT entry_id, event_kind, guild_id, occurred_at, target_id, source_channel_id,
+                message_id, metadata_json, mirror_channel_id, delivery_state,
+                delivery_attempts, delivery_attempted_at, delivery_last_error,
+                delivery_nonce, mirror_message_id, mirror_checked_at
+           FROM operational_audit_log ORDER BY entry_id`,
+      )
+      .all();
+    const tickets = await harness.db
+      .prepare(
+        `SELECT id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closed_at
+           FROM tickets ORDER BY id`,
+      )
+      .all();
+    const transcripts = await harness.db
+      .prepare(
+        `SELECT ticket_id, guild_id, channel_id, opener_id, claimed_by, content,
+                message_count, created_at, purge_after
+           FROM ticket_transcripts ORDER BY ticket_id`,
+      )
+      .all();
 
     const file = join(dir, 'roundtrip.ndjson.gz');
     const manifest = await dump(harness.db, file);
     assert.equal(manifest.tables.find((t) => t.name === 'events')?.count, before.events);
+    assert.equal(manifest.tables.find((t) => t.name === 'operational_audit_log')?.count, 1);
+    assert.equal(manifest.tables.find((t) => t.name === 'tickets')?.count, 1);
+    assert.equal(manifest.tables.find((t) => t.name === 'ticket_transcripts')?.count, 1);
+    assert.equal(manifest.tables.find((t) => t.name === 'automod_violations')?.count, 1);
+    assert.equal(manifest.tables.find((t) => t.name === 'automod_processed_messages')?.count, 3);
+    assert.equal(manifest.tables.find((t) => t.name === 'containment_events')?.count, 1);
+    assert.equal(manifest.tables.find((t) => t.name === 'containment_incidents')?.count, 1);
+    assert.equal(manifest.tables.find((t) => t.name === 'join_risk_flags')?.count, 1);
+    assert.equal(manifest.tables.find((t) => t.name === 'self_role_audit')?.count, 1);
+    assert.equal(manifest.tables.find((t) => t.name === 'self_role_panel_claims')?.count, 1);
 
     // Lose everything, exactly as a dead disk would.
     await harness.db.exec(`TRUNCATE ${DUMP_TABLES.join(', ')} RESTART IDENTITY`);
@@ -104,6 +306,41 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
       .prepare(`SELECT id, event_type, occurred_at, idempotency_key FROM events ORDER BY id`)
       .all();
     assert.deepEqual(after, events);
+    const restoredAudit = await harness.db
+      .prepare(
+        `SELECT entry_id, event_kind, guild_id, occurred_at, target_id, source_channel_id,
+                message_id, metadata_json, mirror_channel_id, delivery_state,
+                delivery_attempts, delivery_attempted_at, delivery_last_error,
+                delivery_nonce, mirror_message_id, mirror_checked_at
+           FROM operational_audit_log ORDER BY entry_id`,
+      )
+      .all();
+    assert.deepEqual(restoredAudit, audit);
+    const restoredTickets = await harness.db
+      .prepare(
+        `SELECT id, guild_id, channel_id, opener_id, claimed_by, status, created_at, closed_at
+           FROM tickets ORDER BY id`,
+      )
+      .all();
+    assert.deepEqual(restoredTickets, tickets);
+    const restoredTranscripts = await harness.db
+      .prepare(
+        `SELECT ticket_id, guild_id, channel_id, opener_id, claimed_by, content,
+                message_count, created_at, purge_after
+           FROM ticket_transcripts ORDER BY ticket_id`,
+      )
+      .all();
+    assert.deepEqual(restoredTranscripts, transcripts);
+    const automod = await harness.db
+      .prepare(`SELECT user_id, violation_count, last_message_id FROM automod_violations WHERE guild_id = ?`)
+      .get(G);
+    assert.deepEqual(automod, { user_id: 'm1', violation_count: 3, last_message_id: 'automod-message-3' });
+    const processed = await harness.db
+      .prepare(`SELECT message_id FROM automod_processed_messages WHERE guild_id = ? ORDER BY message_id`)
+      .all<{ message_id: string }>(G);
+    assert.deepEqual(processed.map((row) => row.message_id), [
+      'automod-message-1', 'automod-message-2', 'automod-message-3',
+    ]);
   });
 
   test('the id sequence resumes past the restored rows', async () => {
@@ -148,6 +385,104 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
     });
     assert.equal(again.inserted, false, 'a restored event was not recognised as already present');
     assert.equal((await counts()).events, before);
+  });
+
+  test('moderation durability survives the round trip: pending unbans, warn ledger, lockdown masks (TOG-1659 High 5)', async () => {
+    await seed();
+    const file = join(dir, 'moderation.ndjson.gz');
+    const manifest = await dump(harness.db, file);
+    const named = new Set(manifest.tables.map((t) => t.name));
+    for (const t of [
+      'moderation_warnings', 'moderation_scheduled_unbans', 'moderation_audit',
+      'moderation_lockdowns', 'moderation_idempotency',
+    ]) {
+      assert.ok(named.has(t as never), `${t} is not in the dump manifest - losing it strands tempbans`);
+    }
+
+    await harness.db.exec(`TRUNCATE ${DUMP_TABLES.join(', ')} RESTART IDENTITY`);
+    await restore(harness.db, file);
+
+    const after = await counts();
+    assert.equal(after.moderation_warnings, 5);
+    assert.equal(after.moderation_audit, 5);
+    assert.equal(after.moderation_scheduled_unbans, 1, 'the pending unban did not survive the restore');
+    assert.equal(after.moderation_lockdowns, 1);
+    assert.equal(after.moderation_idempotency, 1);
+
+    const unban = await harness.db
+      .prepare(`SELECT guild_id, user_id, execute_at, state FROM moderation_scheduled_unbans`)
+      .get();
+    assert.equal(unban?.state, 'pending');
+    assert.equal(unban?.execute_at, '2026-08-02T10:00:00.000Z');
+
+    const lockdown = await harness.db
+      .prepare(`SELECT prior_allow, prior_deny FROM moderation_lockdowns WHERE channel_id = 'chan-1'`)
+      .get();
+    assert.equal(lockdown?.prior_allow, '1024');
+    assert.equal(lockdown?.prior_deny, '8192');
+  });
+
+  test('automation durability survives backup and restore', async () => {
+    await seed();
+    const file = join(dir, 'automations.ndjson.gz');
+    const manifest = await dump(harness.db, file);
+    const named = new Set(manifest.tables.map((t) => t.name));
+    for (const t of [
+      'automation_commands', 'scheduled_messages', 'sticky_messages', 'automation_audit_log',
+    ]) {
+      assert.ok(named.has(t as never), `${t} is not in the dump manifest`);
+    }
+
+    await harness.db.exec(`TRUNCATE ${DUMP_TABLES.join(', ')} RESTART IDENTITY`);
+    await restore(harness.db, file);
+    const after = await counts();
+    assert.equal(after.automation_commands, 1);
+    assert.equal(after.scheduled_messages, 1);
+    assert.equal(after.sticky_messages, 1);
+    assert.equal(after.automation_audit_log, 1);
+    const command = await harness.db
+      .prepare(`SELECT name, text_trigger, enabled FROM automation_commands WHERE guild_id = ?`)
+      .get(G);
+    assert.equal(command?.name, 'faq');
+    assert.equal(command?.text_trigger, '!faq');
+    assert.equal(command?.enabled, true);
+  });
+
+  test('self-role committed target survives the round trip with its audit evidence', async () => {
+    await seed();
+    const file = join(dir, 'self-role-state.ndjson.gz');
+    const manifest = await dump(harness.db, file);
+    assert.equal(manifest.tables.find((t) => t.name === 'self_role_audit')?.count, 1);
+    assert.equal(manifest.tables.find((t) => t.name === 'self_role_panel_claims')?.count, 1);
+
+    await harness.db.exec(`TRUNCATE ${DUMP_TABLES.join(', ')} RESTART IDENTITY`);
+    await restore(harness.db, file);
+
+    const row = await harness.db
+      .prepare(
+        `SELECT event_id, guild_id, panel_id, member_id, source, operation, outcome,
+                added_role_ids, removed_role_ids
+           FROM self_role_audit`,
+      )
+      .get();
+    assert.deepEqual({ ...row }, {
+      event_id: 'self-role-event-1', guild_id: G, panel_id: 'colors', member_id: 'm1',
+      source: 'button', operation: 'add', outcome: 'assigned',
+      added_role_ids: '["role-red"]', removed_role_ids: '[]',
+    });
+    const claim = await harness.db
+      .prepare(
+        `SELECT latest_event_id, latest_option_key, target_committed, latest_event_order
+           FROM self_role_panel_claims
+          WHERE guild_id = ? AND member_id = ? AND panel_id = ?`,
+      )
+      .get(G, 'm1', 'colors');
+    assert.deepEqual({ ...claim }, {
+      latest_event_id: 'self-role-event-1',
+      latest_option_key: 'red',
+      target_committed: true,
+      latest_event_order: '0000000000001:self-role-event-1',
+    });
   });
 
   test('a truncated dump is refused rather than half-restored', async () => {
@@ -220,6 +555,35 @@ describe('backup round trip', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE
       await counts(),
       before,
       'the TRUNCATE must have rolled back with the failed INSERT',
+    );
+  });
+
+  test('an incomplete current-version dump is refused before it can erase audit data', async () => {
+    await seed();
+    const file = join(dir, 'incomplete-source.ndjson.gz');
+    await dump(harness.db, file);
+    const objs = gunzipSync(readFileSync(file))
+      .toString('utf8')
+      .trimEnd()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    const manifest = objs.find((obj) => obj.kind === 'manifest');
+    manifest.tables = manifest.tables.filter((table: { name: string }) => table.name !== 'operational_audit_log');
+    const removedRows = objs.filter((obj) => obj.kind === 'row' && obj.table === 'operational_audit_log').length;
+    const kept = objs.filter((obj) => !(obj.kind === 'row' && obj.table === 'operational_audit_log'));
+    kept.find((obj) => obj.kind === 'end').rows -= removedRows;
+    const incomplete = join(dir, 'incomplete.ndjson.gz');
+    writeFileSync(incomplete, gzipSync(kept.map((obj) => JSON.stringify(obj)).join('\n') + '\n'));
+
+    const before = await counts();
+    const auditBefore = await harness.db
+      .prepare(`SELECT entry_id, delivery_state FROM operational_audit_log ORDER BY entry_id`)
+      .all();
+    await assert.rejects(() => restore(harness.db, incomplete), /missing tables: operational_audit_log/);
+    assert.deepEqual(await counts(), before);
+    assert.deepEqual(
+      await harness.db.prepare(`SELECT entry_id, delivery_state FROM operational_audit_log ORDER BY entry_id`).all(),
+      auditBefore,
     );
   });
 

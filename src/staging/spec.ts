@@ -52,6 +52,8 @@ export const STAGING_BOT_APPLICATION_NAME = 'Owen QA Test';
  */
 export const LIVE_BOT_APPLICATION_ID = '1539711683898118154';
 export const STAGING_BOT_APPLICATION_ID = '1469137636663758888';
+/** The staging guild fixed by TOG-1309 for every parity slice. */
+export const TWO_STAGING_GUILD_ID = '1545644954272137297';
 
 /**
  * The application that held the staging role until 2026-09-05. Kept so that a
@@ -79,21 +81,26 @@ export function applicationIdFromToken(token: string): string | null {
 }
 
 /**
- * Refuse a token that belongs to the LIVE bot.
+ * Refuse every token except the exact Owen QA Test application.
  *
  * This is not hypothetical. On 2026-08-19 the secrets store bound this agent
  * the live bot's token under a generic name while the staging token was
- * absent. Had a staging script been handed that value, it would have created a
- * guild owned by the production bot - and `POST /guilds` is refused once a bot
- * is in ten, so the live bot's guild slots are not something to spend by
- * accident.
+ * absent. A later shell retained the superseded `test-two` token. Both values
+ * remained valid Discord credentials, so allowing an unknown application to
+ * reach the network would turn a staging command into a mutation of whichever
+ * guilds that application can access.
  *
- * Unrecognised ids only warn. A token reset changes the secret but never the
- * application id, so the ids above stay true across resets; but a third
- * staging app someone creates later should not hard-fail a correct setup.
+ * A token reset changes the secret but never the application id, so exact
+ * application matching remains valid across resets. A new staging application
+ * is a policy change: update this constant and its review evidence first rather
+ * than silently accepting it at runtime.
  */
 export function checkStagingToken(token: string): { ok: boolean; message: string } {
   const appId = applicationIdFromToken(token);
+  if (appId === STAGING_BOT_APPLICATION_ID) {
+    return { ok: true, message: `token is ${STAGING_BOT_APPLICATION_NAME} (${appId})` };
+  }
+
   if (appId === LIVE_BOT_APPLICATION_ID) {
     return {
       ok: false,
@@ -105,9 +112,7 @@ export function checkStagingToken(token: string): { ok: boolean; message: string
         'raise it on TWO-21 rather than editing it locally.',
     };
   }
-  if (appId === STAGING_BOT_APPLICATION_ID) {
-    return { ok: true, message: `token is ${STAGING_BOT_APPLICATION_NAME} (${appId})` };
-  }
+
   if (appId === FORMER_STAGING_BOT_APPLICATION_ID) {
     return {
       ok: false,
@@ -120,19 +125,27 @@ export function checkStagingToken(token: string): { ok: boolean; message: string
         '  Re-read DISCORD_STAGING_BOT_TOKEN from the secrets store - your shell has a stale value.',
     };
   }
-  if (appId === null) {
-    return { ok: false, message: 'Token shape not recognised; refusing to contact Discord.' };
-  }
+
+  const actual = appId === null ? 'an unparseable application id' : `application ${appId}`;
   return {
     ok: false,
     message:
-      `This token belongs to application ${appId}, not ${STAGING_BOT_APPLICATION_NAME} ` +
-      `(${STAGING_BOT_APPLICATION_ID}). Refusing to contact Discord.`,
+      `This token identifies ${actual}, not ${STAGING_BOT_APPLICATION_NAME} ` +
+      `(${STAGING_BOT_APPLICATION_ID}).\n` +
+      '  Refusing to run. Nothing was contacted.',
   };
 }
 
 /** Text channels the fixtures and the integration suite expect to find. */
-export const STAGING_TEXT_CHANNELS = ['welcome', 'general', 'events', 'bot-log'] as const;
+export const STAGING_TEXT_CHANNELS = [
+  'welcome',
+  'general',
+  'events',
+  'bot-log',
+  'audit-log',
+  'voice-log',
+  'moderation-log',
+] as const;
 
 /**
  * A real voice channel is in the spec deliberately: `first_voice_session` can
@@ -142,7 +155,7 @@ export const STAGING_TEXT_CHANNELS = ['welcome', 'general', 'events', 'bot-log']
 export const STAGING_VOICE_CHANNELS = ['Voice 1'] as const;
 
 /**
- * The bot must sit ABOVE all three of these in the role list, or role
+ * The bot must sit ABOVE every one of these in the role list, or role
  * assignment fails silently - Discord returns 403 and discord.js swallows it
  * into a rejected promise nobody awaited. This is the single most common
  * staging failure and it produces no error in the log. `staging-verify.ts`
@@ -152,7 +165,14 @@ export const STAGING_VOICE_CHANNELS = ['Voice 1'] as const;
  * bypasses hierarchy entirely. See `evaluateHierarchy` in ./provision.ts,
  * which is the only place that distinction is made.
  */
-export const STAGING_ROLES = ['Moderator', 'Member', 'Game: Test'] as const;
+export const STAGING_ROLES = [
+  'Moderator',
+  'Member',
+  'Game: Test',
+  'Game: Test 2',
+  'Color: Red',
+  'Color: Blue',
+] as const;
 
 /**
  * The scoped permission integer the bot is invited with. Not Administrator -
@@ -169,9 +189,11 @@ export const STAGING_ROLES = ['Moderator', 'Member', 'Game: Test'] as const;
  */
 export const STAGING_PERMISSIONS =
   (1 << 6) | // Add Reactions
+  (1 << 7) | // View Audit Log
   (1 << 10) | // View Channels
   (1 << 11) | // Send Messages
   (1 << 14) | // Embed Links
+  (1 << 13) | // Manage Messages
   (1 << 16) | // Read Message History
   (1 << 28); // Manage Roles
 
@@ -181,22 +203,22 @@ export const STAGING_PERMISSIONS =
  * BigInt and combined separately. Getting this wrong is silent: you produce a
  * plausible-looking permission integer that grants the wrong things.
  */
-const HIGH_BITS = (1n << 33n) | (1n << 44n); // Manage Events, Create Events
+const HIGH_BITS = (1n << 33n) | (1n << 40n) | (1n << 44n); // Manage Events, Moderate Members, Create Events
 
 /**
  * What the invite link actually asks for.
  *
- * `STAGING_PERMISSIONS` covers onboarding. It does NOT cover `event.upsert`,
- * which calls `POST /guilds/{id}/scheduled-events` and needs Manage Events -
- * a bit Manage Server does not imply (`docs/INTERNAL_ACTIONS.md` §8). TOG-463
- * measured that gap against a real guild on 2026-09-05: `role.assign` and
- * `event.upsert` returned `422 discord_rejected` wrapping Discord's own 403,
- * with effective mask `2112134023859777`. The endpoint was correct; the
- * invite was short.
+ * `STAGING_PERMISSIONS` covers onboarding and the moderation audit mirror. It
+ * does NOT cover `event.upsert`, which calls
+ * `POST /guilds/{id}/scheduled-events` and needs Manage Events - a bit Manage
+ * Server does not imply (`docs/INTERNAL_ACTIONS.md` §8). TOG-463 measured that
+ * gap against a real guild on 2026-09-05: `role.assign` and `event.upsert`
+ * returned `422 discord_rejected` wrapping Discord's own 403, with effective
+ * mask `2112134023859777`. The endpoint was correct; the invite was short.
  *
  * Since an invited bot can never exceed its invite, shipping the narrow set
  * guarantees a second round-trip to a human to fix a permission we already
- * know is needed. So the invite carries the events bits too.
+ * know is needed. So the invite carries the events and timeout bits too.
  */
 export const STAGING_INVITE_PERMISSIONS: bigint =
   BigInt(STAGING_PERMISSIONS) | HIGH_BITS;
@@ -204,12 +226,15 @@ export const STAGING_INVITE_PERMISSIONS: bigint =
 /** Decoded, so a mismatch reads as English instead of arithmetic. */
 export const PERMISSION_BITS: ReadonlyArray<{ name: string; bit: bigint }> = [
   { name: 'Add Reactions', bit: 1n << 6n },
+  { name: 'View Audit Log', bit: 1n << 7n },
   { name: 'View Channels', bit: 1n << 10n },
   { name: 'Send Messages', bit: 1n << 11n },
+  { name: 'Manage Messages', bit: 1n << 13n },
   { name: 'Embed Links', bit: 1n << 14n },
   { name: 'Read Message History', bit: 1n << 16n },
   { name: 'Manage Roles', bit: 1n << 28n },
   { name: 'Manage Events', bit: 1n << 33n },
+  { name: 'Moderate Members', bit: 1n << 40n },
   { name: 'Create Events', bit: 1n << 44n },
 ];
 
@@ -260,11 +285,11 @@ export function stagingGuildId(): string {
         'to the new server id. It is not a secret. See docs/STAGING.md.',
     );
   }
-  if (id === LIVE_GUILD_ID) {
+  if (id !== TWO_STAGING_GUILD_ID) {
     throw new Error(
-      `DISCORD_STAGING_GUILD_ID is set to the LIVE TWO server (${LIVE_GUILD_ID}). ` +
-        'Refusing to continue.',
+      `DISCORD_STAGING_GUILD_ID must be the TWO Staging guild (${TWO_STAGING_GUILD_ID}); ` +
+        `got ${id}${id === LIVE_GUILD_ID ? ' (the LIVE TWO server)' : ''}. Refusing to continue.`,
     );
   }
-  return id;
+  return TWO_STAGING_GUILD_ID;
 }

@@ -27,7 +27,7 @@
  *
  *   text   #welcome #general #events #bot-log
  *   voice  Voice 1
- *   roles  Moderator, Member, Game: Test
+ *   roles  Moderator, Member, Game: Test, Game: Test 2, Color: Red, Color: Blue
  *
  * exactly as named in src/staging/spec.ts, because the integration suite
  * asserts on those names.
@@ -62,6 +62,8 @@
 import {
   CHANNEL_TYPE_TEXT,
   CHANNEL_TYPE_VOICE,
+  auditChannelExports,
+  channelCreateBody,
   ROLE_PERMISSIONS,
   chooseGuild,
   evaluateHierarchy,
@@ -72,11 +74,11 @@ import {
   type PartialRole,
 } from '../src/staging/provision.ts';
 import {
-  LIVE_GUILD_ID,
   STAGING_BOT_APPLICATION_ID,
   STAGING_BOT_APPLICATION_NAME,
   STAGING_SERVER_NAME,
   checkStagingToken,
+  stagingGuildId,
 } from '../src/staging/spec.ts';
 
 const API = 'https://discord.com/api/v10';
@@ -107,9 +109,11 @@ if (grantAdminIdx >= 0 && !/^\d{15,25}$/.test(GRANT_ADMIN ?? '')) {
   process.exit(2);
 }
 
-const explicitGuildId = process.env.DISCORD_STAGING_GUILD_ID;
-if (explicitGuildId === LIVE_GUILD_ID) {
-  console.error(`\nDISCORD_STAGING_GUILD_ID is the LIVE TWO server (${LIVE_GUILD_ID}). Refusing.\n`);
+let explicitGuildId: string;
+try {
+  explicitGuildId = stagingGuildId();
+} catch (err) {
+  console.error(`\n${(err as Error).message}\n`);
   process.exit(2);
 }
 
@@ -215,18 +219,26 @@ const channels = channelsRes.body ?? [];
 const roles = rolesRes.body ?? [];
 
 // --- channels ---------------------------------------------------------------
-const cp = planChannels(channels);
+const cp = planChannels(channels, guildId, botId);
 console.log('\nchannels');
 if (cp.present.length) console.log(`  ok     already there: ${cp.present.join(', ')}`);
 for (const d of cp.duplicates) console.log(`  WARN   more than one "${d}" - tests may pick the wrong one`);
 if (cp.extra.length) console.log(`  note   not in the spec, left alone: ${cp.extra.join(', ')}`);
-if (!cp.create.length) console.log('  ok     nothing to create');
+if (!cp.create.length && !cp.repair.length) console.log('  ok     nothing to create or repair');
 for (const c of cp.create) {
   await write(
     `create ${c.type === CHANNEL_TYPE_VOICE ? 'voice' : 'text'} channel "${c.name}"`,
     'POST',
     `/guilds/${guildId}/channels`,
-    { name: c.name, type: c.type },
+    channelCreateBody(c, guildId, botId),
+  );
+}
+for (const c of cp.repair) {
+  await write(
+    `repair private overwrites on #${c.name}`,
+    'PATCH',
+    `/channels/${c.id}`,
+    { permission_overwrites: c.permission_overwrites },
   );
 }
 
@@ -321,7 +333,16 @@ if (!APPLY) {
   process.exit(0);
 }
 console.log(`Done, ${failures} error(s).`);
+const channelsAfter = (await api<PartialChannel[]>('GET', `/guilds/${guildId}/channels`)).body ?? [];
+let auditExports: string[] = [];
+try {
+  auditExports = auditChannelExports(channelsAfter);
+} catch (err) {
+  console.log(`  ERROR  cannot generate audit channel configuration: ${String(err)}`);
+  failures++;
+}
 console.log(`\n  export DISCORD_STAGING_GUILD_ID=${guildId}`);
+for (const line of auditExports) console.log(`  ${line}`);
 console.log('  node scripts/staging-verify.ts     # confirm it against the spec');
 console.log('  node scripts/staging-reset.ts      # seed the fixtures\n');
 process.exit(failures ? 1 : 0);

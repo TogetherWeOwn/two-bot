@@ -2,6 +2,8 @@ import { MESSAGE_RUNGS, nowIso, type FunnelEvent } from './events.ts';
 import type { EventStore } from '../store/eventStore.ts';
 import { VoiceSessionTracker } from './voiceSessions.ts';
 import { log } from './log.ts';
+import type { LevelingService } from '../leveling/service.ts';
+import type { CommunityFactStore, CommunityChannelClass } from '../analytics/communityFacts.ts';
 
 /**
  * Framework-free funnel logic.
@@ -19,6 +21,7 @@ export interface JoinInput {
   source: string;
   occurredAt?: string;
   inviterId?: string | null;
+  sourceEventId?: string;
 }
 
 export interface GateClearedInput {
@@ -40,8 +43,14 @@ export interface MessageInput {
   guildId: string;
   memberId: string;
   isBot: boolean;
+  messageId?: string;
+  webhookId?: string | null;
+  isStaffAutomation?: boolean;
   channelId: string;
+  channelClass?: CommunityChannelClass;
+  captureOnly?: boolean;
   occurredAt?: string;
+  onLevelUp?: (level: number) => Promise<void>;
 }
 
 export interface VoiceInput {
@@ -50,10 +59,13 @@ export interface VoiceInput {
   isBot: boolean;
   channelId: string;
   occurredAt?: string;
+  onLevelUp?: (level: number) => Promise<void>;
 }
 
 export class FunnelHandlers {
   private store: EventStore;
+  private leveling: LevelingService | null;
+  private communityFacts: CommunityFactStore | null;
   /**
    * Open voice sessions, so an end can carry a duration. Public because the
    * gateway adapter clears it on reconnect and the tests read it; there is no
@@ -61,18 +73,36 @@ export class FunnelHandlers {
    */
   readonly voiceSessions: VoiceSessionTracker;
 
-  constructor(store: EventStore) {
+  constructor(
+    store: EventStore,
+    leveling: LevelingService | null = null,
+    communityFacts: CommunityFactStore | null = null,
+  ) {
     this.store = store;
+    this.leveling = leveling;
+    this.communityFacts = communityFacts;
     this.voiceSessions = new VoiceSessionTracker();
   }
 
   async onJoin(i: JoinInput): Promise<FunnelEvent | null> {
+    const occurredAt = i.occurredAt ?? nowIso();
+    if (this.communityFacts) {
+      await this.communityFacts.recordMemberJoin({
+        guildId: i.guildId,
+        actorId: i.memberId,
+        isBot: i.isBot,
+        occurredAt,
+        sourceEventId: i.sourceEventId ?? `${i.guildId}:${i.memberId}:${occurredAt}`,
+        source: i.source,
+        metadata: i.inviterId ? { inviterId: i.inviterId } : undefined,
+      });
+    }
     if (i.isBot) return null;
     const e: FunnelEvent = {
       guildId: i.guildId,
       memberId: i.memberId,
       eventType: 'member_join',
-      occurredAt: i.occurredAt ?? nowIso(),
+      occurredAt,
       source: i.source,
       metadata: i.inviterId ? { inviterId: i.inviterId } : undefined,
     };
@@ -95,12 +125,23 @@ export class FunnelHandlers {
    * cannot inflate it.
    */
   async onGateCleared(i: GateClearedInput): Promise<FunnelEvent | null> {
+    const occurredAt = i.occurredAt ?? nowIso();
+    if (this.communityFacts) {
+      await this.communityFacts.recordRulesAccepted({
+        guildId: i.guildId,
+        actorId: i.memberId,
+        isBot: i.isBot,
+        occurredAt,
+        sourceEventId: `${i.guildId}:${i.memberId}:rules`,
+        source: i.source ?? 'gateway',
+      });
+    }
     if (i.isBot) return null;
     const e: FunnelEvent = {
       guildId: i.guildId,
       memberId: i.memberId,
       eventType: 'gate_cleared',
-      occurredAt: i.occurredAt ?? nowIso(),
+      occurredAt,
       source: i.source ?? 'gateway',
     };
     const r = await this.store.record(e);
@@ -116,9 +157,26 @@ export class FunnelHandlers {
    * so a busy member costs one indexed read per message and no writes.
    */
   async onMessage(i: MessageInput): Promise<FunnelEvent | null> {
-    if (i.isBot) return null;
     const at = i.occurredAt ?? nowIso();
+    if (this.communityFacts && i.messageId) {
+      await this.communityFacts.recordMessage({
+        guildId: i.guildId,
+        actorId: i.memberId,
+        isBot: i.isBot,
+        webhookId: i.webhookId,
+        isStaffAutomation: i.isStaffAutomation,
+        messageId: i.messageId,
+        channelId: i.channelId,
+        channelClass: i.channelClass ?? 'other',
+        occurredAt: at,
+      });
+    }
+    if (i.isBot || i.webhookId || i.isStaffAutomation || i.captureOnly) return null;
     await this.store.touchActivity(i.guildId, i.memberId, at);
+    if (this.leveling) {
+      const award = await this.leveling.awardMessage(i.guildId, i.memberId, at, i.channelId);
+      if (award.leveledUp) await i.onLevelUp?.(award.level);
+    }
 
     // One message fills at most one rung: the lowest empty one. The loop is for
     // the two-process race - the bot and the website can both read the same
@@ -158,8 +216,18 @@ export class FunnelHandlers {
    * every existing caller and test means what it meant before.
    */
   async onVoiceJoin(i: VoiceInput): Promise<FunnelEvent | null> {
-    if (i.isBot) return null;
     const at = i.occurredAt ?? nowIso();
+    let communitySessionKey: string | undefined;
+    if (this.communityFacts) {
+      communitySessionKey = await this.communityFacts.recordVoiceStarted({
+        guildId: i.guildId,
+        actorId: i.memberId,
+        isBot: i.isBot,
+        channelId: i.channelId,
+        occurredAt: at,
+      });
+    }
+    if (i.isBot) return null;
     await this.store.touchActivity(i.guildId, i.memberId, at);
 
     await this.store.record({
@@ -169,7 +237,7 @@ export class FunnelHandlers {
       occurredAt: at,
       source: `channel:${i.channelId}`,
     });
-    this.voiceSessions.start(i.guildId, i.memberId, i.channelId, at);
+    this.voiceSessions.start(i.guildId, i.memberId, i.channelId, at, communitySessionKey);
     log.info('voice_session_start', { memberId: i.memberId, channelId: i.channelId });
 
     if (await this.store.hasEvent(i.guildId, i.memberId, 'first_voice_session')) return null;
@@ -195,7 +263,6 @@ export class FunnelHandlers {
    * whatever the caller gives us rather than inventing a channel.
    */
   async onVoiceLeave(i: VoiceInput): Promise<FunnelEvent | null> {
-    if (i.isBot) return null;
     const at = i.occurredAt ?? nowIso();
     const open = this.voiceSessions.end(i.guildId, i.memberId);
 
@@ -205,6 +272,21 @@ export class FunnelHandlers {
     const durationSeconds = open
       ? Math.max(0, Math.round((Date.parse(at) - Date.parse(open.startedAt)) / 1000))
       : null;
+
+    if (this.communityFacts) {
+      const sessionKey = open?.sessionKey ?? `${i.guildId}:${i.memberId}:unknown-start:${at}:${i.channelId}`;
+      await this.communityFacts.recordVoiceEnded({
+        guildId: i.guildId,
+        actorId: i.memberId,
+        isBot: i.isBot,
+        sessionKey,
+        channelId: open?.channelId ?? i.channelId,
+        occurredAt: at,
+        startedAt: open?.startedAt ?? null,
+        durationSeconds,
+      });
+    }
+    if (i.isBot) return null;
 
     const e: FunnelEvent = {
       guildId: i.guildId,
@@ -221,6 +303,16 @@ export class FunnelHandlers {
       },
     };
     await this.store.record(e);
+    if (this.leveling && durationSeconds !== null) {
+      const award = await this.leveling.awardVoice(
+        i.guildId,
+        i.memberId,
+        durationSeconds,
+        at,
+        open?.channelId ?? i.channelId,
+      );
+      if (award.leveledUp) await i.onLevelUp?.(award.level);
+    }
     // Leaving at T proves they were still there at T, so recency moves too.
     await this.store.touchActivity(i.guildId, i.memberId, at);
     log.info('voice_session_end', {

@@ -16,7 +16,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import { randomBytes } from 'node:crypto';
 import { log } from '../core/log.ts';
-import { assertPrivateBind } from './bind.ts';
+import { resolvePrivateBindHost } from './bind.ts';
 import {
   ActionError,
   authFailure,
@@ -39,9 +39,12 @@ import {
 import type { ActionDiscord } from './discordActions.ts';
 import type { ExpectedJoins } from '../core/expectedJoins.ts';
 import { requestHash, type InternalActionStore } from './store.ts';
+import type { ModerationResolver } from '../moderation/resolver.ts';
+import type { ModerationService } from '../moderation/service.ts';
 
 /** Anything larger than this is a bug on the caller, not a request. */
-const MAX_BODY_BYTES = 64 * 1024;
+// A full MEE6 export may hold hundreds of 2,000-character templates.
+const MAX_BODY_BYTES = 2 * 1024 * 1024;
 
 /**
  * What we accept as an Idempotency-Key. A UUID is what the doc asks for, but
@@ -78,6 +81,13 @@ export interface InternalServerOptions {
    * `unknown`, exactly as before.
    */
   expectedJoins?: ExpectedJoins | null;
+  /** Automations import/export service; null means those verbs fail closed. */
+  automations?: ActionContext['automations'];
+  /** Destructive imports need a stronger capability than ordinary import/export. */
+  allowAutomationOverwrite?: boolean;
+  /** Publish custom slash commands after a successful signed import. */
+  syncCommands?: (() => Promise<number>) | null;
+  moderation?: { resolver: ModerationResolver; service: ModerationService } | null;
   skewSeconds?: number;
   nonceTtlSeconds?: number;
   maxBodyBytes?: number;
@@ -91,8 +101,9 @@ export interface InternalServer {
 
 export async function startInternalActions(opts: InternalServerOptions): Promise<InternalServer> {
   // Before a socket exists. A config mistake should be a crash, not a quietly
-  // exposed remote control for the Discord server.
-  assertPrivateBind(opts.host);
+  // exposed remote control for the Discord server. Resolve once and bind the
+  // exact address validated here so DNS cannot change between check and use.
+  const bindHost = await resolvePrivateBindHost(opts.host);
 
   if (opts.keys.size === 0) {
     throw new Error('Refusing to start the internal actions endpoint with no signing keys.');
@@ -108,7 +119,7 @@ export async function startInternalActions(opts: InternalServerOptions): Promise
 
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(opts.port, opts.host, () => {
+    server.listen(opts.port, bindHost, () => {
       server.removeListener('error', reject);
       resolve();
     });
@@ -116,7 +127,8 @@ export async function startInternalActions(opts: InternalServerOptions): Promise
 
   const addr = server.address() as AddressInfo;
   log.info('internal_actions_listening', {
-    host: opts.host,
+    host: bindHost,
+    configuredHost: opts.host === bindHost ? undefined : opts.host,
     port: addr.port,
     keyIds: opts.keys.size,
     enabled: [...opts.enabled].sort(),
@@ -128,7 +140,7 @@ export async function startInternalActions(opts: InternalServerOptions): Promise
 
   return {
     port: addr.port,
-    url: `http://${opts.host}:${addr.port}${ACTIONS_PATH}`,
+    url: `http://${bindHost}:${addr.port}${ACTIONS_PATH}`,
     close: () =>
       new Promise<void>((resolve) => {
         server.close(() => resolve());
@@ -303,8 +315,13 @@ async function authoriseAndRun(
     roleKeys: opts.roleKeys,
     channelKeys: opts.channelKeys ?? new Map(),
     expectedJoins: opts.expectedJoins ?? null,
+    automations: opts.automations ?? null,
+    allowAutomationOverwrite: opts.allowAutomationOverwrite === true,
+    syncCommands: opts.syncCommands ?? null,
     enabled: opts.enabled,
     store,
+    moderation: opts.moderation ?? null,
+    idempotencyKey: null,
   };
 
   if (!NEEDS_IDEMPOTENCY_KEY.has(action)) {
@@ -366,18 +383,29 @@ async function runIdempotently(
     });
   }
 
+  ctx.idempotencyKey = idempotencyKey;
+  let outcome: ActionOutcome;
   try {
-    const outcome = await runAction(action, body, ctx);
-    await store.complete(keyId, idempotencyKey, { outcome: outcome.outcome, result: outcome.result });
-    return { ...outcome, replayed: false };
+    outcome = await runAction(action, body, ctx);
   } catch (err) {
-    // Give the key back, so a retry of a retryable failure is a real second
-    // attempt rather than a cached error. See store.release().
+    // Moderation owns a second, guild-scoped idempotency row. If its inner
+    // action completed but our outer completion failed, a retry returns that
+    // stored result here and repairs the outer row instead of conflicting.
     await store.release(keyId, idempotencyKey).catch((releaseErr: unknown) => {
       log.error('internal_idempotency_release_failed', { err: String(releaseErr) });
     });
     throw err;
   }
+
+  try {
+    await store.complete(keyId, idempotencyKey, { outcome: outcome.outcome, result: outcome.result });
+  } catch (err) {
+    await store.release(keyId, idempotencyKey).catch((releaseErr: unknown) => {
+      log.error('internal_idempotency_release_failed', { err: String(releaseErr) });
+    });
+    throw err;
+  }
+  return { ...outcome, replayed: outcome.innerReplayed === true };
 }
 
 function parseBody(req: IncomingMessage, raw: Buffer): Record<string, unknown> {

@@ -51,6 +51,45 @@ const TABLES = [
   'presence_probe',
   'counter_snapshots',
   'member_exclusions',
+  'xp_awards',
+  'xp_cooldowns',
+  'level_role_rewards',
+  'level_import_runs',
+  'member_levels',
+  'operational_audit_log',
+  // TOG-1642 moderation state. Same treatment as any other test data: the
+  // moderation suites and the backup round trip seed these directly, and a
+  // leftover row from one fixture would collide with the next one's PKs.
+  'moderation_warnings',
+  'moderation_scheduled_unbans',
+  'moderation_audit',
+  'moderation_lockdowns',
+  'moderation_idempotency',
+  'containment_events',
+  'containment_incidents',
+  'join_risk_flags',
+  // TOG-1648 automations.
+  'automation_commands',
+  'scheduled_messages',
+  'sticky_messages',
+  'automation_audit_log',
+  'community_scorecard_alerts',
+  'community_scorecard_runs',
+  'community_stream_heartbeats',
+  'community_facts',
+  'event_rsvps',
+  'lfg_signups',
+  'lfg_roles',
+  'lfg_posts',
+  'feed_deliveries',
+  'feed_relays',
+  'announcements_audit_log',
+  'ticket_transcripts',
+  'tickets',
+  'automod_violations',
+  'automod_processed_messages',
+  'self_role_audit',
+  'self_role_panel_claims',
 ];
 
 /**
@@ -58,7 +97,46 @@ const TABLES = [
  * not touch - so it only has the original three. Everything migration 0002 adds
  * is Postgres-only, like the views that read it.
  */
-const SQLITE_TABLES = ['events', 'members', 'invite_snapshots'];
+const SQLITE_TABLES = [
+  'events',
+  'members',
+  'invite_snapshots',
+  'xp_awards',
+  'xp_cooldowns',
+  'level_role_rewards',
+  'level_import_runs',
+  'member_levels',
+  'operational_audit_log',
+  'moderation_warnings',
+  'moderation_scheduled_unbans',
+  'moderation_audit',
+  'moderation_lockdowns',
+  'moderation_idempotency',
+  'containment_events',
+  'containment_incidents',
+  'join_risk_flags',
+  'automation_commands',
+  'scheduled_messages',
+  'sticky_messages',
+  'automation_audit_log',
+  'community_scorecard_alerts',
+  'community_scorecard_runs',
+  'community_stream_heartbeats',
+  'community_facts',
+  'event_rsvps',
+  'lfg_signups',
+  'lfg_roles',
+  'lfg_posts',
+  'feed_deliveries',
+  'feed_relays',
+  'announcements_audit_log',
+  'ticket_transcripts',
+  'tickets',
+  'automod_violations',
+  'automod_processed_messages',
+  'self_role_audit',
+  'self_role_panel_claims',
+];
 
 export interface TestDb {
   db: Db;
@@ -110,7 +188,7 @@ export async function openTestDb(label: string): Promise<TestDb> {
     schema,
     webSchema,
     async reset() {
-      await db.exec(`TRUNCATE ${TABLES.join(', ')} RESTART IDENTITY`);
+      await db.exec(`TRUNCATE ${TABLES.join(', ')} RESTART IDENTITY CASCADE`);
     },
     async cleanup() {
       // Views first: they depend on the tables, and CASCADE on the bot schema

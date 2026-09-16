@@ -32,14 +32,79 @@ import { DatabaseSync } from 'node:sqlite';
 import { existsSync } from 'node:fs';
 import { openDb, isPostgresSpec, type Db } from '../src/store/db.ts';
 import { migrate } from '../src/store/migrate.ts';
+import { migrationValue, migrationValuesMatch } from './migration-values.ts';
 
 const args = new Set(process.argv.slice(2));
 const dryRun = args.has('--dry-run');
 const allowNonempty = args.has('--allow-nonempty');
 
-/** Order matters only for readability; there are no FKs between these. */
-const TABLES = ['events', 'members', 'invite_snapshots'] as const;
+/**
+ * Parent tables precede their FK dependants. Feature tables are optional in
+ * old SQLite sources: report and skip a table that did not exist yet.
+ */
+const REQUIRED_TABLES = ['events', 'members', 'invite_snapshots'] as const;
+const OPTIONAL_TABLES = [
+  'moderation_warnings',
+  'moderation_scheduled_unbans',
+  'moderation_audit',
+  'moderation_lockdowns',
+  'moderation_idempotency',
+  'containment_events',
+  'containment_incidents',
+  'join_risk_flags',
+  'operational_audit_log',
+  'tickets',
+  'ticket_transcripts',
+  'automod_violations',
+  'automod_processed_messages',
+  'automation_commands',
+  'scheduled_messages',
+  'sticky_messages',
+  'automation_audit_log',
+  'self_role_audit',
+  'self_role_panel_claims',
+  'event_rsvps',
+  'lfg_posts',
+  'lfg_roles',
+  'lfg_signups',
+  'feed_relays',
+  'feed_deliveries',
+  'announcements_audit_log',
+] as const;
+const TABLES = [...REQUIRED_TABLES, ...OPTIONAL_TABLES] as const;
 type Table = (typeof TABLES)[number];
+
+const PRIMARY_KEYS: Record<Table, readonly string[]> = {
+  events: ['id'],
+  members: ['guild_id', 'member_id'],
+  invite_snapshots: ['guild_id', 'code'],
+  moderation_warnings: ['id'],
+  moderation_scheduled_unbans: ['guild_id', 'user_id', 'request_id'],
+  moderation_audit: ['request_id'],
+  moderation_lockdowns: ['channel_id'],
+  moderation_idempotency: ['guild_id', 'idempotency_key'],
+  containment_events: ['audit_entry_id'],
+  containment_incidents: ['id'],
+  join_risk_flags: ['event_id'],
+  operational_audit_log: ['entry_id'],
+  tickets: ['id'],
+  ticket_transcripts: ['ticket_id'],
+  automod_violations: ['guild_id', 'user_id'],
+  automod_processed_messages: ['guild_id', 'message_id'],
+  automation_commands: ['guild_id', 'name'],
+  scheduled_messages: ['id'],
+  sticky_messages: ['guild_id', 'channel_id'],
+  automation_audit_log: ['id'],
+  self_role_audit: ['event_id'],
+  self_role_panel_claims: ['guild_id', 'member_id', 'panel_id'],
+  event_rsvps: ['guild_id', 'event_id', 'user_id'],
+  lfg_posts: ['id'],
+  lfg_roles: ['lfg_id', 'role_key'],
+  lfg_signups: ['lfg_id', 'user_id'],
+  feed_relays: ['id'],
+  feed_deliveries: ['feed_id', 'item_key'],
+  announcements_audit_log: ['id'],
+};
 
 const sqlitePath = process.env.TWO_SQLITE_PATH || process.env.TWO_DB_PATH || './data/two.db';
 if (!existsSync(sqlitePath)) {
@@ -56,13 +121,27 @@ function sourceCount(table: Table): number {
   return Number((src.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n);
 }
 
-const srcCounts = Object.fromEntries(TABLES.map((t) => [t, sourceCount(t)])) as Record<
+function sourceRows(table: Table, columns: readonly string[]): Record<string, unknown>[] {
+  const quoted = columns.map((c) => `"${c}"`).join(', ');
+  return src.prepare(`SELECT ${quoted} FROM ${table} ORDER BY ${PRIMARY_KEYS[table].join(', ')}`).all() as Record<string, unknown>[];
+}
+
+/** A feature table this old SQLite file never had. Copied as zero rows. */
+const absentFromSource = new Set<Table>(
+  TABLES.filter((t) => (src.prepare(
+    `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`,
+  ).get(t) as { name: string } | undefined) === undefined),
+);
+for (const t of absentFromSource) console.log(`  ${t}: not in source, skipped`);
+
+const copyableTables = TABLES.filter((t) => !absentFromSource.has(t)) as Table[];
+const srcCounts = Object.fromEntries(copyableTables.map((t) => [t, sourceCount(t)])) as Record<
   Table,
   number
 >;
 
 console.log(`source: ${sqlitePath}`);
-for (const t of TABLES) console.log(`  ${t.padEnd(17)} ${srcCounts[t]}`);
+for (const t of copyableTables) console.log(`  ${t.padEnd(26)} ${srcCounts[t]}`);
 
 if (dryRun) {
   console.log('\n--dry-run: nothing written.');
@@ -103,8 +182,8 @@ try {
   await migrate(dst);
 
   const before = {} as Record<Table, number>;
-  for (const t of TABLES) before[t] = await targetCount(dst, t);
-  const occupied = TABLES.filter((t) => before[t] > 0);
+  for (const t of copyableTables) before[t] = await targetCount(dst, t);
+  const occupied = copyableTables.filter((t) => before[t] > 0);
   if (occupied.length > 0 && !allowNonempty) {
     console.error(
       `\nmigrate-data: target already has rows (${occupied
@@ -117,7 +196,7 @@ try {
 
   console.log(`\ntarget: ${url.replace(/\/\/[^@]*@/, '//***@')}`);
 
-  for (const t of TABLES) {
+  for (const t of copyableTables) {
     const cols = sourceColumns(t).filter((c) => c !== 'rowid');
     const tCols = await targetColumns(dst, t);
     const shared = cols.filter((c) => tCols.includes(c));
@@ -134,7 +213,7 @@ try {
 
     // Deterministic read order so a re-run copies the same rows in the same
     // order, and so OFFSET means something.
-    const order = t === 'events' ? 'id' : shared.slice(0, 2).join(', ');
+    const order = PRIMARY_KEYS[t].join(', ');
     const quoted = shared.map((c) => `"${c}"`).join(', ');
     const placeholders = `(${shared.map(() => '?').join(', ')})`;
     // Postgres caps a statement at 65535 bound parameters.
@@ -149,7 +228,7 @@ try {
       if (rows.length === 0) break;
 
       const params: unknown[] = [];
-      for (const row of rows) for (const c of shared) params.push(row[c] ?? null);
+      for (const row of rows) for (const c of shared) params.push(migrationValue(t, c, row[c]));
 
       // DO NOTHING so that a re-run after a partial failure is safe rather
       // than an error. The verification below is what proves it landed.
@@ -163,7 +242,39 @@ try {
       copied += rows.length;
       offset += rows.length;
     }
-    console.log(`  ${t.padEnd(17)} read ${copied}`);
+    console.log(`  ${t.padEnd(26)} read ${copied}`);
+  }
+
+  // Source rows copied after the target's additive migrations never passed
+  // through the target-side normalizations. Finalize pre-lease processing rows,
+  // then derive committed exclusive-panel targets from the exact successful
+  // latest audit. This must run after the copy because a legacy SQLite claims
+  // table has no target_committed column for the shared-column copy to preserve.
+  if (copyableTables.includes('self_role_audit')) {
+    await dst.prepare(
+      `UPDATE self_role_audit
+          SET outcome = 'rejected', code = 'interrupted_before_recovery',
+              reason = 'processing row predates persisted self-role intent'
+        WHERE outcome = 'processing' AND processing_expires_at IS NULL`,
+    ).run();
+  }
+  if (copyableTables.includes('self_role_audit') && copyableTables.includes('self_role_panel_claims')) {
+    await dst.prepare(
+      `UPDATE self_role_panel_claims AS claims
+          SET target_committed = EXISTS (
+            SELECT 1 FROM self_role_audit AS audit
+             WHERE audit.event_id = claims.latest_event_id
+               AND audit.guild_id = claims.guild_id
+               AND audit.member_id = claims.member_id
+               AND audit.panel_id = claims.panel_id
+               AND CASE
+                 WHEN jsonb_array_length(audit.desired_role_ids::jsonb) = 0 THEN NULL
+                 WHEN jsonb_array_length(audit.desired_role_ids::jsonb) = 1 THEN audit.option_key
+                 ELSE '__invalid_multi_target__'
+               END IS NOT DISTINCT FROM claims.latest_option_key
+               AND audit.outcome IN ('assigned', 'removed', 'switched', 'already_held', 'already_absent')
+          )`,
+    ).run();
   }
 
   // BIGSERIAL does not know about ids we inserted explicitly. Move it past the
@@ -175,7 +286,7 @@ try {
   );
 
   console.log('\nverifying...');
-  for (const t of TABLES) {
+  for (const t of copyableTables) {
     const got = await targetCount(dst, t);
 
     // The copy uses ON CONFLICT DO NOTHING, so the target ends up holding the
@@ -192,21 +303,47 @@ try {
     const ok = got >= low && got <= high;
     const range = before[t] > 0 ? `  had ${before[t]}  expect ${low}..${high}` : '';
     console.log(
-      `  ${t.padEnd(17)} source ${srcCounts[t]}  target ${got}${range}  ${ok ? 'ok' : 'MISMATCH'}`,
+      `  ${t.padEnd(26)} source ${srcCounts[t]}  target ${got}${range}  ${ok ? 'ok' : 'MISMATCH'}`,
     );
     if (!ok) failed = true;
   }
 
-  // Counts can match while the contents differ. Compare the key set.
+  // Counts can match while the contents differ. Compare every source row by
+  // primary key, including ticket state and transcript bodies.
+  for (const t of copyableTables) {
+    const srcCols = sourceColumns(t).filter((c) => c !== 'rowid');
+    const dstCols = await targetColumns(dst, t);
+    const shared = srcCols.filter((c) => dstCols.includes(c));
+    const rows = sourceRows(t, shared);
+    let mismatches = 0;
+    const keyColumns = PRIMARY_KEYS[t];
+    if (keyColumns.some((c) => !shared.includes(c))) {
+      failed = true;
+      console.log(`  ${t.padEnd(17)} primary key columns are not shared  MISMATCH`);
+      continue;
+    }
+    for (const row of rows) {
+      const target = await dst
+        .prepare(`SELECT ${shared.map((c) => `"${c}"`).join(', ')} FROM ${t} WHERE ${keyColumns.map((c) => `"${c}" = ?`).join(' AND ')}`)
+        .get<Record<string, unknown>>(...keyColumns.map((c) => row[c]));
+      if (!target || shared.some((c) => {
+        if (t === 'self_role_panel_claims' && c === 'target_committed') return false;
+        return !migrationValuesMatch(t, c, row[c], target[c]);
+      })) mismatches++;
+    }
+    if (mismatches > 0) {
+      failed = true;
+      console.log(`  ${t.padEnd(17)} ${mismatches} source row(s) missing or changed  MISMATCH`);
+    } else {
+      console.log(`  ${t.padEnd(17)} ${rows.length} source row(s) match by primary key  ok`);
+    }
+  }
+
   const srcKeys = new Set(
-    (src.prepare(`SELECT idempotency_key AS k FROM events`).all() as { k: string }[]).map(
-      (r) => r.k,
-    ),
+    (src.prepare(`SELECT idempotency_key AS k FROM events`).all() as { k: string }[]).map((r) => r.k),
   );
   const dstKeys = new Set(
-    (await dst.prepare(`SELECT idempotency_key AS k FROM events`).all<{ k: string }>()).map(
-      (r) => r.k,
-    ),
+    (await dst.prepare(`SELECT idempotency_key AS k FROM events`).all<{ k: string }>()).map((r) => r.k),
   );
   const missing = [...srcKeys].filter((k) => !dstKeys.has(k));
   if (missing.length > 0) {

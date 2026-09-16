@@ -12,6 +12,7 @@ import { join } from 'node:path';
 
 import { readSecret, credentialSource } from '../src/core/credentials.ts';
 import { loadInternalActionsConfig } from '../src/internal/config.ts';
+import { loadModerationConfig } from '../src/moderation/config.ts';
 
 function credDir(files: Record<string, string>): string {
   const dir = mkdtempSync(join(tmpdir(), 'two-creds-'));
@@ -85,6 +86,30 @@ test('internal actions keys load from a credential', () => {
   assert.ok(cfg);
   assert.equal(cfg.keys.length, 1);
   assert.equal(cfg.keys[0].id, 'web-1');
+  assert.equal(cfg.enabled.has('automations.import'), false);
+  assert.equal(cfg.enabled.has('automations.export'), false);
+  assert.equal(cfg.allowAutomationOverwrite, false);
+});
+
+test('automation internal actions require explicit base and overwrite flags', () => {
+  const cfg = loadInternalActionsConfig({
+    TWO_INTERNAL_ACTIONS: '1',
+    TWO_INTERNAL_KEYS: 'web-1:0123456789abcdef0123456789abcdef',
+    TWO_INTERNAL_ALLOW_AUTOMATIONS: '1',
+    TWO_INTERNAL_ALLOW_AUTOMATIONS_OVERWRITE: '1',
+  } as NodeJS.ProcessEnv);
+  assert.ok(cfg);
+  assert.equal(cfg.enabled.has('automations.import'), true);
+  assert.equal(cfg.enabled.has('automations.export'), true);
+  assert.equal(cfg.allowAutomationOverwrite, true);
+
+  const overwriteOnly = loadInternalActionsConfig({
+    TWO_INTERNAL_ACTIONS: '1',
+    TWO_INTERNAL_KEYS: 'web-1:0123456789abcdef0123456789abcdef',
+    TWO_INTERNAL_ALLOW_AUTOMATIONS_OVERWRITE: '1',
+  } as NodeJS.ProcessEnv);
+  assert.ok(overwriteOnly);
+  assert.equal(overwriteOnly.allowAutomationOverwrite, false);
 });
 
 test('internal actions still accept TWO_INTERNAL_KEYS from the environment', () => {
@@ -101,4 +126,18 @@ test('internal actions with no keys at all still refuses to start', () => {
     () => loadInternalActionsConfig({ TWO_INTERNAL_ACTIONS: '1' } as NodeJS.ProcessEnv),
     /internal_keys|TWO_INTERNAL_KEYS/,
   );
+});
+
+test('moderation audit secret loads from a credential, and is null when unprovisioned', () => {
+  const dir = credDir({ moderation_audit_secret: 'mac-secret\n' });
+  const cfg = loadModerationConfig({ CREDENTIALS_DIRECTORY: dir } as NodeJS.ProcessEnv);
+  assert.equal(cfg.moderationAuditSecret, 'mac-secret');
+
+  const unset = loadModerationConfig({} as NodeJS.ProcessEnv);
+  assert.equal(unset.moderationAuditSecret, null);
+});
+
+test('moderation audit secret falls back to TWO_MODERATION_AUDIT_SECRET', () => {
+  const cfg = loadModerationConfig({ TWO_MODERATION_AUDIT_SECRET: 'from-env' } as NodeJS.ProcessEnv);
+  assert.equal(cfg.moderationAuditSecret, 'from-env');
 });
