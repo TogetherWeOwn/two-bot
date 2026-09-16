@@ -17,7 +17,7 @@ import {
   type Channel,
   type JsonObject,
   type LiveCleanupSnapshot,
-  normalizeOverwrites,
+  normalizedChannel,
   operationSemanticHash,
   planArchiveOperations,
   type Role,
@@ -48,7 +48,7 @@ const snapshot: LiveCleanupSnapshot = withSemanticHash({
   guildId: String(state.guild.id),
   guild: state.guild,
   roles: state.roles,
-  channels: state.channels.map((channel) => ({ ...channel, permission_overwrites: normalizeOverwrites(channel.permission_overwrites ?? []) })),
+  channels: state.channels.map(normalizedChannel),
   members: state.members.map((member) => ({
     id: member.user.id,
     bot: Boolean(member.user.bot),

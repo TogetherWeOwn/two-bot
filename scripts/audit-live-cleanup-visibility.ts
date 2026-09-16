@@ -27,6 +27,7 @@ import {
   type LiveCleanupSnapshot,
   type Member,
   normalizeOverwrites,
+  normalizedChannel,
   type Overwrite,
   planArchiveOperations,
   type Role,
@@ -54,7 +55,7 @@ function fixtureSnapshot(): LiveCleanupSnapshot {
     guildId: String(state.guild.id),
     guild: state.guild,
     roles: state.roles,
-    channels: state.channels.map((channel) => ({ ...channel, permission_overwrites: normalizeOverwrites(channel.permission_overwrites ?? []) })),
+    channels: state.channels.map(normalizedChannel),
     members: state.members.map((member) => ({
       id: member.user.id,
       bot: Boolean(member.user.bot),
@@ -120,7 +121,7 @@ const visible = new Map<string, string[]>();
 for (const member of snapshot.members) {
   const seen = auditedIds.filter((id) => {
     const channel = after.channels.find((item) => item.id === id)!;
-    return canSee(member, roleById, snapshot.guildId, normalizeOverwrites(channel.permission_overwrites ?? []));
+    return canSee(member, roleById, snapshot.guildId, normalizeOverwrites(channel.permission_overwrites, `Post-plan projection of channel ${id}`));
   });
   if (seen.length > 0) visible.set(member.id, [...seen]);
 }

@@ -24,6 +24,7 @@ import {
   type LiveCleanupSnapshot,
   manifestInFlightId,
   normalizeOverwrites,
+  normalizedChannel,
   semanticSnapshot,
   sha256,
   stable,
@@ -33,6 +34,7 @@ import {
   reconcileJournalWitness,
   type Role,
   syncedChildIds,
+  unreadableOverwrites,
 } from '../src/redesign/live-cleanup.ts';
 
 const argv = process.argv.slice(2);
@@ -258,7 +260,9 @@ function operationState(operation: CleanupManifest['operations'][number], channe
   if (operation.objectType === 'channel') {
     const current = channels.get(operation.objectId);
     if (!current) return 'drifted';
-    const overwrites = stable(normalizeOverwrites(current.permission_overwrites ?? []));
+    // `?? []` here decided `applied` vs `inverse` vs `drifted` off an invented empty
+    // list, which is the verdict that picks whether this object is PATCHed at all.
+    const overwrites = stable(normalizeOverwrites(current.permission_overwrites, `Live read of channel ${operation.objectId}`));
     if (expectedApplied === expectedInverse && overwrites === expectedInverse) return 'inverse';
     if (overwrites === expectedApplied) return 'applied';
     if (overwrites === expectedInverse) return 'inverse';
@@ -268,12 +272,12 @@ function operationState(operation: CleanupManifest['operations'][number], channe
     return 'drifted';
   }
   const affected = [operation.objectId, ...snapshot.channels
-    .filter((channel) => channel.parent_id === operation.objectId && stable(normalizeOverwrites(channel.permission_overwrites ?? [])) === expectedInverse)
+    .filter((channel) => channel.parent_id === operation.objectId && stable(normalizeOverwrites(channel.permission_overwrites, `Snapshot channel ${channel.id}`)) === expectedInverse)
     .map((channel) => channel.id)];
   const states = affected.map((id) => {
     const current = channels.get(id);
     if (!current) return 'drifted';
-    const overwrites = stable(normalizeOverwrites(current.permission_overwrites ?? []));
+    const overwrites = stable(normalizeOverwrites(current.permission_overwrites, `Live read of channel ${id}`));
     if (overwrites === expectedApplied) return 'applied';
     if (overwrites === expectedInverse) return 'inverse';
     return 'drifted';
@@ -308,7 +312,7 @@ const inFlightCandidate = inFlight[0] ?? null;
 const witnessAgrees = inFlightCandidate !== null
   && manifestInFlightId(manifest) === inFlightCandidate.id
   && inFlightExceptionIsAvailable(token, manifest, manifestPath);
-const inFlightId = witnessAgrees && inFlightDriftIsOurs(snapshot, inFlightCandidate!, new Map(preRollbackChannels.map((channel) => [channel.id, normalizeOverwrites(channel.permission_overwrites ?? [])])))
+const inFlightId = witnessAgrees && inFlightDriftIsOurs(snapshot, inFlightCandidate!, new Map(preRollbackChannels.map((channel) => [channel.id, normalizeOverwrites(channel.permission_overwrites, `Live read of channel ${channel.id}`)])))
   ? inFlightCandidate!.id
   : null;
 if (inFlightCandidate !== null && inFlightId === null) {
@@ -327,8 +331,8 @@ for (const current of preRollbackChannels) {
   const operation = manifest.operations.find((item) => item.objectId === current.id || item.objectId === current.parent_id);
   if (operation) continue;
   const original = snapshot.channels.find((channel) => channel.id === current.id)!;
-  const currentShape = { ...current, permission_overwrites: normalizeOverwrites(current.permission_overwrites ?? []) };
-  const originalShape = { ...original, permission_overwrites: normalizeOverwrites(original.permission_overwrites ?? []) };
+  const currentShape = { ...current, permission_overwrites: normalizeOverwrites(current.permission_overwrites, `Live read of untouched channel ${current.id}`) };
+  const originalShape = { ...original, permission_overwrites: normalizeOverwrites(original.permission_overwrites, `Pre-snapshot channel ${original.id}`) };
   if (stable(currentShape) !== stable(originalShape)) die(1, `Rollback preflight untouched channel ${current.id} drifted from the pre-snapshot.`);
 }
 manifest.status = 'rolling_back';
@@ -357,11 +361,14 @@ for (const operation of [...manifest.operations].reverse()) {
     checkpoint(manifestPath, manifest);
     die(1, `Rollback failed for ${operation.id}: HTTP ${result.status}. No retry was attempted.`);
   }
-  const restored = normalizeOverwrites(result.body.permission_overwrites ?? []);
-  if (stable(restored) !== stable(operation.inverseWrite.permission_overwrites)) {
+  // Post-write, so an unreadable response is folded into the existing partial-restore
+  // branch rather than thrown past it: the PATCH has already reached Discord and this
+  // run owes the manifest a `rollback_failed` checkpoint before it stops.
+  const unreadableRestore = unreadableOverwrites(result.body.permission_overwrites);
+  if (unreadableRestore !== null || stable(normalizeOverwrites(result.body.permission_overwrites)) !== stable(operation.inverseWrite.permission_overwrites)) {
     manifest.status = 'rollback_failed';
     checkpoint(manifestPath, manifest);
-    die(1, `Rollback returned a partial/unexpected state for ${operation.id}.`);
+    die(1, `Rollback returned a partial/unexpected state for ${operation.id}${unreadableRestore === null ? '' : `: the response carried ${unreadableRestore}, so what the restore left behind is unknown`}.`);
   }
   // Discord's sync only carries children that matched the category's *previous* value,
   // so a category left at a partial value re-syncs nothing and its children stay where
@@ -371,12 +378,23 @@ for (const operation of [...manifest.operations].reverse()) {
   // operation already checkpointed, leaving nothing for a retry to re-enter.
   for (const childId of syncedChildIds(snapshot, operation)) {
     const child = (await mustGet<Channel>(`/channels/${childId}`, `Read rollback child ${childId}`));
-    if (stable(normalizeOverwrites(child.permission_overwrites ?? [])) === stable(operation.inverseWrite.permission_overwrites)) continue;
-    const childResult = await api<Channel>('PATCH', `/channels/${childId}`, operation.inverseWrite);
-    if (childResult.status === 429 || childResult.status >= 300 || !childResult.body || stable(normalizeOverwrites(childResult.body.permission_overwrites ?? [])) !== stable(operation.inverseWrite.permission_overwrites)) {
+    // `?? []` here answered "does this child still need restoring?" with an invented
+    // empty list, and an empty list never equals `inverseWrite`, so an unreadable read
+    // meant a PATCH the run could not justify. Both this read and the response below
+    // are past the parent's write, so they checkpoint `rollback_failed` rather than throw.
+    const unreadableChild = unreadableOverwrites(child.permission_overwrites);
+    if (unreadableChild !== null) {
       manifest.status = 'rollback_failed';
       checkpoint(manifestPath, manifest);
-      die(1, `Rollback could not restore synchronized child ${childId} of ${operation.id}: HTTP ${childResult.status}. No retry was attempted.`);
+      die(1, `Rollback could not read synchronized child ${childId} of ${operation.id}: the 200 carried ${unreadableChild}, so whether it still holds the applied value is unknown.`);
+    }
+    if (stable(normalizeOverwrites(child.permission_overwrites)) === stable(operation.inverseWrite.permission_overwrites)) continue;
+    const childResult = await api<Channel>('PATCH', `/channels/${childId}`, operation.inverseWrite);
+    const unreadableChildResult = childResult.body === null ? null : unreadableOverwrites(childResult.body.permission_overwrites);
+    if (childResult.status === 429 || childResult.status >= 300 || !childResult.body || unreadableChildResult !== null || stable(normalizeOverwrites(childResult.body.permission_overwrites)) !== stable(operation.inverseWrite.permission_overwrites)) {
+      manifest.status = 'rollback_failed';
+      checkpoint(manifestPath, manifest);
+      die(1, `Rollback could not restore synchronized child ${childId} of ${operation.id}: HTTP ${childResult.status}${unreadableChildResult === null ? '' : `, and the response carried ${unreadableChildResult}`}. No retry was attempted.`);
     }
     console.log(`RESYNCED ${childId} under ${operation.id}`);
   }
@@ -406,7 +424,9 @@ const restored = {
   guildId,
   guild: postGuild,
   roles: postRoles as LiveCleanupSnapshot['roles'],
-  channels: currentChannels.map((channel) => ({ ...channel, permission_overwrites: normalizeOverwrites(channel.permission_overwrites ?? []) })),
+  // Same mapper capture uses, so an unreadable post-rollback channel stays distinguishable
+  // from an empty one inside the hash instead of matching a pre-snapshot that was empty.
+  channels: currentChannels.map(normalizedChannel),
   members: postMembers.map((member) => ({
     id: member.user?.id ?? '',
     bot: Boolean(member.user?.bot),
