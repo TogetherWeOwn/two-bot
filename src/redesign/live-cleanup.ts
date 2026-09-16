@@ -1,5 +1,5 @@
 import { createHash, createHmac } from 'node:crypto';
-import { appendFileSync, closeSync, existsSync, fsyncSync, openSync, readFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, fsyncSync, openSync, readFileSync, truncateSync } from 'node:fs';
 import { LIVE_BOT_APPLICATION_ID, LIVE_GUILD_ID, LIVE_GUILD_NAME } from '../staging/spec.ts';
 
 export const ARCHIVE_PHASE = 'archive-legacy';
@@ -232,6 +232,24 @@ function expectedWitnessRecords(last: JournalWitnessRecord | undefined): Array<{
 }
 
 /**
+ * Splits a witness file into the records that reached disk whole.
+ *
+ * `appendJournalWitness` writes one record and its newline in a single fsynced append,
+ * so a file that does not end in a newline lost its tail to a power cut or an fs crash
+ * mid-write; a killed process cannot produce one. TOG-3006: that partial tail is
+ * dropped rather than read. It carries no more history than the trailing truncation the
+ * chain already accepts by design, and it hands a forger nothing — cutting the file at
+ * the preceding newline yields a byte-identical accepted prefix and needs no bot token.
+ *
+ * Only the *final* line gets this treatment. An unreadable line anywhere else is a log
+ * that was spliced, not one that was interrupted, and `readJournalWitness` still throws.
+ */
+function committedWitnessLines(content: string): string[] {
+  const lines = content.split('\n').filter((item) => item.length > 0);
+  return content.endsWith('\n') ? lines : lines.slice(0, -1);
+}
+
+/**
  * Reads the run's append-only checkpoint witness and proves it was not edited.
  *
  * Each record is HMACed over its predecessor's chain value, so a line cannot be
@@ -246,11 +264,15 @@ function expectedWitnessRecords(last: JournalWitnessRecord | undefined): Array<{
  * witness at all. Callers decide what that means; `reconcileJournalWitness` treats it
  * as absent and `assertLatestCheckpoint` refuses it, because a manifest cannot be shown
  * to be the latest checkpoint by a log that records none.
+ *
+ * A witness whose *last* line is torn mid-write reads as that line never having been
+ * written — see `committedWitnessLines`. Before TOG-3006 it threw, and both cleanup
+ * entry points then refused to start a run that was otherwise perfectly recoverable.
  */
 export function readJournalWitness(token: string, path: string): JournalWitnessRecord[] {
   const records: JournalWitnessRecord[] = [];
   let previousChain = '';
-  for (const [index, line] of readFileSync(path, 'utf8').split('\n').filter((item) => item.length > 0).entries()) {
+  for (const [index, line] of committedWitnessLines(readFileSync(path, 'utf8')).entries()) {
     let record: JournalWitnessRecord;
     try {
       record = JSON.parse(line) as JournalWitnessRecord;
@@ -271,7 +293,16 @@ export function appendJournalWitness(token: string, path: string, sequence: numb
   let previousChain = '';
   let last: JournalWitnessRecord | undefined;
   if (existsSync(path)) {
-    const line = readFileSync(path, 'utf8').split('\n').filter((item) => item.length > 0).at(-1);
+    const content = readFileSync(path, 'utf8');
+    const lines = committedWitnessLines(content);
+    // Cut a torn tail off before appending past it. The reader skips it only while it is
+    // last; appending over it would bury an unreadable line mid-log, where the reader
+    // throws on it for good. Dropping bytes no reader will ever accept is a repair, not
+    // a loss, which is why it happens before the guard below rather than after.
+    if (!content.endsWith('\n') && content.length > 0) {
+      truncateSync(path, Buffer.byteLength(content.slice(0, content.lastIndexOf('\n') + 1), 'utf8'));
+    }
+    const line = lines.at(-1);
     if (line !== undefined) {
       last = JSON.parse(line) as JournalWitnessRecord;
       previousChain = last.chain;

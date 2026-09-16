@@ -1185,6 +1185,75 @@ test('a torn witness file creation leaves a restartable run, not an unreadable o
   } finally { await stub.close(); }
 });
 
+/**
+ * TOG-3006 — the other half of the torn-witness surface, found reviewing TOG-3001.
+ *
+ * A torn file *creation* left a restartable run from TOG-2975 on. A torn *trailing line*
+ * did not: it threw, and both entry points then refused to start a run whose committed
+ * records were all intact and readable. Needs a power cut rather than a kill — one
+ * fsynced ~190-byte append does not tear — but the recovery it blocked was free.
+ */
+test('a torn trailing witness line leaves a restartable run, not an unreadable one', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-witness-torn-tail-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    const path = manifestPath(dir);
+    assert.equal((await apply(stub, dir)).code, 0);
+    const witnessFile = journalWitnessPath(path);
+    const whole = readFileSync(witnessFile, 'utf8');
+    const committed = readJournalWitness(TOKEN, witnessFile);
+    assert.ok(committed.length >= 2, 'the tear needs a record in front of it to still be readable');
+
+    // The crash: power lost part-way through the final append, so the last record is on
+    // disk mid-JSON with no newline behind it. Every record before it is untouched.
+    const lastLineAt = whole.lastIndexOf('\n', whole.length - 2) + 1;
+    writeFileSync(witnessFile, whole.slice(0, lastLineAt + 40), { mode: 0o600 });
+    assert.equal(readFileSync(witnessFile, 'utf8').endsWith('\n'), false);
+
+    // The torn line reads as never written — one record short, and the rest intact.
+    const afterTear = readJournalWitness(TOKEN, witnessFile);
+    assert.equal(afterTear.length, committed.length - 1);
+    assert.deepEqual(afterTear, committed.slice(0, -1));
+
+    // Which is the point: the run starts instead of exiting 2 on an unreadable log.
+    const started = await rollback(stub, dir);
+    assert.equal(started.code, 0, started.stderr);
+    assert.doesNotMatch(started.stderr, /is not readable/);
+
+    // And the garbage is gone rather than buried mid-file, where it would be permanent:
+    // the reader skips a torn tail only while it is still the tail.
+    const repaired = readFileSync(witnessFile, 'utf8');
+    assert.equal(repaired.endsWith('\n'), true);
+    assert.ok(repaired.startsWith(whole.slice(0, lastLineAt)), 'the committed prefix must survive byte for byte');
+    assert.ok(readJournalWitness(TOKEN, witnessFile).length > afterTear.length, 'the repaired log took the next checkpoint');
+  } finally { await stub.close(); }
+});
+
+test('an unreadable witness line that is not the last one is still refused', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-witness-spliced-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    assert.equal((await apply(stub, dir)).code, 0);
+    const witnessFile = journalWitnessPath(manifestPath(dir));
+    const lines = readFileSync(witnessFile, 'utf8').split('\n').filter((line) => line.length > 0);
+    assert.ok(lines.length >= 2, 'splicing needs a line after the damaged one');
+
+    // Same damage as above, one line further from the end. TOG-3006 relaxed the reader
+    // for a torn tail only: mid-log garbage is a spliced file, not an interrupted write.
+    lines[lines.length - 2] = lines[lines.length - 2]!.slice(0, 40);
+    writeFileSync(witnessFile, `${lines.join('\n')}\n`, { mode: 0o600 });
+    assert.throws(() => readJournalWitness(TOKEN, witnessFile), /is not readable/);
+
+    const writesBefore = stub.writes.length;
+    const refused = await rollback(stub, dir);
+    assert.equal(refused.code, 2);
+    assert.match(refused.stderr, /is not readable/);
+    assert.equal(stub.writes.length, writesBefore, 'an unreadable log must be refused before any write');
+  } finally { await stub.close(); }
+});
+
 test('an open checkpoint is not closed over a manifest the run would reject', async () => {
   const stub = await stubDiscord();
   const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-crash-invalid-manifest-'));
