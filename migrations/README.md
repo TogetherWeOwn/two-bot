@@ -4,8 +4,11 @@ Plain `.sql` files, applied in filename order, each inside one transaction,
 each recorded in `schema_migrations`. Applied by `npm run migrate` and
 automatically at bot startup.
 
-Postgres only. The SQLite path still bootstraps from `src/store/schema.sql`;
-it is being deleted (TWO-18) and is not worth a second dialect.
+These files are the source of truth for the Postgres database. Comments in an
+already-applied migration are checksum-frozen too: some describe the test
+mechanism that existed when the migration landed. Current tests apply the full
+immutable chain to isolated Postgres schemas; do not edit historical comments
+to update that wording.
 
 ## Rules
 

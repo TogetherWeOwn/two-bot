@@ -6,10 +6,8 @@
  *
  *  1. **The database only ever gets asked for rows, never for arithmetic.**
  *     Every aggregate is computed here in JS. The whole member table is under
- *     2,000 rows and the event log under 10,000, so pulling it all is free -
- *     and it means one code path works identically on SQLite and Postgres. No
- *     `julianday()` vs `EXTRACT(EPOCH ...)` forks, no dialect bugs that only
- *     show up in production.
+ *     2,000 rows and the event log under 10,000, so pulling it all is free and
+ *     keeps the calculation rules easy to test.
  *
  *  2. **Everything that shapes a number is exported and pure**, so the tests
  *     can check the arithmetic without a database. `buildDashboard` is a thin

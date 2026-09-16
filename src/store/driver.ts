@@ -1,11 +1,8 @@
 /**
  * The narrow database surface the rest of the bot is allowed to touch.
  *
- * Two implementations: sqliteDriver.ts (the original, on its way out) and
- * postgresDriver.ts (the real one). Keeping the shape identical to the old
- * `node:sqlite` API - prepare().get/all/run - is deliberate: the Postgres move
- * is a driver swap, and the diff at every call site should be one `await` and
- * nothing else.
+ * The prepare().get/all/run shape is deliberate: it keeps database access
+ * narrow and makes every call site consistently asynchronous.
  *
  * The one unavoidable difference is that everything is async. No Postgres
  * client for Node is synchronous, so `record()` cannot stay sync. See
@@ -24,14 +21,9 @@ export interface Statement {
 }
 
 export interface Db {
-  readonly kind: 'sqlite' | 'postgres';
-
   /**
-   * Prepare a statement. SQL is written once, in SQLite's `?` placeholder
-   * style; the Postgres driver rewrites those to `$1..$n`. Every statement
-   * used by the bot must be valid in both dialects until the SQLite path is
-   * deleted - in practice that means `ON CONFLICT ... DO NOTHING` and
-   * `RETURNING`, both of which the two engines share.
+   * Prepare a statement. Internal SQL deliberately uses `?` placeholders; the
+   * Postgres driver rewrites them to `$1..$n` before sending the query.
    */
   prepare(sql: string): Statement;
 

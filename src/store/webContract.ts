@@ -71,18 +71,11 @@ export interface ApplyWebContractResult {
   botSchema: string;
 }
 
-/**
- * Create or update the contract views. Postgres only - these are views over a
- * live schema and the SQLite path is on its way out.
- */
+/** Create or update the contract views over the live schema. */
 export async function applyWebContract(
   db: Db,
   sqlPath: string = WEB_CONTRACT_SQL,
 ): Promise<ApplyWebContractResult> {
-  if (db.kind !== 'postgres') {
-    throw new Error('applyWebContract() is Postgres-only');
-  }
-
   const row = await db.prepare(`SELECT current_schema() AS schema`).get<{ schema: string }>();
   const botSchema = row?.schema;
   if (!botSchema) {

@@ -27,8 +27,8 @@ import {
   LOOKING_TO_PLAY_CHANNEL_ID,
   LOBBY_VOICE_CHANNEL_ID,
 } from '../src/onboarding/session.ts';
-import { openDb, type Db } from '../src/store/db.ts';
-import { openTestDb, usingPostgres, type TestDb } from './helpers/testDb.ts';
+import { type Db } from '../src/store/db.ts';
+import { openTestDb, TEST_PG_URL, type TestDb } from './helpers/testDb.ts';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const NEWBIE = '900000000000006666';
@@ -67,25 +67,15 @@ async function startHarness(
   extraEnv: Record<string, string> = {},
 ): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), 'two-session-e2e-'));
-  const dbPath = join(dir, 'two.db');
   const mock = await startMockDiscord({});
 
-  let harness: TestDb | null = null;
-  let reader: Db;
-  let botDbEnv: Record<string, string>;
-  if (usingPostgres) {
-    harnessSeq++;
-    harness = await openTestDb(`${import.meta.filename}_${harnessSeq}`);
-    const schema = (await harness.db.prepare(`SELECT current_schema() AS s`).get<{ s: string }>())!.s;
-    reader = harness.db;
-    botDbEnv = {
-      TWO_DATABASE_URL: process.env.TWO_TEST_DATABASE_URL!,
-      PGOPTIONS: `-c search_path=${schema}`,
-    };
-  } else {
-    reader = await openDb(dbPath);
-    botDbEnv = { TWO_DB_PATH: dbPath };
-  }
+  harnessSeq++;
+  const harness: TestDb = await openTestDb(`${import.meta.filename}_${harnessSeq}`);
+  const reader: Db = harness.db;
+  const botDbEnv: Record<string, string> = {
+    TWO_DATABASE_URL: TEST_PG_URL,
+    PGOPTIONS: `-c search_path=${harness.schema}`,
+  };
 
   const botLog: string[] = [];
   const bot = spawn(process.execPath, ['src/index.ts'], {
@@ -104,7 +94,6 @@ async function startHarness(
       TWO_ONBOARDING_MODE: 'session',
       TWO_ONBOARDING_DRY_RUN: '0',
       TWO_SELF_ROLE_PANELS: '',
-      TWO_DATABASE_URL: '',
       ...botDbEnv,
       ...extraEnv,
       LOG_LEVEL: 'debug',
@@ -116,8 +105,7 @@ async function startHarness(
   t.after(async () => {
     bot.kill('SIGKILL');
     await mock.close();
-    if (harness) await harness.cleanup();
-    else await reader.close();
+    await harness.cleanup();
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -456,8 +444,14 @@ test(
   },
 );
 
-test('session mode refuses to start without DISCORD_GUILD_ID', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'two-session-missing-guild-'));
+/**
+ * These guards all throw before `openDb`, so they need a syntactically valid
+ * TWO_DATABASE_URL and never dial it. Pointing them at the test database keeps
+ * that honest: if a guard ever moved below the open, the test would still pass
+ * rather than fail for the wrong reason - so each one also asserts the exact
+ * message, which only that guard produces.
+ */
+function spawnBot(env: Record<string, string>): Promise<{ code: number | null; output: string }> {
   const bot = spawn(process.execPath, ['src/index.ts'], {
     cwd: ROOT,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -465,54 +459,84 @@ test('session mode refuses to start without DISCORD_GUILD_ID', async () => {
       ...process.env,
       DISCORD_TOKEN: 'mock-token',
       DISCORD_BOT_TOKEN: 'mock-token',
-      DISCORD_GUILD_ID: '',
-      DISCORD_SESSION_LOOKING_TO_PLAY_CHANNEL_ID: LOOKING_TO_PLAY_CHANNEL_ID,
-      DISCORD_SESSION_LOBBY_VOICE_CHANNEL_ID: LOBBY_VOICE_CHANNEL_ID,
-      TWO_ONBOARDING_MODE: 'session',
       TWO_SELF_ROLE_PANELS: '',
-      TWO_DATABASE_URL: '',
-      TWO_DB_PATH: join(dir, 'two.db'),
+      TWO_DATABASE_URL: TEST_PG_URL,
+      ...env,
     },
   });
   let output = '';
   bot.stdout?.on('data', (d) => (output += String(d)));
   bot.stderr?.on('data', (d) => (output += String(d)));
-  const code = await new Promise<number | null>((resolve) => bot.once('exit', resolve));
-  rmSync(dir, { recursive: true, force: true });
+  return new Promise((resolveExit) =>
+    bot.once('exit', (code) => resolveExit({ code, output })),
+  );
+}
+
+test('session mode refuses to start without DISCORD_GUILD_ID', async () => {
+  const { code, output } = await spawnBot({
+    DISCORD_GUILD_ID: '',
+    DISCORD_SESSION_LOOKING_TO_PLAY_CHANNEL_ID: LOOKING_TO_PLAY_CHANNEL_ID,
+    DISCORD_SESSION_LOBBY_VOICE_CHANNEL_ID: LOBBY_VOICE_CHANNEL_ID,
+    TWO_ONBOARDING_MODE: 'session',
+  });
 
   assert.notEqual(code, 0);
   assert.match(output, /session requires DISCORD_GUILD_ID/);
 });
 
 test('invalid onboarding modes fail closed before the bot can boot', async () => {
-  for (const [index, mode] of ['sessions', 'SESSION', ' session '].entries()) {
-    const dir = mkdtempSync(join(tmpdir(), `two-session-invalid-mode-${index}-`));
-    const bot = spawn(process.execPath, ['src/index.ts'], {
-      cwd: ROOT,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        DISCORD_TOKEN: 'mock-token',
-        DISCORD_BOT_TOKEN: 'mock-token',
-        TWO_ONBOARDING_MODE: mode,
-        TWO_SELF_ROLE_PANELS: '',
-        TWO_DATABASE_URL: '',
-        TWO_DB_PATH: join(dir, 'two.db'),
-      },
-    });
-    let output = '';
-    bot.stdout?.on('data', (d) => (output += String(d)));
-    bot.stderr?.on('data', (d) => (output += String(d)));
-    const code = await new Promise<number | null>((resolve) => bot.once('exit', resolve));
-    rmSync(dir, { recursive: true, force: true });
+  for (const mode of ['sessions', 'SESSION', ' session ']) {
+    const { code, output } = await spawnBot({ TWO_ONBOARDING_MODE: mode });
 
     assert.notEqual(code, 0, `${JSON.stringify(mode)} must not boot`);
     assert.match(output, /TWO_ONBOARDING_MODE must be exactly "legacy" or "session"/);
   }
 });
 
+/**
+ * Anti-nuke quarantine DELETEs an executor's dangerous roles, which is a
+ * member-role write like any other (TOG-2886). Session mode's guarantee is
+ * "no role writes anywhere", not "no onboarding role writes", so an armed
+ * containment must not boot alongside it.
+ */
+test('session mode refuses armed anti-nuke containment', async () => {
+  const { code, output } = await spawnBot({
+    DISCORD_GUILD_ID: '444444444444444444',
+    DISCORD_SESSION_LOOKING_TO_PLAY_CHANNEL_ID: LOOKING_TO_PLAY_CHANNEL_ID,
+    DISCORD_SESSION_LOBBY_VOICE_CHANNEL_ID: LOBBY_VOICE_CHANNEL_ID,
+    TWO_ONBOARDING_MODE: 'session',
+    TWO_ANTI_NUKE: '1',
+    TWO_ANTI_NUKE_DRY_RUN: '0',
+    TWO_OWEN_USER_ID: '555555555555555555',
+  });
+
+  assert.notEqual(code, 0);
+  assert.match(output, /forbids armed anti-nuke containment/);
+});
+
+/**
+ * The control for the guard above: dry-run containment never reaches
+ * `quarantine()`, so session mode must still accept it. Without this, making
+ * the guard unconditional would look like a pass.
+ */
+test('session mode still accepts dry-run anti-nuke containment', async () => {
+  const { output } = await spawnBot({
+    DISCORD_GUILD_ID: '444444444444444444',
+    DISCORD_SESSION_LOOKING_TO_PLAY_CHANNEL_ID: LOOKING_TO_PLAY_CHANNEL_ID,
+    DISCORD_SESSION_LOBBY_VOICE_CHANNEL_ID: LOBBY_VOICE_CHANNEL_ID,
+    TWO_ONBOARDING_MODE: 'session',
+    TWO_ANTI_NUKE: '1',
+    TWO_ANTI_NUKE_DRY_RUN: '1',
+    TWO_OWEN_USER_ID: '555555555555555555',
+    // Nothing to connect to: the process is expected to die further down, and
+    // the assertion is only that it did not die on the containment guard.
+    TWO_DATABASE_URL: 'postgres://two@127.0.0.1:1/unreachable',
+  });
+
+  assert.doesNotMatch(output, /forbids armed anti-nuke containment/);
+});
+
 test('session mode refuses self-role panels instead of registering role writers', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'two-session-self-roles-'));
   const panel = JSON.stringify([
     {
       id: 'colors',
@@ -529,27 +553,13 @@ test('session mode refuses self-role panels instead of registering role writers'
       ],
     },
   ]);
-  const bot = spawn(process.execPath, ['src/index.ts'], {
-    cwd: ROOT,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: {
-      ...process.env,
-      DISCORD_TOKEN: 'mock-token',
-      DISCORD_BOT_TOKEN: 'mock-token',
-      DISCORD_GUILD_ID: '444444444444444444',
-      DISCORD_SESSION_LOOKING_TO_PLAY_CHANNEL_ID: LOOKING_TO_PLAY_CHANNEL_ID,
-      DISCORD_SESSION_LOBBY_VOICE_CHANNEL_ID: LOBBY_VOICE_CHANNEL_ID,
-      TWO_ONBOARDING_MODE: 'session',
-      TWO_SELF_ROLE_PANELS: panel,
-      TWO_DATABASE_URL: '',
-      TWO_DB_PATH: join(dir, 'two.db'),
-    },
+  const { code, output } = await spawnBot({
+    DISCORD_GUILD_ID: '444444444444444444',
+    DISCORD_SESSION_LOOKING_TO_PLAY_CHANNEL_ID: LOOKING_TO_PLAY_CHANNEL_ID,
+    DISCORD_SESSION_LOBBY_VOICE_CHANNEL_ID: LOBBY_VOICE_CHANNEL_ID,
+    TWO_ONBOARDING_MODE: 'session',
+    TWO_SELF_ROLE_PANELS: panel,
   });
-  let output = '';
-  bot.stdout?.on('data', (d) => (output += String(d)));
-  bot.stderr?.on('data', (d) => (output += String(d)));
-  const code = await new Promise<number | null>((resolve) => bot.once('exit', resolve));
-  rmSync(dir, { recursive: true, force: true });
 
   assert.notEqual(code, 0);
   assert.match(output, /session forbids TWO_SELF_ROLE_PANELS/);

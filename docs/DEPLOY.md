@@ -77,7 +77,7 @@ silently writes real data somewhere nobody looks.
 | `TWO_DATABASE_URL` | **yes** | `postgres://…` | **Not** `DATABASE_URL` — see below |
 | `DISCORD_STAFF_ALERT_CHANNEL_ID` | recommended | `1138590808715571300` | Settled on TOG-412. Staff-only: the alert lists member ids |
 | `DISCORD_LANDING_CHANNEL_IDS` | no | empty | Onboarding does not run while empty. Set it only when you want the picker posted |
-| `TWO_ONBOARDING_MODE` | no | `legacy` | Set `session` for roleless routing; requires the next three settings and removes `role.assign` from internal actions |
+| `TWO_ONBOARDING_MODE` | no | `legacy` | Set `session` for roleless routing; requires the next three settings, removes `role.assign` from internal actions, stops leveling reward roles, and refuses to boot with a non-empty `TWO_SELF_ROLE_PANELS` or an armed `TWO_ANTI_NUKE` (see [ANTI-NUKE.md](ANTI-NUKE.md)) |
 | `DISCORD_GOODBYE_CHANNEL_IDS` | session only | empty | Comma-separated, guild-scoped goodbye targets |
 | `DISCORD_SESSION_LOOKING_TO_PLAY_CHANNEL_ID` | session only | empty | Per-guild destination for “Find people to play with” |
 | `DISCORD_SESSION_LOBBY_VOICE_CHANNEL_ID` | session only | empty | Per-guild destination for “Join voice now” |
@@ -231,8 +231,8 @@ Two things it does not undo, so check them before you assume you are back:
 - **Migrations do not roll back.** Every migration in this repo is additive
   (`migrations/README.md`), so an older image runs against a newer schema
   without complaining. If you ever add a destructive one, that stops being true.
-- **The `two-bot-data` volume survives.** It holds only the SQLite fallback and
-  hand-run exports; the funnel log is in Postgres and is untouched by a redeploy.
+- **The `two-bot-data` volume survives.** It holds hand-run exports; the funnel
+  log is in Postgres and is untouched by a redeploy.
 
 To stop the bot without deleting anything, **Stop** the application. The bot
 handles `SIGTERM`: it closes the gateway and the database rather than being

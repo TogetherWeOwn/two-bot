@@ -19,7 +19,7 @@ import {
 } from '../src/staging/readiness.ts';
 import { LIVE_BOT_APPLICATION_ID, LIVE_GUILD_ID, STAGING_BOT_APPLICATION_ID } from '../src/staging/spec.ts';
 import { EXPECTED_FUNNEL, TEST_NOW, seedFixtures } from '../src/staging/fixtures.ts';
-import { openDb } from '../src/store/db.ts';
+import { openTestDb } from './helpers/testDb.ts';
 import { EventStore } from '../src/store/eventStore.ts';
 import type { EventType } from '../src/core/events.ts';
 
@@ -212,21 +212,22 @@ test('an empty environment now has something the operator can do themselves', ()
 
 // --- what the doctor says once it can open the database ---------------------
 //
-// The doctor's own database branch needs Postgres, which no unit test has. The
-// decisions it makes do not, so they live in readiness.ts and are exercised
-// here - against real counts from a really seeded database, not hand-written
-// numbers, so that a fixture change moves this test too.
+// The decisions live in readiness.ts and are exercised here against real counts
+// from a seeded Postgres schema, so that a fixture change moves this test too.
 
 async function realCounts() {
-  const db = await openDb(':memory:');
-  await seedFixtures(db, { guildId: '999000111222333444', now: TEST_NOW });
-  const store = new EventStore(db);
-  const counts: Record<string, number> = {};
-  for (const type of Object.keys(EXPECTED_FUNNEL)) {
-    counts[type] = await store.countByType(type as EventType);
+  const harness = await openTestDb(`${import.meta.filename}_readiness`);
+  try {
+    await seedFixtures(harness.db, { guildId: '999000111222333444', now: TEST_NOW });
+    const store = new EventStore(harness.db);
+    const counts: Record<string, number> = {};
+    for (const type of Object.keys(EXPECTED_FUNNEL)) {
+      counts[type] = await store.countByType(type as EventType);
+    }
+    return counts;
+  } finally {
+    await harness.cleanup();
   }
-  await db.close();
-  return counts;
 }
 
 test('a seeded staging database reads as ready', async () => {

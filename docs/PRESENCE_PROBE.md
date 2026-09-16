@@ -70,9 +70,8 @@ Not by this document. By four things that fail loudly:
 - **A test that `client.ts` never names a presence intent**, and still requests
   exactly five.
 
-All in `test/unit.presenceprobe.test.ts`, which runs on SQLite with no services
-— migration 0004 is written in portable SQL specifically so the containment
-tests apply the shipping file rather than a hand-copied schema.
+All in `test/unit.presenceprobe.test.ts`, which runs in an isolated Postgres
+schema created from the immutable shipping migrations.
 
 ## Reading it
 

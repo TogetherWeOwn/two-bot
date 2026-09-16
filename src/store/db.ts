@@ -1,18 +1,5 @@
-/**
- * Open the datastore.
- *
- * One entry point, two drivers. Which one you get is decided by the spec
- * string, so nothing above this line has to know:
- *
- *   'postgres://...' / 'postgresql://'  -> Postgres (migrations run on open)
- *   ':memory:'                          -> ephemeral SQLite
- *   any other string                    -> SQLite file at that path
- *
- * The SQLite branch is scheduled for deletion (TWO-18) once Postgres has held
- * up in staging. Do not build anything new on it.
- */
+/** Open the Postgres datastore and apply pending migrations. */
 import type { Db } from './driver.ts';
-import { openSqlite } from './sqliteDriver.ts';
 import { openPostgres } from './postgresDriver.ts';
 import { migrate } from './migrate.ts';
 
@@ -33,7 +20,12 @@ export interface OpenOptions {
 
 /** Safe to call repeatedly. Creates the schema if it is not there yet. */
 export async function openDb(spec: string, opts: OpenOptions = {}): Promise<Db> {
-  if (!isPostgresSpec(spec)) return openSqlite(spec);
+  if (!spec.trim()) {
+    throw new Error('Database URL is required. Set TWO_DATABASE_URL to a postgres:// or postgresql:// URL.');
+  }
+  if (!isPostgresSpec(spec)) {
+    throw new Error('Only Postgres is supported. TWO_DATABASE_URL must use postgres:// or postgresql://.');
+  }
 
   const db = await openPostgres({
     connectionString: spec,

@@ -32,10 +32,13 @@ const days = Number(args.find((a) => /^\d+$/.test(a)) ?? 90);
 const offsetHours = Number(args.find((a) => a.startsWith('--offset='))?.split('=')[1] ?? 0);
 const offsetMinutes = Math.round(offsetHours * 60);
 
-// Same resolution the bot uses, so this always reads the bot's database.
-const dbSpec = process.env.TWO_DATABASE_URL || process.env.TWO_DB_PATH || './data/two.db';
+const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
+if (!databaseUrl) {
+  console.error('voice-sessions: TWO_DATABASE_URL is not set.');
+  process.exit(1);
+}
 const since = new Date(Date.now() - days * 86_400_000).toISOString();
-const db = await openDb(dbSpec);
+const db = await openDb(databaseUrl);
 
 const starts = await db
   .prepare(

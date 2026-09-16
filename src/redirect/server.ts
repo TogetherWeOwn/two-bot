@@ -66,9 +66,8 @@ export interface RedirectServer {
    * insert is still in flight, so there is a window where the response has
    * arrived and the row does not exist yet. That is correct in production - the
    * person is not made to wait on a database - but it makes "click, then read
-   * the row back" a race for anything driving this over real HTTP. On SQLite
-   * the write lands within the same tick and the race is invisible; against
-   * Postgres it is a round trip and the read loses.
+   * the row back" a race for anything driving this over real HTTP because the
+   * Postgres write is a separate round trip.
    *
    * `close()` awaits this too, so a SIGTERM does not drop clicks that were
    * already redirected.

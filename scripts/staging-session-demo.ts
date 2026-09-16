@@ -6,32 +6,50 @@
  * us without a human: it posts the exact welcome panel the bot posts - same
  * builder, same code - into #welcome, so the picker's rendering on the real
  * platform is provable now. The full member walk (join -> gate -> pick ->
- * goodbye) is then driven by the owner with the invite this script prints.
+ * goodbye) is then driven by the owner with the invite this script writes.
  *
- * It also produces the zero-role-delta evidence, in two halves. An earlier
- * revision compared `GET /guilds/{id}/roles` before and after, and that proved
- * nothing twice over (TOG-2871 / TOG-2872):
+ * It also produces the zero-role-write evidence. Three earlier revisions of
+ * that proof were each falsifiable-looking and actually blind (TOG-2871,
+ * TOG-2872, TOG-2886):
  *
- *   1. Wrong object. That endpoint returns role *definitions*. Granting a member
- *      an existing role changes `member.roles`, never the definition list, so
- *      the two snapshots matched even after a real role write.
+ *   1. Wrong object. `GET /guilds/{id}/roles` returns role *definitions*.
+ *      Granting a member an existing role changes `member.roles`, never the
+ *      definition list, so both snapshots matched after a real role write.
  *   2. Wrong window. Both snapshots were taken seconds apart, before the owner
- *      had even used the invite - so they could not span the member walk that is
- *      the thing under test.
+ *      had used the invite, so they could not span the walk under test.
+ *   3. Wrong population. Snapshotting every member's roles before the walk and
+ *      again after it still cannot see the member the walk is about: they join
+ *      after the baseline and leave before the verify, so they are absent from
+ *      both sides and compare equal. A role granted and then removed during the
+ *      walk is invisible for the same reason.
  *
- * So the proof now snapshots every member's role IDs, and is split across the
- * walk:
+ * So the proof is now two independent checks over the same window, and BOTH
+ * must pass:
+ *
+ *   a. The guild audit log. Every role write Discord performs lands here with
+ *      an executor, whether or not the member is still in the guild and whether
+ *      or not the write was later undone. The baseline records the newest audit
+ *      entry id; --verify fails on any role-affecting entry after it. This is
+ *      the check that covers the fresh member.
+ *   b. The per-member role snapshot. Net state, for anything the audit log
+ *      cannot attribute.
+ *
+ * Either read failing is a failure: a proof that cannot see its evidence must
+ * not print a pass.
  *
  *   DISCORD_STAGING_BOT_TOKEN=... node scripts/staging-session-demo.ts
- *     -> posts the panel, writes the invite and the baseline snapshot to files
+ *     -> posts the panel, writes the invite and the baseline to a private dir
  *   ...owner walks a fresh member: join -> gate -> pick -> goodbye...
  *   DISCORD_STAGING_BOT_TOKEN=... node scripts/staging-session-demo.ts --verify
- *     -> re-reads member roles and exits non-zero on any delta
+ *     -> re-reads the audit log and member roles, revokes the invite, and
+ *        exits non-zero on any role write in the window
  *
- * Reading members needs the GUILD_MEMBERS privileged intent, which this app
- * already holds.
+ * Reading members needs the GUILD_MEMBERS privileged intent and reading the
+ * audit log needs VIEW_AUDIT_LOG; this app holds both.
  */
-import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fchmodSync, mkdirSync, openSync, readFileSync, rmSync, writeSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { buildSessionMenu } from '../src/discord/sessionWelcome.ts';
 import { buildSessionPicks, sessionWelcomeText } from '../src/onboarding/session.ts';
 import {
@@ -43,12 +61,63 @@ import {
 
 const API = process.env.DISCORD_API_BASE ?? 'https://discord.com/api/v10';
 const EXPECTED_CHANNEL = { id: '1546451669284552726', name: 'welcome', type: 0 } as const;
-const SNAPSHOT_PATH =
-  process.env.TWO_SESSION_DEMO_SNAPSHOT ?? '.staging-session-demo-snapshot.json';
-const INVITE_PATH = process.env.TWO_SESSION_DEMO_INVITE ?? '.staging-session-demo-invite.txt';
+
+/**
+ * Both artifacts carry something that must not be casually readable - the
+ * baseline is the guild's complete member->role map, the invite is a bearer
+ * credential - and neither belongs in the checkout, where `git add -A` can
+ * commit it. Default them into a private per-user runtime directory.
+ */
+const ARTIFACT_DIR =
+  process.env.TWO_SESSION_DEMO_DIR ?? join(process.env.XDG_RUNTIME_DIR ?? tmpdir(), 'two-session-demo');
+const SNAPSHOT_PATH = process.env.TWO_SESSION_DEMO_SNAPSHOT ?? join(ARTIFACT_DIR, 'baseline.json');
+const INVITE_PATH = process.env.TWO_SESSION_DEMO_INVITE ?? join(ARTIFACT_DIR, 'invite.txt');
+
+/** Audit log action types that represent a role write. */
+const ROLE_AUDIT_ACTIONS: ReadonlyArray<{ type: number; name: string }> = [
+  { type: 25, name: 'MEMBER_ROLE_UPDATE' },
+  { type: 30, name: 'ROLE_CREATE' },
+  { type: 31, name: 'ROLE_UPDATE' },
+  { type: 32, name: 'ROLE_DELETE' },
+];
+
+/** Bounds the audit walk. A window this busy is not a demo window; say so. */
+const MAX_AUDIT_PAGES = 10;
+const AUDIT_PAGE_SIZE = 100;
 
 interface MemberRoles {
   [memberId: string]: string[];
+}
+
+interface Baseline {
+  guildId: string;
+  takenAt: string;
+  /** Newest audit log entry id at baseline time; '0' when the log was empty. */
+  auditCursor: string;
+  members: MemberRoles;
+}
+
+interface AuditEntry {
+  id: string;
+  user_id?: string | null;
+  target_id?: string | null;
+  action_type?: number;
+}
+
+/**
+ * Write owner-only, refusing to follow a symlink someone planted at the path.
+ * `O_NOFOLLOW` covers the final component; the 0600 mode is applied on create
+ * AND after the fact, because an existing file keeps its old mode.
+ */
+function writePrivate(path: string, contents: string): void {
+  mkdirSync(ARTIFACT_DIR, { recursive: true, mode: 0o700 });
+  const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600);
+  try {
+    fchmodSync(fd, 0o600);
+    writeSync(fd, contents);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 /** Members whose role set differs between two snapshots, in either direction. */
@@ -119,8 +188,7 @@ async function main(): Promise<void> {
 
   /**
    * Every member's role IDs. This - not the guild role list - is the object a
-   * role grant actually changes, so it is the only snapshot that can falsify
-   * the zero-role-write claim. Paginated because `limit` caps at 1000 and a
+   * role grant actually changes. Paginated because `limit` caps at 1000 and a
    * short read would silently look like "no members changed".
    */
   async function memberRoles(): Promise<MemberRoles> {
@@ -144,28 +212,133 @@ async function main(): Promise<void> {
     }
   }
 
+  /** `after === null` asks for the newest entries; Discord's ordering under an
+   * explicit `after` is not documented as stable, so every caller filters and
+   * pages by entry id rather than by position. */
+  async function auditPage(actionType: number, after: string | null): Promise<AuditEntry[]> {
+    const page = await api<{ audit_log_entries?: AuditEntry[] }>(
+      'GET',
+      `/guilds/${guildId}/audit-logs?limit=${AUDIT_PAGE_SIZE}&action_type=${actionType}` +
+        (after === null ? '' : `&after=${after}`),
+    );
+    if (page.status !== 200 || !Array.isArray(page.body?.audit_log_entries)) {
+      throw new Error(
+        `Could not read the audit log for guild ${guildId} (action ${actionType}): HTTP ${page.status}. ` +
+          'The zero-role-write claim cannot be proven without it.',
+      );
+    }
+    return page.body.audit_log_entries;
+  }
+
+  /** The newest role-affecting audit entry id, or '0' if there is none. */
+  async function newestRoleAuditId(): Promise<string> {
+    let newest = 0n;
+    for (const action of ROLE_AUDIT_ACTIONS) {
+      for (const entry of await auditPage(action.type, null)) {
+        const id = BigInt(entry.id);
+        if (id > newest) newest = id;
+      }
+    }
+    return newest.toString();
+  }
+
+  /** Role writes recorded after `cursor`, described for a human. */
+  async function roleWritesSince(cursor: string): Promise<string[]> {
+    const found = new Map<string, string>();
+    const floor = BigInt(cursor);
+    for (const action of ROLE_AUDIT_ACTIONS) {
+      let after = cursor;
+      for (let page = 0; ; page++) {
+        if (page >= MAX_AUDIT_PAGES) {
+          throw new Error(
+            `More than ${MAX_AUDIT_PAGES * AUDIT_PAGE_SIZE} ${action.name} entries since the baseline. ` +
+              'That is not a demo window - re-baseline and walk again.',
+          );
+        }
+        const entries = await auditPage(action.type, after);
+        let highest = BigInt(after);
+        for (const entry of entries) {
+          const id = BigInt(entry.id);
+          if (id > floor) {
+            // Keyed by id: paging by highest-seen can re-serve an entry, and
+            // the same write must not read as two.
+            found.set(
+              entry.id,
+              `${action.name} entry ${entry.id}: executor ${entry.user_id ?? 'unknown'}, target ${entry.target_id ?? 'unknown'}`,
+            );
+          }
+          if (id > highest) highest = id;
+        }
+        if (entries.length < AUDIT_PAGE_SIZE || highest === BigInt(after)) break;
+        after = highest.toString();
+      }
+    }
+    return [...found.values()].sort();
+  }
+
   if (verifyOnly) {
-    let baseline: MemberRoles;
+    let baseline: Baseline;
     try {
-      baseline = JSON.parse(readFileSync(SNAPSHOT_PATH, 'utf8')) as MemberRoles;
+      baseline = JSON.parse(readFileSync(SNAPSHOT_PATH, 'utf8')) as Baseline;
     } catch {
       throw new Error(
         `No baseline at ${SNAPSHOT_PATH}. Run this script without --verify before the member walk.`,
       );
     }
-    const deltas = roleDeltas(baseline, await memberRoles());
+    if (baseline.guildId !== guildId || typeof baseline.auditCursor !== 'string' || !baseline.members) {
+      throw new Error(
+        `Baseline at ${SNAPSHOT_PATH} is for guild ${baseline.guildId ?? 'unknown'} or predates the audit-log ` +
+          `proof; it cannot cover this walk. Re-baseline against ${guildId} and walk again.`,
+      );
+    }
+
+    // (a) The audit log: the only check that can see a member who has left.
+    const writes = await roleWritesSince(baseline.auditCursor);
+    // (b) Net state, for anything the audit log could not attribute.
+    const deltas = roleDeltas(baseline.members, await memberRoles());
+
+    // Revoke the invite before reporting, so a failure does not leave a live
+    // credential behind. Best effort: a missing or already-expired invite is
+    // not a proof failure.
+    let invite = '';
+    try {
+      invite = readFileSync(INVITE_PATH, 'utf8');
+    } catch {
+      invite = '';
+    }
+    const code = invite.trim().split('/').pop() ?? '';
+    if (code) {
+      const revoked = await api<unknown>('DELETE', `/invites/${code}`);
+      console.log(`--- invite ---`);
+      console.log(`revoked demo invite (HTTP ${revoked.status}); removing ${INVITE_PATH}`);
+      rmSync(INVITE_PATH, { force: true });
+    }
+
+    console.log('--- role writes since baseline (audit log) ---');
+    if (writes.length) {
+      throw new Error(`The guild audit log records role writes during this window:\n${writes.join('\n')}`);
+    }
+    console.log(`NONE across ${ROLE_AUDIT_ACTIONS.map((a) => a.name).join(', ')} since entry ${baseline.auditCursor}`);
+
     console.log('--- member role delta since baseline ---');
     if (deltas.length) {
       throw new Error(`Member roles changed:\n${deltas.join('\n')}`);
     }
-    console.log(`IDENTICAL - zero role delta across ${Object.keys(baseline).length} members`);
+    console.log(`IDENTICAL - zero role delta across ${Object.keys(baseline.members).length} members`);
     return;
   }
 
-  const before = await memberRoles();
-  writeFileSync(SNAPSHOT_PATH, JSON.stringify(before, null, 2));
-  console.log('--- member role snapshot BEFORE ---');
-  console.log(`${Object.keys(before).length} members recorded to ${SNAPSHOT_PATH}`);
+  const baseline: Baseline = {
+    guildId,
+    takenAt: new Date().toISOString(),
+    auditCursor: await newestRoleAuditId(),
+    members: await memberRoles(),
+  };
+  writePrivate(SNAPSHOT_PATH, JSON.stringify(baseline, null, 2));
+  console.log('--- baseline ---');
+  console.log(
+    `${Object.keys(baseline.members).length} members and audit cursor ${baseline.auditCursor} recorded to ${SNAPSHOT_PATH}`,
+  );
 
   // The demo panel: same text and menu the bot posts on gate clear, addressed
   // to the guild rather than one member, so it is self-describing on the wall.
@@ -190,10 +363,11 @@ async function main(): Promise<void> {
   console.log('--- demo panel ---');
   console.log(`posted message ${posted.body.id} in #${EXPECTED_CHANNEL.name}`);
 
-  // A time-limited invite for the owner's test member.
+  // One use, one hour: the walk needs exactly one fresh member, and --verify
+  // revokes whatever is left. A wider invite is a standing way into the guild.
   const invite = await api<{ code: string }>('POST', `/channels/${EXPECTED_CHANNEL.id}/invites`, {
-    max_age: 86400,
-    max_uses: 3,
+    max_age: 3600,
+    max_uses: 1,
     unique: true,
   });
   if (invite.status !== 200 || !invite.body?.code) {
@@ -202,10 +376,9 @@ async function main(): Promise<void> {
   // The invite is a bearer credential: anyone holding the URL can join the
   // guild until it expires. Operator and CI transcripts are retained, so it
   // goes to an owner-only file and only the path is printed.
-  writeFileSync(INVITE_PATH, `https://discord.gg/${invite.body.code}\n`, { mode: 0o600 });
-  chmodSync(INVITE_PATH, 0o600);
+  writePrivate(INVITE_PATH, `https://discord.gg/${invite.body.code}\n`);
   console.log('--- invite for the fresh test member ---');
-  console.log(`written to ${INVITE_PATH} (max_age 86400s, max_uses 3) - not printed here`);
+  console.log(`written to ${INVITE_PATH} (max_age 3600s, max_uses 1) - not printed here`);
 
   console.log('--- next ---');
   console.log('walk a fresh member through join -> gate -> pick -> goodbye, then run:');

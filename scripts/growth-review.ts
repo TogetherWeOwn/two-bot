@@ -86,9 +86,10 @@ function weekStartOf(iso: string): string {
 // unobservable criteria stay unknown here as they do there, so this can never
 // be greener than the gate script - it can only agree or be redder.
 const gateEnv = { ...process.env };
-const dbSpec = gateEnv.TWO_DATABASE_URL || gateEnv.TWO_DB_PATH || './data/two.db';
+const databaseUrl = gateEnv.TWO_DATABASE_URL?.trim();
+if (!databaseUrl) throw new Error('TWO_DATABASE_URL is required.');
 
-const db = await openDb(dbSpec);
+const db = await openDb(databaseUrl);
 
 const attributedJoins = Number(
   (

@@ -1,14 +1,10 @@
 /**
  * Two processes, one funnel log.
  *
- * This is the test the migration exists for. The bot writes joins and messages;
- * the website will write its own events and read the same tables. On SQLite the
- * second writer gets SQLITE_BUSY and the run dies. These tests assert that on
- * Postgres it does not - and, more importantly, that racing writers cannot
- * corrupt the log or the members projection.
- *
- * Skipped unless TWO_TEST_DATABASE_URL is set, because there is nothing
- * meaningful to assert against a single-writer database.
+ * This is the test the Postgres migration exists for. The bot writes joins and
+ * messages; the website will write its own events and read the same tables.
+ * These tests assert that racing writers cannot corrupt the log or the members
+ * projection.
  */
 import { test, before, after, beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -16,7 +12,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { join } from 'node:path';
 import { EventStore } from '../src/store/eventStore.ts';
-import { openTestDb, usingPostgres, type TestDb } from './helpers/testDb.ts';
+import { openTestDb, TEST_PG_URL, type TestDb } from './helpers/testDb.ts';
 
 const run = promisify(execFile);
 const WORKER = join(import.meta.dirname, 'helpers', 'concurrentWriter.ts');
@@ -29,7 +25,7 @@ interface WorkerResult {
   errors: string[];
 }
 
-describe('concurrent writes from two processes', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE_URL' }, () => {
+describe('concurrent writes from two processes', () => {
   let harness: TestDb;
   let schema: string;
 
@@ -56,7 +52,7 @@ describe('concurrent writes from two processes', { skip: !usingPostgres && 'need
   test('two processes writing the SAME events produce exactly one row each', async () => {
     const members = Array.from({ length: 60 }, (_, i) => `m${i}`);
     const occurredAt = '2026-08-19T12:00:00.000Z';
-    const base = { url: process.env.TWO_TEST_DATABASE_URL, guildId: G, memberIds: members, eventType: 'member_join', occurredAt };
+    const base = { url: TEST_PG_URL, guildId: G, memberIds: members, eventType: 'member_join', occurredAt };
 
     const results = await spawnWriters([
       { ...base, label: 'bot' },
@@ -90,8 +86,8 @@ describe('concurrent writes from two processes', { skip: !usingPostgres && 'need
     const occurredAt = '2026-08-19T13:00:00.000Z';
 
     const results = await spawnWriters([
-      { url: process.env.TWO_TEST_DATABASE_URL, guildId: G, memberIds: a, eventType: 'member_join', occurredAt, label: 'bot' },
-      { url: process.env.TWO_TEST_DATABASE_URL, guildId: G, memberIds: b, eventType: 'member_join', occurredAt, label: 'website' },
+      { url: TEST_PG_URL, guildId: G, memberIds: a, eventType: 'member_join', occurredAt, label: 'bot' },
+      { url: TEST_PG_URL, guildId: G, memberIds: b, eventType: 'member_join', occurredAt, label: 'website' },
     ]);
 
     for (const r of results) assert.deepEqual(r.errors, [], r.errors.join(' | '));
@@ -110,7 +106,7 @@ describe('concurrent writes from two processes', { skip: !usingPostgres && 'need
   test('racing recency updates settle on the latest, not the last to commit', async () => {
     const members = Array.from({ length: 40 }, (_, i) => `r${i}`);
     const shared = {
-      url: process.env.TWO_TEST_DATABASE_URL,
+      url: TEST_PG_URL,
       guildId: G,
       memberIds: members,
       eventType: 'member_join',
@@ -138,7 +134,7 @@ describe('concurrent writes from two processes', { skip: !usingPostgres && 'need
     const members = Array.from({ length: 50 }, (_, i) => `t${i}`);
     const writer = spawnWriters([
       {
-        url: process.env.TWO_TEST_DATABASE_URL,
+        url: TEST_PG_URL,
         guildId: G,
         memberIds: members,
         eventType: 'member_join',
