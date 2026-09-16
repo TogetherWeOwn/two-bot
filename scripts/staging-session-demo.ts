@@ -126,6 +126,7 @@ import {
   openSync,
   readFileSync,
   statSync,
+  unlinkSync,
   writeSync,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -378,7 +379,7 @@ function artifactNameInDir(path: string, dir: string): string {
  * something sensitive (a bearer invite; the guild's whole member->role map),
  * and this script is Linux-only in practice - it drives a staging host.
  */
-function openInDir(dirFd: number, dir: string, name: string, flags: number, mode?: number): number {
+function pinnedInDir(dirFd: number, dir: string, name: string): string {
   let pinned = false;
   try {
     const held = fstatSync(dirFd);
@@ -394,7 +395,11 @@ function openInDir(dirFd: number, dir: string, name: string, flags: number, mode
         'bearer invite or the guild member map that way. Run this on a host with procfs mounted.',
     );
   }
-  const target = `/proc/self/fd/${dirFd}/${name}`;
+  return `/proc/self/fd/${dirFd}/${name}`;
+}
+
+function openInDir(dirFd: number, dir: string, name: string, flags: number, mode?: number): number {
+  const target = pinnedInDir(dirFd, dir, name);
   return mode === undefined ? openSync(target, flags) : openSync(target, flags, mode);
 }
 
@@ -441,6 +446,11 @@ function readPrivate(path: string): string {
   }
 }
 
+/** The `pending` marker exactly as a claim writes it, for the run that owns it. */
+function pendingMarker(demoRunId: string): string {
+  return `run ${demoRunId}\n${PENDING_PAYLOAD}\n`;
+}
+
 /**
  * TOG-2999 P1: a baseline must not write over a handle that may name a live
  * invite.
@@ -451,52 +461,163 @@ function readPrivate(path: string): string {
  * `--verify` then found run B's handle, bound it to run B's snapshot, DELETEd
  * run B's code and exited 0 printing `revoked demo invite (HTTP 200)`: run A's
  * invite stayed live for its full `max_age` with nothing on disk naming it, and
- * the exit code an operator reads said clean. Staging the marker before the
- * POST guarantees the overwrite, so this has to be checked before it.
+ * the exit code an operator reads said clean.
+ *
+ * TOG-3027: the first fix for that read the file, refused on anything live, and
+ * left the `pending` write where it already was - several round trips later,
+ * after `preflightGuild()`, `newestAuditId()` and the paginated member walk.
+ * That is check-then-act, and the reviewer reproduced the same orphan through
+ * it: two baselines started together both read "no file", both proceeded, and
+ * the second overwrote the first run's only handle. So the check and the claim
+ * are one step now, and they happen before the first network call of the run.
+ * `O_EXCL` is what makes it one step: exactly one of any number of concurrent
+ * baselines creates the marker, and `EEXIST` is every other one's refusal.
  *
  * Only a terminal receipt - the one artifact state that says the invite it
- * names is gone - lets a new baseline start. Everything else, `pending` and a
- * present-but-unreadable file included, means an invite may be live, which is a
- * state to resolve rather than erase. Same reasoning as `revokeInvite`: the
- * states we know least about are the ones that must be loud.
+ * names is gone - lets a new baseline take the name. Everything else, `pending`
+ * and a present-but-unreadable file included, means an invite may be live,
+ * which is a state to resolve rather than erase. Same reasoning as
+ * `revokeInvite`: the states we know least about are the ones that must be loud.
  *
- * Returns null when it is safe to proceed, or the operator-facing reason.
+ * Returns null when this run holds the claim, or the operator-facing reason.
  */
-function liveInviteBlockingNewBaseline(): string | null {
+function claimInviteHandle(demoRunId: string): string | null {
   const fix =
     'Run `node scripts/staging-session-demo.ts --verify` to revoke it (or delete the demo invite in the ' +
     `guild's invite list by hand and remove ${INVITE_PATH}), then baseline again.`;
-  let contents: string;
+  const marker = pendingMarker(demoRunId);
+  const { dir, fd: dirFd } = openPrivateArtifactDir();
   try {
-    contents = readPrivate(INVITE_PATH);
-  } catch (err) {
-    // No file is the normal case, and the only one that is not evidence.
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    return (
-      `${INVITE_PATH} exists but could not be read (${err instanceof Error ? err.message : String(err)}), ` +
-      `so it may name a demo invite that is still live. ${fix}`
-    );
-  }
+    const name = artifactNameInDir(INVITE_PATH, dir);
+    /** Create-or-fail. True means this run owns the name from here on. */
+    const stake = (): boolean => {
+      let fd: number;
+      try {
+        fd = openInDir(
+          dirFd,
+          dir,
+          name,
+          constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+          0o600,
+        );
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === 'EEXIST') return false;
+        throw err;
+      }
+      try {
+        fchmodSync(fd, 0o600);
+        writeSync(fd, marker);
+      } finally {
+        closeSync(fd);
+      }
+      return true;
+    };
 
-  const artifact = parseArtifact(contents);
-  if (!artifact) {
+    if (stake()) return null;
+
+    // Something already holds the name. Read it through the same directory fd
+    // and judge it; only a terminal receipt frees the name.
+    let contents: string;
+    try {
+      const fd = openInDir(dirFd, dir, name, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        contents = readFileSync(fd, 'utf8');
+      } finally {
+        closeSync(fd);
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        // It existed for the create and was gone for the read, so another
+        // baseline is live in this directory right now. Refuse rather than
+        // retry: a loop here races the same window it is trying to close.
+        return (
+          `${INVITE_PATH} appeared and vanished while this baseline was claiming it, so another baseline ` +
+          `is running against ${dir} at the same time. Run one at a time; wait for that one to finish, ` +
+          `then baseline again.`
+        );
+      }
+      return (
+        `${INVITE_PATH} exists but could not be read (${err instanceof Error ? err.message : String(err)}), ` +
+        `so it may name a demo invite that is still live. ${fix}`
+      );
+    }
+
+    const artifact = parseArtifact(contents);
+    if (!artifact) {
+      return (
+        `${INVITE_PATH} does not hold a recognisable invite handle, so it may name a demo invite that is ` +
+        `still live and this baseline would overwrite it. ${fix}`
+      );
+    }
+    const receipt = RECEIPT_RE.exec(artifact.payload);
+    if (receipt && INVITE_GONE_STATUSES.has(Number(receipt[2]))) {
+      // The invite this names is gone, so the name is free - but taking it is
+      // still a create-or-fail, so that two baselines reading the same receipt
+      // do not both proceed. Whoever unlinks first loses nothing; whoever
+      // creates first wins, and the other gets EEXIST and refuses below.
+      try {
+        unlinkSync(pinnedInDir(dirFd, dir, name));
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+      }
+      if (stake()) return null;
+      return (
+        `${INVITE_PATH} held a spent revocation receipt from baseline run ${artifact.runId}, but another ` +
+        `baseline claimed it first. Run one at a time; wait for that one to finish, then baseline again.`
+      );
+    }
+    if (artifact.payload === PENDING_PAYLOAD) {
+      return (
+        `${INVITE_PATH} was staged by baseline run ${artifact.runId} and never recorded an invite code, so ` +
+        `that run may have created an invite that is still live with no handle to revoke it by. ${fix}`
+      );
+    }
     return (
-      `${INVITE_PATH} does not hold a recognisable invite handle, so it may name a demo invite that is ` +
-      `still live and this baseline would overwrite it. ${fix}`
+      `${INVITE_PATH} still holds the invite handle for baseline run ${artifact.runId}, so that run's invite ` +
+      `may still be live and a new baseline would overwrite the only record of it. ${fix}`
     );
+  } finally {
+    closeSync(dirFd);
   }
-  const receipt = RECEIPT_RE.exec(artifact.payload);
-  if (receipt && INVITE_GONE_STATUSES.has(Number(receipt[2]))) return null;
-  if (artifact.payload === PENDING_PAYLOAD) {
-    return (
-      `${INVITE_PATH} was staged by baseline run ${artifact.runId} and never recorded an invite code, so ` +
-      `that run may have created an invite that is still live with no handle to revoke it by. ${fix}`
-    );
+}
+
+/**
+ * Give the claim back, but only when this run is certain no invite of its own
+ * can exist - i.e. it failed before the create POST was ever put on the wire.
+ *
+ * The claim now happens before `preflightGuild()`, so without this a bad token
+ * or a lost permission would leave a `pending` marker behind and wedge every
+ * later baseline in that directory over an invite that was never created. After
+ * the POST is attempted this must not run: a request that timed out or returned
+ * an unexpected shape may still have created a live invite, and `pending` is
+ * exactly the loud state that case needs.
+ *
+ * Only ever removes the marker this run wrote, byte for byte. If the file holds
+ * anything else, someone else's handle is in it and it is not ours to delete.
+ */
+function releaseUnusedClaim(demoRunId: string): void {
+  const marker = pendingMarker(demoRunId);
+  const { dir, fd: dirFd } = openPrivateArtifactDir();
+  try {
+    const name = artifactNameInDir(INVITE_PATH, dir);
+    let contents: string;
+    try {
+      const fd = openInDir(dirFd, dir, name, constants.O_RDONLY | constants.O_NOFOLLOW);
+      try {
+        contents = readFileSync(fd, 'utf8');
+      } finally {
+        closeSync(fd);
+      }
+    } catch {
+      // Already gone, or unreadable. Either way there is nothing this run is
+      // entitled to remove.
+      return;
+    }
+    if (contents !== marker) return;
+    unlinkSync(pinnedInDir(dirFd, dir, name));
+  } finally {
+    closeSync(dirFd);
   }
-  return (
-    `${INVITE_PATH} still holds the invite handle for baseline run ${artifact.runId}, so that run's invite ` +
-    `may still be live and a new baseline would overwrite the only record of it. ${fix}`
-  );
 }
 
 /** Members whose role set differs between two snapshots, in either direction. */
@@ -986,80 +1107,98 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Before the first write of this run, and before the network: the handle on
-  // disk is the only record of the previous run's invite, and everything below
-  // is about to replace it (see liveInviteBlockingNewBaseline).
-  const staleInvite = liveInviteBlockingNewBaseline();
+  // TOG-2971 P1 / TOG-3027: claim the invite handle BEFORE the first network
+  // call of this run, in one atomic step that both checks the name and stakes
+  // it. The handle on disk is the only record of the previous run's invite, and
+  // everything below is about to replace it; staging the marker is also what
+  // stops a receipt from an earlier run outliving the invite it was about,
+  // because a POST that succeeds and a handle write that then fails now lands
+  // on `pending`, which fails closed and says so. See claimInviteHandle.
+  const demoRunId = randomUUID();
+  const staleInvite = claimInviteHandle(demoRunId);
   if (staleInvite) throw new Error(staleInvite);
 
-  await preflightGuild();
+  // The claim is this run's to give back only while no invite of ours can
+  // exist. Set before the await, not after: a create request that throws or
+  // times out may still have reached Discord.
+  let invitePostAttempted = false;
+  try {
+    await preflightGuild();
 
-  const baseline: Baseline = {
-    guildId,
-    takenAt: new Date().toISOString(),
-    demoRunId: randomUUID(),
-    auditCursor: await newestAuditId(),
-    members: await memberRoles(),
-  };
-  writePrivate(SNAPSHOT_PATH, JSON.stringify(baseline, null, 2));
-  console.log('--- baseline ---');
-  console.log(
-    `${Object.keys(baseline.members).length} members and audit cursor ${baseline.auditCursor} recorded to ${SNAPSHOT_PATH}`,
-  );
-
-  // The demo panel: same text and menu the bot posts on gate clear, addressed
-  // to the guild rather than one member, so it is self-describing on the wall.
-  const sessionPicks = buildSessionPicks({
-    lookingToPlay: '1546211377847337020',
-    lobbyVoice: '1546211378430345286',
-  });
-  const payload = {
-    content:
-      sessionWelcomeText('') +
-      '\n\n*(TOG-1644 staging demo panel - this is the exact welcome the bot posts when a new member clears the rules gate. Click it as yourself: it routes and records, it does not label you.)*',
-    components: [buildSessionMenu(sessionPicks).toJSON()],
-  };
-  const posted = await api<{ id: string }>(
-    'POST',
-    `/channels/${EXPECTED_CHANNEL.id}/messages`,
-    payload,
-  );
-  if (posted.status !== 200 || !posted.body?.id) {
-    throw new Error(`Failed to post demo panel: HTTP ${posted.status} ${JSON.stringify(posted.body)}.`);
-  }
-  console.log('--- demo panel ---');
-  console.log(`posted message ${posted.body.id} in #${EXPECTED_CHANNEL.name}`);
-
-  // TOG-2971 P1: stage the artifact BEFORE asking Discord for an invite. This
-  // is what stops a receipt from an earlier run outliving the invite it was
-  // about. Without it, a POST that succeeds and a handle write that then fails
-  // leaves the previous run's `revoked ... HTTP 200` in place, and --verify
-  // reads a terminal receipt over a live invite. Writing the marker first makes
-  // that same failure land on `pending`, which fails closed and says so.
-  writePrivate(INVITE_PATH, `run ${baseline.demoRunId}\n${PENDING_PAYLOAD}\n`);
-
-  // One use, one hour: the walk needs exactly one fresh member, and --verify
-  // revokes whatever is left. A wider invite is a standing way into the guild.
-  const invite = await api<{ code: string }>('POST', `/channels/${EXPECTED_CHANNEL.id}/invites`, {
-    max_age: 3600,
-    max_uses: 1,
-    unique: true,
-  });
-  if (invite.status !== 200 || !invite.body?.code) {
-    // TOG-2999 P3: the body is not printed. This branch is reached by a 200
-    // whose shape we did not expect as well as by an error status, and a create
-    // response carries the invite code - so dumping it would put the bearer
-    // credential into the transcript everything else here works to keep it out
-    // of. The status is what an operator acts on.
-    throw new Error(
-      `Failed to create demo invite: HTTP ${invite.status}. The response body is not printed because a ` +
-        "create response can carry the invite code; check the bot's permissions on the channel.",
+    const baseline: Baseline = {
+      guildId,
+      takenAt: new Date().toISOString(),
+      demoRunId,
+      auditCursor: await newestAuditId(),
+      members: await memberRoles(),
+    };
+    writePrivate(SNAPSHOT_PATH, JSON.stringify(baseline, null, 2));
+    console.log('--- baseline ---');
+    console.log(
+      `${Object.keys(baseline.members).length} members and audit cursor ${baseline.auditCursor} recorded to ${SNAPSHOT_PATH}`,
     );
+
+    // The demo panel: same text and menu the bot posts on gate clear, addressed
+    // to the guild rather than one member, so it is self-describing on the wall.
+    const sessionPicks = buildSessionPicks({
+      lookingToPlay: '1546211377847337020',
+      lobbyVoice: '1546211378430345286',
+    });
+    const payload = {
+      content:
+        sessionWelcomeText('') +
+        '\n\n*(TOG-1644 staging demo panel - this is the exact welcome the bot posts when a new member clears the rules gate. Click it as yourself: it routes and records, it does not label you.)*',
+      components: [buildSessionMenu(sessionPicks).toJSON()],
+    };
+    const posted = await api<{ id: string }>(
+      'POST',
+      `/channels/${EXPECTED_CHANNEL.id}/messages`,
+      payload,
+    );
+    if (posted.status !== 200 || !posted.body?.id) {
+      throw new Error(`Failed to post demo panel: HTTP ${posted.status} ${JSON.stringify(posted.body)}.`);
+    }
+    console.log('--- demo panel ---');
+    console.log(`posted message ${posted.body.id} in #${EXPECTED_CHANNEL.name}`);
+
+    // One use, one hour: the walk needs exactly one fresh member, and --verify
+    // revokes whatever is left. A wider invite is a standing way into the guild.
+    invitePostAttempted = true;
+    const invite = await api<{ code: string }>('POST', `/channels/${EXPECTED_CHANNEL.id}/invites`, {
+      max_age: 3600,
+      max_uses: 1,
+      unique: true,
+    });
+    if (invite.status !== 200 || !invite.body?.code) {
+      // TOG-2999 P3: the body is not printed. This branch is reached by a 200
+      // whose shape we did not expect as well as by an error status, and a create
+      // response carries the invite code - so dumping it would put the bearer
+      // credential into the transcript everything else here works to keep it out
+      // of. The status is what an operator acts on.
+      throw new Error(
+        `Failed to create demo invite: HTTP ${invite.status}. The response body is not printed because a ` +
+          "create response can carry the invite code; check the bot's permissions on the channel.",
+      );
+    }
+    // The invite is a bearer credential: anyone holding the URL can join the
+    // guild until it expires. Operator and CI transcripts are retained, so it
+    // goes to an owner-only file and only the path is printed.
+    writePrivate(INVITE_PATH, `run ${demoRunId}\nhttps://discord.gg/${invite.body.code}\n`);
+  } catch (err) {
+    if (!invitePostAttempted) {
+      try {
+        releaseUnusedClaim(demoRunId);
+      } catch (releaseErr) {
+        // Never let the cleanup bury the reason the run failed; say both.
+        console.error(
+          `Could not release this run's claim on ${INVITE_PATH}: ` +
+            `${releaseErr instanceof Error ? releaseErr.message : String(releaseErr)}. ` +
+            'Remove it by hand before the next baseline.',
+        );
+      }
+    }
+    throw err;
   }
-  // The invite is a bearer credential: anyone holding the URL can join the
-  // guild until it expires. Operator and CI transcripts are retained, so it
-  // goes to an owner-only file and only the path is printed.
-  writePrivate(INVITE_PATH, `run ${baseline.demoRunId}\nhttps://discord.gg/${invite.body.code}\n`);
   console.log('--- invite for the fresh test member ---');
   console.log(`written to ${INVITE_PATH} (max_age 3600s, max_uses 1) - not printed here`);
 

@@ -21,6 +21,8 @@ const GUILD = '1545644954272137297';
 const CHANNEL = '1546451669284552726';
 const TOKEN = `${Buffer.from(STAGING_BOT_APPLICATION_ID).toString('base64')}.Gxxxxx.yyyyyyyyyy`;
 const MEMBER_ROLE_UPDATE = 25;
+/** DELETE statuses the script treats as "the invite is gone", mirrored here. */
+const INVITE_GONE_STATUSES = new Set([200, 204, 404]);
 
 interface AuditEntry {
   id: string;
@@ -44,6 +46,13 @@ interface StubOptions {
   inviteDeleteStatus?: number;
   /** Status for POST /channels/{id}/invites; 200 unless a test wants a failure. */
   inviteCreateStatus?: number;
+  /**
+   * TOG-3027: serve a distinct code per create, so a run that orphans another
+   * run's invite is visible as a code that was created and never DELETEd. The
+   * default stays `invite-code` because every earlier test asserts on that
+   * exact path.
+   */
+  uniqueInviteCodes?: boolean;
 }
 
 /**
@@ -67,6 +76,21 @@ interface Stub {
   inviteDeleteStatus: number;
   /** Append this entry when the invite DELETE arrives - i.e. after the scan. */
   injectOnRevoke: AuditEntry | null;
+  /** Invite codes this stub handed out, and the ones it has since seen DELETEd. */
+  invitesCreated: string[];
+  invitesDeleted: string[];
+  /** Status the roles read is served with from now on; settable mid-run. */
+  rolesStatus: number;
+  /**
+   * TOG-3027: park the NEXT `GET /guilds/{id}/roles` - the second request of
+   * `preflightGuild()` - until the returned `release` is called. That holds one
+   * baseline inside the window a concurrent baseline has to be refused in,
+   * without depending on timing. `arrived` resolves when that run reaches it,
+   * so the test knows the window is open rather than guessing. The status is
+   * read at release, so setting `rolesStatus` first turns the parked run into a
+   * failed one.
+   */
+  armRolesHold: () => { arrived: Promise<void>; release: () => void };
   close: () => Promise<void>;
 }
 
@@ -89,6 +113,23 @@ async function stubDiscord(options: StubOptions = {}): Promise<Stub> {
     auditStatus: options.auditStatus ?? 200,
     inviteDeleteStatus: options.inviteDeleteStatus ?? 200,
     injectOnRevoke: null as AuditEntry | null,
+    rolesStatus: options.rolesStatus ?? 200,
+    /** Set by armRolesHold; consumed by the next roles request that arrives. */
+    rolesHold: null as { announce: () => void; held: Promise<void> } | null,
+  };
+  const invitesCreated: string[] = [];
+  const invitesDeleted: string[] = [];
+  const armRolesHold = (): { arrived: Promise<void>; release: () => void } => {
+    let announce = (): void => {};
+    const arrived = new Promise<void>((resolve) => {
+      announce = resolve;
+    });
+    let release = (): void => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    state.rolesHold = { announce, held };
+    return { arrived, release };
   };
   const server: Server = createServer((req, res) => {
     const path = req.url ?? '';
@@ -112,8 +153,20 @@ async function stubDiscord(options: StubOptions = {}): Promise<Stub> {
       return;
     }
     if (req.method === 'GET' && path === `/api/v10/guilds/${GUILD}/roles`) {
-      res.writeHead(options.rolesStatus ?? 200);
-      res.end(options.rolesStatus && options.rolesStatus !== 200 ? JSON.stringify({ message: 'denied' }) : '[]');
+      const answer = (): void => {
+        res.writeHead(state.rolesStatus);
+        res.end(state.rolesStatus === 200 ? '[]' : JSON.stringify({ message: 'denied' }));
+      };
+      // An armed hold parks this run here: announce that it arrived, then answer
+      // only once the test releases it. One arming holds one request.
+      const hold = state.rolesHold;
+      if (hold) {
+        state.rolesHold = null;
+        hold.announce();
+        void hold.held.then(answer);
+        return;
+      }
+      answer();
       return;
     }
     if (req.method === 'GET' && path.startsWith(`/api/v10/guilds/${GUILD}/audit-logs?`)) {
@@ -168,7 +221,9 @@ async function stubDiscord(options: StubOptions = {}): Promise<Stub> {
         res.writeHead(options.inviteCreateStatus).end(JSON.stringify({ message: 'denied' }));
         return;
       }
-      res.end(JSON.stringify({ code: 'invite-code' }));
+      const code = options.uniqueInviteCodes ? `invite-code-${invitesCreated.length + 1}` : 'invite-code';
+      invitesCreated.push(code);
+      res.end(JSON.stringify({ code }));
       return;
     }
     if (req.method === 'DELETE' && path.startsWith('/api/v10/invites/')) {
@@ -179,8 +234,10 @@ async function stubDiscord(options: StubOptions = {}): Promise<Stub> {
         audit.push(state.injectOnRevoke);
         state.injectOnRevoke = null;
       }
+      const code = String(path.split('/').pop());
+      if (INVITE_GONE_STATUSES.has(state.inviteDeleteStatus)) invitesDeleted.push(code);
       res.writeHead(state.inviteDeleteStatus);
-      res.end(JSON.stringify({ code: path.split('/').pop() }));
+      res.end(JSON.stringify({ code }));
       return;
     }
     res.writeHead(404).end(JSON.stringify({ message: 'not found' }));
@@ -229,6 +286,15 @@ async function stubDiscord(options: StubOptions = {}): Promise<Stub> {
     set injectOnRevoke(e: AuditEntry | null) {
       state.injectOnRevoke = e;
     },
+    get rolesStatus() {
+      return state.rolesStatus;
+    },
+    set rolesStatus(s: number) {
+      state.rolesStatus = s;
+    },
+    invitesCreated,
+    invitesDeleted,
+    armRolesHold,
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }
@@ -884,6 +950,11 @@ test('a failed invite create reports the status without the response body', asyn
  *
  * The state the refused run must leave behind is the one it found: run A's
  * handle and run A's snapshot, so a --verify can still revoke exactly it.
+ *
+ * This is the sequential route - the one an operator actually hits. The same
+ * orphan is reachable by starting the two baselines together, which this test
+ * says nothing about; that is `a second baseline started inside the first run's
+ * window cannot create a second invite` (TOG-3027) below.
  */
 test('a second baseline refuses to overwrite the previous run handle', async () => {
   const stub = await stubDiscord();
@@ -961,6 +1032,195 @@ test('a baseline after a confirmed revocation starts normally', async () => {
       2,
       'the second baseline must have created its own invite',
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/** Invite codes the stub handed out that it never saw a successful DELETE for. */
+function liveInvites(stub: Stub): string[] {
+  return stub.invitesCreated.filter((code) => !stub.invitesDeleted.includes(code));
+}
+
+/**
+ * A parked run holds an open request, and `stub.close()` waits for it - so a
+ * failed assertion between `arrived` and `release` would hang the suite instead
+ * of reporting. Release and drain unconditionally, whatever the body did.
+ */
+async function withHeldBaseline(
+  stub: Stub,
+  dir: string,
+  body: (held: Promise<{ code: number; stdout: string; stderr: string }>, release: () => void) => Promise<void>,
+): Promise<void> {
+  const hold = stub.armRolesHold();
+  const run = runScript(stub, { dir });
+  try {
+    await hold.arrived;
+    await body(run, hold.release);
+  } finally {
+    hold.release();
+    await run.catch(() => undefined);
+  }
+}
+
+/**
+ * TOG-3027, the reviewer's second repro: the sequential refusal above was real,
+ * but the guard that produced it was check-then-act. It read the handle, and the
+ * run then did `preflightGuild()`, `newestAuditId()` and a paginated member walk
+ * before staging the `pending` marker. Nothing claimed the name across those
+ * round trips, so two baselines started together both read "no file", both
+ * proceeded, and the second overwrote the first's only handle - the same orphan,
+ * reached by a different route, with `--verify` still exiting 0 over it.
+ *
+ * `arrived` is what makes this a race rather than a sleep: the first baseline is
+ * parked inside that exact window, provably, before the second one starts.
+ */
+test('a second baseline started inside the first run\'s window cannot create a second invite', async () => {
+  const stub = await stubDiscord({ uniqueInviteCodes: true });
+  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
+  try {
+    await withHeldBaseline(stub, dir, async (first, release) => {
+      // The first baseline is now past the guard and has not reached the create.
+      // Under the old check-then-act guard this is where the second run read "no
+      // file" and went on to POST an invite of its own.
+      const second = await runScript(stub, { dir });
+      assert.notEqual(second.code, 0, 'a concurrent baseline must be refused, not merely a later one');
+      assert.match(second.stderr, /never recorded an invite code/);
+      assert.deepEqual(stub.invitesCreated, [], 'the refused run must not create an invite');
+
+      release();
+      const winner = await first;
+      assert.equal(winner.code, 0, winner.stderr);
+      assert.deepEqual(stub.invitesCreated, ['invite-code-1'], 'two concurrent baselines, one invite');
+      assert.equal(
+        inviteReceipt(dir),
+        `run ${baselineRunId(dir)}\nhttps://discord.gg/invite-code-1\n`,
+        'the handle on disk must name the invite that actually exists',
+      );
+    });
+
+    // And the remedy the refusal names clears everything that was created: the
+    // orphan signature is a live code with nothing on disk naming it.
+    const verify = await runScript(stub, { dir, args: ['--verify'] });
+    assert.equal(verify.code, 0, verify.stderr);
+    assert.deepEqual(liveInvites(stub), [], 'no invite may outlive the run that created it');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/**
+ * The claim is create-or-fail on the terminal-receipt path too. A spent receipt
+ * frees the name, and freeing it is `unlink` then the same exclusive create - so
+ * a baseline that takes over a receipt still locks the name against a racer for
+ * the rest of its run, exactly as one starting from an empty directory does.
+ */
+test('a baseline that takes over a spent receipt still locks out a concurrent one', async () => {
+  const stub = await stubDiscord({ uniqueInviteCodes: true });
+  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
+  try {
+    assert.equal((await runScript(stub, { dir })).code, 0);
+    assert.equal((await runScript(stub, { dir, args: ['--verify'] })).code, 0);
+    assert.match(inviteReceipt(dir), /^revoked invite-code-1 HTTP 200 at /m);
+
+    await withHeldBaseline(stub, dir, async (first, release) => {
+      const second = await runScript(stub, { dir });
+      assert.notEqual(second.code, 0, 'the receipt was already taken over by the parked run');
+      assert.match(second.stderr, /never recorded an invite code/);
+
+      release();
+      assert.equal((await first).code, 0);
+      assert.deepEqual(
+        stub.invitesCreated,
+        ['invite-code-1', 'invite-code-2'],
+        'one invite for the first baseline, one for the run that took over its receipt',
+      );
+      assert.deepEqual(liveInvites(stub), ['invite-code-2'], 'and only the current run\'s invite is live');
+    });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/**
+ * The cost of claiming before the network is that a run which never gets to the
+ * create now holds a marker for work it did not do. It has to give that back, or
+ * a bad token would wedge every later baseline in the directory over an invite
+ * that does not exist.
+ */
+test('a baseline that fails before the create releases its own claim', async () => {
+  const stub = await stubDiscord({ rolesStatus: 403 });
+  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
+  try {
+    const failed = await runScript(stub, { dir });
+    assert.notEqual(failed.code, 0);
+    assert.match(failed.stderr, /Could not read roles/);
+    assert.throws(
+      () => inviteReceipt(dir),
+      /ENOENT/,
+      'a run that never reached the create must not leave a claim behind',
+    );
+
+    stub.rolesStatus = 200;
+    const recovered = await runScript(stub, { dir });
+    assert.equal(recovered.code, 0, recovered.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/**
+ * The other half of that, and the direction that must fail closed: once the
+ * create is on the wire an invite may exist whatever came back, so the marker
+ * stays and the next baseline is refused. `the baseline stages the invite file
+ * before the invite exists` proves the marker survives; this proves it still
+ * does the job the release must never undo.
+ */
+test('a baseline that fails after the create keeps its claim', async () => {
+  const stub = await stubDiscord({ inviteCreateStatus: 500 });
+  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
+  try {
+    const base = await runScript(stub, { dir });
+    assert.notEqual(base.code, 0);
+    assert.equal(inviteReceipt(dir), `run ${baselineRunId(dir)}\npending\n`);
+
+    const second = await runScript(stub, { dir });
+    assert.notEqual(second.code, 0, 'a create that may have succeeded must still wedge the next baseline');
+    assert.match(second.stderr, /never recorded an invite code/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/**
+ * The release is the one path that deletes the invite artifact, so it must only
+ * ever delete the marker its own run wrote. Here the parked run's claim is
+ * replaced by someone else's live handle before it fails: deleting that would
+ * orphan an invite in the name of cleaning up.
+ */
+test('a failing baseline does not release a handle it did not write', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
+  try {
+    const foreign = 'run 11111111-1111-4111-8111-111111111111\nhttps://discord.gg/foreign-code\n';
+    await withHeldBaseline(stub, dir, async (run, release) => {
+      writeFileSync(join(dir, 'invite.txt'), foreign);
+      stub.rolesStatus = 403;
+      release();
+      const result = await run;
+      assert.notEqual(result.code, 0);
+      assert.match(result.stderr, /Could not read roles/);
+      assert.equal(
+        readFileSync(join(dir, 'invite.txt'), 'utf8'),
+        foreign,
+        'the failing run must leave a handle that is not its own exactly where it found it',
+      );
+    });
   } finally {
     rmSync(dir, { recursive: true, force: true });
     await stub.close();
