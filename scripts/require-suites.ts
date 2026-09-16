@@ -60,6 +60,11 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     minTests: 8,
     why: 'a HOT key reloading without a restart, and the schema-level refusal of every env-only key',
   },
+  {
+    file: 'test/unit.tempvoice.test.ts',
+    minTests: 50,
+    why: 'the "no persisted row, no delete" invariant, and the atomic per-user cap claim behind it',
+  },
 ];
 
 /**
