@@ -42,6 +42,8 @@ interface StubOptions {
   auditStatus?: number;
   /** Status for DELETE /invites/{code}; 200 unless a test wants a failure. */
   inviteDeleteStatus?: number;
+  /** Status for POST /channels/{id}/invites; 200 unless a test wants a failure. */
+  inviteCreateStatus?: number;
 }
 
 /**
@@ -162,6 +164,10 @@ async function stubDiscord(options: StubOptions = {}): Promise<Stub> {
       return;
     }
     if (req.method === 'POST' && path === `/api/v10/channels/${CHANNEL}/invites`) {
+      if (options.inviteCreateStatus && options.inviteCreateStatus !== 200) {
+        res.writeHead(options.inviteCreateStatus).end(JSON.stringify({ message: 'denied' }));
+        return;
+      }
       res.end(JSON.stringify({ code: 'invite-code' }));
       return;
     }
@@ -268,6 +274,88 @@ function assertNoProofLanguage(text: string, context: string): void {
   );
   assert.doesNotMatch(text, /\bproof\b|\bprove[sd]?\b/i, `${context}: no revived proof wording`);
   assert.doesNotMatch(text, /NONE across|window closed/i, `${context}: no revived closed-window wording`);
+}
+
+/**
+ * TOG-2999 P2: the citation guard was vacuous. It string-matched the script's
+ * own stdout, so it could only ever notice the script changing its mind - never
+ * `src/index.ts` drifting underneath it. Inserting five blank lines at
+ * `src/index.ts:90` left `:99` on a comment, `:449` blank and `:543` on a
+ * comment, and the suite stayed green: the operator-facing message would have
+ * gone on citing lines that no longer held what it said they did.
+ *
+ * Each entry is now checked twice - the script must still print the citation,
+ * and the lines that citation names must still contain the code it claims. Only
+ * the first of those can be satisfied by editing this file, so a shift in
+ * `src/index.ts` fails here.
+ */
+const INDEX_CITATIONS: ReadonlyArray<{
+  /** Exactly as the script prints it, so a reworded claim fails on stdout. */
+  printed: string;
+  /** The range that citation names, and the anchor that must sit inside it. */
+  start: number;
+  end: number;
+  contains: RegExp;
+  what: string;
+}> = [
+  {
+    printed: 'src/index.ts:449-484',
+    start: 449,
+    end: 484,
+    contains: /registerSessionWelcome\(client, \{/,
+    what: 'exclusive session registration',
+  },
+  {
+    printed: 'src/index.ts:543 and :272',
+    start: 543,
+    end: 543,
+    contains: /actionsForOnboardingMode\(/,
+    what: 'the internal role.assign call site',
+  },
+  {
+    printed: 'src/index.ts:543 and :272',
+    start: 272,
+    end: 272,
+    contains: /levelRoleWritesForOnboardingMode\(/,
+    what: 'the leveling role-write call site',
+  },
+  {
+    printed: 'src/index.ts:99-103, :112-117',
+    start: 99,
+    end: 103,
+    contains: /forbids TWO_SELF_ROLE_PANELS/,
+    what: 'the self-role panel boot guard',
+  },
+  {
+    printed: 'src/index.ts:99-103, :112-117',
+    start: 112,
+    end: 117,
+    contains: /forbids armed anti-nuke containment/,
+    what: 'the armed containment boot guard',
+  },
+];
+
+/** The other two paths that message names; a citation to a file that moved is stale too. */
+const CITED_PATHS = ['src/onboarding/mode.ts', 'test/e2e.session.test.ts'];
+
+function assertCitationsResolve(stdout: string): void {
+  const lines = readFileSync(join(REPO, 'src/index.ts'), 'utf8').split('\n');
+  for (const c of INDEX_CITATIONS) {
+    assert.ok(
+      c.printed.includes(String(c.start)),
+      `${c.what}: this table's range must be one the script actually prints`,
+    );
+    assert.ok(stdout.includes(c.printed), `the output must still cite ${c.what} as ${c.printed}`);
+    assert.match(
+      lines.slice(c.start - 1, c.end).join('\n'),
+      c.contains,
+      `src/index.ts:${c.start}-${c.end} no longer holds ${c.what}, so the citation is stale`,
+    );
+  }
+  for (const path of CITED_PATHS) {
+    assert.ok(stdout.includes(path), `the output must still cite ${path}`);
+    assert.ok(readFileSync(join(REPO, path), 'utf8').length > 0, `${path} is cited but not there`);
+  }
 }
 
 interface RunOptions {
@@ -585,10 +673,9 @@ test('a role write published after the scan is not claimed to have been ruled ou
     // TOG-2972 P1: the guarantee it points at is an application property, so the
     // citation has to reach the wiring and the boot guards, not stop at the two
     // pure helpers whose unit test cannot see either.
-    assert.match(verify.stdout, /src\/index\.ts:449-484/, 'cites exclusive session registration');
-    assert.match(verify.stdout, /src\/index\.ts:543 and :272/, 'cites the two call sites');
-    assert.match(verify.stdout, /src\/index\.ts:99-103, :112-117/, 'cites the boot guards');
-    assert.match(verify.stdout, /test\/e2e\.session\.test\.ts/, 'cites the test that covers them');
+    // TOG-2999 P2: and each citation is checked against the file it names, not
+    // only against the script's own stdout - see INDEX_CITATIONS.
+    assertCitationsResolve(verify.stdout);
     // TOG-2972 P2: and must not imply it identified the running build.
     assert.match(verify.stdout, /does not identify which build the staging bot is serving/);
     assert.doesNotMatch(verify.stdout, /checks the deployed build/);
@@ -662,12 +749,17 @@ test('a canonical HTTP 200 receipt from another run does not suppress revocation
 });
 
 /**
- * The other half of TOG-2971 P1: the staged marker is what stops the state
- * above from arising by accident. The baseline writes it BEFORE asking Discord
- * for an invite, so a POST that succeeds while the handle write fails leaves
- * `pending` rather than the previous run's terminal receipt.
+ * The other half of TOG-2971 P1, reader side: what `--verify` does when it finds
+ * the staged marker. A POST that succeeded while the handle write failed leaves
+ * `pending` rather than the previous run's terminal receipt, and that has to
+ * fail closed and name the run.
+ *
+ * TOG-2997 P3: the marker is hand-written here, so this covers only the reader.
+ * That the baseline really writes it before the POST is proved by
+ * 'the baseline stages the invite file before the invite exists', which fails
+ * the create and looks at the disk.
  */
-test('the baseline stages the invite file before the invite exists', async () => {
+test('a staged-but-unrecorded invite fails closed on verify', async () => {
   const stub = await stubDiscord();
   const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
   try {
@@ -681,6 +773,194 @@ test('the baseline stages the invite file before the invite exists', async () =>
     assert.match(verify.stderr, /never recorded an invite code/);
     assert.match(verify.stderr, new RegExp(runId));
     assert.deepEqual(inviteDeletes(stub), [], 'there is no code to DELETE');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/**
+ * TOG-2997 #1. The receipt payload's binding is covered above; the URL payload's
+ * was not, and `if (!bound)` at the end of `revokeInvite` is the only thing
+ * between a foreign-run handle with a readable baseline and exit 0 - the same
+ * "reported ok for an invite it cannot identify" defect. Deleting is always
+ * safe, so the DELETE must still go out; what must not happen is a clean exit.
+ */
+test('a URL handle from another run is revoked but not reported ok', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
+  try {
+    assert.equal((await runScript(stub, { dir })).code, 0);
+    const foreignRun = '00000000-0000-4000-8000-000000000000';
+    assert.notEqual(foreignRun, baselineRunId(dir), 'precondition: another run');
+    writeArtifact(dir, 'https://discord.gg/invite-code', foreignRun);
+
+    const verify = await runScript(stub, { dir, args: ['--verify'] });
+    assert.deepEqual(inviteDeletes(stub), ['/api/v10/invites/invite-code'], 'it must still try');
+    assert.notEqual(verify.code, 0, 'an invite it cannot identify must not exit 0');
+    assert.match(verify.stderr, /may still be live/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/**
+ * TOG-2997 #2. Re-stamping the receipt header with this baseline's run would
+ * make the NEXT --verify read it as bound and report a clean revocation - the
+ * same defect, one run later. The second --verify is what makes that visible.
+ */
+test('the receipt for an unbound revocation keeps that run id, not this one', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
+  try {
+    assert.equal((await runScript(stub, { dir })).code, 0);
+    const foreignRun = '00000000-0000-4000-8000-000000000000';
+    const mine = baselineRunId(dir);
+    writeArtifact(dir, 'https://discord.gg/invite-code', foreignRun);
+
+    await runScript(stub, { dir, args: ['--verify'] });
+    assert.match(inviteReceipt(dir), new RegExp(`^run ${foreignRun}\n`));
+    assert.doesNotMatch(inviteReceipt(dir), new RegExp(mine), 'must not be re-stamped');
+
+    const second = await runScript(stub, { dir, args: ['--verify'] });
+    assert.notEqual(second.code, 0, 'a re-stamped receipt would read as a clean revocation');
+    assert.doesNotMatch(second.stdout, /already revoked/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/**
+ * TOG-2997 #3: the ordering half of TOG-2971 P1, which nothing covered. Fail the
+ * POST and the file on disk is the proof: present => staged first; absent => the
+ * script only writes after a success, which is exactly the window the pending
+ * marker exists to close.
+ */
+test('the baseline stages the invite file before the invite exists', async () => {
+  const stub = await stubDiscord({ inviteCreateStatus: 500 });
+  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
+  try {
+    const base = await runScript(stub, { dir });
+    assert.notEqual(base.code, 0, 'a failed invite create must fail the baseline');
+    assert.equal(
+      inviteReceipt(dir),
+      `run ${baselineRunId(dir)}\npending\n`,
+      'the marker must already be on disk when the POST is attempted',
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/** TOG-2999 P3: a failed create must not put the response body in a transcript. */
+test('a failed invite create reports the status without the response body', async () => {
+  const stub = await stubDiscord({ inviteCreateStatus: 500 });
+  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
+  try {
+    const base = await runScript(stub, { dir });
+    assert.notEqual(base.code, 0);
+    assert.match(base.stderr, /Failed to create demo invite: HTTP 500/);
+    assert.doesNotMatch(
+      base.stdout + base.stderr,
+      /denied/,
+      'a create response can carry the invite code, so the body must not be printed',
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/**
+ * TOG-2999 P1, the reviewer's repro: baseline, baseline again, --verify. The
+ * second baseline used to overwrite the first run's bearer URL before anything
+ * revoked it - and because the artifact and the snapshot were both replaced,
+ * --verify bound run B's handle, DELETEd run B's code and exited 0 printing
+ * `revoked demo invite (HTTP 200)`. Run A's invite stayed live for its full
+ * max_age with nothing on disk naming it.
+ *
+ * The state the refused run must leave behind is the one it found: run A's
+ * handle and run A's snapshot, so a --verify can still revoke exactly it.
+ */
+test('a second baseline refuses to overwrite the previous run handle', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
+  try {
+    assert.equal((await runScript(stub, { dir })).code, 0);
+    const firstRun = baselineRunId(dir);
+    const firstArtifact = inviteReceipt(dir);
+
+    const second = await runScript(stub, { dir });
+    assert.notEqual(second.code, 0, 'a live handle must stop a new baseline');
+    assert.match(second.stderr, /still holds the invite handle for baseline run/);
+    assert.match(second.stderr, new RegExp(firstRun));
+    assert.equal(
+      stub.writes.filter((p) => p.endsWith('/invites')).length,
+      1,
+      'the refused run must not create a second invite',
+    );
+    assert.equal(inviteReceipt(dir), firstArtifact, 'the only handle for the live invite must survive');
+    assert.equal(baselineRunId(dir), firstRun, 'and the baseline that binds it must survive too');
+
+    // The remedy the message names has to work: the first invite is still
+    // revocable, cleanly, because both artifacts were left alone.
+    const verify = await runScript(stub, { dir, args: ['--verify'] });
+    assert.equal(verify.code, 0, verify.stderr);
+    assert.deepEqual(inviteDeletes(stub), ['/api/v10/invites/invite-code']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/** Same refusal from the staged marker: an unidentified invite may be live too. */
+test('a baseline refuses to start on a staged marker from an interrupted run', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
+  try {
+    assert.equal((await runScript(stub, { dir })).code, 0);
+    writeArtifact(dir, 'pending');
+
+    const second = await runScript(stub, { dir });
+    assert.notEqual(second.code, 0, 'a staged marker must stop a new baseline');
+    assert.match(second.stderr, /never recorded an invite code/);
+    assert.equal(
+      stub.writes.filter((p) => p.endsWith('/invites')).length,
+      1,
+      'the refused run must not create a second invite',
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/**
+ * The other side of that guard: a confirmed revocation is the one artifact state
+ * that says nothing is live, so it must not wedge the script. Without this, the
+ * fix above would make the demo a one-shot per directory.
+ */
+test('a baseline after a confirmed revocation starts normally', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
+  try {
+    assert.equal((await runScript(stub, { dir })).code, 0);
+    const firstRun = baselineRunId(dir);
+    assert.equal((await runScript(stub, { dir, args: ['--verify'] })).code, 0);
+    assert.match(inviteReceipt(dir), /^revoked invite-code HTTP 200 at /m);
+
+    const second = await runScript(stub, { dir });
+    assert.equal(second.code, 0, second.stderr);
+    assert.notEqual(baselineRunId(dir), firstRun, 'the second baseline is its own run');
+    assert.match(inviteReceipt(dir), /^https:\/\/discord\.gg\/invite-code$/m);
+    assert.equal(
+      stub.writes.filter((p) => p.endsWith('/invites')).length,
+      2,
+      'the second baseline must have created its own invite',
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
     await stub.close();

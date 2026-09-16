@@ -441,6 +441,64 @@ function readPrivate(path: string): string {
   }
 }
 
+/**
+ * TOG-2999 P1: a baseline must not write over a handle that may name a live
+ * invite.
+ *
+ * `INVITE_PATH` holds exactly one invite's handle, and the baseline used to
+ * replace it unconditionally - so a second baseline in the same directory
+ * destroyed the first run's URL before anything had revoked it. The next
+ * `--verify` then found run B's handle, bound it to run B's snapshot, DELETEd
+ * run B's code and exited 0 printing `revoked demo invite (HTTP 200)`: run A's
+ * invite stayed live for its full `max_age` with nothing on disk naming it, and
+ * the exit code an operator reads said clean. Staging the marker before the
+ * POST guarantees the overwrite, so this has to be checked before it.
+ *
+ * Only a terminal receipt - the one artifact state that says the invite it
+ * names is gone - lets a new baseline start. Everything else, `pending` and a
+ * present-but-unreadable file included, means an invite may be live, which is a
+ * state to resolve rather than erase. Same reasoning as `revokeInvite`: the
+ * states we know least about are the ones that must be loud.
+ *
+ * Returns null when it is safe to proceed, or the operator-facing reason.
+ */
+function liveInviteBlockingNewBaseline(): string | null {
+  const fix =
+    'Run `node scripts/staging-session-demo.ts --verify` to revoke it (or delete the demo invite in the ' +
+    `guild's invite list by hand and remove ${INVITE_PATH}), then baseline again.`;
+  let contents: string;
+  try {
+    contents = readPrivate(INVITE_PATH);
+  } catch (err) {
+    // No file is the normal case, and the only one that is not evidence.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    return (
+      `${INVITE_PATH} exists but could not be read (${err instanceof Error ? err.message : String(err)}), ` +
+      `so it may name a demo invite that is still live. ${fix}`
+    );
+  }
+
+  const artifact = parseArtifact(contents);
+  if (!artifact) {
+    return (
+      `${INVITE_PATH} does not hold a recognisable invite handle, so it may name a demo invite that is ` +
+      `still live and this baseline would overwrite it. ${fix}`
+    );
+  }
+  const receipt = RECEIPT_RE.exec(artifact.payload);
+  if (receipt && INVITE_GONE_STATUSES.has(Number(receipt[2]))) return null;
+  if (artifact.payload === PENDING_PAYLOAD) {
+    return (
+      `${INVITE_PATH} was staged by baseline run ${artifact.runId} and never recorded an invite code, so ` +
+      `that run may have created an invite that is still live with no handle to revoke it by. ${fix}`
+    );
+  }
+  return (
+    `${INVITE_PATH} still holds the invite handle for baseline run ${artifact.runId}, so that run's invite ` +
+    `may still be live and a new baseline would overwrite the only record of it. ${fix}`
+  );
+}
+
 /** Members whose role set differs between two snapshots, in either direction. */
 function roleDeltas(before: MemberRoles, after: MemberRoles): string[] {
   const deltas: string[] = [];
@@ -928,6 +986,12 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Before the first write of this run, and before the network: the handle on
+  // disk is the only record of the previous run's invite, and everything below
+  // is about to replace it (see liveInviteBlockingNewBaseline).
+  const staleInvite = liveInviteBlockingNewBaseline();
+  if (staleInvite) throw new Error(staleInvite);
+
   await preflightGuild();
 
   const baseline: Baseline = {
@@ -982,7 +1046,15 @@ async function main(): Promise<void> {
     unique: true,
   });
   if (invite.status !== 200 || !invite.body?.code) {
-    throw new Error(`Failed to create demo invite: HTTP ${invite.status} ${JSON.stringify(invite.body)}.`);
+    // TOG-2999 P3: the body is not printed. This branch is reached by a 200
+    // whose shape we did not expect as well as by an error status, and a create
+    // response carries the invite code - so dumping it would put the bearer
+    // credential into the transcript everything else here works to keep it out
+    // of. The status is what an operator acts on.
+    throw new Error(
+      `Failed to create demo invite: HTTP ${invite.status}. The response body is not printed because a ` +
+        "create response can carry the invite code; check the bot's permissions on the channel.",
+    );
   }
   // The invite is a bearer credential: anyone holding the URL can join the
   // guild until it expires. Operator and CI transcripts are retained, so it
