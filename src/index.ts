@@ -45,7 +45,12 @@ import { RestModerationResolver } from './moderation/resolver.ts';
 import { ModerationService } from './moderation/service.ts';
 import { ModerationStore } from './moderation/store.ts';
 import { MODERATION_COMMAND_DATA, registerModerationHandler } from './moderation/commands.ts';
-import { ANNOUNCEMENT_COMMAND_DATA, AUTOMATION_COMMAND_DATA, COMMUNITY_COMMAND_DATA } from './discord/commandNames.ts';
+import {
+  ANNOUNCEMENT_COMMAND_DATA,
+  AUTOMATION_COMMAND_DATA,
+  COMMUNITY_COMMAND_DATA,
+  TEMP_VOICE_COMMAND_DATA,
+} from './discord/commandNames.ts';
 import { loadAutomodConfig } from './automod/config.ts';
 import { AutomodService } from './automod/service.ts';
 import { AutomodStore } from './automod/store.ts';
@@ -84,6 +89,15 @@ import { loadAnnouncementsConfig } from './announcements/config.ts';
 import { AnnouncementsStore } from './announcements/store.ts';
 import { AnnouncementsService } from './announcements/service.ts';
 import { DiscordAnnouncements, XmlFeedReader, registerAnnouncementCommands, startFeedPoller } from './announcements/discord.ts';
+import { loadTempVoiceConfig } from './tempVoice/config.ts';
+import { TempVoiceStore } from './tempVoice/store.ts';
+import { TempVoiceService } from './tempVoice/service.ts';
+import {
+  DiscordTempVoiceGateway,
+  ensureTempVoicePanel,
+  registerTempVoice,
+  startTempVoiceSweeper,
+} from './tempVoice/discord.ts';
 
 const cfg = loadConfig();
 const automationCfg = loadAutomationConfig();
@@ -94,6 +108,9 @@ const selfRolePanels = loadSelfRolePanels();
 // below refuses the process before the database is opened or the gateway is
 // touched. It is a pure read of process.env.
 const containmentCfg = loadContainmentConfig();
+// Same reason: this one throws when TWO_TEMP_VOICE=1 is pointed at any guild
+// but staging, and that refusal has to land before the gateway connects.
+const tempVoiceCfg = loadTempVoiceConfig();
 setLogLevel(cfg.logLevel);
 
 if (cfg.onboardingMode === 'session' && selfRolePanels.length) {
@@ -377,6 +394,7 @@ if (cfg.guildId) {
       ...(communityFacts ? COMMUNITY_COMMAND_DATA : []),
       ...(automationCfg.enabled ? AUTOMATION_COMMAND_DATA : []),
       ...(announcementsCfg.enabled ? ANNOUNCEMENT_COMMAND_DATA : []),
+      ...(tempVoiceCfg.enabled ? TEMP_VOICE_COMMAND_DATA : []),
       ...(moderationResolver && moderationService ? MODERATION_COMMAND_DATA : []),
     ],
   });
@@ -425,6 +443,48 @@ if (cfg.guildId && announcementsCfg.enabled) {
 } else {
   log.info('announcements_disabled', {
     reason: cfg.guildId ? 'TWO_ANNOUNCEMENTS is not 1' : 'DISCORD_GUILD_ID is unset',
+  });
+}
+
+// Temporary voice channels / join-to-create (TOG-3052). Staging-only; the
+// config loader refuses to start against any guild but TWO Staging.
+let tempVoiceSweeper: ReturnType<typeof startTempVoiceSweeper> | null = null;
+if (cfg.guildId && tempVoiceCfg.enabled) {
+  const tempVoiceService = new TempVoiceService({
+    store: new TempVoiceStore(db),
+    gateway: new DiscordTempVoiceGateway(client),
+    config: tempVoiceCfg,
+    // The same word list that governs chat governs channel names, so the two
+    // cannot drift apart.
+    policy: automodCfg.policy,
+  });
+  registerTempVoice(client, { guildId: cfg.guildId, service: tempVoiceService, config: tempVoiceCfg });
+  const guildId = cfg.guildId;
+  client.once('ready', () => {
+    void (async () => {
+      // Reconcile before the sweeper starts: boot is the only moment we can
+      // tell a channel that survived a restart from one that leaked.
+      try {
+        const report = await tempVoiceService.reconcile(guildId);
+        log.info('temp_voice_reconciled', { guildId, ...report });
+      } catch (err) {
+        log.error('temp_voice_reconcile_failed', { guildId, err: String(err) });
+      }
+      await ensureTempVoicePanel(client, tempVoiceCfg);
+      tempVoiceSweeper = startTempVoiceSweeper(tempVoiceService, guildId, tempVoiceCfg.sweepSeconds);
+    })();
+  });
+  log.info('temp_voice_enabled', {
+    guildId: cfg.guildId,
+    generatorChannelId: tempVoiceCfg.generatorChannelId,
+    categoryId: tempVoiceCfg.categoryId,
+    emptyGraceSeconds: tempVoiceCfg.emptyGraceSeconds,
+    maxPerUser: tempVoiceCfg.maxPerUser,
+    disabledControls: [...tempVoiceCfg.disabledControls],
+  });
+} else {
+  log.info('temp_voice_disabled', {
+    reason: cfg.guildId ? 'TWO_TEMP_VOICE is not 1' : 'DISCORD_GUILD_ID is unset',
   });
 }
 
@@ -711,6 +771,7 @@ async function shutdown(signal: string) {
   automationScheduler?.stop();
   clearInterval(auditSweep);
   feedPoller?.stop();
+  tempVoiceSweeper?.stop();
   if (moderationSweep) clearInterval(moderationSweep);
   presenceProbe?.stop();
   communitySnapshots?.stop();
