@@ -24,7 +24,15 @@ before(async () => {
 after(async () => t.cleanup());
 beforeEach(async () => t.reset());
 
-const settle = () => new Promise((resolve) => setTimeout(resolve, 25));
+async function waitFor<T>(fn: () => Promise<T>, timeoutMs = 5_000): Promise<NonNullable<T>> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = await fn();
+    if (value != null) return value;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('timed out waiting for community scorecard job');
+}
 
 test('Monday job persists production coverage before scoring the closed week', async () => {
   const handle = startCommunityScorecardJob({
@@ -37,18 +45,16 @@ test('Monday job persists production coverage before scoring the closed week', a
     now: () => new Date('2026-09-07T06:15:00.000Z'),
   });
   try {
-    await settle();
+    const run = await waitFor(() => t.db.prepare(
+      `SELECT coverage_state FROM community_scorecard_runs WHERE guild_id = ?`,
+    ).get<{ coverage_state: string }>(GUILD));
     const rows = await t.db.prepare(
       `SELECT stream, covered_from, covered_through FROM community_stream_heartbeats WHERE guild_id = ? ORDER BY stream`,
     ).all<{ stream: string; covered_from: string; covered_through: string }>(GUILD);
     assert.equal(rows.length, COMMUNITY_FACT_TYPES.length);
     assert.deepEqual(new Set(rows.map((row) => row.stream)), new Set(COMMUNITY_FACT_TYPES));
     assert.equal(rows.every((row) => row.covered_from === WEEK_START && row.covered_through === WEEK_END), true);
-
-    const run = await t.db.prepare(
-      `SELECT coverage_state FROM community_scorecard_runs WHERE guild_id = ?`,
-    ).get<{ coverage_state: string }>(GUILD);
-    assert.equal(run?.coverage_state, 'complete');
+    assert.equal(run.coverage_state, 'complete');
   } finally {
     handle.stop();
   }
@@ -65,12 +71,11 @@ test('a process started inside the week makes the Monday job fail closed', async
     now: () => new Date('2026-09-07T06:15:00.000Z'),
   });
   try {
-    await settle();
-    const run = await t.db.prepare(
+    const run = await waitFor(() => t.db.prepare(
       `SELECT coverage_state, scorecard_json FROM community_scorecard_runs WHERE guild_id = ?`,
-    ).get<{ coverage_state: string; scorecard_json: string }>(GUILD);
-    assert.equal(run?.coverage_state, 'incomplete');
-    assert.equal(JSON.parse(run!.scorecard_json).weeklyActiveHumans, null);
+    ).get<{ coverage_state: string; scorecard_json: string }>(GUILD));
+    assert.equal(run.coverage_state, 'incomplete');
+    assert.equal(JSON.parse(run.scorecard_json).weeklyActiveHumans, null);
   } finally {
     handle.stop();
   }
