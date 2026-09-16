@@ -21,7 +21,6 @@ const GUILD = '1545644954272137297';
 const CHANNEL = '1546451669284552726';
 const TOKEN = `${Buffer.from(STAGING_BOT_APPLICATION_ID).toString('base64')}.Gxxxxx.yyyyyyyyyy`;
 const MEMBER_ROLE_UPDATE = 25;
-const CHANNEL_DELETE = 12;
 
 interface AuditEntry {
   id: string;
@@ -64,10 +63,8 @@ interface Stub {
   injectEntry: AuditEntry | null;
   auditStatus: number;
   inviteDeleteStatus: number;
-  /** Status for POST /guilds/{id}/channels, which mints the audit fence. */
-  fenceCreateStatus: number;
-  /** Clear it to model an audit log that never publishes the fence entry. */
-  publishFence: boolean;
+  /** Append this entry when the invite DELETE arrives - i.e. after the scan. */
+  injectOnRevoke: AuditEntry | null;
   close: () => Promise<void>;
 }
 
@@ -89,11 +86,7 @@ async function stubDiscord(options: StubOptions = {}): Promise<Stub> {
     injectEntry: null as AuditEntry | null,
     auditStatus: options.auditStatus ?? 200,
     inviteDeleteStatus: options.inviteDeleteStatus ?? 200,
-    fenceCreateStatus: 200,
-    fenceDeleteStatus: 200,
-    fenceChannels: 0,
-    /** Clear it to model an audit log that never publishes the fence entry. */
-    publishFence: true,
+    injectOnRevoke: null as AuditEntry | null,
   };
   const server: Server = createServer((req, res) => {
     const path = req.url ?? '';
@@ -145,33 +138,6 @@ async function stubDiscord(options: StubOptions = {}): Promise<Stub> {
       res.end(JSON.stringify({ audit_log_entries: entries }));
       return;
     }
-    // The audit fence: a throwaway channel whose deletion the script must
-    // observe in the log before it is allowed to report a result. Creating it
-    // appends the CHANNEL_DELETE entry the script is waiting for, unless a test
-    // has suppressed that to model a log that never catches up.
-    if (req.method === 'POST' && path === `/api/v10/guilds/${GUILD}/channels`) {
-      if (state.fenceCreateStatus !== 200) {
-        res.writeHead(state.fenceCreateStatus).end(JSON.stringify({ message: 'denied' }));
-        return;
-      }
-      state.fenceChannels += 1;
-      res.end(JSON.stringify({ id: `fence-channel-${state.fenceChannels}` }));
-      return;
-    }
-    if (req.method === 'DELETE' && path.startsWith('/api/v10/channels/')) {
-      const channelId = path.split('/').pop() ?? '';
-      if (state.publishFence) {
-        audit.push({
-          id: `9500000000000000${String(state.fenceChannels).padStart(2, '0')}`,
-          action_type: CHANNEL_DELETE,
-          user_id: STAGING_BOT_APPLICATION_ID,
-          target_id: channelId,
-        });
-      }
-      res.writeHead(state.fenceDeleteStatus);
-      res.end(JSON.stringify({ id: channelId }));
-      return;
-    }
     if (req.method === 'GET' && path.startsWith(`/api/v10/guilds/${GUILD}/members?`)) {
       if (options.membersStatus && options.membersStatus !== 200) {
         res.writeHead(options.membersStatus).end(JSON.stringify({ message: 'denied' }));
@@ -200,6 +166,13 @@ async function stubDiscord(options: StubOptions = {}): Promise<Stub> {
       return;
     }
     if (req.method === 'DELETE' && path.startsWith('/api/v10/invites/')) {
+      // Revocation is the first call the script makes AFTER the audit scan has
+      // returned, so appending here is the exact "published just too late"
+      // sequence both TOG-2963 and TOG-2964 used to defeat the old fence.
+      if (state.injectOnRevoke) {
+        audit.push(state.injectOnRevoke);
+        state.injectOnRevoke = null;
+      }
       res.writeHead(state.inviteDeleteStatus);
       res.end(JSON.stringify({ code: path.split('/').pop() }));
       return;
@@ -244,23 +217,17 @@ async function stubDiscord(options: StubOptions = {}): Promise<Stub> {
     set inviteDeleteStatus(s: number) {
       state.inviteDeleteStatus = s;
     },
-    get fenceCreateStatus() {
-      return state.fenceCreateStatus;
+    get injectOnRevoke() {
+      return state.injectOnRevoke;
     },
-    set fenceCreateStatus(s: number) {
-      state.fenceCreateStatus = s;
-    },
-    get publishFence() {
-      return state.publishFence;
-    },
-    set publishFence(v: boolean) {
-      state.publishFence = v;
+    set injectOnRevoke(e: AuditEntry | null) {
+      state.injectOnRevoke = e;
     },
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }
 
-/** DELETEs now include the fence channel, so invite revocation is asserted alone. */
+/** Invite revocation asserted on its own, whatever else the run may DELETE. */
 function inviteDeletes(stub: Stub): string[] {
   return stub.deletes.filter((p) => p.startsWith('/api/v10/invites/'));
 }
@@ -297,9 +264,6 @@ function runScript(
           TWO_SESSION_DEMO_DIR: work,
           TWO_SESSION_DEMO_SNAPSHOT: join(work, 'snapshot.json'),
           TWO_SESSION_DEMO_INVITE: join(work, 'invite.txt'),
-          // The stub publishes synchronously, so the quiesce delay only needs
-          // to be non-zero for the re-read loop to be a real second pass.
-          TWO_SESSION_DEMO_QUIESCE_MS: '5',
           ...env,
         },
       },
@@ -385,7 +349,7 @@ test('an unreadable audit log aborts instead of proving nothing', async () => {
  * member-role grant never touches, so it printed "zero role delta" over a real
  * write. Simulate the grant the old proof missed; --verify must fail.
  */
-test('a member role grant makes the zero-role proof fail', async () => {
+test('a member role grant fails the run', async () => {
   const stub = await stubDiscord();
   const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
   try {
@@ -436,14 +400,14 @@ test('a role granted to a member who then leaves still fails the proof', async (
   }
 });
 
-test('an untouched guild passes the zero-role proof', async () => {
+test('an untouched guild passes, reported as observed rather than proven', async () => {
   const stub = await stubDiscord();
   const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
   try {
     assert.equal((await runScript(stub, { dir })).code, 0);
     const verify = await runScript(stub, { dir, args: ['--verify'] });
     assert.equal(verify.code, 0, `clean verify should pass: ${verify.stderr}`);
-    assert.match(verify.stdout, /NONE across MEMBER_ROLE_UPDATE/);
+    assert.match(verify.stdout, /NONE OBSERVED across MEMBER_ROLE_UPDATE/);
     assert.match(verify.stdout, /IDENTICAL - zero role delta across 2 members/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -505,19 +469,18 @@ test('the demo invite is never printed, lands owner-only, and is revoked on veri
 });
 
 /**
- * TOG-2926 P1: the open-ended window. An entry that publishes after the first
- * scan has read the log is missed, and if the member has left, the snapshot
- * cannot see it either. Publish it during the second scan: only a third scan
- * can find it, so this fails if the re-read loop is collapsed into one pass.
+ * TOG-2926 P1: a role write that publishes while the scan is running must be
+ * caught, not stepped over. Injecting on the scan's own request models a write
+ * that lands in the log just as it is being read.
  */
-test('a role write published after the first audit scan still fails the proof', async () => {
+test('a role write published as the audit scan runs still fails the run', async () => {
   const stub = await stubDiscord();
   const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
   try {
     assert.equal((await runScript(stub, { dir })).code, 0);
 
     stub.auditRequests = 0;
-    stub.injectAfterAuditRequests = 2; // scan #2, after scan #1 has read the log
+    stub.injectAfterAuditRequests = 1;
     stub.injectEntry = {
       id: '900000000000000077',
       action_type: MEMBER_ROLE_UPDATE,
@@ -526,7 +489,7 @@ test('a role write published after the first audit scan still fails the proof', 
     };
 
     const verify = await runScript(stub, { dir, args: ['--verify'] });
-    assert.notEqual(verify.code, 0, 'a late-published role write must fail the proof');
+    assert.notEqual(verify.code, 0, 'a role write in the scanned window must fail the run');
     assert.match(verify.stderr, /audit log records role writes/);
     assert.match(verify.stderr, /900000000000000043/);
   } finally {
@@ -536,50 +499,57 @@ test('a role write published after the first audit scan still fails the proof', 
 });
 
 /**
- * TOG-2949/TOG-2950 P1: the window is closed by a fence, not by a timer.
+ * TOG-2963/TOG-2964 P1, and the reason this script no longer claims a proof.
  *
- * Both reviewers reproduced a pass by publishing an entry after the scan that
- * returned success, and the answer to "how long should we wait" is that Discord
- * documents no maximum publication lag - so --verify mints an audit entry of
- * its own and refuses to report anything until it has read that entry back.
+ * Both reviewers defeated the fence with the same sequence: let the scan return
+ * clean, then publish an older-id role write immediately afterwards. There is no
+ * defence against it - Discord documents audit entry ORDERING but no publication
+ * completeness, so a scan can only ever report what had been published when it
+ * ran, and no fence or re-read changes that.
  *
- * Here the log never publishes it. The guild is otherwise clean, so the old
- * two-agreeing-scans rule was satisfied on the first round and printed a pass;
- * the fence must turn that into a failure.
+ * So this test asserts honesty rather than detection. The entry is published
+ * strictly after the scan (on the invite DELETE), the run legitimately does not
+ * see it, and what must hold is that the output does not tell a reader it proved
+ * absence. If anyone reintroduces a "proven"/"NONE across" claim, this fails.
  */
-test('a fence the audit log never publishes fails instead of passing a clean guild', async () => {
+test('a role write published after the scan is not claimed to have been ruled out', async () => {
   const stub = await stubDiscord();
   const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
   try {
     assert.equal((await runScript(stub, { dir })).code, 0);
-    stub.publishFence = false;
+    const late: AuditEntry = {
+      id: '900000000000000009',
+      action_type: MEMBER_ROLE_UPDATE,
+      user_id: STAGING_BOT_APPLICATION_ID,
+      target_id: '900000000000000044',
+    };
+    stub.injectOnRevoke = late;
 
     const verify = await runScript(stub, { dir, args: ['--verify'] });
-    assert.notEqual(verify.code, 0, 'an unfenced window must not report a pass');
-    assert.match(verify.stderr, /never published the fence entry/);
-    assert.doesNotMatch(verify.stdout, /NONE across/, 'it must not print the clean result it did not earn');
-    // The invite is still revoked: an unprovable window is exactly when a live
-    // bearer credential is most likely to be forgotten.
-    assert.deepEqual(inviteDeletes(stub), ['/api/v10/invites/invite-code']);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-    await stub.close();
-  }
-});
-
-/** No permission to mint the fence is no proof, not a proof with a caveat. */
-test('a guild that refuses the fence channel fails closed', async () => {
-  const stub = await stubDiscord();
-  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
-  try {
-    assert.equal((await runScript(stub, { dir })).code, 0);
-    stub.fenceCreateStatus = 403;
-
-    const verify = await runScript(stub, { dir, args: ['--verify'] });
-    assert.notEqual(verify.code, 0);
-    assert.match(verify.stderr, /Could not create the audit fence channel/);
-    assert.match(verify.stderr, /MANAGE_CHANNELS/);
-    assert.deepEqual(inviteDeletes(stub), ['/api/v10/invites/invite-code'], 'and it still revokes');
+    // The entry really did get published, and the run really did not see it.
+    assert.ok(stub.audit.includes(late), 'the late entry must actually have been published');
+    assert.equal(verify.code, 0, verify.stderr);
+    // "NOT PROVEN" is the wording we want, so the guard is against an
+    // AFFIRMATIVE claim: `proven` not preceded by `NOT `, the old `NONE across`
+    // line, and any talk of a proof or a closed window.
+    assert.doesNotMatch(
+      verify.stdout,
+      /(?<!NOT )\bproven\b/i,
+      'a scan that cannot establish absence must not word its result as if it had',
+    );
+    assert.doesNotMatch(verify.stdout, /NONE across|\bproof\b|window closed/i, 'no revived proof wording');
+    assert.match(verify.stdout, /OBSERVED, NOT PROVEN/);
+    assert.match(verify.stdout, /NONE OBSERVED across MEMBER_ROLE_UPDATE/);
+    assert.match(
+      verify.stdout,
+      /no publication-completeness guarantee/,
+      'the output must say why a clean scan is not a proof',
+    );
+    assert.match(
+      verify.stdout,
+      /guarantee is in the code/,
+      'and must point at what does carry the guarantee',
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
     await stub.close();
@@ -587,27 +557,48 @@ test('a guild that refuses the fence channel fails closed', async () => {
 });
 
 /**
- * The passing side: a clean verify reports NONE only after it has both seen the
- * fence and had two agreeing scans, and it cleans the fence channel up.
+ * TOG-2964 P2: a receipt is evidence, so it has to be the exact line this script
+ * writes with a status that means gone. The reviewer replaced invite.txt with
+ * `revoked invite-code HTTP 500 ...`; the old `/(\d{3})/` matcher accepted it,
+ * reported "already revoked (HTTP 500)", and sent no DELETE - certifying a live
+ * invite. The code in such a line is still live, so it must be retried.
  */
-test('a clean verify closes the window with a fence and a second scan', async () => {
+test('a receipt whose status does not mean gone is retried, not believed', async () => {
   const stub = await stubDiscord();
   const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
   try {
     assert.equal((await runScript(stub, { dir })).code, 0);
-    stub.auditRequests = 0;
+    writeFileSync(join(dir, 'invite.txt'), 'revoked invite-code HTTP 500 at 2026-09-16T00:00:00.000Z\n');
+
     const verify = await runScript(stub, { dir, args: ['--verify'] });
+    assert.deepEqual(
+      inviteDeletes(stub),
+      ['/api/v10/invites/invite-code'],
+      'a non-gone status must send the DELETE it claimed to have sent',
+    );
     assert.equal(verify.code, 0, verify.stderr);
-    assert.ok(stub.auditRequests >= 2, `expected at least two scans, saw ${stub.auditRequests}`);
-    assert.match(verify.stdout, /window closed by observing fence entry for channel fence-channel-1/);
-    assert.ok(
-      stub.writes.includes(`/api/v10/guilds/${GUILD}/channels`),
-      'the fence channel must actually be created',
-    );
-    assert.ok(
-      stub.deletes.includes('/api/v10/channels/fence-channel-1'),
-      'the fence channel must not be left behind in the guild',
-    );
+    assert.doesNotMatch(verify.stdout, /already revoked \(HTTP 500\)/);
+    assert.match(inviteReceipt(dir), /^revoked invite-code HTTP 200 at /, 'and leaves a real receipt');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/** Anything that is neither a canonical receipt nor an invite URL fails closed. */
+test('a receipt-shaped line that this script would not have written fails closed', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
+  try {
+    assert.equal((await runScript(stub, { dir })).code, 0);
+    // Trailing prose: the old matcher was multiline and unanchored, so a line
+    // like this anywhere in the file short-circuited revocation.
+    writeFileSync(join(dir, 'invite.txt'), 'notes\nrevoked invite-code HTTP 204 by hand\n');
+
+    const verify = await runScript(stub, { dir, args: ['--verify'] });
+    assert.notEqual(verify.code, 0, 'an unrecognised handle must not read as a clean revocation');
+    assert.deepEqual(inviteDeletes(stub), [], 'there is no code it can trust enough to DELETE');
+    assert.match(verify.stdout + verify.stderr, /does not hold a usable invite handle or a revocation receipt/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
     await stub.close();

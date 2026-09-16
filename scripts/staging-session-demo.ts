@@ -8,9 +8,9 @@
  * platform is provable now. The full member walk (join -> gate -> pick ->
  * goodbye) is then driven by the owner with the invite this script writes.
  *
- * It also produces the zero-role-write evidence. Three earlier revisions of
+ * It also produces the zero-role-write evidence. Five earlier revisions of
  * that proof were each falsifiable-looking and actually blind (TOG-2871,
- * TOG-2872, TOG-2886):
+ * TOG-2872, TOG-2886, TOG-2949/TOG-2950, TOG-2963/TOG-2964):
  *
  *   1. Wrong object. `GET /guilds/{id}/roles` returns role *definitions*.
  *      Granting a member an existing role changes `member.roles`, never the
@@ -35,29 +35,57 @@
  *      publication lag, so no wait length closes it. Both reviewers reproduced
  *      a pass by publishing at exactly that point.
  *
- * So the proof is now two independent checks over the same window, and BOTH
- * must pass:
+ *   6. A fence is not a boundary either (TOG-2963/TOG-2964). The answer to (5)
+ *      was to mint an entry of our own after the walk and read until it
+ *      appeared, reasoning that snowflake ids make the fence newer than any
+ *      role write the walk could have produced, so seeing it meant the log had
+ *      published past the window. Both reviewers reproduced a pass over that
+ *      too, and they are right. Discord documents that `after` returns "entries
+ *      with ID greater than" the cursor, ascending - that is the ordering of
+ *      what HAS been published, not a promise that an older id publishes before
+ *      a newer one. Seeing the fence therefore bounds nothing.
+ *
+ * There is no seventh revision of this trick, because the approach itself was
+ * wrong. Absence cannot be established from the audit log: that would need a
+ * completeness guarantee, only Discord could give one, and Discord does not.
+ * So this script no longer claims to prove absence. The claim it makes now is
+ * the true one, and it is a stronger claim than the live walk could ever have
+ * supported:
+ *
+ *   THE GUARANTEE IS IN THE CODE, NOT IN THE GUILD. Session mode cannot write a
+ *   role because no code path reaches a role write. `actionsForOnboardingMode`
+ *   removes `role.assign` from the enabled internal actions, and
+ *   `levelRoleWritesForOnboardingMode` suppresses leveling reward roles (both
+ *   in src/onboarding/mode.ts); nothing in src/discord/sessionWelcome.ts calls
+ *   `roles.add`/`roles.remove`. Those are total over the code, deterministic,
+ *   and asserted by test/unit.onboardingmode.test.ts. No observation of one
+ *   walk in one guild can be more complete than that - it can only agree with
+ *   it or contradict it.
+ *
+ * What the live walk contributes is therefore a FALSIFIER, whose job is to
+ * catch a deployed build that does not behave like the tested one:
  *
  *   a. The guild audit log. Every role write Discord performs lands here with
  *      an executor, whether or not the member is still in the guild and whether
  *      or not the write was later undone. The baseline records the newest audit
  *      entry id; --verify fails on any role-affecting entry after it. This is
- *      the check that covers the fresh member.
+ *      the check that covers the fresh member. One unfiltered read covers every
+ *      action type at once, so a scan is a single consistent view of the tail
+ *      with no cross-type skew.
  *   b. The per-member role snapshot. Net state, for anything the audit log
  *      cannot attribute.
  *
  * The member snapshot is read FIRST, so every audit read is strictly after it.
- * The window is then closed by a FENCE rather than by a wait: --verify creates
- * and immediately deletes a throwaway channel, and refuses to report a result
- * until it has seen that deletion in the audit log. Entry ids are snowflakes,
- * so the fence is newer than any role write the walk could have produced -
- * seeing it published is the log saying it has caught up past the window. One
- * unfiltered read covers every action type at once, so a scan is a single
- * consistent view with no cross-type skew, and two agreeing scans are still
- * required on top of the fence.
  *
- * Either read failing is a failure: a proof that cannot see its evidence must
- * not print a pass. So is a fence that never appears.
+ * A finding in either is a hard failure. A clean result is reported as exactly
+ * what it is - no role write OBSERVED, in the log as published at the moment it
+ * was read - and this script will not print the word "proven" over it. Either
+ * read failing is also a failure: a falsifier that cannot see its evidence must
+ * not report a pass.
+ *
+ * The bot's permissions cannot supply the missing boundary either: it keeps
+ * Manage Roles in staging for self-roles and, in legacy mode, leveling. Which
+ * is precisely why the boundary has to be the code path, and is.
  *
  *   DISCORD_STAGING_BOT_TOKEN=... node scripts/staging-session-demo.ts
  *     -> posts the panel, writes the invite and the baseline to a private dir
@@ -84,7 +112,6 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
-import { setTimeout as sleep } from 'node:timers/promises';
 import { buildSessionMenu } from '../src/discord/sessionWelcome.ts';
 import { buildSessionPicks, sessionWelcomeText } from '../src/onboarding/session.ts';
 import {
@@ -116,31 +143,26 @@ const ROLE_AUDIT_ACTIONS: ReadonlyArray<{ type: number; name: string }> = [
   { type: 32, name: 'ROLE_DELETE' },
 ];
 
-/**
- * The audit action that carries the completion fence, and the name of the
- * throwaway channel that produces it. The name is self-describing because an
- * operator who sees it in the guild - which only happens if a --verify run died
- * between creating and deleting it - should be able to tell what it was for.
- */
-const CHANNEL_DELETE_ACTION = 12;
-const FENCE_CHANNEL_NAME = 'tog-1644-audit-fence';
-
 /** Bounds the audit walk. A window this busy is not a demo window; say so. */
 const MAX_AUDIT_PAGES = 10;
 const AUDIT_PAGE_SIZE = 100;
 
-/**
- * How long to wait between scans while the log catches up to the fence, and how
- * many times we are willing to go round. This is a backoff, NOT the evidence:
- * what closes the window is seeing the fence entry (see `closeAuditWindow`).
- * Overridable so the tests, which drive a synchronous stub, do not sleep for
- * real.
- */
-const QUIESCE_MS = Number(process.env.TWO_SESSION_DEMO_QUIESCE_MS ?? 15_000);
-const MAX_QUIESCE_ROUNDS = 8;
-
 /** DELETE /invites statuses that mean the invite is definitely gone. */
 const INVITE_GONE_STATUSES = new Set([200, 204, 404]);
+
+/**
+ * The one line a confirmed revocation is allowed to leave behind, and the only
+ * shape `--verify` will accept as one on a later run.
+ *
+ * TOG-2964 P2: the old matcher was `/^revoked\s+(\S+)\s+HTTP\s+(\d{3})\b/m` -
+ * any three digits, anywhere in the file, multiline. So a hand-edited
+ * `revoked invite-code HTTP 500 ...` certified a LIVE invite as already gone
+ * and made zero DELETE requests. The receipt is evidence, so it has to be the
+ * exact text this script writes: whole file, one line, a real invite code, and
+ * a status that actually means gone (checked against INVITE_GONE_STATUSES
+ * below, not by the pattern).
+ */
+const RECEIPT_RE = /^revoked ([A-Za-z0-9-]+) HTTP (\d{3}) at (\d{4}-\d{2}-\d{2}T[\d:.]+Z)\n?$/;
 
 interface MemberRoles {
   [memberId: string]: string[];
@@ -302,13 +324,16 @@ function artifactNameInDir(path: string, dir: string): string {
  * the name in between. `O_NOFOLLOW` still applies to the final component,
  * which is the only component left.
  *
- * Where procfs is absent the open falls back to the validated pathname. That
- * path is not race-free, and it is the reason the parent must be sticky or
- * unwritable by others: without write access to the parent nobody can swap the
- * directory out from under the name in the first place.
+ * TOG-2964: where procfs is absent this used to fall back to the validated
+ * pathname, which silently drops exactly the guarantee the fd was obtained for
+ * - the checks would still pass, the artifacts would still be written, and
+ * nothing in the output would say the race-free property had been given up.
+ * A boundary that disappears without telling you is worse than one you never
+ * had, so the absent-procfs case now fails closed. Both artifacts here hold
+ * something sensitive (a bearer invite; the guild's whole member->role map),
+ * and this script is Linux-only in practice - it drives a staging host.
  */
 function openInDir(dirFd: number, dir: string, name: string, flags: number, mode?: number): number {
-  const viaProc = `/proc/self/fd/${dirFd}/${name}`;
   let pinned = false;
   try {
     const held = fstatSync(dirFd);
@@ -317,7 +342,14 @@ function openInDir(dirFd: number, dir: string, name: string, flags: number, mode
   } catch {
     pinned = false;
   }
-  const target = pinned ? viaProc : join(dir, name);
+  if (!pinned) {
+    throw new Error(
+      `Cannot pin ${dir} through /proc/self/fd/${dirFd}, so ${name} would have to be reached by ` +
+        'pathname and could be redirected between the check and the open. Refusing to write a ' +
+        'bearer invite or the guild member map that way. Run this on a host with procfs mounted.',
+    );
+  }
+  const target = `/proc/self/fd/${dirFd}/${name}`;
   return mode === undefined ? openSync(target, flags) : openSync(target, flags, mode);
 }
 
@@ -524,15 +556,16 @@ async function main(): Promise<void> {
   const ROLE_ACTION_NAMES = new Map(ROLE_AUDIT_ACTIONS.map((a) => [a.type, a.name]));
 
   /**
-   * One full scan of everything recorded after `cursor`.
+   * One full scan of everything recorded after `cursor`, returning the role
+   * writes it found.
    *
-   * Returns both halves because the caller needs them for different jobs: the
-   * role writes are the finding, and every id seen is what the fence below is
-   * checked against.
+   * This is a falsifier, not a boundary: it reports what the log had published
+   * at the moment it was read. An entry that publishes later is not in it, and
+   * no amount of re-reading changes that (see the header, revisions 5 and 6) -
+   * which is why the caller reports "observed" and never "proven".
    */
-  async function auditSince(cursor: string): Promise<{ roleWrites: Map<string, string>; seen: AuditEntry[] }> {
+  async function auditSince(cursor: string): Promise<string[]> {
     const roleWrites = new Map<string, string>();
-    const seen: AuditEntry[] = [];
     const floor = BigInt(cursor);
     let after = cursor;
     for (let page = 0; ; page++) {
@@ -547,7 +580,6 @@ async function main(): Promise<void> {
       for (const entry of entries) {
         const id = BigInt(entry.id);
         if (id > floor) {
-          seen.push(entry);
           const name = entry.action_type === undefined ? undefined : ROLE_ACTION_NAMES.get(entry.action_type);
           // Keyed by id: paging by highest-seen can re-serve an entry, and the
           // same write must not read as two.
@@ -563,96 +595,7 @@ async function main(): Promise<void> {
       if (entries.length < AUDIT_PAGE_SIZE || highest === BigInt(after)) break;
       after = highest.toString();
     }
-    return { roleWrites, seen };
-  }
-
-  /**
-   * Mint the completion fence: an audit entry we author ourselves, after the
-   * walk is over, whose id is therefore newer than any role write the walk could
-   * have produced.
-   *
-   * TOG-2949/TOG-2950: the previous version closed the window when two scans
-   * 15 seconds apart agreed. That is a timer, not a boundary - an entry that
-   * publishes after the second scan reads its tail is in neither scan, and both
-   * reviewers reproduced a pass over exactly that. Discord documents no maximum
-   * publication lag, so there is no wait length that would fix it. The only way
-   * to know the log has caught up to a moment is to put something of our own at
-   * that moment and read until we see it.
-   *
-   * A throwaway channel is the marker: it is not a role write (so it cannot be
-   * confused with the thing under test), not a credential (unlike an invite, a
-   * leaked one grants nobody anything), and it is created and deleted within a
-   * few milliseconds. `CHANNEL_DELETE` is the fence because it is the later of
-   * the two entries.
-   *
-   * The channel is deleted on every path; a marker we could not clean up is
-   * reported rather than swallowed, because a leftover channel in the guild is
-   * an operator-visible mess even though it is harmless.
-   */
-  async function mintAuditFence(): Promise<string> {
-    const created = await api<{ id: string }>('POST', `/guilds/${guildId}/channels`, {
-      name: FENCE_CHANNEL_NAME,
-      type: 0,
-    });
-    if (created.status !== 200 && created.status !== 201) {
-      throw new Error(
-        `Could not create the audit fence channel in guild ${guildId}: HTTP ${created.status}. ` +
-          'Without a marker of our own the audit window cannot be closed, and an unfenced scan ' +
-          'is a timed guess rather than a proof. Grant the staging app MANAGE_CHANNELS and re-verify.',
-      );
-    }
-    const channelId = created.body?.id;
-    if (!channelId) {
-      throw new Error(`Discord accepted the audit fence channel but returned no id: ${JSON.stringify(created.body)}.`);
-    }
-    const deleted = await api<unknown>('DELETE', `/channels/${channelId}`);
-    if (deleted.status !== 200 && deleted.status !== 204) {
-      throw new Error(
-        `Could not delete the audit fence channel ${channelId}: HTTP ${deleted.status}. ` +
-          `Delete #${FENCE_CHANNEL_NAME} by hand, then re-verify.`,
-      );
-    }
-    return channelId;
-  }
-
-  /**
-   * Close the window by observation rather than by waiting.
-   *
-   * Mint a fence (an entry we authored after the walk ended), then scan until
-   * that entry is visible in the log. Because audit entry ids are snowflakes,
-   * every role write the walk could have produced has a smaller id than the
-   * fence; seeing the fence is the log telling us it has published past the
-   * point where such a write would be. A scan that cannot find the fence has
-   * not caught up, so it is repeated - and a log that never catches up is a
-   * failure, not a pass.
-   *
-   * The two-agreeing-scans rule is kept on top of the fence as defence in
-   * depth, so a write that publishes out of id order still has to land in two
-   * consecutive identical scans to be missed.
-   */
-  async function closeAuditWindow(cursor: string, fenceChannelId: string): Promise<string[]> {
-    let previous: Map<string, string> | null = null;
-    for (let round = 1; ; round++) {
-      const { roleWrites, seen } = await auditSince(cursor);
-      const fenced = seen.some((e) => e.action_type === CHANNEL_DELETE_ACTION && e.target_id === fenceChannelId);
-      const prior = previous;
-      const settled =
-        prior !== null && prior.size === roleWrites.size && [...roleWrites.keys()].every((id) => prior.has(id));
-      if (fenced && settled) return [...roleWrites.values()].sort();
-      if (round >= MAX_QUIESCE_ROUNDS) {
-        throw new Error(
-          fenced
-            ? `The audit log was still changing after ${MAX_QUIESCE_ROUNDS} rounds ` +
-              `(${previous?.size ?? 0} -> ${roleWrites.size} role writes since ${cursor}). ` +
-              'The window is not closed, so this proof would be a guess - stop the walk and re-verify.'
-            : `The audit log never published the fence entry for channel ${fenceChannelId} after ` +
-              `${MAX_QUIESCE_ROUNDS} rounds. The log is lagging further behind than this proof can ` +
-              'wait, so anything the walk wrote may still be unpublished - re-verify rather than trust this.',
-        );
-      }
-      previous = roleWrites;
-      await sleep(QUIESCE_MS);
-    }
+    return [...roleWrites.values()].sort();
   }
 
   /**
@@ -690,13 +633,23 @@ async function main(): Promise<void> {
     // A confirmed revocation leaves a receipt rather than removing the file, so
     // that a second --verify can tell "already revoked, and here is the status
     // Discord actually returned" apart from "the handle is missing".
-    const receipt = contents.match(/^revoked\s+(\S+)\s+HTTP\s+(\d{3})\b/m);
-    if (receipt) {
+    //
+    // TOG-2964 P2: the receipt must be the exact line this script writes AND
+    // carry a status that means gone. A file reading `revoked <code> HTTP 500`
+    // used to short-circuit revocation entirely - it certified a live invite
+    // and sent no DELETE. Anything that is not a valid receipt falls through to
+    // the invite-URL path below, and if it is not that either, revocation is
+    // reported unconfirmed rather than assumed.
+    const receipt = RECEIPT_RE.exec(contents);
+    if (receipt && INVITE_GONE_STATUSES.has(Number(receipt[2]))) {
       return { ok: true, message: `demo invite already revoked (HTTP ${receipt[2]}); receipt in ${INVITE_PATH}` };
     }
-
-    const url = contents.trim();
-    const code = /^https:\/\/discord\.gg\/([A-Za-z0-9-]+)$/.exec(url)?.[1] ?? '';
+    // A receipt-shaped line whose status does not mean gone is not a receipt at
+    // all - it is a record of a revocation that FAILED, and the code in it is
+    // still live. So take the code from it and try the DELETE again rather than
+    // trusting it or merely refusing.
+    const code =
+      receipt?.[1] ?? /^https:\/\/discord\.gg\/([A-Za-z0-9-]+)$/.exec(contents.trim())?.[1] ?? '';
     if (!code) {
       return {
         ok: false,
@@ -778,26 +731,44 @@ async function main(): Promise<void> {
       // (b) Net state first, so every audit read below is strictly after it and
       // no write can slip through the gap between the two checks.
       const deltas = roleDeltas(baseline.members, await memberRoles());
-      // The fence is minted after the member read and before the audit scan, so
-      // its id is newer than any role write this walk could have produced.
-      const fenceChannelId = await mintAuditFence();
       // (a) The audit log: the only check that can see a member who has left.
-      const writes = await closeAuditWindow(baseline.auditCursor, fenceChannelId);
+      const readAt = new Date().toISOString();
+      const writes = await auditSince(baseline.auditCursor);
 
       console.log('--- role writes since baseline (audit log) ---');
       if (writes.length) {
         throw new Error(`The guild audit log records role writes during this window:\n${writes.join('\n')}`);
       }
       console.log(
-        `NONE across ${ROLE_AUDIT_ACTIONS.map((a) => a.name).join(', ')} since entry ${baseline.auditCursor}`,
+        `NONE OBSERVED across ${ROLE_AUDIT_ACTIONS.map((a) => a.name).join(', ')} since entry ` +
+          `${baseline.auditCursor}, in the log as published at ${readAt}`,
       );
-      console.log(`window closed by observing fence entry for channel ${fenceChannelId}`);
 
       console.log('--- member role delta since baseline ---');
       if (deltas.length) {
         throw new Error(`Member roles changed:\n${deltas.join('\n')}`);
       }
       console.log(`IDENTICAL - zero role delta across ${Object.keys(baseline.members).length} members`);
+
+      // The grading line. It exists because five revisions of this script in a
+      // row printed a clean audit scan and let a reader take it for proof of
+      // absence, and twice a reviewer built a sequence that published just
+      // after the final read and sailed through. Neither check below can
+      // establish absence, so neither is allowed to be reported as if it did.
+      console.log('--- what this does and does not establish ---');
+      console.log(
+        'OBSERVED, NOT PROVEN: both checks above are falsifiers. Discord documents audit entry ' +
+          'ordering but no publication-completeness guarantee, so an entry published after the read ' +
+          'above is in neither result, and a member who joined and left inside the window is in no ' +
+          'snapshot. A clean run here is consistent with zero role writes; it does not demonstrate them.',
+      );
+      console.log(
+        'The zero-role-write guarantee is in the code, not in this run: actionsForOnboardingMode ' +
+          'drops role.assign and levelRoleWritesForOnboardingMode suppresses level reward roles ' +
+          '(src/onboarding/mode.ts), and sessionWelcome.ts contains no role write. Those hold over ' +
+          'every walk; see test/unit.onboardingmode.test.ts. This run only checks the deployed build ' +
+          'against them.',
+      );
     } catch (err) {
       proofError = err;
     }
