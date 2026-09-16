@@ -1,0 +1,210 @@
+import {
+  chmodSync,
+  closeSync,
+  fsyncSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { applicationIdFromToken, LIVE_BOT_APPLICATION_ID, LIVE_GUILD_ID, LIVE_GUILD_NAME } from '../src/staging/spec.ts';
+import {
+  ADMINISTRATOR,
+  type Channel,
+  type CleanupManifest,
+  type JsonObject,
+  type LiveCleanupSnapshot,
+  normalizeOverwrites,
+  semanticSnapshot,
+  sha256,
+  stable,
+  operationSemanticHash,
+} from '../src/redesign/live-cleanup.ts';
+
+const argv = process.argv.slice(2);
+const APPLY = argv.includes('--apply');
+const CONFIRMED = argv.includes('--confirm-main-guild');
+const token = process.env.DISCORD_BOT_TOKEN;
+const guildId = process.env.DISCORD_GUILD_ID ?? LIVE_GUILD_ID;
+
+type ApiResult<T> = { status: number; body: T | null };
+type Role = { id: string; permissions: string; position?: number };
+type RawMember = { user?: { id: string; username?: string; bot?: boolean }; roles?: string[]; premium_since?: string | null; pending?: boolean };
+
+function die(code: number, message: string): never {
+  console.error(message);
+  process.exit(code);
+}
+function value(name: string): string | null {
+  const index = argv.indexOf(`--${name}`);
+  if (index === -1) return null;
+  const found = argv[index + 1];
+  if (!found || found.startsWith('--')) die(2, `--${name} needs a value.`);
+  return found;
+}
+function apiBase(): string {
+  const raw = process.env.MAIN_GUILD_API_BASE;
+  if (!raw) return 'https://discord.com/api/v10';
+  let parsed: URL;
+  try { parsed = new URL(raw); } catch { die(2, `MAIN_GUILD_API_BASE is not a URL: ${raw}`); }
+  if (!['127.0.0.1', 'localhost', '::1'].includes(parsed.hostname)) die(2, `MAIN_GUILD_API_BASE only accepts loopback test seams. Got ${parsed.hostname}.`);
+  return raw.replace(/\/$/, '');
+}
+function atomicJson(path: string, valueToWrite: unknown): void {
+  const temporary = `${path}.${process.pid}.tmp`;
+  const fd = openSync(temporary, 'wx', 0o600);
+  try {
+    writeFileSync(fd, `${JSON.stringify(valueToWrite, null, 2)}\n`);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(temporary, path);
+  chmodSync(path, 0o600);
+  const dirFd = openSync(dirname(path), 'r');
+  try { fsyncSync(dirFd); } finally { closeSync(dirFd); }
+}
+
+if (!token) die(2, 'Missing DISCORD_BOT_TOKEN.');
+if (applicationIdFromToken(token) !== LIVE_BOT_APPLICATION_ID) die(2, `This token is not live Owen (${LIVE_BOT_APPLICATION_ID}). Nothing was contacted.`);
+if (guildId !== LIVE_GUILD_ID) die(2, `DISCORD_GUILD_ID is not the live guild ${LIVE_GUILD_ID}. Nothing was contacted.`);
+if (!APPLY || !CONFIRMED) die(2, 'Rollback requires both --confirm-main-guild and --apply. Nothing was contacted.');
+const manifestPath = resolve(value('manifest') ?? die(2, '--manifest is required.'));
+const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as CleanupManifest;
+if (manifest.version !== 1 || manifest.kind !== 'live-clean-slate-cleanup' || manifest.applicationId !== LIVE_BOT_APPLICATION_ID || manifest.guildId !== LIVE_GUILD_ID) die(2, 'Manifest identity is invalid.');
+const snapshot = JSON.parse(readFileSync(resolve(manifest.snapshotPath), 'utf8')) as LiveCleanupSnapshot;
+if (snapshot.generatedAt !== manifest.snapshotGeneratedAt) die(2, 'Pre-snapshot timestamp does not match the manifest.');
+if (snapshot.semanticHash !== manifest.snapshotSemanticHash || snapshot.semanticHash !== sha256(semanticSnapshot(snapshot))) die(2, 'Pre-snapshot hash does not match the manifest.');
+if (manifest.operationCount !== manifest.operations.length || operationSemanticHash(manifest.operations) !== manifest.operationSemanticHash) die(2, 'Manifest operation bodies do not match their recorded semantic hash.');
+const API = apiBase();
+
+async function api<T>(method: 'GET' | 'PATCH', path: string, body?: unknown): Promise<ApiResult<T>> {
+  const response = await fetch(`${API}${path}`, {
+    method,
+    headers: { Authorization: `Bot ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  const responseBody = (await response.json().catch(() => null)) as T | null;
+  return { status: response.status, body: responseBody };
+}
+async function mustGet<T>(path: string, label: string): Promise<T> {
+  const result = await api<T>('GET', path);
+  if (result.status === 429) die(1, `${label}: Discord returned 429. Stop; no retry was attempted.`);
+  if (result.status !== 200 || result.body === null) die(1, `${label}: HTTP ${result.status}.`);
+  return result.body;
+}
+async function members(): Promise<RawMember[]> {
+  const out: RawMember[] = [];
+  let after = '0';
+  for (;;) {
+    const page = await mustGet<RawMember[]>(`/guilds/${guildId}/members?limit=1000&after=${after}`, 'Read members');
+    out.push(...page);
+    if (page.length < 1000) return out;
+    const last = page.at(-1)?.user?.id;
+    if (!last) die(1, 'Member pagination returned an entry without an id.');
+    after = last;
+  }
+}
+
+const [me, guilds, guild, roles, currentMembers, integrations, application, welcome, onboarding, screening] = await Promise.all([
+  mustGet<{ id: string }>('/users/@me', 'Authenticate bot'),
+  mustGet<Array<{ id: string }>>('/users/@me/guilds', 'Read bot guilds'),
+  mustGet<JsonObject>(`/guilds/${guildId}`, 'Read guild'),
+  mustGet<Role[]>(`/guilds/${guildId}/roles`, 'Read roles'),
+  members(),
+  mustGet<JsonObject[]>(`/guilds/${guildId}/integrations`, 'Read integrations'),
+  mustGet<JsonObject>('/oauth2/applications/@me', 'Read application'),
+  api<JsonObject>('GET', `/guilds/${guildId}/welcome-screen`),
+  api<JsonObject>('GET', `/guilds/${guildId}/onboarding`),
+  api<JsonObject>('GET', `/guilds/${guildId}/member-verification`),
+]);
+if (me.id !== LIVE_BOT_APPLICATION_ID || application.id !== LIVE_BOT_APPLICATION_ID || !guilds.some((item) => item.id === guildId) || guild.name !== LIVE_GUILD_NAME) die(1, 'Rollback identity preflight failed.');
+const botMember = currentMembers.find((member) => member.user?.id === LIVE_BOT_APPLICATION_ID && member.user.bot);
+if (!botMember || !roles.some((role) => botMember.roles?.includes(role.id) && (BigInt(role.permissions) & ADMINISTRATOR) !== 0n)) die(1, 'Rollback preflight: Owen does not have Administrator.');
+manifest.status = 'rolling_back';
+atomicJson(manifestPath, manifest);
+const rollbackOrder: string[] = [];
+
+for (const operation of [...manifest.operations].reverse()) {
+  if (operation.state === 'rolled_back' || operation.state === 'pending') continue;
+  const category = await mustGet<Channel>(`/channels/${operation.objectId}`, `Read rollback category ${operation.objectId}`);
+  const current = normalizeOverwrites(category.permission_overwrites ?? []);
+  if (stable(current) === stable(operation.inverseWrite.permission_overwrites)) {
+    operation.state = 'rolled_back';
+    operation.rolledBackAt = new Date().toISOString();
+    atomicJson(manifestPath, manifest);
+    continue;
+  }
+  if (stable(current) !== stable(operation.write.permission_overwrites)) {
+    manifest.status = 'rollback_failed';
+    atomicJson(manifestPath, manifest);
+    die(1, `Rollback target ${operation.objectId} drifted from both applied and inverse state.`);
+  }
+  const result = await api<Channel>('PATCH', `/channels/${operation.objectId}`, operation.inverseWrite);
+  if (result.status === 429 || result.status >= 300 || !result.body) {
+    manifest.status = 'rollback_failed';
+    atomicJson(manifestPath, manifest);
+    die(1, `Rollback failed for ${operation.id}: HTTP ${result.status}. No retry was attempted.`);
+  }
+  const restored = normalizeOverwrites(result.body.permission_overwrites ?? []);
+  if (stable(restored) !== stable(operation.inverseWrite.permission_overwrites)) {
+    manifest.status = 'rollback_failed';
+    atomicJson(manifestPath, manifest);
+    die(1, `Rollback returned a partial/unexpected state for ${operation.id}.`);
+  }
+  operation.state = 'rolled_back';
+  operation.rolledBackAt = new Date().toISOString();
+  rollbackOrder.push(operation.id);
+  atomicJson(manifestPath, manifest);
+  console.log(`UNDID ${operation.id}`);
+}
+
+const currentChannels = await mustGet<Channel[]>(`/guilds/${guildId}/channels`, 'Read post-rollback channels');
+const currentChannelIds = currentChannels.map((channel) => channel.id).sort();
+if (stable(currentChannelIds) !== stable(snapshot.channels.map((channel) => channel.id).sort())) die(1, 'Post-rollback channel/category inventory differs from the pre-snapshot.');
+const restored = {
+  version: 1 as const,
+  generatedAt: snapshot.generatedAt,
+  applicationId: LIVE_BOT_APPLICATION_ID,
+  guildId,
+  guild,
+  roles: roles as LiveCleanupSnapshot['roles'],
+  channels: currentChannels.map((channel) => ({ ...channel, permission_overwrites: normalizeOverwrites(channel.permission_overwrites ?? []) })),
+  members: currentMembers.map((member) => ({
+    id: member.user?.id ?? '',
+    bot: Boolean(member.user?.bot),
+    username: member.user?.username ?? null,
+    roles: [...(member.roles ?? [])].sort(),
+    premiumSince: member.premium_since ?? null,
+    pending: Boolean(member.pending),
+  })).filter((member) => member.id).sort((a, b) => a.id.localeCompare(b.id)),
+  integrations: integrations.map((integration) => {
+    const linkedApplication = integration.application as JsonObject | undefined;
+    return {
+      id: typeof integration.id === 'string' ? integration.id : '',
+      name: typeof integration.name === 'string' ? integration.name : null,
+      applicationId: typeof linkedApplication?.id === 'string' ? linkedApplication.id : null,
+      roleId: typeof integration.role_id === 'string' ? integration.role_id : null,
+    };
+  }).sort((a, b) => a.id.localeCompare(b.id)),
+  references: {
+    welcomeScreen: { status: welcome.status, body: welcome.body },
+    onboarding: { status: onboarding.status, body: onboarding.body },
+    membershipScreening: { status: screening.status, body: screening.body },
+    guildReferences: {
+      applicationId: guild.application_id ?? null,
+      systemChannelId: guild.system_channel_id ?? null,
+      rulesChannelId: guild.rules_channel_id ?? null,
+      publicUpdatesChannelId: guild.public_updates_channel_id ?? null,
+      safetyAlertsChannelId: guild.safety_alerts_channel_id ?? null,
+    },
+  },
+};
+const restoredHash = sha256(semanticSnapshot(restored));
+if (restoredHash !== snapshot.semanticHash) die(1, `Post-rollback semantic hash mismatch: expected ${snapshot.semanticHash}, got ${restoredHash}.`);
+manifest.status = 'rolled_back';
+atomicJson(manifestPath, manifest);
+console.log(`Rollback complete: ${manifestPath}`);
+console.log(`Reverse order: ${rollbackOrder.join(', ')}`);
+console.log(`Restored snapshot semantic hash: ${restoredHash}`);
