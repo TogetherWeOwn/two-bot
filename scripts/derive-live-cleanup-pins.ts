@@ -58,7 +58,12 @@ const snapshot: LiveCleanupSnapshot = withSemanticHash({
     pending: Boolean(member.pending),
   })).sort((a, b) => a.id.localeCompare(b.id)),
   integrations: [],
-  references: {},
+  // A readable Server Guide that pins nothing — the shape `captureSnapshot` records for a
+  // real 200 (`{status, body}`), with `enabled: false`. `planArchiveOperations` refuses an
+  // unreadable one outright, so `references: {}` made this script throw and the operator's
+  // pin unregenerable (TOG-3059/TOG-3060). Declaring it readable-and-empty keeps the pin
+  // a pure function of the channel/category fixture: 69 operations, hash unchanged.
+  references: { onboarding: { status: 200, body: { enabled: false, default_channel_ids: [], prompts: [] } } },
 });
 
 const operations = planArchiveOperations(snapshot);

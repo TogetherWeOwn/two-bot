@@ -648,6 +648,14 @@ export function semanticSnapshot(input: Omit<LiveCleanupSnapshot, 'semanticHash'
     channels: [...input.channels].map((channel) => ({ ...channel, permission_overwrites: normalizeOverwrites(channel.permission_overwrites ?? []) })).sort((a, b) => a.id.localeCompare(b.id)),
     members: [...input.members].map((member) => ({ ...member, roles: [...member.roles].sort() })).sort((a, b) => a.id.localeCompare(b.id)),
     integrations: [...input.integrations].sort((a, b) => a.id.localeCompare(b.id)),
+    // `references` is load-bearing here, not just recorded. `onboardingReferencedChannels`
+    // plans off it, and a token-holder who forges `references.onboarding` onto `pre.json`
+    // and re-signs everything is stopped by exactly one control: this field sits inside
+    // the semantic hash, and apply re-captures the guild live and compares. Measured on
+    // TOG-3060 — body only, body + rehash, and body + rehash + full valid re-sign all
+    // refuse, the last one on `Live state drifted since dry-run/resume`, zero writes.
+    // Moving `references` out of this object to quiet drift noise makes that forgery
+    // reachable. Do not.
     references: input.references,
   };
 }
@@ -727,7 +735,7 @@ function jsonObject(value: unknown): JsonObject | undefined {
  * 403 code 20001 `Bots cannot use this endpoint`. Measured live on TOG-2806, where
  * apply stopped on operation 31 and five reviewed legacy channels stayed visible.
  *
- * Sources, all four observed to 400 in that run:
+ * Sources, all of the 350003 class observed live in that run:
  *   - `rules_channel_id`, `public_updates_channel_id`, `safety_alerts_channel_id`
  *   - the Server Guide's default channels and every prompt option's channels
  *
@@ -752,24 +760,43 @@ export function onboardingReferencedChannels(snapshot: Pick<LiveCleanupSnapshot,
   // `captureSnapshot` reads onboarding with best-effort `api()`, not `mustGet()`, because
   // losing the pre-snapshot to a transient 429 costs more than it buys. That is fine while
   // the read is only evidence. It is not fine here, where it decides which channels this
-  // phase must leave alone: an error body carries no `enabled`/`default_channel_ids`/
-  // `prompts`, so a 403/429/500 is indistinguishable from a Server Guide that pins nothing.
-  // Measured on the production fixture with one legacy channel pinned: 200 -> 1 exclusion,
-  // 68 operations; 500 -> 0 exclusions, 69 operations with that channel PATCHed. Nothing
-  // downstream catches it — `assertManifest` and the snapshot hash compare dry-run against
-  // apply, and both read the same failing endpoint, so they agree on the wrong answer; the
-  // independent audit derives its exclusions from this same field and corroborates it.
-  // A status we cannot read is a claim we cannot check, so refuse rather than plan blind.
+  // phase must leave alone: a body that is not a Server Guide payload carries no
+  // `default_channel_ids`/`prompts`, so it is indistinguishable from a Server Guide that
+  // pins nothing. Measured on the production fixture with one legacy channel pinned:
+  // a real 200 -> 1 exclusion, 68 operations; anything unreadable -> 0 exclusions, 69
+  // operations with that channel PATCHed. Nothing downstream catches it — `assertManifest`
+  // and the snapshot hash compare dry-run against apply, and both read the same failing
+  // endpoint, so they agree on the wrong answer; the independent audit derives its
+  // exclusions from this same field and corroborates it.
+  //
+  // So the gate is on *readability*, not just the status code. Gating the status alone
+  // was round 7's bug one field to the left (TOG-3060): `api()` records
+  // `body: await response.json().catch(() => null)`, so an HTML interstitial, an empty
+  // body, `null`, `[]`, and a `{message, code, retry_after}` error object all arrive as
+  // `status: 200` with nothing in them, and 5/5 planned clean. An OR over these two
+  // fields has the same shape again — the derivation reads both, so a payload missing
+  // either one is a half-answer read as "pins nothing" for that half. Both are required.
+  // Measured live across five TOG-2907 pre-snapshots: `GET /guilds/{id}/onboarding`
+  // returns `guild_id`, `prompts`, `default_channel_ids`, `enabled` and `mode` on every
+  // 200, so requiring both arrays costs a real Server Guide nothing.
   const onboardingRead = jsonObject(references.onboarding);
   const onboardingStatus = typeof onboardingRead?.status === 'number' ? onboardingRead.status : null;
-  if (onboardingStatus !== 200) {
-    throw new Error(`Server Guide (GET /guilds/{id}/onboarding) answered HTTP ${onboardingStatus === null ? 'no recorded status' : String(onboardingStatus)}, so the set of channels Discord pins publicly readable is unknown. Planning refuses rather than treat an unreadable Server Guide as one that pins nothing. Re-run the dry-run once that read returns 200.`);
-  }
   const onboarding = jsonObject(onboardingRead?.body);
+  const readable = onboarding !== undefined && Array.isArray(onboarding.default_channel_ids) && Array.isArray(onboarding.prompts);
+  if (onboardingStatus !== 200 || !readable) {
+    const answered = onboardingStatus === null ? 'no recorded status' : `HTTP ${onboardingStatus}`;
+    const detail = onboardingStatus === 200
+      ? 'a 200 whose body carries neither `default_channel_ids` nor `prompts` as arrays, so it is not a Server Guide payload'
+      : answered;
+    throw new Error(`Server Guide (GET /guilds/{id}/onboarding) answered ${detail}, so the set of channels Discord pins publicly readable is unknown. Planning refuses rather than treat an unreadable Server Guide as one that pins nothing. Re-run the dry-run once that read returns a 200 carrying \`default_channel_ids\` and \`prompts\`.`);
+  }
   // A disabled Server Guide pins nothing, and treating it as if it did would leave
   // its channels visible forever. Absent `enabled` is read as enabled: the guild
-  // reference is the claim, and an unreadable claim must fail towards refusing.
-  if (onboarding && onboarding.enabled !== false) {
+  // reference is the claim, and an unreadable claim must fail towards refusing. That
+  // stays outside the readability gate deliberately — a payload carrying both arrays
+  // has answered the question this derivation asks, and failing towards excluding is
+  // already the safe direction for the one field left.
+  if (onboarding.enabled !== false) {
     for (const id of jsonArray(onboarding.default_channel_ids)) note(id, 'onboarding.default_channel_ids');
     for (const prompt of jsonArray(onboarding.prompts)) {
       const promptId = referencedId(jsonObject(prompt)?.id) ?? 'unknown';

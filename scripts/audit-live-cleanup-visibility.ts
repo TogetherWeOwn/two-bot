@@ -64,7 +64,12 @@ function fixtureSnapshot(): LiveCleanupSnapshot {
       pending: Boolean(member.pending),
     })).sort((a, b) => a.id.localeCompare(b.id)),
     integrations: [],
-    references: {},
+    // Readable Server Guide that pins nothing, in the `{status, body}` shape
+    // `captureSnapshot` records. `planArchiveOperations` refuses an unreadable one, so
+    // `references: {}` made the documented default invocation above throw before it
+    // audited anything (TOG-3059/TOG-3060). `--snapshot <real pre.json>` carries the
+    // live references and is unaffected either way.
+    references: { onboarding: { status: 200, body: { enabled: false, default_channel_ids: [], prompts: [] } } },
   });
 }
 

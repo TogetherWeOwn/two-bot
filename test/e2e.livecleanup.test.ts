@@ -58,6 +58,8 @@ type Stub = {
   writeOrder: string[];
   rollbackOrder: string[];
   failOnboardingRead(status: number): void;
+  /** Serve `GET /onboarding` as a raw 200 body; `null` payload sends no body at all. */
+  serveOnboardingRaw(contentType: string, payload: string | null): void;
   failNextWrite(status: number): void;
   partialNextWrite(): void;
   /** Tear the write to one specific object rather than whichever comes first. */
@@ -106,13 +108,18 @@ async function stubDiscord(): Promise<Stub> {
   const writes: Stub['writes'] = [];
   const writeOrder: string[] = [];
   const rollbackOrder: string[] = [];
-  const references: Stub['references'] = { onboarding: { enabled: false, prompts: [] } };
+  // Measured live across five TOG-2907 pre-snapshots, `GET /guilds/{id}/onboarding`
+  // returns `guild_id`, `prompts`, `default_channel_ids`, `enabled` and `mode` on every
+  // 200 — `default_channel_ids` is always present, empty or not. The stub used to omit it,
+  // which is what let a status-only readability gate look total (TOG-3060).
+  const references: Stub['references'] = { onboarding: { enabled: false, default_channel_ids: [], prompts: [] } };
   const featureOrders: string[] = [];
   let guildReads = 0;
   let nextFailure = 0;
   let partialNextWrite = false;
   let partialWriteTarget: string | null = null;
   let onboardingStatus = 200;
+  let onboardingRaw: { contentType: string; payload: string | null } | null = null;
   const server: Server = createServer((req, res) => {
     const method = req.method ?? 'GET';
     const path = req.url ?? '';
@@ -185,6 +192,16 @@ async function stubDiscord(): Promise<Stub> {
     // `captureSnapshot` reads this one best-effort, so the stub has to be able to fail it
     // the way Discord does — an error body, not the onboarding object with a bad status.
     if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/onboarding`) {
+      // A 200 that is not a Server Guide payload: an edge interstitial, an empty body, a
+      // rate-limit object. `api()` reduces every one of these to `{status: 200, body: …}`
+      // with nothing the derivation can read, so the stub has to serve the raw bytes
+      // rather than a JSON value the test helper would re-encode.
+      if (onboardingRaw !== null) {
+        const { contentType, payload } = onboardingRaw;
+        if (payload === null) return res.writeHead(200, { 'content-type': contentType }).end();
+        res.writeHead(200, { 'content-type': contentType, 'content-length': Buffer.byteLength(payload) });
+        return res.end(payload);
+      }
       return onboardingStatus === 200 ? send(200, references.onboarding) : send(onboardingStatus, { message: 'stubbed failure', code: 0 });
     }
     if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/member-verification`) return send(200, { form_fields: [] });
@@ -203,6 +220,7 @@ async function stubDiscord(): Promise<Stub> {
     writeOrder,
     rollbackOrder,
     failOnboardingRead(status: number) { onboardingStatus = status; },
+    serveOnboardingRaw(contentType: string, payload: string | null) { onboardingRaw = { contentType, payload }; },
     failNextWrite(status: number) { nextFailure = status; },
     partialNextWrite() { partialNextWrite = true; },
     partialWriteOn(objectId: string) { partialNextWrite = true; partialWriteTarget = objectId; },
@@ -487,6 +505,74 @@ test('an unreadable Server Guide refuses the plan instead of pinning nothing', a
       assert.ok(existsSync(join(dir, 'snapshot', 'pre.json')));
     } finally { await stub.close(); }
   }
+});
+
+/**
+ * Round 8 (TOG-3060): gating the status alone is the same defect one field to the left.
+ * `api()` records `body: await response.json().catch(() => null)`, so a 200 that is not a
+ * Server Guide payload arrives as `status: 200` with nothing the derivation can read — and
+ * reads exactly like a guild that pins nothing. Reproduced 5/5 before the readability gate:
+ * every body below planned clean, exit 0, `onboardingExclusions: []`, 69 operations,
+ * `will hide: 112 of 112`. The error-object case needs no parse failure at all.
+ *
+ * Driven with a *synchronized* pinned channel, because that is the silent half: a real 200
+ * refuses the whole plan, so anything that still exits 0 has lost the answer.
+ */
+test('a 200 that is not a Server Guide payload refuses the plan', async () => {
+  const bodies: Array<{ label: string; contentType: string; payload: string | null }> = [
+    { label: 'html interstitial', contentType: 'text/html', payload: '<!doctype html><title>error</title>' },
+    { label: 'empty body', contentType: 'application/json', payload: null },
+    { label: 'json null', contentType: 'application/json', payload: 'null' },
+    { label: 'json array', contentType: 'application/json', payload: '[]' },
+    { label: 'rate limit object', contentType: 'application/json', payload: JSON.stringify({ message: 'You are being rate limited.', code: 0, retry_after: 1.5 }) },
+    { label: 'server guide missing default_channel_ids', contentType: 'application/json', payload: JSON.stringify({ guild_id: LIVE_GUILD_ID, enabled: true, prompts: [] }) },
+    { label: 'server guide missing prompts', contentType: 'application/json', payload: JSON.stringify({ guild_id: LIVE_GUILD_ID, enabled: true, default_channel_ids: [] }) },
+  ];
+  for (const { label, contentType, payload } of bodies) {
+    const stub = await stubDiscord();
+    try {
+      const drifted = new Set(PERMISSION_DRIFT.mismatches.map((mismatch) => mismatch.channelId));
+      const synchronized = LEGACY_CHANNEL_IDS.find((id) => !drifted.has(id))!;
+      stub.references.onboarding = { enabled: true, default_channel_ids: [synchronized], prompts: [] };
+      stub.serveOnboardingRaw(contentType, payload);
+      const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-guide-unreadable-'));
+      const result = await plan(stub, dir);
+      assert.notEqual(result.code, 0, `${label} produced a plan`);
+      assert.equal(stub.writes.length, 0, label);
+      assert.match(result.stderr, /is not a Server Guide payload/, label);
+      assert.ok(!existsSync(planManifestPath(dir)), `${label} produced a plan manifest`);
+      // Refusing still has to leave the stop evidence behind.
+      assert.ok(existsSync(join(dir, 'snapshot', 'pre.json')), label);
+    } finally { await stub.close(); }
+  }
+});
+
+/**
+ * Neither of these two scripts is referenced by CI, `package.json`, or any other test, so
+ * `check` cannot see them — which is how round 8 shipped a planner change that made both
+ * throw on their own documented invocation while the suite and `tsc` stayed green
+ * (TOG-3059, TOG-3060). This is the cheapest thing that would have caught it.
+ *
+ * `derive` rewrites the committed pin in place, so this also re-proves that the pin the
+ * operator diffs a live dry-run against is what the current planner actually derives.
+ */
+test('the pin regenerator and the independent audit both still run', async () => {
+  const pinPath = fileURLToPath(new URL('./fixtures/live-cleanup-expected-operations.json', import.meta.url));
+  const committed = readFileSync(pinPath);
+  try {
+    const derive = await run(fileURLToPath(new URL('../scripts/derive-live-cleanup-pins.ts', import.meta.url)), []);
+    assert.equal(derive.code, 0, derive.stderr);
+    assert.match(derive.stdout, new RegExp(`operationCount: ${EXPECTED_OPERATIONS.operationCount}`));
+    assert.match(derive.stdout, new RegExp(`operationSemanticHash: ${EXPECTED_OPERATIONS.operationSemanticHash}`));
+    // Byte-for-byte, not just equal by count and hash: the pin is committed output.
+    assert.equal(readFileSync(pinPath).toString(), committed.toString(), 'scripts/derive-live-cleanup-pins.ts no longer reproduces the committed pin');
+  } finally {
+    writeFileSync(pinPath, committed);
+  }
+  const audit = await run(fileURLToPath(new URL('../scripts/audit-live-cleanup-visibility.ts', import.meta.url)), []);
+  assert.equal(audit.code, 0, audit.stderr);
+  assert.match(audit.stdout, /AUDIT PASSED/);
+  assert.match(audit.stdout, new RegExp(`audited: ${LEGACY_CHANNEL_IDS.length}`));
 });
 
 test('a Server Guide with no `enabled` field is read as enabled and still excludes', async () => {
