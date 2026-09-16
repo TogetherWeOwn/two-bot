@@ -21,12 +21,14 @@ import { openDb } from '../src/store/db.ts';
 import { collapseCrossSourceDuplicates } from '../src/backfill/dedupe.ts';
 
 const dryRun = process.argv.includes('--dry-run');
-const dbPath =
-  process.env.TWO_DATABASE_URL || process.env.TWO_DB_PATH || './data/two.db';
-const db = await openDb(dbPath);
+const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
+if (!databaseUrl) {
+  console.error('dedupe-events: TWO_DATABASE_URL is not set.');
+  process.exit(1);
+}
+const db = await openDb(databaseUrl);
 
-console.log(`\nEvent de-duplication${dryRun ? '  (DRY RUN - nothing will be deleted)' : ''}`);
-console.log(`  db ${dbPath}\n`);
+console.log(`\nEvent de-duplication${dryRun ? '  (DRY RUN - nothing will be deleted)' : ''}\n`);
 
 let found = 0;
 let deleted = 0;

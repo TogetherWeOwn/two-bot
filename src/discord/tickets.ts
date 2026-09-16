@@ -206,7 +206,7 @@ export class TicketStore {
           WHERE EXISTS (
             SELECT 1 FROM tickets
              WHERE id = ? AND status = 'closing'
-               AND (? IS NULL OR closing_started_at = ?)
+               AND (CAST(? AS TEXT) IS NULL OR closing_started_at = ?)
           )
          ON CONFLICT (ticket_id) DO NOTHING`,
       )

@@ -35,7 +35,7 @@ export class ContainmentStore {
 
   async claimEvent(row: ContainmentEventRow, windowSeconds: number): Promise<ContainmentClaim> {
     return this.db.transaction(async (tx) => {
-      if (tx.kind === 'postgres' && row.executorId) {
+      if (row.executorId) {
         const lock = createHash('sha256').update(`${row.guildId}:${row.executorId}`).digest();
         const high = lock.readInt32BE(0);
         const low = lock.readInt32BE(4);
@@ -107,10 +107,8 @@ export class ContainmentStore {
     windowSeconds: number,
   ): Promise<boolean> {
     return this.db.transaction(async (tx) => {
-      if (tx.kind === 'postgres') {
-        const lock = createHash('sha256').update(`incident:${guildId}:${executorId}`).digest();
-        await tx.prepare('SELECT pg_advisory_xact_lock(?, ?)').get(lock.readInt32BE(0), lock.readInt32BE(4));
-      }
+      const lock = createHash('sha256').update(`incident:${guildId}:${executorId}`).digest();
+      await tx.prepare('SELECT pg_advisory_xact_lock(?, ?)').get(lock.readInt32BE(0), lock.readInt32BE(4));
       const now = iso(this.now());
       const active = await tx.prepare(
         `SELECT id FROM containment_incidents
@@ -166,10 +164,8 @@ export class ContainmentStore {
     joinThreshold: number;
   }): Promise<{ persisted: boolean; score: number; reasons: string[]; flagged: boolean }> {
     return this.db.transaction(async (tx) => {
-      if (tx.kind === 'postgres') {
-        const lock = createHash('sha256').update(`joins:${input.guildId}`).digest();
-        await tx.prepare('SELECT pg_advisory_xact_lock(?, ?)').get(lock.readInt32BE(0), lock.readInt32BE(4));
-      }
+      const lock = createHash('sha256').update(`joins:${input.guildId}`).digest();
+      await tx.prepare('SELECT pg_advisory_xact_lock(?, ?)').get(lock.readInt32BE(0), lock.readInt32BE(4));
       const existing = await tx.prepare(
         'SELECT event_id FROM join_risk_flags WHERE event_id = ?',
       ).get<{ event_id: string }>(input.eventId);

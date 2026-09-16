@@ -71,10 +71,6 @@ export function loadMigrations(dir: string = MIGRATIONS_DIR): Migration[] {
  * (or a test) can assert that a second run is a no-op.
  */
 export async function migrate(db: Db, dir: string = MIGRATIONS_DIR): Promise<string[]> {
-  if (db.kind !== 'postgres') {
-    throw new Error('migrate() is Postgres-only; the SQLite path bootstraps from schema.sql');
-  }
-
   await db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       id         TEXT PRIMARY KEY,

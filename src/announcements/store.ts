@@ -223,9 +223,7 @@ export class AnnouncementsStore {
 
   async signupLfg(guildId: string, id: string, roleKey: string, userId: string, joinedAt: string): Promise<'joined' | 'moved' | 'full' | 'closed' | 'missing'> {
     return this.db.transaction(async (tx) => {
-      if (tx.kind === 'postgres') {
-        await tx.prepare(`SELECT pg_advisory_xact_lock(hashtextextended(?, 0))`).get(`lfg:${guildId}:${id}`);
-      }
+      await tx.prepare(`SELECT pg_advisory_xact_lock(hashtextextended(?, 0))`).get(`lfg:${guildId}:${id}`);
       const post = await tx.prepare(`SELECT status FROM lfg_posts WHERE guild_id = ? AND id = ?`).get<{ status: string }>(guildId, id);
       if (!post) return 'missing';
       if (post.status !== 'open') return 'closed';

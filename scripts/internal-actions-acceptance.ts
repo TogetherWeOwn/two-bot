@@ -49,7 +49,7 @@ const DB_SPEC = process.env.TWO_ACCEPT_DB ?? '';
 // happens to resolve to. `internal-actions-host.ts` isolates its tables under
 // TWO_HOST_SCHEMA (default `qa_tog463`), so reading the default `public` finds a
 // table that exists, is empty, and reports 0/7 - a FAIL that blames the endpoint
-// for a mismatch in this reader. Ignored for SQLite, which has no schemas.
+// for a mismatch in this reader.
 const DB_SCHEMA = process.env.TWO_ACCEPT_SCHEMA ?? process.env.TWO_HOST_SCHEMA ?? '';
 
 /** Every request this run made, so step 7 can look for exactly these rows. */

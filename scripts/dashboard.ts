@@ -6,9 +6,9 @@
  *   npm run dashboard -- --serve      # rebuild on every request, port 8080
  *   npm run dashboard -- --weeks 26   # more history
  *
- * Reads the same database the bot writes to (TWO_DATABASE_URL, or TWO_DB_PATH,
- * or ./data/two.db) - so if this page is wrong, the bot is wrong, and there is
- * no third place the truth could be hiding.
+ * Reads the same database the bot writes to (`TWO_DATABASE_URL`) - so if this
+ * page is wrong, the bot is wrong, and there is no third place the truth could
+ * be hiding.
  *
  * --serve exists so the page can be a URL rather than a file somebody has to
  * remember to re-download. It binds to localhost by default; put it behind the
@@ -30,7 +30,11 @@ const value = (name: string, fallback: string) => {
   return i >= 0 && argv[i + 1] ? argv[i + 1] : fallback;
 };
 
-const dbSpec = process.env.TWO_DATABASE_URL || process.env.TWO_DB_PATH || './data/two.db';
+const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
+if (!databaseUrl) {
+  console.error('dashboard: TWO_DATABASE_URL is not set.');
+  process.exit(1);
+}
 const weeks = Number(value('weeks', '12'));
 const outPath = value('out', './data/dashboard.html');
 const dataDir = process.env.TWO_DATA_DIR || './data';
@@ -81,7 +85,7 @@ async function loadChannelSnapshot(): Promise<ChannelSnapshot | null> {
 }
 
 async function build() {
-  const db = await openDb(dbSpec, { applicationName: 'two-bot-dashboard' });
+  const db = await openDb(databaseUrl!, { applicationName: 'two-bot-dashboard' });
   try {
     return await buildDashboard(db, { weeks, channelSnapshot: await loadChannelSnapshot() });
   } finally {

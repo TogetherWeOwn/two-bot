@@ -227,8 +227,8 @@ Two things it does not undo, so check them before you assume you are back:
 - **Migrations do not roll back.** Every migration in this repo is additive
   (`migrations/README.md`), so an older image runs against a newer schema
   without complaining. If you ever add a destructive one, that stops being true.
-- **The `two-bot-data` volume survives.** It holds only the SQLite fallback and
-  hand-run exports; the funnel log is in Postgres and is untouched by a redeploy.
+- **The `two-bot-data` volume survives.** It holds hand-run exports; the funnel
+  log is in Postgres and is untouched by a redeploy.
 
 To stop the bot without deleting anything, **Stop** the application. The bot
 handles `SIGTERM`: it closes the gateway and the database rather than being

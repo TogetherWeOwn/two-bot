@@ -4,8 +4,7 @@
 #   sudo systemctl enable --now two-bot-backup.timer
 #   systemctl list-timers two-bot-backup
 #
-# Backs up Postgres. The old SQLite snapshot (scripts/backup.sh) is still there
-# for a box that has not migrated yet, but this unit no longer calls it.
+# Backs up Postgres using the bot's verified NDJSON dump format.
 #
 # Note this unit does NOT get the Discord token. A backup needs the database and
 # nothing else, which is why the connection string lives in its own environment

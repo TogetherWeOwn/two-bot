@@ -459,7 +459,7 @@ It has been checked against a deliberate over-grant: `GRANT SELECT ON
 public.events TO two_web_ro` makes it fail two checks and exit non-zero. A
 verification nobody has seen fail is not a verification.
 
-**It runs in CI, on every pull request.** The `postgres` job in
+**It runs in CI, on every pull request.** The required `check` job in
 `.github/workflows/ci.yml` starts a `postgres:17` service, sets
 `TWO_TEST_DATABASE_URL`, and runs the whole suite against it — so this
 contract's 23 cases, the backup round trip and the concurrent-writer test now
@@ -479,7 +479,7 @@ executes is how a runbook rots; this one is executed. Landed by TOG-465.
 | `web_v1` schema and its 9 views | **Live.** `sql/web_v1.sql`, applied by `npm run web:views` and at bot startup |
 | Tables behind them | **Live.** `migrations/0003_web_contract_tables.sql`, `0005_counter_snapshots.sql` |
 | `two_web_ro` role and grants | **Live.** `npm run web:role`, proven by `npm run verify:web-role` — **35/35 re-run against a clean Postgres on 2026-08-30** |
-| Tests | `test/e2e.webcontract.test.ts` — 23 cases, Postgres only. **23/23 re-run 2026-08-30**, and run by CI in the `postgres` job (TOG-465) |
+| Tests | `test/e2e.webcontract.test.ts` — 23 cases, Postgres only. **23/23 re-run 2026-08-30**, and run by CI in the required `check` job (TOG-465) |
 | Counter cache + rank snapshot collector | **Code shipped (TOG-73)**, 60s member cache / 10m rank snapshot — but **not yet producing data**: it needs a Discord token the company does not hold. See §6.2. |
 | Scheduled events poller | TOG-74, not started |
 | Presence intent decision | TOG-75, `done` — see §6.1 |

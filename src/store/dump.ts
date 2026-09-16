@@ -165,8 +165,6 @@ function orderFor(table: DumpTable, columns: string[]): string {
  * produce a backup whose projection disagrees with its own event log.
  */
 export async function dump(db: Db, outPath: string): Promise<DumpManifest> {
-  if (db.kind !== 'postgres') throw new Error('dump() is Postgres-only');
-
   const gz = createGzip({ level: 9 });
   const written = pipeline(gz, createWriteStream(outPath));
 
@@ -355,8 +353,6 @@ function validateManifest(obj: Record<string, unknown>): DumpManifest {
  * target. See scripts/pg-restore.ts.
  */
 export async function restore(db: Db, inPath: string): Promise<RestoreReport> {
-  if (db.kind !== 'postgres') throw new Error('restore() is Postgres-only');
-
   const { manifest, buffers } = await inspect(inPath);
   const droppedColumns: Record<string, string[]> = {};
 

@@ -1,10 +1,8 @@
 /**
  * Funnel rules, tested without a network or a token.
  *
- * The assertions are the same ones this suite has always made. What changed in
- * TWO-18 is that they now run against whichever driver the run is pointed at -
- * SQLite by default, Postgres when TWO_TEST_DATABASE_URL is set. Same rules,
- * both engines, or the migration is not done.
+ * The assertions run against an isolated Postgres schema supplied through
+ * TWO_TEST_DATABASE_URL.
  */
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';

@@ -180,21 +180,17 @@ export class AutomationStore {
 
   /**
    * Serialize every capacity-changing command write for one guild. The caller
-   * checks the final name set while holding this scope. Postgres uses a
-   * transaction-scoped advisory lock so unrelated guilds remain independent;
-   * SQLite's BEGIN IMMEDIATE transaction supplies the same safety while that
-   * rollback path remains supported.
+   * checks the final name set while holding this scope. A transaction-scoped
+   * Postgres advisory lock keeps unrelated guilds independent.
    */
   async withCommandCapacity<T>(
     guildId: string,
     fn: (store: AutomationStore) => Promise<T>,
   ): Promise<T> {
     return this.db.transaction(async (tx) => {
-      if (tx.kind === 'postgres') {
-        await tx.prepare(`SELECT pg_advisory_xact_lock(hashtextextended(?, 0))`).get(
-          `automation_commands:${guildId}`,
-        );
-      }
+      await tx.prepare(`SELECT pg_advisory_xact_lock(hashtextextended(?, 0))`).get(
+        `automation_commands:${guildId}`,
+      );
       return fn(new AutomationStore(tx));
     });
   }
@@ -335,7 +331,7 @@ export class AutomationStore {
   /**
    * Atomically lease due rows before any outbound post. Postgres locks each
    * candidate inside the UPDATE statement and skips rows another scheduler has
-   * already claimed; SQLite serialises writes and uses the portable fallback.
+   * already claimed.
    */
   claimDueScheduled(
     guildId: string,
@@ -345,7 +341,7 @@ export class AutomationStore {
     limit = 10,
     occurrenceNonce = claimToken,
   ): Promise<ScheduledMessageRow[]> {
-    const locked = this.db.kind === 'postgres' ? ' FOR UPDATE SKIP LOCKED' : '';
+    const locked = ' FOR UPDATE SKIP LOCKED';
     return this.db
       .prepare(
         `WITH due AS (
@@ -430,9 +426,8 @@ export class AutomationStore {
    * would be never); a recurring row advances from the run time, so a bot that
    * was down for an hour does not fire a burst of catch-up posts.
    *
-   * Computing `next_run_at` in TypeScript rather than SQL keeps the statement
-   * portable across the SQLite and Postgres drivers (`?` placeholders, no
-   * dialect date maths).
+   * Computing `next_run_at` in TypeScript rather than SQL keeps the scheduling
+   * rule explicit and avoids database date arithmetic.
    */
   async markScheduledRun(
     guildId: string,

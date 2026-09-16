@@ -50,8 +50,8 @@ const servers: InternalServer[] = [];
 before(async () => {
   mock = await startMockDiscord();
   // The durable store is not optional any more: idempotency, the replay guard
-  // and the audit trail all live in it, so these tests run against a real
-  // database (SQLite in memory by default, Postgres when pointed at one).
+  // and the audit trail all live in it, so these tests use a real Postgres
+  // schema.
   testDb = await openTestDb(import.meta.filename);
 });
 after(async () => {
@@ -412,9 +412,8 @@ test('a timestamp outside the window is stale, in both directions', async () => 
   // 110 rather than 119. `now` is stamped before the two rejected calls above,
   // and the window is checked when the request is SERVED - so the headroom
   // here is 120s minus however long this test has been running. At 119 that is
-  // one second, which the SQLite run makes comfortably and the Postgres run
-  // does not always: two round trips through a real database ahead of this
-  // line is enough to age the timestamp out and fail a test that is not about
+  // one second, and two round trips through a real database ahead of this line
+  // are enough to age the timestamp out and fail a test that is not about
   // timing at all. The boundary itself is already pinned by the ±121s
   // rejections above; this call only needs to be inside it.
   const ok = await call(srv, { body: roleAssign, timestamp: String(now - 110) });

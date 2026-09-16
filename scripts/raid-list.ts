@@ -32,10 +32,14 @@ const argv = process.argv.slice(2);
 const idsOnly = argv.includes('--ids');
 const verify = argv.includes('--verify');
 const scan = argv.includes('--scan');
-const dbPath = process.env.TWO_DB_PATH || './data/two.db';
+const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
 const guildId = process.env.DISCORD_GUILD_ID ?? '';
+if (!databaseUrl) {
+  console.error('raid-list: TWO_DATABASE_URL is not set.');
+  process.exit(1);
+}
 
-const db = await openDb(dbPath);
+const db = await openDb(databaseUrl);
 
 interface Row {
   member_id: string;
@@ -85,7 +89,7 @@ if (idsOnly) {
 }
 
 console.log('\nTWO raid accounts still in the server\n');
-console.log(`  Source: ${dbPath}, windows from src/analytics/anomalies.ts. Read-only.\n`);
+console.log('  Source: TWO_DATABASE_URL, windows from src/analytics/anomalies.ts. Read-only.\n');
 
 raids.forEach((raid, i) => {
   const mine = remove.filter((r) => r.windowId === raid.id);

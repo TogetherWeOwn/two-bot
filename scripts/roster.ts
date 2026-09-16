@@ -19,11 +19,15 @@ import { DiscordRest } from '../src/discord/rest.ts';
 const argv = process.argv.slice(2);
 const days = Number(argv.find((a) => /^\d+$/.test(a)) ?? 7);
 const withNames = argv.includes('--names');
-const dbPath = process.env.TWO_DB_PATH || './data/two.db';
+const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
 const guildId = process.env.DISCORD_GUILD_ID ?? '';
+if (!databaseUrl) {
+  console.error('roster: TWO_DATABASE_URL is not set.');
+  process.exit(1);
+}
 
 const since = new Date(Date.now() - days * 86_400_000).toISOString();
-const db = await openDb(dbPath);
+const db = await openDb(databaseUrl);
 
 interface Row {
   member_id: string;

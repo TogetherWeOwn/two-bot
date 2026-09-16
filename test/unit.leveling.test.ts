@@ -1,6 +1,6 @@
 import { after, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { openTestDb, usingPostgres } from './helpers/testDb.ts';
+import { openTestDb } from './helpers/testDb.ts';
 import {
   LevelingService,
   MAX_STORED_XP,
@@ -108,7 +108,7 @@ test('re-import is idempotent and corrected imports preserve organic XP', async 
   assert.equal(profile.xp, 135);
 });
 
-test('concurrent identical imports remain idempotent', { skip: !usingPostgres && 'needs concurrent Postgres transactions' }, async () => {
+test('concurrent identical imports remain idempotent', async () => {
   const first = new LevelingService(fixture.db);
   const second = new LevelingService(fixture.db);
   const rows = [{ memberId: A, xp: 100 }];

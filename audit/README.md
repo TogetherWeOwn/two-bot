@@ -44,8 +44,9 @@ Two more files land outside this directory, at the contract paths from
 | `../data/server-audit-<date>.csv` | One row per channel, spec 2.3 columns plus the verdict. What the reconfiguration plan in TWO-14 is built from. |
 | `../data/server-audit-<date>.json` | The rollback source for the migration: every channel's topic, position, parent and full permission overwrites as they were at collection time, plus guild config, welcome screen, onboarding and all roles. |
 
-`data/` is otherwise gitignored (it holds the runtime SQLite database); the
-two snapshot files are explicitly un-ignored because they are the point.
+`data/` is otherwise gitignored (it can hold generated reports and legacy
+database files); the two snapshot files are explicitly un-ignored because they
+are the point.
 
 ## Privacy
 
