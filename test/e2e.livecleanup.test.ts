@@ -58,8 +58,12 @@ type Stub = {
   writeOrder: string[];
   rollbackOrder: string[];
   failOnboardingRead(status: number): void;
-  /** Serve `GET /onboarding` as a raw 200 body; `null` payload sends no body at all. */
-  serveOnboardingRaw(contentType: string, payload: string | null): void;
+  /**
+   * Serve `GET /onboarding` as a raw body; `null` payload sends no body at all. `status`
+   * defaults to 200 so a caller that only shapes the body keeps reading an authoritative
+   * answer; pass a non-200 to pin the status half of the readability gate.
+   */
+  serveOnboardingRaw(contentType: string, payload: string | null, status?: number): void;
   failNextWrite(status: number): void;
   partialNextWrite(): void;
   /** Tear the write to one specific object rather than whichever comes first. */
