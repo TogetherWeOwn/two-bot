@@ -93,8 +93,8 @@ services:
       start_period: 60s
       retries: 3
 
-    # The funnel log lives in Postgres. This is only the SQLite fallback path
-    # and the wave0/audit exports, which are written by scripts run by hand.
+    # The funnel log lives in Postgres. This volume holds only wave0/audit
+    # exports written by scripts run by hand.
     # Named rather than bind-mounted so it survives a redeploy without depending
     # on a host path that has to exist first.
     volumes:

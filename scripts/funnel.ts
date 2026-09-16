@@ -11,11 +11,13 @@ import { openDb } from '../src/store/db.ts';
 import { ANOMALIES, detectSpikes, excludeClause } from '../src/analytics/anomalies.ts';
 
 const days = Number(process.argv[2] ?? 7);
-// Same resolution the bot uses, so the report always reads the bot's database
-// and not a stale local file.
-const dbSpec = process.env.TWO_DATABASE_URL || process.env.TWO_DB_PATH || './data/two.db';
+const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
+if (!databaseUrl) {
+  console.error('funnel: TWO_DATABASE_URL is not set.');
+  process.exit(1);
+}
 const since = new Date(Date.now() - days * 86_400_000).toISOString();
-const db = await openDb(dbSpec);
+const db = await openDb(databaseUrl);
 
 const one = async (sql: string, ...p: unknown[]) =>
   Number((await db.prepare(sql).get<{ n: number }>(...p))?.n ?? 0);
@@ -193,12 +195,9 @@ if (trackedLinks > 0) {
 const cohortExcl = excludeClause('member_join').sql.replaceAll('occurred_at', 'joined_at');
 const cohortParams = excludeClause('member_join').params;
 console.log(`\n  Retention (of members who joined in the window):`);
-// "Still around d days after joining". SQLite counts days with julianday();
-// Postgres subtracts the timestamps directly (real timestamptz since 0009).
-const daysAlive =
-  db.kind === 'postgres'
-    ? `EXTRACT(EPOCH FROM (last_active_at - joined_at)) / 86400`
-    : `julianday(last_active_at) - julianday(joined_at)`;
+// "Still around d days after joining". Postgres stores these as timestamptz,
+// so subtract them directly and convert the interval to days.
+const daysAlive = `EXTRACT(EPOCH FROM (last_active_at - joined_at)) / 86400`;
 
 for (const d of [1, 7, 30]) {
   const until = new Date(Date.now() - d * 86_400_000).toISOString();
@@ -245,7 +244,7 @@ if (strandedRaid > 0) {
 console.log(`  Total events on file: ${await one(`SELECT COUNT(*) AS n FROM events`)}\n`);
 
 // Days that are not community behaviour. Bucketing happens in JS so the query
-// stays identical on SQLite and Postgres - a few thousand timestamps is nothing.
+// stays in one tested code path - a few thousand timestamps is nothing.
 for (const type of ['member_leave', 'member_join'] as const) {
   const rows = await db
     .prepare(`SELECT occurred_at FROM events WHERE event_type=? AND occurred_at >= ?`)

@@ -6,9 +6,9 @@
  *   "who actually comes back"  -> frequency(): sessions per member
  *   "when should we run it"    -> attendanceGrid(): day-of-week x hour
  *
- * Pure functions over rows, deliberately: the SQL that fetches them has to be
- * valid on both SQLite and Postgres, and bucketing a few thousand timestamps
- * in JS is free. Same reasoning as detectSpikes in anomalies.ts.
+ * Pure functions over rows, deliberately: bucketing a few thousand timestamps
+ * in JS is free and keeps the reporting rules easy to test. Same reasoning as
+ * detectSpikes in anomalies.ts.
  *
  * The ranking rule that matters is in bestSlot(): slots rank by DISTINCT
  * MEMBERS first and sessions second. One person who hops in and out of voice

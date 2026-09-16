@@ -1,24 +1,29 @@
 /**
- * One fixture, two drivers.
+ * Postgres test fixture.
  *
- * The point of TWO-18 is that the existing suite passes against Postgres
- * without its assertions changing. So the tests do not name a driver: they ask
- * for a database and get whichever one the run is pointed at.
- *
- *   npm test                        # SQLite, no services needed
- *   TWO_TEST_DATABASE_URL=... npm test   # the same tests, against Postgres
- *
- * Isolation on Postgres: `node --test` runs each file in its own process, in
- * parallel, so every file gets a private schema named after itself and drops
- * it on the way out. Within a file the tests share the schema and truncate
- * between fixtures, which is fine because a file's tests run in order.
+ * `node --test` runs each file in its own process, in parallel, so every file
+ * gets a private schema named after itself and drops it on the way out. Within
+ * a file the tests share the schema and truncate between fixtures, which is fine
+ * because a file's tests run in order.
  */
 import { basename } from 'node:path';
 import { openDb, isPostgresSpec, type Db } from '../../src/store/db.ts';
 import { webSchemaFor } from '../../src/store/webContract.ts';
 
-export const TEST_PG_URL = process.env.TWO_TEST_DATABASE_URL ?? '';
-export const usingPostgres = isPostgresSpec(TEST_PG_URL);
+function requiredTestDatabaseUrl(): string {
+  const url = process.env.TWO_TEST_DATABASE_URL?.trim() ?? '';
+  if (!url) {
+    throw new Error(
+      'TWO_TEST_DATABASE_URL is required. Set it to an isolated Postgres database before running database tests.',
+    );
+  }
+  if (!isPostgresSpec(url)) {
+    throw new Error('TWO_TEST_DATABASE_URL must use postgres:// or postgresql://.');
+  }
+  return url;
+}
+
+export const TEST_PG_URL = requiredTestDatabaseUrl();
 
 /** A stable, legal schema name derived from the test file that asked for it. */
 function schemaFor(label: string): string {
@@ -92,58 +97,12 @@ const TABLES = [
   'self_role_panel_claims',
 ];
 
-/**
- * The SQLite path bootstraps from src/store/schema.sql, which the migrations do
- * not touch - so it only has the original three. Everything migration 0002 adds
- * is Postgres-only, like the views that read it.
- */
-const SQLITE_TABLES = [
-  'events',
-  'members',
-  'invite_snapshots',
-  'xp_awards',
-  'xp_cooldowns',
-  'level_role_rewards',
-  'level_import_runs',
-  'member_levels',
-  'operational_audit_log',
-  'moderation_warnings',
-  'moderation_scheduled_unbans',
-  'moderation_audit',
-  'moderation_lockdowns',
-  'moderation_idempotency',
-  'containment_events',
-  'containment_incidents',
-  'join_risk_flags',
-  'automation_commands',
-  'scheduled_messages',
-  'sticky_messages',
-  'automation_audit_log',
-  'community_scorecard_alerts',
-  'community_scorecard_runs',
-  'community_stream_heartbeats',
-  'community_facts',
-  'event_rsvps',
-  'lfg_signups',
-  'lfg_roles',
-  'lfg_posts',
-  'feed_deliveries',
-  'feed_relays',
-  'announcements_audit_log',
-  'ticket_transcripts',
-  'tickets',
-  'automod_violations',
-  'automod_processed_messages',
-  'self_role_audit',
-  'self_role_panel_claims',
-];
-
 export interface TestDb {
   db: Db;
-  /** Schema holding the bot's tables. `main` on SQLite, `test_*` on Postgres. */
-  schema?: string;
-  /** Schema the contract views go in, when there are any. Postgres only. */
-  webSchema?: string;
+  /** Schema holding the bot's tables. */
+  schema: string;
+  /** Schema holding the contract views. */
+  webSchema: string;
   /** Empty every table, leaving the schema in place. */
   reset(): Promise<void>;
   cleanup(): Promise<void>;
@@ -153,22 +112,6 @@ export interface TestDb {
  * @param label usually `import.meta.filename` - only used to name the schema.
  */
 export async function openTestDb(label: string): Promise<TestDb> {
-  if (!usingPostgres) {
-    const db = await openDb(':memory:');
-    return {
-      db,
-      async reset() {
-        for (const t of SQLITE_TABLES) await db.exec(`DELETE FROM ${t}`);
-        // Restart the rowid counter so event ids look the same as a fresh
-        // database - `recent()` and any id assertion depend on it.
-        await db.exec(`DELETE FROM sqlite_sequence WHERE name = 'events'`);
-      },
-      async cleanup() {
-        await db.close();
-      },
-    };
-  }
-
   const schema = schemaFor(label);
   // The contract views get their own schema per test file too, or parallel
   // files would CREATE OR REPLACE each other's views mid-run and every one of
@@ -198,5 +141,23 @@ export async function openTestDb(label: string): Promise<TestDb> {
       await db.exec(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
       await db.close();
     },
+  };
+}
+
+let ephemeralSequence = 0;
+
+/**
+ * Open a one-test Postgres schema whose `close()` also drops the schema.
+ *
+ * This keeps focused tests that create a fresh database per case concise while
+ * still running every assertion against the shipping Postgres migrations.
+ */
+export async function openEphemeralTestDb(_legacySpec?: string): Promise<Db> {
+  const harness = await openTestDb(`ephemeral_${process.pid}_${++ephemeralSequence}`);
+  return {
+    prepare: (sql) => harness.db.prepare(sql),
+    exec: (sql) => harness.db.exec(sql),
+    transaction: (fn) => harness.db.transaction(fn),
+    close: () => harness.cleanup(),
   };
 }

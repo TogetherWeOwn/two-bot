@@ -11,17 +11,16 @@
  *  2. That the thing collects and reads back correctly, including the trigger
  *     that would reopen TOG-75 option A.
  *
- * Runs on SQLite with no services, which is deliberate: migration 0004 is
- * written in portable SQL specifically so these tests apply THE SHIPPING FILE
- * rather than a hand-copied schema. A containment guarantee that only runs
- * when someone remembers to start a Postgres is not a guarantee.
+ * Database assertions run against an isolated Postgres schema created from the
+ * immutable shipping migrations.
  */
 import { test, describe, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { GatewayIntentBits, Partials } from 'discord.js';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { openDb, type Db } from '../src/store/db.ts';
+import type { Db } from '../src/store/db.ts';
+import { openTestDb, type TestDb } from './helpers/testDb.ts';
 import { createClient, INTENTS, PARTIALS, intents } from '../src/discord/client.ts';
 import { WEB_CONTRACT_VIEWS } from '../src/store/webContract.ts';
 import {
@@ -46,8 +45,18 @@ import {
 import { renderPresenceReport } from '../src/analytics/presenceReport.ts';
 
 const ROOT = join(import.meta.dirname, '..');
-const MIGRATION = join(ROOT, 'migrations', '0004_presence_probe.sql');
 const GUILD = '326474832151838730';
+
+let harness: TestDb;
+before(async () => {
+  harness = await openTestDb(import.meta.filename);
+});
+after(async () => {
+  await harness.cleanup();
+});
+beforeEach(async () => {
+  await harness.reset();
+});
 
 /** Read every file under a directory, recursively, as [relativePath, text]. */
 function readTree(dir: string, exts: string[]): [string, string][] {
@@ -164,27 +173,24 @@ describe('presence probe containment', () => {
   });
 
   test('the stored row has no per-member column and no derived human estimate', async () => {
-    const db = await openDb(':memory:');
-    try {
-      await db.exec(readFileSync(MIGRATION, 'utf8'));
-      const cols = (
-        await db.prepare(`SELECT name FROM pragma_table_info('presence_probe')`).all<{
-          name: string;
-        }>()
-      ).map((r) => r.name);
+    const cols = (
+      await harness.db
+        .prepare(
+          `SELECT column_name FROM information_schema.columns
+           WHERE table_schema = current_schema() AND table_name = 'presence_probe'`,
+        )
+        .all<{ column_name: string }>()
+    ).map((r) => r.column_name);
 
-      // Exactly these four. A member id would break the aggregate-only promise
-      // that makes this acceptable at all; a `human_estimate` column would be a
-      // stored guess that someone eventually publishes. See migration 0004.
-      assert.deepEqual(cols.sort(), [
-        'approximate_presence_count',
-        'bot_floor',
-        'guild_id',
-        'observed_at',
-      ]);
-    } finally {
-      await db.close();
-    }
+    // Exactly these four. A member id would break the aggregate-only promise
+    // that makes this acceptable at all; a `human_estimate` column would be a
+    // stored guess that someone eventually publishes. See migration 0004.
+    assert.deepEqual(cols.sort(), [
+      'approximate_presence_count',
+      'bot_floor',
+      'guild_id',
+      'observed_at',
+    ]);
   });
 
   test('the cadence is hourly, not the 60s counter job', () => {
@@ -201,15 +207,8 @@ describe('presence probe containment', () => {
 describe('presence probe collection', () => {
   let db: Db;
 
-  before(async () => {
-    db = await openDb(':memory:');
-    await db.exec(readFileSync(MIGRATION, 'utf8'));
-  });
-  after(async () => {
-    await db.close();
-  });
-  beforeEach(async () => {
-    await db.exec('DELETE FROM presence_probe');
+  before(() => {
+    db = harness.db;
   });
 
   test('the presence read asks for counts and takes no intent', async () => {

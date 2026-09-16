@@ -12,7 +12,7 @@ import {
 import { formatAuditEvent, hasAuditEventIdentity, type OperationalAuditEvent } from '../src/audit/events.ts';
 import { makeOperationalAudit } from '../src/audit/service.ts';
 import { deliveryNonce, OperationalAuditStore, type StoredOperationalAudit } from '../src/audit/store.ts';
-import { openDb } from '../src/store/db.ts';
+import { openEphemeralTestDb as openDb } from './helpers/testDb.ts';
 import type { FunnelHandlers } from '../src/core/handlers.ts';
 import type { InviteTracker } from '../src/core/inviteTracker.ts';
 
@@ -267,7 +267,7 @@ test('member and voice occurrence keys preserve identical transitions separated 
 });
 
 test('durable audit is idempotent by entry id', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   const event: OperationalAuditEvent = {
     entryId: 'discord-audit:staging:1',
@@ -327,7 +327,7 @@ test('correlated moderation gateway entries converge on the service audit identi
   });
   assert.doesNotMatch(JSON.stringify(event), /human-only reason/);
 
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   const serviceEvent = {
     ...event,
@@ -346,7 +346,7 @@ test('correlated moderation gateway entries converge on the service audit identi
 });
 
 test('gateway-first correlated moderation keeps gateway identity and gains service metadata', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   const entryId = moderationAuditEntryId(GUILD, moderationAuditToken(GUILD, 'gateway-first'));
   const gatewayEvent: OperationalAuditEvent = {
@@ -371,7 +371,7 @@ test('gateway-first correlated moderation keeps gateway identity and gains servi
 });
 
 test('unrelated duplicate audit metadata remains immutable', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   const original: OperationalAuditEvent = {
     entryId: 'immutable-duplicate', kind: 'moderation_action', channel: 'moderation', guildId: GUILD,
@@ -537,7 +537,7 @@ test('role-heavy member updates truncate metadata at complete role ids with an e
 });
 
 test('audit-sink message tampering is stored but never remirrored', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   let sent = 0;
   const channel = {
@@ -573,7 +573,7 @@ test('audit-sink message tampering is stored but never remirrored', async () => 
 });
 
 test('delivered audit mirrors are checked exactly and checkpointed when intact', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   const entryId = 'delivered-intact';
   const messageId = '900000000000000501';
@@ -601,7 +601,7 @@ test('delivered audit mirrors are checked exactly and checkpointed when intact',
 });
 
 test('delivered reconciliation needs ViewChannel but not SendMessages', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   const event: OperationalAuditEvent = {
     entryId: 'delivered-read-only', kind: 'message_delete', channel: 'audit', guildId: GUILD,
@@ -631,7 +631,7 @@ test('delivered reconciliation needs ViewChannel but not SendMessages', async ()
 });
 
 test('reconciliation quarantines instead of checkpointing forever when ReadMessageHistory is revoked', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   const event: OperationalAuditEvent = {
     entryId: 'delivered-no-history', kind: 'message_delete', channel: 'audit', guildId: GUILD,
@@ -659,7 +659,7 @@ test('reconciliation quarantines instead of checkpointing forever when ReadMessa
 });
 
 test('reconciliation quarantines a permanent 403 fetch rejection instead of checkpointing it as transient', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   const event: OperationalAuditEvent = {
     entryId: 'delivered-forbidden', kind: 'message_delete', channel: 'audit', guildId: GUILD,
@@ -680,7 +680,7 @@ test('reconciliation quarantines a permanent 403 fetch rejection instead of chec
 });
 
 test('deleted delivered mirror records deterministic evidence and quarantines without recursion', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   const event: OperationalAuditEvent = {
     entryId: 'delivered-deleted', kind: 'message_delete', channel: 'audit', guildId: GUILD,
@@ -713,7 +713,7 @@ test('deleted delivered mirror records deterministic evidence and quarantines wi
 });
 
 test('edited delivered mirror records evidence even when restored before the next pass', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   const event: OperationalAuditEvent = {
     entryId: 'delivered-edited', kind: 'message_edit', channel: 'audit', guildId: GUILD,
@@ -745,7 +745,7 @@ test('edited delivered mirror records evidence even when restored before the nex
 });
 
 test('transient delivered mirror failures are bounded, fair, checkpointed and redacted', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   for (let index = 0; index < 12; index++) {
     const entryId = `delivered-${String(index).padStart(2, '0')}`;
@@ -790,7 +790,7 @@ test('transient delivered mirror failures are bounded, fair, checkpointed and re
 });
 
 test('tamper evidence failure rolls back quarantine and leaves the delivered row retryable', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   await store.record({
     entryId: 'atomic-tamper', kind: 'message_delete', channel: 'audit', guildId: GUILD,
@@ -823,7 +823,7 @@ test('tamper evidence failure rolls back quarantine and leaves the delivered row
 });
 
 test('stale delivered mirror CAS cannot quarantine a newer checkpoint', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   await store.record({
     entryId: 'stale-mirror-cas', kind: 'message_delete', channel: 'audit', guildId: GUILD,
@@ -872,7 +872,7 @@ function auditClient(channel: ReturnType<typeof auditChannel>): Client {
 }
 
 test('failed audit delivery is retryable without duplicating the durable row', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   let attempts = 0;
   const channel = {
@@ -926,7 +926,7 @@ test('failed audit delivery is retryable without duplicating the durable row', a
 });
 
 test('pre-send delivery quarantines instead of retrying forever when ReadMessageHistory is revoked', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   let sent = false;
   const channel = {
@@ -964,7 +964,7 @@ test('pre-send delivery quarantines instead of retrying forever when ReadMessage
 });
 
 test('pre-send delivery quarantines a definite 4xx from the pre-send scan instead of retrying forever', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   let sent = false;
   const channel = {
@@ -1000,7 +1000,7 @@ test('pre-send delivery quarantines a definite 4xx from the pre-send scan instea
 });
 
 test('post-send acknowledgement retries reconcile beyond 500 newer Discord messages', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   const sends: Array<{ nonce?: string | number; enforceNonce?: boolean }> = [];
   const preSendMessageId = '900000000000000000';
@@ -1084,7 +1084,7 @@ test('post-send acknowledgement retries reconcile beyond 500 newer Discord messa
 });
 
 test('acknowledgement failure replaces send authorization with a finite reconciliation lease', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   const event: OperationalAuditEvent = {
     entryId: 'finite-reconciliation-lease', kind: 'message_delete', channel: 'audit', guildId: GUILD,
@@ -1106,7 +1106,7 @@ test('acknowledgement failure replaces send authorization with a finite reconcil
 });
 
 test('stale audit delivery claims cannot mutate replacement ownership', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   const event: OperationalAuditEvent = {
     entryId: 'stale-claim', kind: 'message_delete', channel: 'audit', guildId: GUILD,
@@ -1158,7 +1158,7 @@ test('stale audit delivery claims cannot mutate replacement ownership', async ()
 });
 
 test('a crash after send preparation remains reclaimable for marker reconciliation', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   await store.record({
     entryId: 'crash-before-send', kind: 'message_delete', channel: 'audit', guildId: GUILD,
@@ -1176,7 +1176,7 @@ test('a crash after send preparation remains reclaimable for marker reconciliati
 });
 
 test('a replacement claim before send authorization blocks the stale worker', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   let sends = 0;
   let replacementToken: string | null = null;
@@ -1218,7 +1218,7 @@ test('a replacement claim before send authorization blocks the stale worker', as
 });
 
 test('an empty-channel acknowledgement retry does not trust the host clock', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   const sends: string[] = [];
   let acceptedMessage: { id: string; author: { id: string }; content: string } | null = null;
@@ -1274,7 +1274,7 @@ test('an empty-channel acknowledgement retry does not trust the host clock', asy
 });
 
 test('a failed pre-send recovery-bound write prevents the Discord send', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   let sends = 0;
   const channel = {
@@ -1316,7 +1316,7 @@ test('a failed pre-send recovery-bound write prevents the Discord send', async (
 });
 
 test('a transient recovery scan failure retains its boundary and never duplicates an accepted mirror', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   const preSendMessageId = '900000000000000000';
   const acceptedMessageId = (BigInt(preSendMessageId) + 1n).toString();
@@ -1382,7 +1382,7 @@ test('a transient recovery scan failure retains its boundary and never duplicate
 });
 
 test('a definite 403 send rejection clears its boundary and retries after recovery', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   let sends = 0;
   const messageId = '900000000000000601';
@@ -1413,7 +1413,7 @@ test('a definite 403 send rejection clears its boundary and retries after recove
 });
 
 test('a generic post-send failure retains its recovery bound for marker reconciliation', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   const preSendMessageId = '900000000000000000';
   let sends = 0;
@@ -1460,7 +1460,7 @@ test('a generic post-send failure retains its recovery bound for marker reconcil
 });
 
 test('marker reconciliation requires the marker as the leading identity field', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   let sends = 0;
   const messages = [
@@ -1506,7 +1506,7 @@ test('marker reconciliation requires the marker as the leading identity field', 
 
 
 test('an edited ambiguous marker fails closed through a long scan and overlapping retry', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   let sends = 0;
   const preSendMessageId = '900000000000000000';
@@ -1592,7 +1592,7 @@ test('an edited ambiguous marker fails closed through a long scan and overlappin
 });
 
 test('quarantined ambiguous rows cannot starve newer pending audit deliveries', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   for (let index = 0; index < 25; index++) {
     const entryId = `poison-${String(index).padStart(2, '0')}`;
@@ -1617,7 +1617,7 @@ test('quarantined ambiguous rows cannot starve newer pending audit deliveries', 
 });
 
 test('retryable failures yield the next sweep to newer unattempted deliveries', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   for (let index = 0; index < 25; index++) {
     await store.record({
@@ -1643,7 +1643,7 @@ test('retryable failures yield the next sweep to newer unattempted deliveries', 
 });
 
 test('audit delivery failures redact thrown error text from process logs', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   const sentinel = 'SENTINEL_AUDIT_SECRET_DO_NOT_LOG';
   const channel = {
@@ -1723,7 +1723,7 @@ test('audit database write errors redact thrown text from process logs', async (
 });
 
 test('member erasure removes operational audit rows carrying the member identity', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   const store = new OperationalAuditStore(db);
   const memberId = '900000000000000001';
   await store.record({

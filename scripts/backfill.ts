@@ -1,7 +1,7 @@
 /**
  * One-shot historical backfill. Runs, writes, exits - no always-on host.
  *
- *   DISCORD_TOKEN=... DISCORD_GUILD_ID=... node scripts/backfill.ts
+ *   DISCORD_TOKEN=... DISCORD_GUILD_ID=... TWO_DATABASE_URL=postgres://... node scripts/backfill.ts
  *   node scripts/backfill.ts --dry-run          # report, write nothing
  *   node scripts/backfill.ts --max-pages=50     # scan deeper per channel
  *
@@ -61,7 +61,11 @@ const flag = (name: string): string | null => {
 };
 const dryRun = flag('dry-run') !== null;
 const maxPages = Number(flag('max-pages') ?? 25);
-const dbPath = flag('db') ?? process.env.TWO_DB_PATH ?? './data/two.db';
+if (flag('db') !== null) {
+  console.error('The --db option has been removed. Set TWO_DATABASE_URL instead.');
+  process.exit(2);
+}
+const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
 
 setLogLevel((process.env.LOG_LEVEL as 'debug' | 'info' | 'error') || 'error');
 
@@ -70,6 +74,10 @@ setLogLevel((process.env.LOG_LEVEL as 'debug' | 'info' | 'error') || 'error');
 const token = process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN;
 if (!token) {
   console.error('Missing DISCORD_TOKEN (or DISCORD_BOT_TOKEN). See docs/SECRETS.md.');
+  process.exit(2);
+}
+if (!databaseUrl) {
+  console.error('Missing TWO_DATABASE_URL. See docs/SECRETS.md.');
   process.exit(2);
 }
 const guildId = process.env.DISCORD_GUILD_ID;
@@ -91,13 +99,13 @@ const TEXT_CHANNEL_TYPES = new Set([0, 5]); // GUILD_TEXT, GUILD_ANNOUNCEMENT
 const MIN_PROBE_YIELD = 0.05;
 
 const rest = new DiscordRest({ token });
-const db = await openDb(dbPath);
+const db = await openDb(databaseUrl);
 const store = new EventStore(db);
 const invites = new InviteTracker(db);
 
 const t0 = Date.now();
 console.log(`\nTWO backfill${dryRun ? '  (DRY RUN - nothing will be written)' : ''}`);
-console.log(`  guild ${guildId}   db ${dbPath}   max ${maxPages} pages/channel\n`);
+console.log(`  guild ${guildId}   max ${maxPages} pages/channel\n`);
 
 // --- 1. current members: Discord's own joined_at ----------------------------
 

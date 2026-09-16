@@ -4,8 +4,7 @@
  * collision guards.
  *
  * No network and no discord.js client: the service takes a fake Discord
- * surface, the store takes the test database (Postgres when the e2e variable
- * is set, SQLite otherwise - openTestDb handles both).
+ * surface, and the store uses an isolated Postgres test schema.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -35,7 +34,7 @@ import {
   COMMUNITY_COMMAND_DATA,
   MAX_CUSTOM_COMMANDS,
 } from '../src/discord/commandNames.ts';
-import { openTestDb, TEST_PG_URL, usingPostgres, type TestDb } from './helpers/testDb.ts';
+import { openTestDb, TEST_PG_URL, type TestDb } from './helpers/testDb.ts';
 import { openDb } from '../src/store/db.ts';
 import { loadMigrations } from '../src/store/migrate.ts';
 import { cleanupDecision, restoredStickyRow } from '../scripts/staging-automations-proof-state.ts';
@@ -617,7 +616,7 @@ test('service: slow serial scheduling claims each row only when it is ready to p
   await db.cleanup();
 });
 
-test('migration: an applied pre-lease 0015 is upgraded with scheduler claim columns', { skip: !usingPostgres }, async () => {
+test('migration: an applied pre-lease 0015 is upgraded with scheduler claim columns', async () => {
   const db = await openTestDb(`${import.meta.filename}-automation-upgrade`);
   assert.ok(db.schema);
   const claims = loadMigrations().find((migration) => migration.id === '0016_automation_claims');
@@ -658,7 +657,7 @@ test('migration: an applied pre-lease 0015 is upgraded with scheduler claim colu
   await db.cleanup();
 });
 
-test('store: independent Postgres clients skip an already locked scheduled row', { skip: !usingPostgres }, async () => {
+test('store: independent Postgres clients skip an already locked scheduled row', async () => {
   const first = await openTestDb(`${import.meta.filename}-claim-lock`);
   assert.ok(first.schema);
   const secondDb = await openDb(TEST_PG_URL, {
@@ -1346,7 +1345,7 @@ test('service: import budget counts existing names and permits same-name updates
   await db.cleanup();
 });
 
-test('store: independent Postgres clients serialize import and individual create capacity', { skip: !usingPostgres }, async () => {
+test('store: independent Postgres clients serialize import and individual create capacity', async () => {
   const first = await openTestDb(`${import.meta.filename}-command-capacity`);
   assert.ok(first.schema);
   const secondDb = await openDb(TEST_PG_URL, {
@@ -1390,7 +1389,7 @@ test('store: independent Postgres clients serialize import and individual create
   await first.cleanup();
 });
 
-test('store: independent Postgres clients allow concurrent same-name update at capacity', { skip: !usingPostgres }, async () => {
+test('store: independent Postgres clients allow concurrent same-name update at capacity', async () => {
   const first = await openTestDb(`${import.meta.filename}-command-same-name`);
   assert.ok(first.schema);
   const secondDb = await openDb(TEST_PG_URL, {
@@ -1556,7 +1555,7 @@ test('service: export round-trips an import', async () => {
 
 // --- Discord wiring ------------------------------------------------------------
 
-const settle = () => new Promise((resolve) => setTimeout(resolve, usingPostgres ? 50 : 0));
+const settle = () => new Promise((resolve) => setTimeout(resolve, 50));
 
 function fakeAdminInteraction(permissionBits: bigint | boolean) {
   const replies: unknown[] = [];

@@ -30,12 +30,13 @@ record of either. **Join dates are not lost** — see the next section.
 ## Recover the history (one-off, no host needed)
 
 ```bash
-DISCORD_TOKEN=... DISCORD_GUILD_ID=... node scripts/backfill.ts --dry-run
-DISCORD_TOKEN=... DISCORD_GUILD_ID=... node scripts/backfill.ts
+DISCORD_TOKEN=... DISCORD_GUILD_ID=... TWO_DATABASE_URL=postgres://... node scripts/backfill.ts --dry-run
+DISCORD_TOKEN=... DISCORD_GUILD_ID=... TWO_DATABASE_URL=postgres://... node scripts/backfill.ts
 ```
 
-Runs once and exits — this does **not** need the service installed, and it is
-read-only against Discord. It recovers:
+Runs once and exits — this does **not** need the service installed, but it does
+need access to the intended Postgres database. It is read-only against Discord.
+It recovers:
 
 - every current member's real join date, from Discord's own `joined_at`;
 - joins, leaves and voice sessions from the log channels TWO's older logging
@@ -134,8 +135,8 @@ as passing, no matter how green everything else is.
 ## Keep attribution alive before there is a host
 
 ```bash
-DISCORD_BOT_TOKEN=... DISCORD_GUILD_ID=... node scripts/capture.ts --dry-run
-DISCORD_BOT_TOKEN=... DISCORD_GUILD_ID=... node scripts/capture.ts
+DISCORD_BOT_TOKEN=... DISCORD_GUILD_ID=... TWO_DATABASE_URL=postgres://... node scripts/capture.ts --dry-run
+DISCORD_BOT_TOKEN=... DISCORD_GUILD_ID=... TWO_DATABASE_URL=postgres://... node scripts/capture.ts
 ```
 
 Runs once and exits, read-only against Discord. Run it **as often as you can**
@@ -168,30 +169,6 @@ Two things it cannot do, and no amount of running fixes either:
 Once the service is live this stops being necessary — the bot does the same
 diff per join, at full precision. Leaving it on a cron afterwards is harmless
 (every write is idempotent) but redundant.
-
-## One-off: moving an existing SQLite database to Postgres
-
-Only needed on a box that ran the old SQLite build. Copies the history across
-and refuses to report success unless the row counts match per table.
-
-```bash
-cd /opt/two-bot
-sudo systemctl stop two-bot                      # so nothing writes mid-copy
-
-# Look before you leap - prints the source counts and writes nothing.
-sudo -u twobot TWO_SQLITE_PATH=/opt/two-bot/data/two.db \
-  node scripts/migrate-sqlite-to-postgres.ts --dry-run
-
-sudo -u twobot --preserve-env=TWO_DATABASE_URL TWO_SQLITE_PATH=/opt/two-bot/data/two.db \
-  node scripts/migrate-sqlite-to-postgres.ts
-```
-
-`MIGRATION VERIFIED` means every table matched and every event idempotency key
-made it across. Anything else: do not start the bot, and do not delete the
-SQLite file. It refuses to run against a Postgres that already has rows unless
-you pass `--allow-nonempty`.
-
-Keep `data/two.db` until the numbers have looked right for a week.
 
 ## Deploy
 
@@ -720,10 +697,9 @@ error message will not contain the URL, because the URL contains the password.
 them, or `TWO_DB_POOL_MAX` was raised too far. `SELECT application_name,
 count(*) FROM pg_stat_activity GROUP BY 1;` will name the culprit.
 
-**The bot is on SQLite when it should be on Postgres** — `TWO_DATABASE_URL` is
-unset or misspelled, so it fell back to `TWO_DB_PATH`. The startup log line
-`datastore_open` says which driver it actually chose; trust that over what you
-think the env file says.
+**The bot exits before `datastore_open` with a missing or invalid database URL**
+— set `TWO_DATABASE_URL` to a `postgres://` or `postgresql://` URL. There is no
+local-file fallback.
 
 ## Things this bot deliberately does not do
 

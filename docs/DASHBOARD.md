@@ -15,8 +15,8 @@ npm run dashboard -- --json    # the same numbers as JSON, for piping somewhere
 npm run dashboard -- --weeks 26
 ```
 
-It reads the bot's own database (`TWO_DATABASE_URL`, or `TWO_DB_PATH`, or
-`./data/two.db`). There is no separate analytics store, no nightly sync, and
+It reads the bot's own Postgres database (`TWO_DATABASE_URL`). There is no
+separate analytics store, no nightly sync, and
 therefore nothing that can drift out of agreement with the bot.
 
 The HTML file is entirely self-contained — no fonts, no scripts, no CDN. You can

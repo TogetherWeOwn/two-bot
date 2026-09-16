@@ -1,10 +1,8 @@
 import { test, describe, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { openDb, type Db } from '../src/store/db.ts';
+import type { Db } from '../src/store/db.ts';
 import { stubRest } from './helpers/stubRest.ts';
+import { openTestDb, type TestDb } from './helpers/testDb.ts';
 import {
   LIVE_COUNTER_INTERVAL_MS,
   RANK_SNAPSHOT_INTERVAL_MS,
@@ -15,13 +13,8 @@ import {
 } from '../src/jobs/communitySnapshots.ts';
 import { ANOMALIES, windowBounds } from '../src/analytics/anomalies.ts';
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const GUILD = '326474832151838730';
 const NOW = '2026-08-25T20:00:00.000Z';
-const MIGRATIONS = [
-  'migrations/0003_web_contract_tables.sql',
-  'migrations/0005_counter_snapshots.sql',
-];
 const ROLE_IDS = Object.fromEntries(RANKS.map((rank) => [rank.key, `role-${rank.key}`]));
 
 function roles() {
@@ -42,7 +35,7 @@ async function groundRaids(db: Db) {
     await db
       .prepare(
         `INSERT INTO members (guild_id, member_id, joined_at, is_bot)
-         VALUES (?, ?, ?, 0)`,
+         VALUES (?, ?, ?, FALSE)`,
       )
       .run(GUILD, `raid-${index}`, from);
   }
@@ -99,25 +92,16 @@ describe('community snapshot arithmetic', () => {
 });
 
 describe('community snapshot collector', () => {
+  let harness: TestDb;
   let db: Db;
 
   before(async () => {
-    db = await openDb(':memory:');
-    for (const path of MIGRATIONS) await db.exec(readFileSync(join(ROOT, path), 'utf8'));
+    harness = await openTestDb(import.meta.filename);
+    db = harness.db;
   });
-  after(async () => db.close());
+  after(async () => harness.cleanup());
   beforeEach(async () => {
-    for (const table of [
-      'events',
-      'members',
-      'guild_counters',
-      'counter_snapshots',
-      'rank_snapshots',
-      'member_ranks',
-      'member_exclusions',
-    ]) {
-      await db.exec(`DELETE FROM ${table}`);
-    }
+    await harness.reset();
   });
 
   test('an ungrounded raid window publishes nothing on first run', async () => {

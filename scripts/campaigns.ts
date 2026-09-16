@@ -20,8 +20,9 @@ import { CampaignStore, isValidSlug } from '../src/redirect/campaigns.ts';
 const argv = process.argv.slice(2);
 const flagAt = (name: string) => argv.indexOf(`--${name}`);
 
-const dbSpec = process.env.TWO_DATABASE_URL || process.env.TWO_DB_PATH || './data/two.db';
-const db = await openDb(dbSpec, { applicationName: 'two-bot-campaigns' });
+const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
+if (!databaseUrl) throw new Error('TWO_DATABASE_URL is required.');
+const db = await openDb(databaseUrl, { applicationName: 'two-bot-campaigns' });
 const store = new CampaignStore(db);
 
 const base = process.env.TWO_REDIRECT_BASE_URL || 'https://go.two.gg';

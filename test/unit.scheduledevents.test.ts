@@ -1,16 +1,13 @@
 import { after, before, beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { openDb, type Db } from '../src/store/db.ts';
+import type { Db } from '../src/store/db.ts';
+import { openEphemeralTestDb as openDb } from './helpers/testDb.ts';
 import {
   runScheduledEventsCycle,
   SCHEDULED_EVENTS_INTERVAL_MS,
 } from '../src/jobs/scheduledEvents.ts';
 import { stubRest } from './helpers/stubRest.ts';
 
-const ROOT = join(import.meta.dirname, '..');
-const MIGRATION = join(ROOT, 'migrations', '0003_web_contract_tables.sql');
 const GUILD = '326474832151838730';
 const OBSERVED_AT = '2026-09-04T18:00:00.000Z';
 
@@ -18,8 +15,7 @@ describe('scheduled events poller', () => {
   let db: Db;
 
   before(async () => {
-    db = await openDb(':memory:');
-    await db.exec(readFileSync(MIGRATION, 'utf8'));
+    db = await openDb();
   });
   after(async () => {
     await db.close();

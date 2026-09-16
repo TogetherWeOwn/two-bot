@@ -14,15 +14,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { startMockDiscord } from '../tools/mock-discord/server.ts';
-import { openTestDb, usingPostgres, type TestDb } from './helpers/testDb.ts';
+import { openTestDb } from './helpers/testDb.ts';
 
 const ROOT = resolve(import.meta.dirname, '..');
+let harnessSequence = 0;
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
@@ -61,29 +60,21 @@ async function waitFor<T>(fn: () => Promise<T>, timeoutMs = 30_000): Promise<Non
 
 test('health endpoints answer on the real bot process', { timeout: 90_000 }, async (t) => {
   const mock = await startMockDiscord();
-  const dir = mkdtempSync(join(tmpdir(), 'two-health-'));
   const port = await freePort();
   let bot: ChildProcess | null = null;
   const botLog: string[] = [];
 
-  let harness: TestDb | null = null;
-  let botDbEnv: Record<string, string>;
-  if (usingPostgres) {
-    harness = await openTestDb(import.meta.filename);
-    const schema = (await harness.db.prepare(`SELECT current_schema() AS s`).get<{ s: string }>())!.s;
-    botDbEnv = {
-      TWO_DATABASE_URL: process.env.TWO_TEST_DATABASE_URL!,
-      PGOPTIONS: `-c search_path=${schema}`,
-    };
-  } else {
-    botDbEnv = { TWO_DB_PATH: join(dir, 'two.db') };
-  }
+  const harness = await openTestDb(`${import.meta.filename}_${++harnessSequence}`);
+  const schema = (await harness.db.prepare(`SELECT current_schema() AS s`).get<{ s: string }>())!.s;
+  const botDbEnv = {
+    TWO_DATABASE_URL: process.env.TWO_TEST_DATABASE_URL!,
+    PGOPTIONS: `-c search_path=${schema}`,
+  };
 
   t.after(async () => {
     bot?.kill('SIGKILL');
     await mock.close();
-    if (harness) await harness.cleanup();
-    rmSync(dir, { recursive: true, force: true });
+    await harness.cleanup();
   });
 
   bot = spawn(process.execPath, ['src/index.ts'], {
@@ -151,29 +142,21 @@ test('no health port means no listener at all', { timeout: 90_000 }, async (t) =
   // The systemd deployment in deploy/ must keep working exactly as before, and
   // "exactly as before" means the bot opens no port unless asked.
   const mock = await startMockDiscord();
-  const dir = mkdtempSync(join(tmpdir(), 'two-nohealth-'));
   const port = await freePort();
   let bot: ChildProcess | null = null;
   const botLog: string[] = [];
 
-  let harness: TestDb | null = null;
-  let botDbEnv: Record<string, string>;
-  if (usingPostgres) {
-    harness = await openTestDb(import.meta.filename);
-    const schema = (await harness.db.prepare(`SELECT current_schema() AS s`).get<{ s: string }>())!.s;
-    botDbEnv = {
-      TWO_DATABASE_URL: process.env.TWO_TEST_DATABASE_URL!,
-      PGOPTIONS: `-c search_path=${schema}`,
-    };
-  } else {
-    botDbEnv = { TWO_DB_PATH: join(dir, 'two.db') };
-  }
+  const harness = await openTestDb(`${import.meta.filename}_${++harnessSequence}`);
+  const schema = (await harness.db.prepare(`SELECT current_schema() AS s`).get<{ s: string }>())!.s;
+  const botDbEnv = {
+    TWO_DATABASE_URL: process.env.TWO_TEST_DATABASE_URL!,
+    PGOPTIONS: `-c search_path=${schema}`,
+  };
 
   t.after(async () => {
     bot?.kill('SIGKILL');
     await mock.close();
-    if (harness) await harness.cleanup();
-    rmSync(dir, { recursive: true, force: true });
+    await harness.cleanup();
   });
 
   const env = { ...process.env, ...botDbEnv } as Record<string, string>;
