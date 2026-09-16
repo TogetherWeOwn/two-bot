@@ -29,6 +29,12 @@
  *      before the snapshot, is in neither result. Audit publication lag opens
  *      the same hole for a write made just before verification.
  *
+ *   5. A timer is not a boundary (TOG-2949/TOG-2950). Waiting for two identical
+ *      scans 15 seconds apart still passes over an entry that publishes after
+ *      the second scan has read its tail, and Discord documents no maximum
+ *      publication lag, so no wait length closes it. Both reviewers reproduced
+ *      a pass by publishing at exactly that point.
+ *
  * So the proof is now two independent checks over the same window, and BOTH
  * must pass:
  *
@@ -40,14 +46,18 @@
  *   b. The per-member role snapshot. Net state, for anything the audit log
  *      cannot attribute.
  *
- * The member snapshot is read FIRST and the audit scan is then repeated until
- * two consecutive full scans, separated by a quiesce delay, agree. Every audit
- * read is therefore strictly after the member read, and the covered interval is
- * closed by observation rather than by assumption: a write that lands mid-scan,
- * or publishes late, changes the next scan and the loop goes round again.
+ * The member snapshot is read FIRST, so every audit read is strictly after it.
+ * The window is then closed by a FENCE rather than by a wait: --verify creates
+ * and immediately deletes a throwaway channel, and refuses to report a result
+ * until it has seen that deletion in the audit log. Entry ids are snowflakes,
+ * so the fence is newer than any role write the walk could have produced -
+ * seeing it published is the log saying it has caught up past the window. One
+ * unfiltered read covers every action type at once, so a scan is a single
+ * consistent view with no cross-type skew, and two agreeing scans are still
+ * required on top of the fence.
  *
  * Either read failing is a failure: a proof that cannot see its evidence must
- * not print a pass.
+ * not print a pass. So is a fence that never appears.
  *
  *   DISCORD_STAGING_BOT_TOKEN=... node scripts/staging-session-demo.ts
  *     -> posts the panel, writes the invite and the baseline to a private dir
@@ -69,12 +79,11 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
-  rmSync,
   statSync,
   writeSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { buildSessionMenu } from '../src/discord/sessionWelcome.ts';
 import { buildSessionPicks, sessionWelcomeText } from '../src/onboarding/session.ts';
@@ -107,16 +116,25 @@ const ROLE_AUDIT_ACTIONS: ReadonlyArray<{ type: number; name: string }> = [
   { type: 32, name: 'ROLE_DELETE' },
 ];
 
+/**
+ * The audit action that carries the completion fence, and the name of the
+ * throwaway channel that produces it. The name is self-describing because an
+ * operator who sees it in the guild - which only happens if a --verify run died
+ * between creating and deleting it - should be able to tell what it was for.
+ */
+const CHANNEL_DELETE_ACTION = 12;
+const FENCE_CHANNEL_NAME = 'tog-1644-audit-fence';
+
 /** Bounds the audit walk. A window this busy is not a demo window; say so. */
 const MAX_AUDIT_PAGES = 10;
 const AUDIT_PAGE_SIZE = 100;
 
 /**
- * How long the audit log must stay unchanged before the window counts as
- * closed, and how many times we are willing to go round. Discord publishes
- * audit entries asynchronously; two identical full scans this far apart is the
- * evidence that nothing is still in flight. Overridable so the tests, which
- * drive a synchronous stub, do not have to sleep for real.
+ * How long to wait between scans while the log catches up to the fence, and how
+ * many times we are willing to go round. This is a backoff, NOT the evidence:
+ * what closes the window is seeing the fence entry (see `closeAuditWindow`).
+ * Overridable so the tests, which drive a synchronous stub, do not sleep for
+ * real.
  */
 const QUIESCE_MS = Number(process.env.TWO_SESSION_DEMO_QUIESCE_MS ?? 15_000);
 const MAX_QUIESCE_ROUNDS = 8;
@@ -157,16 +175,35 @@ interface AuditEntry {
  * group/world-writable parent without the sticky bit lets someone rename our
  * directory out from under the path.
  *
- * Returns the resolved directory; throws with a fix-it message otherwise.
+ * TOG-2949/TOG-2950: the caller gets the *open fd*, not just the path, and
+ * every artifact is opened relative to it. Returning only the path meant the
+ * validated directory was closed and then re-reached by name, so a directory
+ * swapped in between the two steps would have been written to instead - the
+ * checks proved something about an object we then stopped holding.
+ *
+ * Returns the resolved directory and an open fd on it; the caller must close
+ * the fd. Throws with a fix-it message otherwise.
  */
-function assertPrivateArtifactDir(): string {
+function openPrivateArtifactDir(): { dir: string; fd: number } {
   const dir = resolve(ARTIFACT_DIR);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
 
   const parent = dirname(dir);
   if (parent !== dir) {
+    // `statSync` reports the *target* of a symlinked parent, which would hide an
+    // attacker-owned link sitting on the path: repointing that link moves our
+    // directory as surely as renaming it, while the stat still shows a
+    // reassuring root-owned sticky /tmp. Ask what the name itself is first.
+    const link = lstatSync(parent);
     const p = statSync(parent);
     const selfUid = typeof process.getuid === 'function' ? process.getuid() : p.uid;
+    if (link.isSymbolicLink() && link.uid !== 0 && link.uid !== selfUid) {
+      throw new Error(
+        `Artifact directory parent ${parent} is a symlink owned by uid ${link.uid}, not root or uid ` +
+          `${selfUid}, so it can be repointed after this check. Set TWO_SESSION_DEMO_DIR to a path ` +
+          'with no foreign symlinks on it.',
+      );
+    }
     const parentWritableByOthers = (p.mode & 0o022) !== 0;
     const sticky = (p.mode & 0o1000) !== 0;
     if (p.uid !== 0 && p.uid !== selfUid) {
@@ -230,22 +267,58 @@ function assertPrivateArtifactDir(): string {
           'Fix its permissions or set TWO_SESSION_DEMO_DIR elsewhere.',
       );
     }
-  } finally {
+  } catch (err) {
     closeSync(fd);
+    throw err;
   }
-  return dir;
+  return { dir, fd };
 }
 
 /**
  * Artifacts must live inside the validated directory. An override pointing
  * outside it would sidestep every check above while still looking configured.
+ *
+ * Returns the single path component to open relative to the directory fd -
+ * never a path, so there is nothing left for a later resolution step to
+ * reinterpret.
  */
-function assertInsideArtifactDir(path: string, dir: string): string {
+function artifactNameInDir(path: string, dir: string): string {
   const full = resolve(path);
   if (dirname(full) !== dir) {
     throw new Error(`Artifact ${full} is outside the private directory ${dir}; refusing to use it.`);
   }
-  return full;
+  const name = basename(full);
+  if (name === '' || name === '.' || name === '..') {
+    throw new Error(`Artifact ${full} does not name a file inside ${dir}; refusing to use it.`);
+  }
+  return name;
+}
+
+/**
+ * Open an artifact *through the validated directory fd* rather than by
+ * pathname. `/proc/self/fd/<fd>` is the portable-on-Linux spelling of
+ * `openat(2)`: it resolves to the inode the fd holds, so the directory we
+ * checked is provably the directory we write into even if something replaces
+ * the name in between. `O_NOFOLLOW` still applies to the final component,
+ * which is the only component left.
+ *
+ * Where procfs is absent the open falls back to the validated pathname. That
+ * path is not race-free, and it is the reason the parent must be sticky or
+ * unwritable by others: without write access to the parent nobody can swap the
+ * directory out from under the name in the first place.
+ */
+function openInDir(dirFd: number, dir: string, name: string, flags: number, mode?: number): number {
+  const viaProc = `/proc/self/fd/${dirFd}/${name}`;
+  let pinned = false;
+  try {
+    const held = fstatSync(dirFd);
+    const seen = statSync(`/proc/self/fd/${dirFd}`);
+    pinned = seen.ino === held.ino && seen.dev === held.dev;
+  } catch {
+    pinned = false;
+  }
+  const target = pinned ? viaProc : join(dir, name);
+  return mode === undefined ? openSync(target, flags) : openSync(target, flags, mode);
 }
 
 /**
@@ -254,26 +327,40 @@ function assertInsideArtifactDir(path: string, dir: string): string {
  * AND after the fact, because an existing file keeps its old mode.
  */
 function writePrivate(path: string, contents: string): void {
-  const dir = assertPrivateArtifactDir();
-  const full = assertInsideArtifactDir(path, dir);
-  const fd = openSync(full, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o600);
+  const { dir, fd: dirFd } = openPrivateArtifactDir();
   try {
-    fchmodSync(fd, 0o600);
-    writeSync(fd, contents);
+    const name = artifactNameInDir(path, dir);
+    const fd = openInDir(
+      dirFd,
+      dir,
+      name,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+      0o600,
+    );
+    try {
+      fchmodSync(fd, 0o600);
+      writeSync(fd, contents);
+    } finally {
+      closeSync(fd);
+    }
   } finally {
-    closeSync(fd);
+    closeSync(dirFd);
   }
 }
 
 /** Read back through the same boundary; a verification read is a read of secrets too. */
 function readPrivate(path: string): string {
-  const dir = assertPrivateArtifactDir();
-  const full = assertInsideArtifactDir(path, dir);
-  const fd = openSync(full, constants.O_RDONLY | constants.O_NOFOLLOW);
+  const { dir, fd: dirFd } = openPrivateArtifactDir();
   try {
-    return readFileSync(fd, 'utf8');
+    const name = artifactNameInDir(path, dir);
+    const fd = openInDir(dirFd, dir, name, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      return readFileSync(fd, 'utf8');
+    } finally {
+      closeSync(fd);
+    }
   } finally {
-    closeSync(fd);
+    closeSync(dirFd);
   }
 }
 
@@ -306,9 +393,13 @@ async function main(): Promise<void> {
   // member map will live is actually private, and that both artifacts are
   // really inside it. Failing here costs nothing; failing after the invite
   // exists means a live bearer credential in a shared directory.
-  const artifactDir = assertPrivateArtifactDir();
-  assertInsideArtifactDir(SNAPSHOT_PATH, artifactDir);
-  assertInsideArtifactDir(INVITE_PATH, artifactDir);
+  const preflight = openPrivateArtifactDir();
+  try {
+    artifactNameInDir(SNAPSHOT_PATH, preflight.dir);
+    artifactNameInDir(INVITE_PATH, preflight.dir);
+  } finally {
+    closeSync(preflight.fd);
+  }
 
   async function api<T>(method: string, path: string, body?: unknown): Promise<{ status: number; body: T | null }> {
     const r = await fetch(API + path, {
@@ -322,6 +413,15 @@ async function main(): Promise<void> {
     return { status: r.status, body: (await r.json().catch(() => null)) as T | null };
   }
 
+  /**
+   * Identity is the one check that cannot move inside the cleanup-protected
+   * region below: revocation is itself a write, and a DELETE sent with a token
+   * we have not yet confirmed belongs to the staging application could revoke
+   * something in a guild this script was never pointed at. Failing here is also
+   * the one case where no invite of ours can exist yet on a --verify run that
+   * has not reached the baseline, and where a live one is better left alone
+   * than deleted by the wrong identity.
+   */
   const me = await api<{ id: string }>('GET', '/users/@me');
   if (me.status !== 200 || me.body?.id !== STAGING_BOT_APPLICATION_ID) {
     throw new Error(
@@ -329,26 +429,29 @@ async function main(): Promise<void> {
     );
   }
 
-  const channel = await api<{ id: string; guild_id?: string; name?: string; type?: number }>(
-    'GET',
-    `/channels/${EXPECTED_CHANNEL.id}`,
-  );
-  if (
-    channel.status !== 200 ||
-    channel.body?.id !== EXPECTED_CHANNEL.id ||
-    channel.body.guild_id !== guildId ||
-    channel.body.name !== EXPECTED_CHANNEL.name ||
-    channel.body.type !== EXPECTED_CHANNEL.type
-  ) {
-    throw new Error(
-      `Expected #${EXPECTED_CHANNEL.name} (${EXPECTED_CHANNEL.id}) in guild ${guildId}; ` +
-        `received HTTP ${channel.status} ${JSON.stringify(channel.body)}.`,
+  /** The reads that must succeed before the script trusts the guild it is in. */
+  async function preflightGuild(): Promise<void> {
+    const channel = await api<{ id: string; guild_id?: string; name?: string; type?: number }>(
+      'GET',
+      `/channels/${EXPECTED_CHANNEL.id}`,
     );
-  }
+    if (
+      channel.status !== 200 ||
+      channel.body?.id !== EXPECTED_CHANNEL.id ||
+      channel.body.guild_id !== guildId ||
+      channel.body.name !== EXPECTED_CHANNEL.name ||
+      channel.body.type !== EXPECTED_CHANNEL.type
+    ) {
+      throw new Error(
+        `Expected #${EXPECTED_CHANNEL.name} (${EXPECTED_CHANNEL.id}) in guild ${guildId}; ` +
+          `received HTTP ${channel.status} ${JSON.stringify(channel.body)}.`,
+      );
+    }
 
-  const roles = await api<Array<{ id: string; name: string }>>('GET', `/guilds/${guildId}/roles`);
-  if (roles.status !== 200 || !Array.isArray(roles.body)) {
-    throw new Error(`Could not read roles for guild ${guildId}: HTTP ${roles.status}.`);
+    const roles = await api<Array<{ id: string; name: string }>>('GET', `/guilds/${guildId}/roles`);
+    if (roles.status !== 200 || !Array.isArray(roles.body)) {
+      throw new Error(`Could not read roles for guild ${guildId}: HTTP ${roles.status}.`);
+    }
   }
 
   /**
@@ -377,101 +480,178 @@ async function main(): Promise<void> {
     }
   }
 
-  /** `after === null` asks for the newest entries; Discord's ordering under an
+  /**
+   * One audit read, unfiltered.
+   *
+   * TOG-2949/TOG-2950: this used to take an `action_type` and be called once per
+   * role action, so a single "full scan" was four sequential HTTP requests. An
+   * entry of the first type that published while the fourth request was in
+   * flight was in neither that scan nor the previous one - and both reviewers
+   * reproduced exactly that, injecting on the last request of a scan.
+   *
+   * Asking for every action type at once makes a scan ONE request, so its result
+   * is a single consistent view of the log tail and the cross-type skew does not
+   * exist. Role types are selected here instead of by the server.
+   *
+   * `after === null` asks for the newest entries; Discord's ordering under an
    * explicit `after` is not documented as stable, so every caller filters and
-   * pages by entry id rather than by position. */
-  async function auditPage(actionType: number, after: string | null): Promise<AuditEntry[]> {
+   * pages by entry id rather than by position.
+   */
+  async function auditPage(after: string | null): Promise<AuditEntry[]> {
     const page = await api<{ audit_log_entries?: AuditEntry[] }>(
       'GET',
-      `/guilds/${guildId}/audit-logs?limit=${AUDIT_PAGE_SIZE}&action_type=${actionType}` +
-        (after === null ? '' : `&after=${after}`),
+      `/guilds/${guildId}/audit-logs?limit=${AUDIT_PAGE_SIZE}` + (after === null ? '' : `&after=${after}`),
     );
     if (page.status !== 200 || !Array.isArray(page.body?.audit_log_entries)) {
       throw new Error(
-        `Could not read the audit log for guild ${guildId} (action ${actionType}): HTTP ${page.status}. ` +
+        `Could not read the audit log for guild ${guildId}: HTTP ${page.status}. ` +
           'The zero-role-write claim cannot be proven without it.',
       );
     }
     return page.body.audit_log_entries;
   }
 
-  /** The newest role-affecting audit entry id, or '0' if there is none. */
-  async function newestRoleAuditId(): Promise<string> {
+  /** The newest audit entry id of any type, or '0' if the log is empty. */
+  async function newestAuditId(): Promise<string> {
     let newest = 0n;
-    for (const action of ROLE_AUDIT_ACTIONS) {
-      for (const entry of await auditPage(action.type, null)) {
-        const id = BigInt(entry.id);
-        if (id > newest) newest = id;
-      }
+    for (const entry of await auditPage(null)) {
+      const id = BigInt(entry.id);
+      if (id > newest) newest = id;
     }
     return newest.toString();
   }
 
-  /** One full scan: role writes recorded after `cursor`, keyed by entry id. */
-  async function roleWritesSince(cursor: string): Promise<Map<string, string>> {
-    const found = new Map<string, string>();
+  const ROLE_ACTION_NAMES = new Map(ROLE_AUDIT_ACTIONS.map((a) => [a.type, a.name]));
+
+  /**
+   * One full scan of everything recorded after `cursor`.
+   *
+   * Returns both halves because the caller needs them for different jobs: the
+   * role writes are the finding, and every id seen is what the fence below is
+   * checked against.
+   */
+  async function auditSince(cursor: string): Promise<{ roleWrites: Map<string, string>; seen: AuditEntry[] }> {
+    const roleWrites = new Map<string, string>();
+    const seen: AuditEntry[] = [];
     const floor = BigInt(cursor);
-    for (const action of ROLE_AUDIT_ACTIONS) {
-      let after = cursor;
-      for (let page = 0; ; page++) {
-        if (page >= MAX_AUDIT_PAGES) {
-          throw new Error(
-            `More than ${MAX_AUDIT_PAGES * AUDIT_PAGE_SIZE} ${action.name} entries since the baseline. ` +
-              'That is not a demo window - re-baseline and walk again.',
-          );
-        }
-        const entries = await auditPage(action.type, after);
-        let highest = BigInt(after);
-        for (const entry of entries) {
-          const id = BigInt(entry.id);
-          if (id > floor) {
-            // Keyed by id: paging by highest-seen can re-serve an entry, and
-            // the same write must not read as two.
-            found.set(
+    let after = cursor;
+    for (let page = 0; ; page++) {
+      if (page >= MAX_AUDIT_PAGES) {
+        throw new Error(
+          `More than ${MAX_AUDIT_PAGES * AUDIT_PAGE_SIZE} audit entries since the baseline. ` +
+            'That is not a demo window - re-baseline and walk again.',
+        );
+      }
+      const entries = await auditPage(after);
+      let highest = BigInt(after);
+      for (const entry of entries) {
+        const id = BigInt(entry.id);
+        if (id > floor) {
+          seen.push(entry);
+          const name = entry.action_type === undefined ? undefined : ROLE_ACTION_NAMES.get(entry.action_type);
+          // Keyed by id: paging by highest-seen can re-serve an entry, and the
+          // same write must not read as two.
+          if (name) {
+            roleWrites.set(
               entry.id,
-              `${action.name} entry ${entry.id}: executor ${entry.user_id ?? 'unknown'}, target ${entry.target_id ?? 'unknown'}`,
+              `${name} entry ${entry.id}: executor ${entry.user_id ?? 'unknown'}, target ${entry.target_id ?? 'unknown'}`,
             );
           }
-          if (id > highest) highest = id;
         }
-        if (entries.length < AUDIT_PAGE_SIZE || highest === BigInt(after)) break;
-        after = highest.toString();
+        if (id > highest) highest = id;
       }
+      if (entries.length < AUDIT_PAGE_SIZE || highest === BigInt(after)) break;
+      after = highest.toString();
     }
-    return found;
+    return { roleWrites, seen };
   }
 
   /**
-   * Close the window rather than assume it is closed.
+   * Mint the completion fence: an audit entry we author ourselves, after the
+   * walk is over, whose id is therefore newer than any role write the walk could
+   * have produced.
    *
-   * A single pass scans the four action types one after another, so a write
-   * landing between two of those requests is only in the later types' results -
-   * and if its member has left, the snapshot cannot see it either. Discord also
-   * publishes audit entries with a lag, so a write made just before --verify can
-   * be absent from a scan that ran after it.
+   * TOG-2949/TOG-2950: the previous version closed the window when two scans
+   * 15 seconds apart agreed. That is a timer, not a boundary - an entry that
+   * publishes after the second scan reads its tail is in neither scan, and both
+   * reviewers reproduced a pass over exactly that. Discord documents no maximum
+   * publication lag, so there is no wait length that would fix it. The only way
+   * to know the log has caught up to a moment is to put something of our own at
+   * that moment and read until we see it.
    *
-   * Both holes have the same shape: the answer is still moving. So scan, wait,
-   * scan again, and only accept a result when two consecutive full scans
-   * separated by the quiesce delay are identical. Anything in flight lands in
-   * one of them and sends us round again; a log that will not settle is a
-   * failure, not a pass.
+   * A throwaway channel is the marker: it is not a role write (so it cannot be
+   * confused with the thing under test), not a credential (unlike an invite, a
+   * leaked one grants nobody anything), and it is created and deleted within a
+   * few milliseconds. `CHANNEL_DELETE` is the fence because it is the later of
+   * the two entries.
+   *
+   * The channel is deleted on every path; a marker we could not clean up is
+   * reported rather than swallowed, because a leftover channel in the guild is
+   * an operator-visible mess even though it is harmless.
    */
-  async function closeAuditWindow(cursor: string): Promise<string[]> {
-    let previous = await roleWritesSince(cursor);
+  async function mintAuditFence(): Promise<string> {
+    const created = await api<{ id: string }>('POST', `/guilds/${guildId}/channels`, {
+      name: FENCE_CHANNEL_NAME,
+      type: 0,
+    });
+    if (created.status !== 200 && created.status !== 201) {
+      throw new Error(
+        `Could not create the audit fence channel in guild ${guildId}: HTTP ${created.status}. ` +
+          'Without a marker of our own the audit window cannot be closed, and an unfenced scan ' +
+          'is a timed guess rather than a proof. Grant the staging app MANAGE_CHANNELS and re-verify.',
+      );
+    }
+    const channelId = created.body?.id;
+    if (!channelId) {
+      throw new Error(`Discord accepted the audit fence channel but returned no id: ${JSON.stringify(created.body)}.`);
+    }
+    const deleted = await api<unknown>('DELETE', `/channels/${channelId}`);
+    if (deleted.status !== 200 && deleted.status !== 204) {
+      throw new Error(
+        `Could not delete the audit fence channel ${channelId}: HTTP ${deleted.status}. ` +
+          `Delete #${FENCE_CHANNEL_NAME} by hand, then re-verify.`,
+      );
+    }
+    return channelId;
+  }
+
+  /**
+   * Close the window by observation rather than by waiting.
+   *
+   * Mint a fence (an entry we authored after the walk ended), then scan until
+   * that entry is visible in the log. Because audit entry ids are snowflakes,
+   * every role write the walk could have produced has a smaller id than the
+   * fence; seeing the fence is the log telling us it has published past the
+   * point where such a write would be. A scan that cannot find the fence has
+   * not caught up, so it is repeated - and a log that never catches up is a
+   * failure, not a pass.
+   *
+   * The two-agreeing-scans rule is kept on top of the fence as defence in
+   * depth, so a write that publishes out of id order still has to land in two
+   * consecutive identical scans to be missed.
+   */
+  async function closeAuditWindow(cursor: string, fenceChannelId: string): Promise<string[]> {
+    let previous: Map<string, string> | null = null;
     for (let round = 1; ; round++) {
-      await sleep(QUIESCE_MS);
-      const current = await roleWritesSince(cursor);
+      const { roleWrites, seen } = await auditSince(cursor);
+      const fenced = seen.some((e) => e.action_type === CHANNEL_DELETE_ACTION && e.target_id === fenceChannelId);
+      const prior = previous;
       const settled =
-        previous.size === current.size && [...current.keys()].every((id) => previous.has(id));
-      if (settled) return [...current.values()].sort();
+        prior !== null && prior.size === roleWrites.size && [...roleWrites.keys()].every((id) => prior.has(id));
+      if (fenced && settled) return [...roleWrites.values()].sort();
       if (round >= MAX_QUIESCE_ROUNDS) {
         throw new Error(
-          `The audit log was still changing after ${MAX_QUIESCE_ROUNDS} rounds ` +
-            `(${previous.size} -> ${current.size} entries since ${cursor}). ` +
-            'The window is not closed, so this proof would be a guess - stop the walk and re-verify.',
+          fenced
+            ? `The audit log was still changing after ${MAX_QUIESCE_ROUNDS} rounds ` +
+              `(${previous?.size ?? 0} -> ${roleWrites.size} role writes since ${cursor}). ` +
+              'The window is not closed, so this proof would be a guess - stop the walk and re-verify.'
+            : `The audit log never published the fence entry for channel ${fenceChannelId} after ` +
+              `${MAX_QUIESCE_ROUNDS} rounds. The log is lagging further behind than this proof can ` +
+              'wait, so anything the walk wrote may still be unpublished - re-verify rather than trust this.',
         );
       }
-      previous = current;
+      previous = roleWrites;
+      await sleep(QUIESCE_MS);
     }
   }
 
@@ -489,14 +669,42 @@ async function main(): Promise<void> {
    * proof's own error.
    */
   async function revokeInvite(): Promise<{ ok: boolean; message: string }> {
-    let invite = '';
+    let contents: string;
     try {
-      invite = readPrivate(INVITE_PATH);
+      contents = readPrivate(INVITE_PATH);
     } catch {
-      return { ok: true, message: `no invite at ${INVITE_PATH}; nothing to revoke` };
+      // TOG-2949/TOG-2950: this used to return ok. "I cannot find the handle"
+      // is not "the invite is gone" - it is the one state where we know least,
+      // and the baseline run only ever writes this file after Discord has
+      // confirmed a live invite. Deleting it (or a write that failed after the
+      // POST succeeded) must not read as a clean revocation.
+      return {
+        ok: false,
+        message:
+          `No invite handle at ${INVITE_PATH}, so revocation is unconfirmed. An invite created by the ` +
+          'baseline run may still be live: check the guild\'s invite list in Discord and delete it by hand, ' +
+          'then re-baseline before walking again.',
+      };
     }
-    const code = invite.trim().split('/').pop() ?? '';
-    if (!code) return { ok: true, message: `no invite code in ${INVITE_PATH}; nothing to revoke` };
+
+    // A confirmed revocation leaves a receipt rather than removing the file, so
+    // that a second --verify can tell "already revoked, and here is the status
+    // Discord actually returned" apart from "the handle is missing".
+    const receipt = contents.match(/^revoked\s+(\S+)\s+HTTP\s+(\d{3})\b/m);
+    if (receipt) {
+      return { ok: true, message: `demo invite already revoked (HTTP ${receipt[2]}); receipt in ${INVITE_PATH}` };
+    }
+
+    const url = contents.trim();
+    const code = /^https:\/\/discord\.gg\/([A-Za-z0-9-]+)$/.exec(url)?.[1] ?? '';
+    if (!code) {
+      return {
+        ok: false,
+        message:
+          `${INVITE_PATH} does not hold a usable invite handle or a revocation receipt, so revocation is ` +
+          'unconfirmed. Check the guild\'s invite list in Discord and delete any demo invite by hand.',
+      };
+    }
 
     let status: number;
     try {
@@ -517,39 +725,64 @@ async function main(): Promise<void> {
           `The invite may still be live; ${INVITE_PATH} is kept so you can retry.`,
       };
     }
-    rmSync(INVITE_PATH, { force: true });
+    // The bearer URL is overwritten in place by the receipt, so the credential
+    // stops existing on disk at the same moment it stops existing in Discord,
+    // and the file that remains is evidence rather than a secret.
+    try {
+      writePrivate(INVITE_PATH, `revoked ${code} HTTP ${status} at ${new Date().toISOString()}\n`);
+    } catch (err) {
+      return {
+        ok: false,
+        message:
+          `The demo invite was revoked (HTTP ${status}) but the receipt could not be written to ${INVITE_PATH}: ` +
+          `${err instanceof Error ? err.message : String(err)}. Remove that file by hand.`,
+      };
+    }
     return {
       ok: true,
       message:
         status === 404
-          ? `demo invite was already gone (HTTP 404); removed ${INVITE_PATH}`
-          : `revoked demo invite (HTTP ${status}); removed ${INVITE_PATH}`,
+          ? `demo invite was already gone (HTTP 404); receipt written to ${INVITE_PATH}`
+          : `revoked demo invite (HTTP ${status}); receipt written to ${INVITE_PATH}`,
     };
   }
 
   if (verifyOnly) {
-    let baseline: Baseline;
-    try {
-      baseline = JSON.parse(readPrivate(SNAPSHOT_PATH)) as Baseline;
-    } catch {
-      throw new Error(
-        `No baseline at ${SNAPSHOT_PATH}. Run this script without --verify before the member walk.`,
-      );
-    }
-    if (baseline.guildId !== guildId || typeof baseline.auditCursor !== 'string' || !baseline.members) {
-      throw new Error(
-        `Baseline at ${SNAPSHOT_PATH} is for guild ${baseline.guildId ?? 'unknown'} or predates the audit-log ` +
-          `proof; it cannot cover this walk. Re-baseline against ${guildId} and walk again.`,
-      );
-    }
-
+    /**
+     * TOG-2949/TOG-2950: everything that can fail now sits inside this block,
+     * because revocation runs after it unconditionally. Previously the baseline
+     * parse and the guild preflight ran above it, so a corrupted snapshot or a
+     * lost permission failed the run with zero DELETE requests and left the
+     * bearer invite live - which is the exact moment an operator stops reading
+     * output.
+     */
     let proofError: unknown = null;
     try {
+      await preflightGuild();
+
+      let baseline: Baseline;
+      try {
+        baseline = JSON.parse(readPrivate(SNAPSHOT_PATH)) as Baseline;
+      } catch {
+        throw new Error(
+          `No baseline at ${SNAPSHOT_PATH}. Run this script without --verify before the member walk.`,
+        );
+      }
+      if (baseline.guildId !== guildId || typeof baseline.auditCursor !== 'string' || !baseline.members) {
+        throw new Error(
+          `Baseline at ${SNAPSHOT_PATH} is for guild ${baseline.guildId ?? 'unknown'} or predates the audit-log ` +
+            `proof; it cannot cover this walk. Re-baseline against ${guildId} and walk again.`,
+        );
+      }
+
       // (b) Net state first, so every audit read below is strictly after it and
       // no write can slip through the gap between the two checks.
       const deltas = roleDeltas(baseline.members, await memberRoles());
+      // The fence is minted after the member read and before the audit scan, so
+      // its id is newer than any role write this walk could have produced.
+      const fenceChannelId = await mintAuditFence();
       // (a) The audit log: the only check that can see a member who has left.
-      const writes = await closeAuditWindow(baseline.auditCursor);
+      const writes = await closeAuditWindow(baseline.auditCursor, fenceChannelId);
 
       console.log('--- role writes since baseline (audit log) ---');
       if (writes.length) {
@@ -558,6 +791,7 @@ async function main(): Promise<void> {
       console.log(
         `NONE across ${ROLE_AUDIT_ACTIONS.map((a) => a.name).join(', ')} since entry ${baseline.auditCursor}`,
       );
+      console.log(`window closed by observing fence entry for channel ${fenceChannelId}`);
 
       console.log('--- member role delta since baseline ---');
       if (deltas.length) {
@@ -581,10 +815,12 @@ async function main(): Promise<void> {
     return;
   }
 
+  await preflightGuild();
+
   const baseline: Baseline = {
     guildId,
     takenAt: new Date().toISOString(),
-    auditCursor: await newestRoleAuditId(),
+    auditCursor: await newestAuditId(),
     members: await memberRoles(),
   };
   writePrivate(SNAPSHOT_PATH, JSON.stringify(baseline, null, 2));

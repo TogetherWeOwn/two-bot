@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
 import { execFile } from 'node:child_process';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,6 +21,7 @@ const GUILD = '1545644954272137297';
 const CHANNEL = '1546451669284552726';
 const TOKEN = `${Buffer.from(STAGING_BOT_APPLICATION_ID).toString('base64')}.Gxxxxx.yyyyyyyyyy`;
 const MEMBER_ROLE_UPDATE = 25;
+const CHANNEL_DELETE = 12;
 
 interface AuditEntry {
   id: string;
@@ -63,6 +64,10 @@ interface Stub {
   injectEntry: AuditEntry | null;
   auditStatus: number;
   inviteDeleteStatus: number;
+  /** Status for POST /guilds/{id}/channels, which mints the audit fence. */
+  fenceCreateStatus: number;
+  /** Clear it to model an audit log that never publishes the fence entry. */
+  publishFence: boolean;
   close: () => Promise<void>;
 }
 
@@ -84,6 +89,11 @@ async function stubDiscord(options: StubOptions = {}): Promise<Stub> {
     injectEntry: null as AuditEntry | null,
     auditStatus: options.auditStatus ?? 200,
     inviteDeleteStatus: options.inviteDeleteStatus ?? 200,
+    fenceCreateStatus: 200,
+    fenceDeleteStatus: 200,
+    fenceChannels: 0,
+    /** Clear it to model an audit log that never publishes the fence entry. */
+    publishFence: true,
   };
   const server: Server = createServer((req, res) => {
     const path = req.url ?? '';
@@ -124,12 +134,42 @@ async function stubDiscord(options: StubOptions = {}): Promise<Stub> {
         state.injectEntry = null;
       }
       const params = new URL(`http://x${path.slice('/api/v10'.length)}`).searchParams;
-      const actionType = Number(params.get('action_type'));
+      // The script reads every action type in one request now; honour an
+      // explicit action_type anyway so a regression back to per-type paging
+      // fails on the assertions rather than silently reading nothing.
+      const actionType = params.get('action_type');
       const after = params.get('after');
       const entries = audit
-        .filter((e) => e.action_type === actionType)
+        .filter((e) => (actionType === null ? true : e.action_type === Number(actionType)))
         .filter((e) => (after === null ? true : BigInt(e.id) > BigInt(after)));
       res.end(JSON.stringify({ audit_log_entries: entries }));
+      return;
+    }
+    // The audit fence: a throwaway channel whose deletion the script must
+    // observe in the log before it is allowed to report a result. Creating it
+    // appends the CHANNEL_DELETE entry the script is waiting for, unless a test
+    // has suppressed that to model a log that never catches up.
+    if (req.method === 'POST' && path === `/api/v10/guilds/${GUILD}/channels`) {
+      if (state.fenceCreateStatus !== 200) {
+        res.writeHead(state.fenceCreateStatus).end(JSON.stringify({ message: 'denied' }));
+        return;
+      }
+      state.fenceChannels += 1;
+      res.end(JSON.stringify({ id: `fence-channel-${state.fenceChannels}` }));
+      return;
+    }
+    if (req.method === 'DELETE' && path.startsWith('/api/v10/channels/')) {
+      const channelId = path.split('/').pop() ?? '';
+      if (state.publishFence) {
+        audit.push({
+          id: `9500000000000000${String(state.fenceChannels).padStart(2, '0')}`,
+          action_type: CHANNEL_DELETE,
+          user_id: STAGING_BOT_APPLICATION_ID,
+          target_id: channelId,
+        });
+      }
+      res.writeHead(state.fenceDeleteStatus);
+      res.end(JSON.stringify({ id: channelId }));
       return;
     }
     if (req.method === 'GET' && path.startsWith(`/api/v10/guilds/${GUILD}/members?`)) {
@@ -204,8 +244,30 @@ async function stubDiscord(options: StubOptions = {}): Promise<Stub> {
     set inviteDeleteStatus(s: number) {
       state.inviteDeleteStatus = s;
     },
+    get fenceCreateStatus() {
+      return state.fenceCreateStatus;
+    },
+    set fenceCreateStatus(s: number) {
+      state.fenceCreateStatus = s;
+    },
+    get publishFence() {
+      return state.publishFence;
+    },
+    set publishFence(v: boolean) {
+      state.publishFence = v;
+    },
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
+}
+
+/** DELETEs now include the fence channel, so invite revocation is asserted alone. */
+function inviteDeletes(stub: Stub): string[] {
+  return stub.deletes.filter((p) => p.startsWith('/api/v10/invites/'));
+}
+
+/** The receipt --verify leaves in place of the bearer URL once Discord confirms. */
+function inviteReceipt(dir: string): string {
+  return readFileSync(join(dir, 'invite.txt'), 'utf8');
 }
 
 interface RunOptions {
@@ -397,7 +459,6 @@ test('a baseline from another guild is refused rather than compared', async () =
     const snapshot = JSON.parse(readFileSync(join(dir, 'snapshot.json'), 'utf8')) as { guildId: string };
     assert.equal(snapshot.guildId, GUILD);
     rmSync(join(dir, 'snapshot.json'));
-    const { writeFileSync } = await import('node:fs');
     writeFileSync(
       join(dir, 'snapshot.json'),
       JSON.stringify({ ...snapshot, guildId: '999999999999999999' }),
@@ -431,8 +492,12 @@ test('the demo invite is never printed, lands owner-only, and is revoked on veri
 
     const verify = await runScript(stub, { dir, args: ['--verify'] });
     assert.equal(verify.code, 0, verify.stderr);
-    assert.deepEqual(stub.deletes, ['/api/v10/invites/invite-code'], 'verify must revoke the invite');
-    assert.equal(existsSync(invitePath), false, 'verify must remove the invite file');
+    assert.deepEqual(inviteDeletes(stub), ['/api/v10/invites/invite-code'], 'verify must revoke the invite');
+    // The bearer URL is replaced by a receipt, not deleted: a missing file is
+    // indistinguishable from one an operator removed, and that state now fails.
+    assert.match(inviteReceipt(dir), /^revoked invite-code HTTP 200 at /);
+    assert.doesNotMatch(inviteReceipt(dir), /discord\.gg/, 'the receipt must not keep the bearer URL');
+    assert.equal(statSync(invitePath).mode & 0o077, 0, 'the receipt stays owner-only');
   } finally {
     rmSync(dir, { recursive: true, force: true });
     await stub.close();
@@ -440,12 +505,10 @@ test('the demo invite is never printed, lands owner-only, and is revoked on veri
 });
 
 /**
- * TOG-2926 P1: the open-ended window. Scanning the four action types once,
- * sequentially, leaves a gap - an entry that publishes after its own type was
- * scanned is missed, and if the member has left, the snapshot cannot see it
- * either. Publish the entry at exactly that point: the last request of the
- * first full scan. Only a second scan can find it, so this test fails if the
- * re-read loop is ever collapsed back into a single pass.
+ * TOG-2926 P1: the open-ended window. An entry that publishes after the first
+ * scan has read the log is missed, and if the member has left, the snapshot
+ * cannot see it either. Publish it during the second scan: only a third scan
+ * can find it, so this fails if the re-read loop is collapsed into one pass.
  */
 test('a role write published after the first audit scan still fails the proof', async () => {
   const stub = await stubDiscord();
@@ -454,7 +517,7 @@ test('a role write published after the first audit scan still fails the proof', 
     assert.equal((await runScript(stub, { dir })).code, 0);
 
     stub.auditRequests = 0;
-    stub.injectAfterAuditRequests = 4; // the 4th and last request of scan #1
+    stub.injectAfterAuditRequests = 2; // scan #2, after scan #1 has read the log
     stub.injectEntry = {
       id: '900000000000000077',
       action_type: MEMBER_ROLE_UPDATE,
@@ -473,11 +536,61 @@ test('a role write published after the first audit scan still fails the proof', 
 });
 
 /**
- * The passing side of the same property: a clean verify is only allowed to
- * report NONE after two agreeing full scans. Four action types per scan, so a
- * single-scan implementation would stop at 4 requests.
+ * TOG-2949/TOG-2950 P1: the window is closed by a fence, not by a timer.
+ *
+ * Both reviewers reproduced a pass by publishing an entry after the scan that
+ * returned success, and the answer to "how long should we wait" is that Discord
+ * documents no maximum publication lag - so --verify mints an audit entry of
+ * its own and refuses to report anything until it has read that entry back.
+ *
+ * Here the log never publishes it. The guild is otherwise clean, so the old
+ * two-agreeing-scans rule was satisfied on the first round and printed a pass;
+ * the fence must turn that into a failure.
  */
-test('a clean verify confirms the window with a second full audit scan', async () => {
+test('a fence the audit log never publishes fails instead of passing a clean guild', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
+  try {
+    assert.equal((await runScript(stub, { dir })).code, 0);
+    stub.publishFence = false;
+
+    const verify = await runScript(stub, { dir, args: ['--verify'] });
+    assert.notEqual(verify.code, 0, 'an unfenced window must not report a pass');
+    assert.match(verify.stderr, /never published the fence entry/);
+    assert.doesNotMatch(verify.stdout, /NONE across/, 'it must not print the clean result it did not earn');
+    // The invite is still revoked: an unprovable window is exactly when a live
+    // bearer credential is most likely to be forgotten.
+    assert.deepEqual(inviteDeletes(stub), ['/api/v10/invites/invite-code']);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/** No permission to mint the fence is no proof, not a proof with a caveat. */
+test('a guild that refuses the fence channel fails closed', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
+  try {
+    assert.equal((await runScript(stub, { dir })).code, 0);
+    stub.fenceCreateStatus = 403;
+
+    const verify = await runScript(stub, { dir, args: ['--verify'] });
+    assert.notEqual(verify.code, 0);
+    assert.match(verify.stderr, /Could not create the audit fence channel/);
+    assert.match(verify.stderr, /MANAGE_CHANNELS/);
+    assert.deepEqual(inviteDeletes(stub), ['/api/v10/invites/invite-code'], 'and it still revokes');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/**
+ * The passing side: a clean verify reports NONE only after it has both seen the
+ * fence and had two agreeing scans, and it cleans the fence channel up.
+ */
+test('a clean verify closes the window with a fence and a second scan', async () => {
   const stub = await stubDiscord();
   const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
   try {
@@ -485,9 +598,39 @@ test('a clean verify confirms the window with a second full audit scan', async (
     stub.auditRequests = 0;
     const verify = await runScript(stub, { dir, args: ['--verify'] });
     assert.equal(verify.code, 0, verify.stderr);
+    assert.ok(stub.auditRequests >= 2, `expected at least two scans, saw ${stub.auditRequests}`);
+    assert.match(verify.stdout, /window closed by observing fence entry for channel fence-channel-1/);
     assert.ok(
-      stub.auditRequests >= 8,
-      `expected at least two full audit scans (8 requests), saw ${stub.auditRequests}`,
+      stub.writes.includes(`/api/v10/guilds/${GUILD}/channels`),
+      'the fence channel must actually be created',
+    );
+    assert.ok(
+      stub.deletes.includes('/api/v10/channels/fence-channel-1'),
+      'the fence channel must not be left behind in the guild',
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/**
+ * TOG-2949/TOG-2950 P1: a scan is one request covering every action type, so
+ * there is no interval in which an entry of an already-scanned type can land
+ * unseen. Per-type paging made a scan four requests with three such gaps.
+ */
+test('one audit scan is a single request across every action type', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
+  try {
+    assert.equal((await runScript(stub, { dir })).code, 0);
+    stub.auditRequests = 0;
+    const verify = await runScript(stub, { dir, args: ['--verify'] });
+    assert.equal(verify.code, 0, verify.stderr);
+    // Two scans of one request each. Four action types per scan would be 8.
+    assert.ok(
+      stub.auditRequests <= 4,
+      `a scan must not fan out per action type; saw ${stub.auditRequests} requests for two scans`,
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -510,11 +653,11 @@ test('an unconfirmed invite revocation fails the run and keeps the retry handle'
     const verify = await runScript(stub, { dir, args: ['--verify'] });
     assert.notEqual(verify.code, 0, 'an unconfirmed revocation must not exit 0');
     assert.match(verify.stderr, /HTTP 500, which does not confirm deletion/);
-    assert.deepEqual(stub.deletes, ['/api/v10/invites/invite-code'], 'it must still have tried');
-    assert.equal(
-      existsSync(join(dir, 'invite.txt')),
-      true,
-      'the invite file is the only retry handle; it must survive a failed DELETE',
+    assert.deepEqual(inviteDeletes(stub), ['/api/v10/invites/invite-code'], 'it must still have tried');
+    assert.match(
+      inviteReceipt(dir),
+      /^https:\/\/discord\.gg\/invite-code$/m,
+      'the bearer URL is the only retry handle; it must survive a failed DELETE unreplaced',
     );
     assert.doesNotMatch(verify.stdout + verify.stderr, /discord\.gg|invite-code/);
   } finally {
@@ -534,7 +677,99 @@ test('an already-gone invite counts as revoked', async () => {
     const verify = await runScript(stub, { dir, args: ['--verify'] });
     assert.equal(verify.code, 0, verify.stderr);
     assert.match(verify.stdout, /already gone \(HTTP 404\)/);
-    assert.equal(existsSync(join(dir, 'invite.txt')), false);
+    assert.match(inviteReceipt(dir), /^revoked invite-code HTTP 404 at /);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/**
+ * TOG-2949/TOG-2950 P1: the fail-open handle. `revokeInvite` returned ok when
+ * it could not read invite.txt, so deleting the file made --verify exit 0
+ * having sent no DELETE at all - while the invite the baseline created was
+ * still live. "I cannot find the handle" is the state we know least about; it
+ * is not a confirmed revocation.
+ */
+test('a missing invite handle is an unconfirmed revocation, not a clean one', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
+  try {
+    assert.equal((await runScript(stub, { dir })).code, 0);
+    rmSync(join(dir, 'invite.txt'));
+
+    const verify = await runScript(stub, { dir, args: ['--verify'] });
+    assert.notEqual(verify.code, 0, 'a lost handle must not exit 0');
+    assert.match(verify.stderr, /revocation is unconfirmed/);
+    assert.deepEqual(inviteDeletes(stub), [], 'precondition: there was no handle to DELETE with');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/** Same fail-open, reached by corrupting the handle rather than removing it. */
+test('an unparseable invite handle is an unconfirmed revocation', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
+  try {
+    assert.equal((await runScript(stub, { dir })).code, 0);
+    writeFileSync(join(dir, 'invite.txt'), '\n');
+
+    const verify = await runScript(stub, { dir, args: ['--verify'] });
+    assert.notEqual(verify.code, 0);
+    assert.match(verify.stderr, /does not hold a usable invite handle/);
+    assert.deepEqual(inviteDeletes(stub), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/**
+ * TOG-2950 P1: cleanup has to be wrapped around the whole verify path. The
+ * baseline parse used to run before it, so corrupting snapshot.json failed the
+ * run with zero DELETE requests and left the bearer invite live - the reviewer
+ * reproduced exactly this.
+ */
+test('a corrupted baseline still revokes the invite', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
+  try {
+    assert.equal((await runScript(stub, { dir })).code, 0);
+    writeFileSync(join(dir, 'snapshot.json'), '{ not json');
+
+    const verify = await runScript(stub, { dir, args: ['--verify'] });
+    assert.notEqual(verify.code, 0, 'an unusable baseline must fail');
+    assert.match(verify.stderr, /No baseline at/);
+    assert.deepEqual(
+      inviteDeletes(stub),
+      ['/api/v10/invites/invite-code'],
+      'a failed baseline parse must not leave a live bearer invite behind',
+    );
+    assert.match(inviteReceipt(dir), /^revoked invite-code HTTP 200 at /);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/**
+ * The receipt is what makes a repeat --verify honest: it distinguishes "already
+ * revoked, here is the status Discord returned" from "the handle is gone".
+ */
+test('a second verify reads the receipt instead of re-deleting or failing', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
+  try {
+    assert.equal((await runScript(stub, { dir })).code, 0);
+    assert.equal((await runScript(stub, { dir, args: ['--verify'] })).code, 0);
+    assert.deepEqual(inviteDeletes(stub), ['/api/v10/invites/invite-code']);
+
+    const again = await runScript(stub, { dir, args: ['--verify'] });
+    assert.equal(again.code, 0, again.stderr);
+    assert.match(again.stdout, /already revoked \(HTTP 200\)/);
+    assert.deepEqual(inviteDeletes(stub), ['/api/v10/invites/invite-code'], 'it must not DELETE twice');
   } finally {
     rmSync(dir, { recursive: true, force: true });
     await stub.close();
@@ -557,11 +792,11 @@ test('a proof that cannot read the audit log still revokes the invite', async ()
     assert.notEqual(verify.code, 0, 'an unreadable audit log must fail');
     assert.match(verify.stderr, /Could not read the audit log/);
     assert.deepEqual(
-      stub.deletes,
+      inviteDeletes(stub),
       ['/api/v10/invites/invite-code'],
       'a failed proof must not leave a live bearer invite behind',
     );
-    assert.equal(existsSync(join(dir, 'invite.txt')), false);
+    assert.match(inviteReceipt(dir), /^revoked invite-code HTTP 200 at /);
   } finally {
     rmSync(dir, { recursive: true, force: true });
     await stub.close();
@@ -602,6 +837,32 @@ test('a symlinked artifact directory aborts before any write', async () => {
     assert.notEqual(result.code, 0);
     assert.match(result.stderr, /is a symlink/);
     assert.deepEqual(stub.writes, []);
+  } finally {
+    rmSync(link, { force: true });
+    rmSync(real, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/**
+ * The parent check reads `lstat` as well as `stat`, so that a symlink sitting
+ * on the path cannot present a reassuring root-owned target. A symlink we own
+ * is not that attack, and must not be refused - otherwise the guard would be
+ * unusable anywhere `$TMPDIR` is itself a link (macOS, some CI images).
+ *
+ * The foreign-owned case needs a second uid to plant the link, so it is not
+ * reachable from this suite; this test pins the half that is.
+ */
+test('a symlinked parent the running user owns is still usable', async () => {
+  const stub = await stubDiscord();
+  const real = mkdtempSync(join(tmpdir(), 'two-staging-parent-'));
+  const link = `${real}-link`;
+  try {
+    symlinkSync(real, link);
+    const dir = join(link, 'artifacts');
+    const result = await runScript(stub, { dir });
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(inviteReceipt(join(real, 'artifacts')), /^https:\/\/discord\.gg\/invite-code$/m);
   } finally {
     rmSync(link, { force: true });
     rmSync(real, { recursive: true, force: true });
