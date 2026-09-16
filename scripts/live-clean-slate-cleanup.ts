@@ -16,6 +16,7 @@ import {
   ACTIVE_CATEGORY_IDS,
   ACTIVE_CHANNEL_IDS,
   ADMINISTRATOR,
+  applyCategoryOverwrites,
   ARCHIVE_PHASE,
   buildManifest,
   type Channel,
@@ -342,8 +343,7 @@ async function apply(): Promise<void> {
     const acceptable = structuredClone(snapshot);
     for (const operation of phaseManifest.operations) {
       if (operation.state !== 'applied' && !(requestingApplied && operation.state === 'requesting')) continue;
-      const category = acceptable.channels.find((channel) => channel.id === operation.objectId)!;
-      category.permission_overwrites = operation.write.permission_overwrites;
+      applyCategoryOverwrites(acceptable, operation.objectId, operation.write.permission_overwrites);
     }
     const { semanticHash: _acceptableHash, ...acceptableInput } = acceptable;
     acceptableHashes.add(withSemanticHash({ ...acceptableInput, generatedAt: fresh.generatedAt }).semanticHash);
@@ -398,8 +398,7 @@ async function apply(): Promise<void> {
   const post = await captureSnapshot();
   const { semanticHash: _ignoredSemanticHash, ...expectedPostInput } = structuredClone(snapshot);
   for (const operation of phaseManifest.operations) {
-    const category = expectedPostInput.channels.find((channel) => channel.id === operation.objectId)!;
-    category.permission_overwrites = operation.write.permission_overwrites;
+    applyCategoryOverwrites(expectedPostInput, operation.objectId, operation.write.permission_overwrites);
   }
   const expectedPostHashed = withSemanticHash({ ...expectedPostInput, generatedAt: post.generatedAt });
   if (post.semanticHash !== expectedPostHashed.semanticHash) {

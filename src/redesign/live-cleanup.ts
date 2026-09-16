@@ -163,6 +163,58 @@ export function archiveEveryoneOverwrite(guildId: string, overwrites: Overwrite[
   return normalized.map((overwrite, itemIndex) => itemIndex === index ? updated : overwrite);
 }
 
+function memberCanView(member: Member, snapshot: LiveCleanupSnapshot, overwrites: Overwrite[]): boolean {
+  const roles = snapshot.roles.filter((role) => role.id === snapshot.guildId || member.roles.includes(role.id));
+  let permissions = roles.reduce((value, role) => value | BigInt(role.permissions), 0n);
+  if ((permissions & ADMINISTRATOR) !== 0n) return true;
+  const everyone = overwrites.find((overwrite) => overwrite.type === 0 && overwrite.id === snapshot.guildId);
+  if (everyone) permissions = (permissions & ~BigInt(everyone.deny)) | BigInt(everyone.allow);
+  let roleAllow = 0n;
+  let roleDeny = 0n;
+  for (const overwrite of overwrites) {
+    if (overwrite.type !== 0 || overwrite.id === snapshot.guildId || !member.roles.includes(overwrite.id)) continue;
+    roleAllow |= BigInt(overwrite.allow);
+    roleDeny |= BigInt(overwrite.deny);
+  }
+  permissions = (permissions & ~roleDeny) | roleAllow;
+  const memberOverwrite = overwrites.find((overwrite) => overwrite.type === 1 && overwrite.id === member.id);
+  if (memberOverwrite) permissions = (permissions & ~BigInt(memberOverwrite.deny)) | BigInt(memberOverwrite.allow);
+  return (permissions & VIEW_CHANNEL) !== 0n;
+}
+
+function assertArchiveVisibility(snapshot: LiveCleanupSnapshot, category: Channel, overwrites: Overwrite[]): void {
+  const roles = new Map(snapshot.roles.map((role) => [role.id, role]));
+  const members = new Map(snapshot.members.map((member) => [member.id, member]));
+  for (const overwrite of overwrites) {
+    if ((BigInt(overwrite.allow) & VIEW_CHANNEL) === 0n) continue;
+    if (overwrite.type === 0 && overwrite.id !== snapshot.guildId && !roles.get(overwrite.id)?.managed) {
+      throw new Error(`Legacy category ${category.id} has an unmanaged role View Channel allow; @everyone deny would not keep it hidden.`);
+    }
+    if (overwrite.type === 1 && !members.get(overwrite.id)?.bot) {
+      throw new Error(`Legacy category ${category.id} has a non-bot member View Channel allow; @everyone deny would not keep it hidden.`);
+    }
+  }
+  const ownerId = typeof snapshot.guild.owner_id === 'string' ? snapshot.guild.owner_id : null;
+  for (const member of snapshot.members) {
+    if (member.bot || member.id === ownerId) continue;
+    const memberRoles = snapshot.roles.filter((role) => member.roles.includes(role.id));
+    if (memberRoles.some((role) => (BigInt(role.permissions) & ADMINISTRATOR) !== 0n)) continue;
+    if (memberCanView(member, snapshot, overwrites)) {
+      throw new Error(`Legacy category ${category.id} remains visible to non-administrator member ${member.id} after the planned archive deny.`);
+    }
+  }
+}
+
+export function applyCategoryOverwrites(snapshot: Pick<LiveCleanupSnapshot, 'channels'>, categoryId: string, overwrites: Overwrite[]): void {
+  const normalized = normalizeOverwrites(overwrites);
+  const category = snapshot.channels.find((channel) => channel.id === categoryId);
+  if (!category) throw new Error(`Category ${categoryId} is missing from snapshot.`);
+  category.permission_overwrites = normalized;
+  for (const channel of snapshot.channels) {
+    if (channel.parent_id === categoryId) channel.permission_overwrites = structuredClone(normalized);
+  }
+}
+
 export function semanticSnapshot(input: Omit<LiveCleanupSnapshot, 'semanticHash'>): JsonObject {
   return {
     version: input.version,
@@ -226,6 +278,7 @@ export function planArchiveOperations(snapshot: LiveCleanupSnapshot): CleanupOpe
     const category = snapshot.channels.find((channel) => channel.id === objectId)!;
     const before = normalizeOverwrites(category.permission_overwrites ?? []);
     const write = archiveEveryoneOverwrite(snapshot.guildId, before);
+    assertArchiveVisibility(snapshot, category, write);
     const body = { phase: ARCHIVE_PHASE, objectId, expectedBefore: { permission_overwrites: before }, write: { permission_overwrites: write }, inverseWrite: { permission_overwrites: before } };
     return {
       version: 1,

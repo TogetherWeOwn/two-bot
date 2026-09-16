@@ -183,11 +183,13 @@ const preRollbackChannels = await mustGet<Channel[]>(`/guilds/${guildId}/channel
 if (stable(preRollbackChannels.map((channel) => channel.id).sort()) !== stable(snapshot.channels.map((channel) => channel.id).sort())) die(1, 'Rollback preflight channel/category inventory drifted from the pre-snapshot.');
 for (const current of preRollbackChannels) {
   const original = snapshot.channels.find((channel) => channel.id === current.id)!;
-  const operation = manifest.operations.find((item) => item.objectId === current.id && item.state !== 'pending' && item.state !== 'rolled_back');
-  const expectedOverwrites = operation ? operation.write.permission_overwrites : original.permission_overwrites;
+  const operation = manifest.operations.find((item) => (item.objectId === current.id || item.objectId === current.parent_id) && item.state !== 'pending' && item.state !== 'rolled_back');
   const currentShape = { ...current, permission_overwrites: normalizeOverwrites(current.permission_overwrites ?? []) };
-  const expectedShape = { ...original, permission_overwrites: normalizeOverwrites(expectedOverwrites ?? []) };
-  if (stable(currentShape) !== stable(expectedShape)) die(1, `Rollback preflight channel ${current.id} drifted from the expected applied state.`);
+  const expectedAppliedShape = { ...original, permission_overwrites: normalizeOverwrites(operation?.write.permission_overwrites ?? original.permission_overwrites) };
+  const expectedInverseShape = { ...original, permission_overwrites: normalizeOverwrites(operation?.inverseWrite.permission_overwrites ?? original.permission_overwrites) };
+  if (stable(currentShape) !== stable(expectedAppliedShape) && stable(currentShape) !== stable(expectedInverseShape)) {
+    die(1, `Rollback preflight channel ${current.id} drifted from both applied and inverse state.`);
+  }
 }
 manifest.status = 'rolling_back';
 atomicJson(manifestPath, manifest);

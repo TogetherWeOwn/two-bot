@@ -96,7 +96,8 @@ function fixtureState(): State {
     application: { id: LIVE_BOT_APPLICATION_ID, name: 'Owen' },
     members: [
       { user: { id: LIVE_BOT_APPLICATION_ID, username: 'Owen', bot: true }, roles: [ID(1)], premium_since: null, pending: false },
-      { user: { id: ID(60), username: 'holder', bot: false }, roles: [ID(50), ID(51)], premium_since: null, pending: false },
+      { user: { id: ID(60), username: 'holder', bot: false }, roles: [ID(50)], premium_since: null, pending: false },
+      { user: { id: ID(61), username: 'integration', bot: true }, roles: [ID(51)], premium_since: null, pending: false },
     ],
   };
 }
@@ -142,6 +143,11 @@ async function stubDiscord(): Promise<Stub> {
         if (everyone && (BigInt(everyone.deny) & (1n << 10n)) !== 0n) writeOrder.push(channel.id);
         else rollbackOrder.push(channel.id);
         channel.permission_overwrites = structuredClone(overwrites);
+        if (channel.type === 4) {
+          for (const child of state.channels.filter((item) => item.parent_id === channel.id)) {
+            child.permission_overwrites = structuredClone(overwrites);
+          }
+        }
         return send(200, channel);
       });
     }
@@ -226,6 +232,21 @@ test('production-shaped fixture pins 18 stable operations and dry-run writes not
     const secondManifest = JSON.parse(readFileSync(planManifestPath(secondDir), 'utf8')) as CleanupManifest;
     assert.equal(secondManifest.operationSemanticHash, firstManifest.operationSemanticHash);
     assert.deepEqual(secondManifest.operations.map((operation) => operation.id), firstManifest.operations.map((operation) => operation.id));
+  } finally { await stub.close(); }
+});
+
+test('unmanaged role visibility allow is refused because @everyone deny would not keep legacy channels hidden', async () => {
+  const stub = await stubDiscord();
+  try {
+    const category = stub.state.channels.find((channel) => channel.id === LEGACY_CATEGORY_IDS[0])!;
+    category.permission_overwrites.push({ id: ID(50), type: 0, allow: VIEW, deny: '0' });
+    for (const child of stub.state.channels.filter((channel) => channel.parent_id === category.id)) {
+      child.permission_overwrites = structuredClone(category.permission_overwrites);
+    }
+    const result = await plan(stub, mkdtempSync(join(tmpdir(), 'two-live-clean-visible-role-')));
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /unmanaged role View Channel allow|remains visible/);
+    assert.equal(stub.writes.length, 0);
   } finally { await stub.close(); }
 });
 
@@ -398,9 +419,14 @@ test('interrupted apply resumes without replay, then rollback restores exact sem
     const manifest = JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest;
     assert.equal(manifest.status, 'applied');
     assert.ok(manifest.operations.every((operation) => operation.state === 'applied'));
+    const interruptedRollback = manifest.operations.at(-1)!;
+    stub.state.channels.find((channel) => channel.id === interruptedRollback.objectId)!.permission_overwrites = structuredClone(interruptedRollback.inverseWrite.permission_overwrites);
+    for (const child of stub.state.channels.filter((channel) => channel.parent_id === interruptedRollback.objectId)) {
+      child.permission_overwrites = structuredClone(interruptedRollback.inverseWrite.permission_overwrites);
+    }
     const rolledBack = await rollback(stub, dir);
     assert.equal(rolledBack.code, 0, rolledBack.stderr);
-    assert.deepEqual(stub.rollbackOrder, [...stub.writeOrder].reverse());
+    assert.deepEqual(stub.rollbackOrder, [...stub.writeOrder].reverse().slice(1));
     assert.equal(stable(stub.state.channels), stable(before));
     const finalManifest = JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest;
     assert.equal(finalManifest.status, 'rolled_back');
