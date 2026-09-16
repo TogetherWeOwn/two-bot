@@ -34,12 +34,19 @@ permissions:
 
 jobs:
   arrived-by-pr:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 5
     # `created` is true only for the very first push that makes the branch -
     # the initial history import. Nothing to review against, so skip it.
     if: github.event.created == false
     steps:
+      - name: Install GitHub CLI
+        run: |
+          if ! command -v gh >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y gh
+          fi
+
       - name: Check the head commit is attached to a merged pull request
         env:
           GH_TOKEN: ${{ github.token }}
