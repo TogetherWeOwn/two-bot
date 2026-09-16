@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
@@ -47,7 +47,7 @@ jobs:
   # is every run of `check` - so the backup round trip, the concurrent-writer
   # test and the whole web_v1 contract were green by absence, not by passing.
   postgres:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 10
 
     services:
@@ -58,7 +58,7 @@ jobs:
           POSTGRES_PASSWORD: two
           POSTGRES_DB: two_test
         ports:
-          - 5432:5432
+          - 5432
         options: >-
           --health-cmd "pg_isready -U two"
           --health-interval 5s
@@ -66,14 +66,23 @@ jobs:
           --health-retries 10
 
     env:
-      TWO_TEST_DATABASE_URL: postgres://two:two@localhost:5432/two_test
-      TWO_DATABASE_URL: postgres://two:two@localhost:5432/two_test
       # Only ever reaches this throwaway container. The real one goes to the
       # Web Lead through docs/SECRETS.md and never near a repo or a log.
       TWO_WEB_RO_PASSWORD: ci-throwaway-not-a-secret
 
     steps:
       - uses: actions/checkout@v5
+
+      # Five runners share one host, so Docker assigns an unused host port
+      # instead of every job fighting over 5432. Set the database URLs at
+      # runtime so every later step reads the mapped port.
+      - name: Configure Postgres connection
+        env:
+          PGPORT: ${{ job.services.postgres.ports['5432'] }}
+        run: |
+          echo "PGPORT=$PGPORT" >> "$GITHUB_ENV"
+          echo "TWO_TEST_DATABASE_URL=postgres://two:two@localhost:$PGPORT/two_test" >> "$GITHUB_ENV"
+          echo "TWO_DATABASE_URL=postgres://two:two@localhost:$PGPORT/two_test" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: '24'

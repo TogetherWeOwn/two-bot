@@ -34,7 +34,7 @@ permissions:
 
 jobs:
   arrived-by-pr:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 5
     # `created` is true only for the very first push that makes the branch -
     # the initial history import. Nothing to review against, so skip it.
