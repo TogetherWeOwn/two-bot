@@ -1,0 +1,28 @@
+{
+  "avc_export_version": 1,
+  "exported_at": "2026-09-16T00:00:00.000Z",
+  "guild_id": "326474832151838730",
+  "guild_name": "TWO",
+  "source_application_id": null,
+  "source_fleet_channel_scope": null,
+  "settings": {
+    "enabled": true,
+    "channel_name_template": "Squad ##"
+  },
+  "creator_channels": [
+    {
+      "channel_id": "1546777867978018887",
+      "channel_name": "Squad",
+      "template": {
+        "name": null,
+        "status": null,
+        "limit": null,
+        "startAt": null,
+        "above": false,
+        "defaultPrivate": false,
+        "inheritperms": null
+      }
+    }
+  ],
+  "adopted_channels": []
+}
