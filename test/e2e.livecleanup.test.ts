@@ -73,7 +73,11 @@ function fixtureState(): State {
     parent_id: LEGACY_CATEGORY_IDS[index % LEGACY_CATEGORY_IDS.length]!,
     position: 200 + index,
     topic: `preserved-history-${id}`,
-    permission_overwrites: [],
+    permission_overwrites: [
+      everyone,
+      { id: ID(50), type: 0, allow: '0', deny: String((1n << 10n) | (1n << 11n)) },
+      { id: ID(51), type: 0, allow: VIEW, deny: '0' },
+    ],
   });
   channels.push({ id: '1545924265868525588', name: '💬 CHAT', type: 4, parent_id: null, permission_overwrites: [] });
   channels.push({ id: '1545924268489973841', name: 'looking-to-play', type: 0, parent_id: '1545924265868525588', permission_overwrites: [] });

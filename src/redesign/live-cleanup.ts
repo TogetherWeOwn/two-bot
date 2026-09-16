@@ -196,7 +196,10 @@ export function assertReviewedShape(snapshot: LiveCleanupSnapshot): void {
     const channel = snapshot.channels.find((item) => item.id === id);
     if (!channel || channel.type === 4) throw new Error(`Reviewed legacy channel ${id} is missing or is a category.`);
     if (!channel.parent_id || !LEGACY_CATEGORY_IDS.includes(channel.parent_id as never)) throw new Error(`Reviewed legacy channel ${id} is not under a reviewed legacy category.`);
-    if ((channel.permission_overwrites ?? []).length > 0) throw new Error(`Reviewed legacy channel ${id} is permission-unsynchronized; category-only archive cannot prove it will inherit the deny.`);
+    const parent = snapshot.channels.find((item) => item.id === channel.parent_id)!;
+    if (stable(normalizeOverwrites(channel.permission_overwrites ?? [])) !== stable(normalizeOverwrites(parent.permission_overwrites ?? []))) {
+      throw new Error(`Reviewed legacy channel ${id} is permission-unsynchronized from category ${parent.id}; category-only archive cannot prove it will inherit the deny.`);
+    }
   }
   const reviewed = new Set([...ACTIVE_CATEGORY_IDS, ...ACTIVE_CHANNEL_IDS, ...LEGACY_CATEGORY_IDS, ...LEGACY_CHANNEL_IDS]);
   const duplicateMergeIds = new Set(['1545924265868525588', '1545924268489973841']);

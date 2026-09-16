@@ -179,6 +179,16 @@ if (me.id !== LIVE_BOT_APPLICATION_ID || application.id !== LIVE_BOT_APPLICATION
 if (stable(nonChannelSemantic(guild, roles, currentMembers, integrations, welcome, onboarding, screening)) !== stable(snapshotNonChannel)) die(1, 'Rollback preflight found non-channel drift from the pre-snapshot.');
 const botMember = currentMembers.find((member) => member.user?.id === LIVE_BOT_APPLICATION_ID && member.user.bot);
 if (!botMember || !roles.some((role) => botMember.roles?.includes(role.id) && (BigInt(role.permissions) & ADMINISTRATOR) !== 0n)) die(1, 'Rollback preflight: Owen does not have Administrator.');
+const preRollbackChannels = await mustGet<Channel[]>(`/guilds/${guildId}/channels`, 'Read rollback channel preflight');
+if (stable(preRollbackChannels.map((channel) => channel.id).sort()) !== stable(snapshot.channels.map((channel) => channel.id).sort())) die(1, 'Rollback preflight channel/category inventory drifted from the pre-snapshot.');
+for (const current of preRollbackChannels) {
+  const original = snapshot.channels.find((channel) => channel.id === current.id)!;
+  const operation = manifest.operations.find((item) => item.objectId === current.id && item.state !== 'pending' && item.state !== 'rolled_back');
+  const expectedOverwrites = operation ? operation.write.permission_overwrites : original.permission_overwrites;
+  const currentShape = { ...current, permission_overwrites: normalizeOverwrites(current.permission_overwrites ?? []) };
+  const expectedShape = { ...original, permission_overwrites: normalizeOverwrites(expectedOverwrites ?? []) };
+  if (stable(currentShape) !== stable(expectedShape)) die(1, `Rollback preflight channel ${current.id} drifted from the expected applied state.`);
+}
 manifest.status = 'rolling_back';
 atomicJson(manifestPath, manifest);
 const rollbackOrder: string[] = [];
@@ -217,7 +227,16 @@ for (const operation of [...manifest.operations].reverse()) {
   console.log(`UNDID ${operation.id}`);
 }
 
-const currentChannels = await mustGet<Channel[]>(`/guilds/${guildId}/channels`, 'Read post-rollback channels');
+const [postGuild, postRoles, postMembers, postIntegrations, postWelcome, postOnboarding, postScreening, currentChannels] = await Promise.all([
+  mustGet<JsonObject>(`/guilds/${guildId}`, 'Read post-rollback guild'),
+  mustGet<Role[]>(`/guilds/${guildId}/roles`, 'Read post-rollback roles'),
+  members(),
+  mustGet<JsonObject[]>(`/guilds/${guildId}/integrations`, 'Read post-rollback integrations'),
+  api<JsonObject>('GET', `/guilds/${guildId}/welcome-screen`),
+  api<JsonObject>('GET', `/guilds/${guildId}/onboarding`),
+  api<JsonObject>('GET', `/guilds/${guildId}/member-verification`),
+  mustGet<Channel[]>(`/guilds/${guildId}/channels`, 'Read post-rollback channels'),
+]);
 const currentChannelIds = currentChannels.map((channel) => channel.id).sort();
 if (stable(currentChannelIds) !== stable(snapshot.channels.map((channel) => channel.id).sort())) die(1, 'Post-rollback channel/category inventory differs from the pre-snapshot.');
 const restored = {
@@ -225,10 +244,10 @@ const restored = {
   generatedAt: snapshot.generatedAt,
   applicationId: LIVE_BOT_APPLICATION_ID,
   guildId,
-  guild,
-  roles: roles as LiveCleanupSnapshot['roles'],
+  guild: postGuild,
+  roles: postRoles as LiveCleanupSnapshot['roles'],
   channels: currentChannels.map((channel) => ({ ...channel, permission_overwrites: normalizeOverwrites(channel.permission_overwrites ?? []) })),
-  members: currentMembers.map((member) => ({
+  members: postMembers.map((member) => ({
     id: member.user?.id ?? '',
     bot: Boolean(member.user?.bot),
     username: member.user?.username ?? null,
@@ -236,7 +255,7 @@ const restored = {
     premiumSince: member.premium_since ?? null,
     pending: Boolean(member.pending),
   })).filter((member) => member.id).sort((a, b) => a.id.localeCompare(b.id)),
-  integrations: integrations.map((integration) => {
+  integrations: postIntegrations.map((integration) => {
     const linkedApplication = integration.application as JsonObject | undefined;
     return {
       id: typeof integration.id === 'string' ? integration.id : '',
@@ -246,15 +265,15 @@ const restored = {
     };
   }).sort((a, b) => a.id.localeCompare(b.id)),
   references: {
-    welcomeScreen: { status: welcome.status, body: welcome.body },
-    onboarding: { status: onboarding.status, body: onboarding.body },
-    membershipScreening: { status: screening.status, body: screening.body },
+    welcomeScreen: { status: postWelcome.status, body: postWelcome.body },
+    onboarding: { status: postOnboarding.status, body: postOnboarding.body },
+    membershipScreening: { status: postScreening.status, body: postScreening.body },
     guildReferences: {
-      applicationId: guild.application_id ?? null,
-      systemChannelId: guild.system_channel_id ?? null,
-      rulesChannelId: guild.rules_channel_id ?? null,
-      publicUpdatesChannelId: guild.public_updates_channel_id ?? null,
-      safetyAlertsChannelId: guild.safety_alerts_channel_id ?? null,
+      applicationId: postGuild.application_id ?? null,
+      systemChannelId: postGuild.system_channel_id ?? null,
+      rulesChannelId: postGuild.rules_channel_id ?? null,
+      publicUpdatesChannelId: postGuild.public_updates_channel_id ?? null,
+      safetyAlertsChannelId: postGuild.safety_alerts_channel_id ?? null,
     },
   },
 };
