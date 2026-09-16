@@ -62,7 +62,10 @@ interface Harness {
   botLog: string[];
 }
 
-async function startHarness(t: { after: (fn: () => Promise<void>) => void }): Promise<Harness> {
+async function startHarness(
+  t: { after: (fn: () => Promise<void>) => void },
+  extraEnv: Record<string, string> = {},
+): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), 'two-session-e2e-'));
   const dbPath = join(dir, 'two.db');
   const mock = await startMockDiscord({});
@@ -99,7 +102,11 @@ async function startHarness(t: { after: (fn: () => Promise<void>) => void }): Pr
       DISCORD_SESSION_LOOKING_TO_PLAY_CHANNEL_ID: LOOKING_TO_PLAY_CHANNEL_ID,
       DISCORD_SESSION_LOBBY_VOICE_CHANNEL_ID: LOBBY_VOICE_CHANNEL_ID,
       TWO_ONBOARDING_MODE: 'session',
+      TWO_ONBOARDING_DRY_RUN: '0',
+      TWO_SELF_ROLE_PANELS: '',
+      TWO_DATABASE_URL: '',
       ...botDbEnv,
+      ...extraEnv,
       LOG_LEVEL: 'debug',
     },
   });
@@ -291,6 +298,35 @@ test(
 );
 
 test(
+  'session dry-run still posts the picker before recording the once-per-member welcome',
+  { timeout: 90_000 },
+  async (t) => {
+    const { mock, reader, botLog } = await startHarness(t, { TWO_ONBOARDING_DRY_RUN: '1' });
+
+    await waitFor(
+      () => (botLog.join('').includes('session_onboarding_enabled') ? true : undefined),
+      'session_onboarding_enabled boot line',
+    );
+
+    mock.memberJoinPending(NEWBIE, 'newbie');
+    mock.memberAcceptRules(NEWBIE, 'newbie');
+    const welcome = await waitFor(
+      () => postedMessages(mock).find((p) => p.content.includes(`<@${NEWBIE}>`)),
+      `a dry-run welcome post.\n${botLog.join('')}`,
+    );
+    assert.match(welcome.content, /what do you want to do right now/i);
+    assert.equal(roleWrites(mock).length, 0, 'dry-run session mode must not write roles');
+
+    const prompted = await queryDb(reader, (db) =>
+      db
+        .prepare(`SELECT COUNT(*) AS n FROM events WHERE event_type='onboarding_prompted' AND member_id=?`)
+        .get(NEWBIE),
+    ) as { n: number } | null;
+    assert.equal(Number(prompted?.n ?? 0), 1, 'recorded only after the picker was posted');
+  },
+);
+
+test(
   'session mode ignores member and picker events from every other guild',
   { timeout: 90_000 },
   async (t) => {
@@ -332,6 +368,8 @@ test('session mode refuses to start without DISCORD_GUILD_ID', async () => {
       DISCORD_SESSION_LOOKING_TO_PLAY_CHANNEL_ID: LOOKING_TO_PLAY_CHANNEL_ID,
       DISCORD_SESSION_LOBBY_VOICE_CHANNEL_ID: LOBBY_VOICE_CHANNEL_ID,
       TWO_ONBOARDING_MODE: 'session',
+      TWO_SELF_ROLE_PANELS: '',
+      TWO_DATABASE_URL: '',
       TWO_DB_PATH: join(dir, 'two.db'),
     },
   });
@@ -343,4 +381,75 @@ test('session mode refuses to start without DISCORD_GUILD_ID', async () => {
 
   assert.notEqual(code, 0);
   assert.match(output, /session requires DISCORD_GUILD_ID/);
+});
+
+test('invalid onboarding modes fail closed before the bot can boot', async () => {
+  for (const [index, mode] of ['sessions', 'SESSION', ' session '].entries()) {
+    const dir = mkdtempSync(join(tmpdir(), `two-session-invalid-mode-${index}-`));
+    const bot = spawn(process.execPath, ['src/index.ts'], {
+      cwd: ROOT,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        DISCORD_TOKEN: 'mock-token',
+        DISCORD_BOT_TOKEN: 'mock-token',
+        TWO_ONBOARDING_MODE: mode,
+        TWO_SELF_ROLE_PANELS: '',
+        TWO_DATABASE_URL: '',
+        TWO_DB_PATH: join(dir, 'two.db'),
+      },
+    });
+    let output = '';
+    bot.stdout?.on('data', (d) => (output += String(d)));
+    bot.stderr?.on('data', (d) => (output += String(d)));
+    const code = await new Promise<number | null>((resolve) => bot.once('exit', resolve));
+    rmSync(dir, { recursive: true, force: true });
+
+    assert.notEqual(code, 0, `${JSON.stringify(mode)} must not boot`);
+    assert.match(output, /TWO_ONBOARDING_MODE must be exactly "legacy" or "session"/);
+  }
+});
+
+test('session mode refuses self-role panels instead of registering role writers', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'two-session-self-roles-'));
+  const panel = JSON.stringify([
+    {
+      id: 'colors',
+      channelId: '111111111111111111',
+      messageId: '222222222222222222',
+      mode: 'button',
+      options: [
+        {
+          key: 'red',
+          label: 'Red',
+          roleId: '333333333333333333',
+          permissions: '0',
+        },
+      ],
+    },
+  ]);
+  const bot = spawn(process.execPath, ['src/index.ts'], {
+    cwd: ROOT,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env: {
+      ...process.env,
+      DISCORD_TOKEN: 'mock-token',
+      DISCORD_BOT_TOKEN: 'mock-token',
+      DISCORD_GUILD_ID: '444444444444444444',
+      DISCORD_SESSION_LOOKING_TO_PLAY_CHANNEL_ID: LOOKING_TO_PLAY_CHANNEL_ID,
+      DISCORD_SESSION_LOBBY_VOICE_CHANNEL_ID: LOBBY_VOICE_CHANNEL_ID,
+      TWO_ONBOARDING_MODE: 'session',
+      TWO_SELF_ROLE_PANELS: panel,
+      TWO_DATABASE_URL: '',
+      TWO_DB_PATH: join(dir, 'two.db'),
+    },
+  });
+  let output = '';
+  bot.stdout?.on('data', (d) => (output += String(d)));
+  bot.stderr?.on('data', (d) => (output += String(d)));
+  const code = await new Promise<number | null>((resolve) => bot.once('exit', resolve));
+  rmSync(dir, { recursive: true, force: true });
+
+  assert.notEqual(code, 0);
+  assert.match(output, /session forbids TWO_SELF_ROLE_PANELS/);
 });

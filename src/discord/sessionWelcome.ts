@@ -56,7 +56,10 @@ export interface SessionWelcomeDeps {
   goodbyeChannelIds: string[];
   /** Per-guild picker destinations; channel ids must never be shared across guilds. */
   picks: SessionPick[];
-  /** True = record events, send nothing. Used by preflight and staging rehearsal. */
+  /**
+   * True = keep role-writing features disabled; session welcomes still post
+   * because they never write roles.
+   */
   dryRun?: boolean;
 }
 
@@ -120,8 +123,6 @@ export function registerSessionWelcome(client: Client, deps: SessionWelcomeDeps)
 
     if (deps.dryRun) {
       log.info('session_welcome_dry_run', { memberId: member.id, channelId: target.id });
-      await recorder.prompted(member.guild.id, member.id, target.id);
-      return;
     }
 
     try {

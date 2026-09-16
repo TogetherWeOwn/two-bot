@@ -89,7 +89,14 @@ const cfg = loadConfig();
 const automationCfg = loadAutomationConfig();
 const processStartedAt = new Date().toISOString();
 const announcementsCfg = loadAnnouncementsConfig();
+const selfRolePanels = loadSelfRolePanels();
 setLogLevel(cfg.logLevel);
+
+if (cfg.onboardingMode === 'session' && selfRolePanels.length) {
+  throw new Error(
+    'TWO_ONBOARDING_MODE=session forbids TWO_SELF_ROLE_PANELS because session mode guarantees zero role writes.',
+  );
+}
 
 if (
   cfg.onboardingMode === 'session' &&
@@ -472,7 +479,6 @@ if (cfg.onboardingMode === 'session') {
 // Hardened self-role panels (TOG-1646). The panel catalogue is deployment data:
 // ids are never guessed from the live guild, and an empty catalogue is a clean
 // disable rather than an implicit panel with production ids.
-const selfRolePanels = loadSelfRolePanels();
 if (selfRolePanels.length) {
   if (!cfg.guildId) {
     throw new Error('TWO_SELF_ROLE_PANELS requires DISCORD_GUILD_ID - every panel belongs to one guild.');
