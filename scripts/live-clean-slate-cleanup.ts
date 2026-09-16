@@ -16,19 +16,30 @@ import {
   ACTIVE_CATEGORY_IDS,
   ACTIVE_CHANNEL_IDS,
   ADMINISTRATOR,
-  applyCategoryOverwrites,
+  appendJournalWitness,
+  applyOperationOverwrites,
   ARCHIVE_PHASE,
+  archiveVisibilityExemptions,
+  assertLatestCheckpoint,
   buildManifest,
   type Channel,
   type CleanupManifest,
   type JsonObject,
+  inFlightDriftIsOurs,
+  inFlightExceptionIsAvailable,
+  journalSignature,
+  journalWitnessPath,
   LEGACY_CATEGORY_IDS,
   LEGACY_CHANNEL_IDS,
+  manifestInFlightId,
   normalizeOverwrites,
   operationSemanticHash,
   planSignature,
   planArchiveOperations,
+  readJournalWitness,
+  reconcileJournalWitness,
   type Role,
+  syncedChildIds,
   SNAPSHOT_MAX_AGE_MS,
   stable,
   type LiveCleanupSnapshot,
@@ -109,6 +120,33 @@ function atomicFile(path: string, body: string): void {
 
 function atomicJson(path: string, valueToWrite: unknown): void {
   atomicFile(path, `${JSON.stringify(valueToWrite, null, 2)}\n`);
+}
+
+/**
+ * The only sanctioned way to persist a phase manifest. Re-signs the mutable journal
+ * before every write so that a manifest edited between runs — in particular one whose
+ * operation states were relabelled to buy a recovery exception — fails verification
+ * instead of being trusted. Never call `atomicJson` on a manifest directly.
+ *
+ * The sequence number and the surrounding intent/commit witness records are what make
+ * that signature mean *current* rather than merely genuine; see `assertLatestCheckpoint`.
+ * Intent is appended first so the witness can never trail the manifest by more than the
+ * one checkpoint a crash inside this function can lose.
+ */
+function checkpoint(path: string, manifest: CleanupManifest): void {
+  manifest.journalSequence += 1;
+  manifest.journalSignature = journalSignature(token!, manifest);
+  const witness = journalWitnessPath(path);
+  // The in-flight id travels in the record because it is the one fact about a crashed
+  // checkpoint that the manifest cannot be trusted for; see `inFlightExceptionIsAvailable`.
+  const inFlightId = manifestInFlightId(manifest);
+  appendJournalWitness(token!, witness, manifest.journalSequence, 'intent', manifest.journalSignature, inFlightId);
+  // Test-only: the descriptor above is only load-bearing for a checkpoint that never
+  // committed, and no amount of killing between operations produces one — the window is
+  // these three lines. Exits before the manifest write, which is the harder half.
+  if (Number(process.env.LIVE_CLEANUP_TEST_ABORT_IN_CHECKPOINT ?? '0') === manifest.journalSequence) process.exit(86);
+  atomicJson(path, manifest);
+  appendJournalWitness(token!, witness, manifest.journalSequence, 'commit', manifest.journalSignature, inFlightId);
 }
 
 function createImmutable(path: string, body: string): void {
@@ -273,12 +311,17 @@ function assertManifest(manifest: CleanupManifest, snapshot: LiveCleanupSnapshot
   const generatedOperationHash = operationSemanticHash(operations);
   const expectedSignature = planSignature(token!, snapshot.generatedAt, snapshot.semanticHash, generatedOperationHash);
   if (manifest.planSignature !== expectedSignature) throw new Error('Manifest plan signature is invalid for this token, snapshot, and operation hash.');
+  // The plan signature covers only immutable plan content. Journal state drives
+  // recovery decisions, so it is authenticated separately or an edited file could
+  // buy itself an in-flight exception.
+  if (manifest.journalSignature !== journalSignature(token!, manifest)) throw new Error('Manifest journal signature is invalid; operation states or timestamps were modified outside a run.');
   if (manifest.operationCount !== operations.length || manifest.operationSemanticHash !== generatedOperationHash) throw new Error('Generated operation count/hash differs from the reviewed dry-run manifest.');
   if (manifest.operationCount !== manifest.operations.length || operationSemanticHash(manifest.operations) !== manifest.operationSemanticHash) throw new Error('Stored manifest operations do not match their recorded semantic hash.');
   if (stable(manifest.operations.map(({ state: _state, requestStartedAt: _requestStartedAt, appliedAt: _appliedAt, rolledBackAt: _rolledBackAt, ...operation }) => operation)) !== stable(operations)) throw new Error('Stored manifest operation bodies differ from the deterministic plan.');
   if (stable(manifest.reviewedLegacyChannelIds) !== stable([...LEGACY_CHANNEL_IDS])) throw new Error('Reviewed 112-channel allowlist differs.');
   if (stable(manifest.reviewedLegacyCategoryIds) !== stable([...LEGACY_CATEGORY_IDS])) throw new Error('Reviewed 18-category allowlist differs.');
   if (stable(manifest.activeChannelIds) !== stable([...ACTIVE_CHANNEL_IDS]) || stable(manifest.activeCategoryIds) !== stable([...ACTIVE_CATEGORY_IDS])) throw new Error('Active-tree allowlist differs.');
+  if (stable(manifest.visibilityExemptions ?? []) !== stable(archiveVisibilityExemptions(snapshot))) throw new Error('Reviewed visibility-exemption set differs from the fresh snapshot.');
   const expectedIds = operations.map((operation) => operation.id);
   if (stable(manifest.operations.map((operation) => operation.id)) !== stable(expectedIds)) throw new Error('Generated operation IDs differ from the reviewed dry-run manifest.');
 }
@@ -288,7 +331,18 @@ async function dryRun(): Promise<void> {
   ensurePrivateDir(snapshotDir);
   ensurePrivateDir(planDir);
   const snapshot = await captureSnapshot();
-  const operations = planArchiveOperations(snapshot);
+  createImmutableJson(snapshotPath, snapshot);
+  createImmutable(holdersPath, holdersCsv(snapshot));
+  createImmutableJson(referencesPath, snapshot.references);
+  log(`Fresh pre-snapshot captured: ${snapshotPath}`);
+  let operations: ReturnType<typeof planArchiveOperations>;
+  try {
+    operations = planArchiveOperations(snapshot);
+  } catch (error) {
+    log(`Planning refused after preserving the pre-snapshot: ${error instanceof Error ? error.message : String(error)}`);
+    finalizeLog();
+    throw error;
+  }
   const manifest = buildManifest(snapshot, snapshotPath, operations, token!);
   const operationFile: OperationFile = {
     version: 1,
@@ -301,14 +355,19 @@ async function dryRun(): Promise<void> {
     operationCount: operations.length,
     operations: manifest.operations,
   };
-  createImmutableJson(snapshotPath, snapshot);
-  createImmutable(holdersPath, holdersCsv(snapshot));
-  createImmutableJson(referencesPath, snapshot.references);
   createImmutableJson(operationsPath, operationFile);
   createImmutableJson(planRollbackPath, manifest);
-  log(`Dry-run complete: ${operations.length} deterministic category-overwrite operations; 112 legacy channels are hidden through 18 reviewed categories.`);
+  const channelOperationCount = operations.filter((operation) => operation.objectType === 'channel').length;
+  log(`Dry-run complete: ${operations.length} deterministic overwrite operations (${operations.length - channelOperationCount} category PATCHes, ${channelOperationCount} direct channel PATCHes).`);
   log(`Snapshot semantic hash: ${snapshot.semanticHash}`);
   log(`Operation semantic hash: ${manifest.operationSemanticHash}`);
+  // Everyone else — human or bot — is denied View and asserted hidden by the planner.
+  // Administrator holders cannot be denied by any channel overwrite, so the operator
+  // must read this list and accept it before applying.
+  log(`Principals that still see the archived objects after this plan: ${manifest.visibilityExemptions.length}`);
+  for (const exemption of manifest.visibilityExemptions) {
+    log(`  RETAINS-VIEW ${exemption.reason} ${exemption.bot ? 'bot' : 'member'} ${exemption.memberId}`);
+  }
   log('Applied 0 Discord write(s).');
   finalizeLog();
 }
@@ -322,17 +381,44 @@ async function apply(): Promise<void> {
   const planned = readJson<CleanupManifest>(planRollbackPath);
   assertManifest(planned, snapshot);
   let phaseManifest: CleanupManifest;
+  // A process that died inside `checkpoint()` left the witness tip an uncommitted
+  // `intent`. Close it before anything reads or extends the log: the next checkpoint
+  // would otherwise append a second `intent` and make the witness permanently
+  // unreadable, stranding a run that had only been interrupted (TOG-2960).
+  let reconciled: ReturnType<typeof reconcileJournalWitness>;
+  try {
+    // Closing an open checkpoint is an append, so the manifest it is closed against has
+    // to clear the same bar the resume itself applies. Otherwise a manifest carrying
+    // nothing but the tip's plaintext sequence/signature pair buys a `commit` that
+    // `assertManifest` then rejects for good, with the abort path already gone.
+    reconciled = reconcileJournalWitness(token!, phaseRollbackPath, (candidate) => assertManifest(candidate, snapshot));
+  } catch (error) {
+    die(2, error instanceof Error ? error.message : String(error));
+  }
+  if (reconciled!.outcome === 'committed') log(`RECOVERED checkpoint ${reconciled!.sequence}: its manifest write landed, only the commit record was lost.`);
+  if (reconciled!.outcome === 'aborted') log(`RECOVERED checkpoint ${reconciled!.sequence}: its manifest write never landed, so the checkpoint is abandoned and the sequence retried.`);
   if (existsSync(phaseRollbackPath)) {
     phaseManifest = readJson<CleanupManifest>(phaseRollbackPath);
     if (phaseManifest.status === 'applied') die(2, 'Phase is already applied; no writes were replayed.');
     if (phaseManifest.status === 'rolled_back' || phaseManifest.status === 'rolling_back' || phaseManifest.status === 'rollback_failed') die(2, `Phase manifest is in ${phaseManifest.status}; apply cannot resume it.`);
     assertManifest(phaseManifest, snapshot);
+    // A valid signature only proves the journal is one this run wrote; the witness log
+    // is what proves it is the one this run wrote *last*.
+    assertLatestCheckpoint(token!, phaseManifest, phaseRollbackPath);
     if (phaseManifest.operationSemanticHash !== planned.operationSemanticHash || phaseManifest.snapshotSemanticHash !== planned.snapshotSemanticHash || phaseManifest.planSignature !== planned.planSignature) die(2, 'Resume manifest does not match the dry-run manifest.');
   } else {
+    // A witness that ever committed a checkpoint proves a manifest existed, so its
+    // absence means the journal was removed and a fresh one would write over history.
+    // A witness holding only abandoned attempts at checkpoint 1 proves the opposite —
+    // no manifest ever landed — and that run is safe to start again.
+    const witness = journalWitnessPath(phaseRollbackPath);
+    if (existsSync(witness) && readJournalWitness(token!, witness).some((record) => record.phase === 'commit')) {
+      die(2, 'A checkpoint witness records a committed checkpoint without its manifest; the phase journal was removed. Refusing to start a fresh journal over it.');
+    }
     phaseManifest = structuredClone(planned);
     phaseManifest.status = 'applying';
     ensurePrivateDir(phaseDir);
-    atomicJson(phaseRollbackPath, phaseManifest);
+    checkpoint(phaseRollbackPath, phaseManifest);
   }
   const fresh = await captureSnapshot();
   const acceptableHashes = new Set<string>();
@@ -343,14 +429,49 @@ async function apply(): Promise<void> {
     const acceptable = structuredClone(snapshot);
     for (const operation of phaseManifest.operations) {
       if (operation.state !== 'applied' && !(requestingApplied && operation.state === 'requesting')) continue;
-      applyCategoryOverwrites(acceptable, operation.objectId, operation.write.permission_overwrites);
+      applyOperationOverwrites(acceptable, operation, operation.write.permission_overwrites);
     }
     const { semanticHash: _acceptableHash, ...acceptableInput } = acceptable;
     acceptableHashes.add(withSemanticHash({ ...acceptableInput, generatedAt: fresh.generatedAt }).semanticHash);
   }
-  if (!acceptableHashes.has(fresh.semanticHash)) die(1, `Live state drifted since dry-run/resume: got ${fresh.semanticHash}.`);
+  if (!acceptableHashes.has(fresh.semanticHash)) {
+    // A persisted `requesting` operation whose live object matches neither its
+    // expected-before nor its full write is a partial in-flight write. Apply
+    // deliberately refuses to push forward over an ambiguous write; rollback is
+    // the recovery path and accepts exactly this state (see the rollback script's
+    // in-flight branch). Name it, so the operator is not left guessing.
+    //
+    // Scope matters here. Only the operation's own object and the children Discord's
+    // sync would have carried are attributable to our PATCH; every other child of an
+    // in-flight category is unsynchronized and could not have moved because of us.
+    // Substituting live state for those too would let unrelated third-party drift be
+    // misread as our own partial write — and rollback would then clobber it.
+    const inFlight = requesting[0];
+    const liveOverwrites = new Map(fresh.channels.map((channel) => [channel.id, normalizeOverwrites(channel.permission_overwrites ?? [])]));
+    // An abandoned checkpoint above this manifest that held nothing in flight proves the
+    // write this operation is still labelled `requesting` for had already been verified,
+    // so the ambiguity the rollback hint offers to resolve does not exist (TOG-2975).
+    if (inFlight && inFlightExceptionIsAvailable(token!, phaseManifest, phaseRollbackPath) && inFlightDriftIsOurs(snapshot, inFlight, liveOverwrites)) {
+      const subtree = new Set([inFlight.objectId, ...syncedChildIds(snapshot, inFlight)]);
+      const confined = structuredClone(snapshot);
+      for (const operation of phaseManifest.operations) {
+        if (operation.state !== 'applied') continue;
+        applyOperationOverwrites(confined, operation, operation.write.permission_overwrites);
+      }
+      for (const id of subtree) {
+        const live = fresh.channels.find((channel) => channel.id === id);
+        const target = confined.channels.find((channel) => channel.id === id);
+        if (live && target) target.permission_overwrites = normalizeOverwrites(live.permission_overwrites ?? []);
+      }
+      const { semanticHash: _confinedHash, ...confinedInput } = confined;
+      if (withSemanticHash({ ...confinedInput, generatedAt: fresh.generatedAt }).semanticHash === fresh.semanticHash) {
+        die(1, `Interrupted operation ${inFlight.id} left a partial write on ${inFlight.objectId}; apply will not push forward over it. Recover with: DISCORD_GUILD_ID=${LIVE_GUILD_ID} node scripts/live-clean-slate-cleanup-rollback.ts --manifest ${JSON.stringify(phaseRollbackPath)} --confirm-main-guild --apply`);
+      }
+    }
+    die(1, `Live state drifted since dry-run/resume: got ${fresh.semanticHash}.`);
+  }
   phaseManifest.status = 'applying';
-  atomicJson(phaseRollbackPath, phaseManifest);
+  checkpoint(phaseRollbackPath, phaseManifest);
   logPath = phaseLogPath;
   logLines = [];
   log(`Apply starting from reviewed operation hash ${phaseManifest.operationSemanticHash}.`);
@@ -366,7 +487,7 @@ async function apply(): Promise<void> {
       if (stable(liveBefore) === stable(operation.write.permission_overwrites)) {
         operation.state = 'applied';
         operation.appliedAt = new Date().toISOString();
-        atomicJson(phaseRollbackPath, phaseManifest);
+        checkpoint(phaseRollbackPath, phaseManifest);
         continue;
       }
       if (stable(liveBefore) !== stable(operation.expectedBefore.permission_overwrites)) die(1, `Interrupted operation ${operation.id} has ambiguous state.`);
@@ -375,35 +496,35 @@ async function apply(): Promise<void> {
     }
     operation.state = 'requesting';
     operation.requestStartedAt = new Date().toISOString();
-    atomicJson(phaseRollbackPath, phaseManifest);
+    checkpoint(phaseRollbackPath, phaseManifest);
     const result = await api<Channel>('PATCH', `/channels/${operation.objectId}`, operation.write);
     if (result.status === 429 || result.status >= 300 || !result.body) {
       phaseManifest.status = 'apply_failed';
-      atomicJson(phaseRollbackPath, phaseManifest);
+      checkpoint(phaseRollbackPath, phaseManifest);
       die(1, `Discord write failed for ${operation.id}: HTTP ${result.status}. No retry was attempted.`);
     }
     const returned = normalizeOverwrites(result.body.permission_overwrites ?? []);
     if (stable(returned) !== stable(operation.write.permission_overwrites)) {
       phaseManifest.status = 'apply_failed';
-      atomicJson(phaseRollbackPath, phaseManifest);
+      checkpoint(phaseRollbackPath, phaseManifest);
       die(1, `Discord returned a partial/unexpected state for ${operation.id}.`);
     }
     discordWrites++;
     if (abortAfter > 0 && discordWrites >= abortAfter) die(86, `Test interruption after ${discordWrites} accepted write(s).`);
     operation.state = 'applied';
     operation.appliedAt = new Date().toISOString();
-    atomicJson(phaseRollbackPath, phaseManifest);
+    checkpoint(phaseRollbackPath, phaseManifest);
     log(`DID ${operation.id}`);
   }
   const post = await captureSnapshot();
   const { semanticHash: _ignoredSemanticHash, ...expectedPostInput } = structuredClone(snapshot);
   for (const operation of phaseManifest.operations) {
-    applyCategoryOverwrites(expectedPostInput, operation.objectId, operation.write.permission_overwrites);
+    applyOperationOverwrites(expectedPostInput, operation, operation.write.permission_overwrites);
   }
   const expectedPostHashed = withSemanticHash({ ...expectedPostInput, generatedAt: post.generatedAt });
   if (post.semanticHash !== expectedPostHashed.semanticHash) {
     phaseManifest.status = 'apply_failed';
-    atomicJson(phaseRollbackPath, phaseManifest);
+    checkpoint(phaseRollbackPath, phaseManifest);
     die(1, `Postflight semantic hash mismatch: expected ${expectedPostHashed.semanticHash}, got ${post.semanticHash}.`);
   }
   if (existsSync(phasePostPath)) {
@@ -413,7 +534,7 @@ async function apply(): Promise<void> {
     createImmutableJson(phasePostPath, post);
   }
   phaseManifest.status = 'applied';
-  atomicJson(phaseRollbackPath, phaseManifest);
+  checkpoint(phaseRollbackPath, phaseManifest);
   log(`Applied ${discordWrites} Discord write(s).`);
   log(`Post semantic hash: ${post.semanticHash}`);
   log(`Rollback: DISCORD_GUILD_ID=${LIVE_GUILD_ID} node scripts/live-clean-slate-cleanup-rollback.ts --manifest ${JSON.stringify(phaseRollbackPath)} --confirm-main-guild --apply`);
