@@ -1,4 +1,5 @@
 import { createHash, createHmac } from 'node:crypto';
+import { appendFileSync, closeSync, existsSync, fsyncSync, openSync, readFileSync } from 'node:fs';
 import { LIVE_BOT_APPLICATION_ID, LIVE_GUILD_ID, LIVE_GUILD_NAME } from '../staging/spec.ts';
 
 export const ARCHIVE_PHASE = 'archive-legacy';
@@ -99,8 +100,8 @@ export type CleanupOperation = {
   sequence: number;
   id: string;
   phase: typeof ARCHIVE_PHASE;
-  kind: 'patch-category-overwrites';
-  objectType: 'category';
+  kind: 'patch-category-overwrites' | 'patch-channel-overwrites';
+  objectType: 'category' | 'channel';
   objectId: string;
   expectedBefore: { permission_overwrites: Overwrite[] };
   write: { permission_overwrites: Overwrite[] };
@@ -108,6 +109,8 @@ export type CleanupOperation = {
 };
 export type OperationState = 'pending' | 'requesting' | 'applied' | 'rolled_back';
 export type RollbackEntry = CleanupOperation & { state: OperationState; requestStartedAt?: string; appliedAt?: string; rolledBackAt?: string };
+export type ArchiveExemptionReason = 'owner' | 'owen' | 'administrator';
+export type ArchiveVisibilityExemption = { memberId: string; bot: boolean; reason: ArchiveExemptionReason };
 export type CleanupManifest = {
   version: 1;
   kind: 'live-clean-slate-cleanup';
@@ -120,14 +123,24 @@ export type CleanupManifest = {
   snapshotGeneratedAt: string;
   snapshotSemanticHash: string;
   planSignature: string;
+  journalSignature: string;
+  journalSequence: number;
   operationSemanticHash: string;
   operationCount: number;
   reviewedLegacyChannelIds: string[];
   reviewedLegacyCategoryIds: string[];
   activeChannelIds: string[];
   activeCategoryIds: string[];
+  visibilityExemptions: ArchiveVisibilityExemption[];
   operations: RollbackEntry[];
 };
+
+// A project ceiling, deliberately below Discord's own documented limit (error 30060
+// permits 1,000 overwrites per channel). Additive member denies must never push a
+// reviewed object anywhere near that, or the PATCH is rejected mid-phase. The plan's
+// observed maximum is 19, so tripping this means the drift shape changed radically
+// and the phase should be re-reviewed rather than pushed through.
+export const OVERWRITE_CEILING_PER_CHANNEL = 500;
 
 export function stable(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
@@ -143,6 +156,341 @@ export function sha256(value: unknown): string {
 
 export function planSignature(token: string, snapshotGeneratedAt: string, snapshotSemanticHash: string, operationHash: string): string {
   return createHmac('sha256', token).update(stable({ snapshotGeneratedAt, snapshotSemanticHash, operationHash })).digest('hex');
+}
+
+/**
+ * Authenticates the *mutable* half of the manifest, which `planSignature` does not
+ * cover: the phase status and every operation's journal state and timestamps.
+ *
+ * This matters because recovery decisions are driven by journal state — rollback
+ * grants its in-flight exception to whichever operation reads `requesting`. Without
+ * this HMAC, anyone who can write the manifest file could relabel a long-applied
+ * operation `requesting` and have rollback overwrite unrelated live drift for them.
+ * The plan signature is folded into the input so a journal signature cannot be
+ * lifted from a different plan, and the token keys it so a manifest edited outside
+ * a run with the bot token cannot be re-signed.
+ *
+ * Every checkpoint must re-sign before it writes; see `checkpoint()` in the apply
+ * and rollback scripts, which is the only sanctioned way to persist a manifest.
+ *
+ * Authenticity is not freshness: every checkpoint a run ever wrote carries a valid
+ * signature forever, so `journalSequence` is signed here and corroborated against the
+ * append-only witness log by `assertLatestCheckpoint`.
+ */
+export function journalSignature(token: string, manifest: CleanupManifest): string {
+  return createHmac('sha256', token).update(stable({
+    planSignature: manifest.planSignature,
+    status: manifest.status,
+    journalSequence: manifest.journalSequence,
+    operations: manifest.operations.map((operation) => ({
+      id: operation.id,
+      state: operation.state,
+      requestStartedAt: operation.requestStartedAt ?? null,
+      appliedAt: operation.appliedAt ?? null,
+      rolledBackAt: operation.rolledBackAt ?? null,
+    })),
+  })).digest('hex');
+}
+
+export type JournalWitnessPhase = 'intent' | 'commit' | 'abort';
+export type JournalWitnessRecord = { sequence: number; phase: JournalWitnessPhase; journalSignature: string; inFlightId: string | null; chain: string };
+
+export function journalWitnessPath(manifestPath: string): string {
+  return `${manifestPath}.witness`;
+}
+
+/**
+ * The one operation a manifest declares in flight, which is the only operation allowed
+ * to hold an arbitrary live value during recovery. Apply never journals more than one;
+ * callers that find more treat the manifest as unrecoverable rather than pick.
+ */
+export function manifestInFlightId(manifest: Pick<CleanupManifest, 'operations'>): string | null {
+  const requesting = manifest.operations.filter((operation) => operation.state === 'requesting');
+  return requesting.length === 1 ? requesting[0]!.id : null;
+}
+
+function witnessChain(token: string, previous: string, record: Omit<JournalWitnessRecord, 'chain'>): string {
+  return createHmac('sha256', token).update(stable({ previous, ...record })).digest('hex');
+}
+
+/**
+ * The records that may legally follow `last`, which is what makes the log a protocol
+ * rather than a list.
+ *
+ * An `intent` is closed either way: `commit` once the manifest write landed, or
+ * `abort` when it did not (TOG-2960 — a crash inside `checkpoint()` leaves a dangling
+ * intent, and without a way to close it the next checkpoint appends a second intent
+ * and the log becomes permanently unreadable). An aborted sequence number is retried,
+ * so `abort` is followed by an `intent` at the *same* sequence; only a `commit`
+ * advances it.
+ */
+function expectedWitnessRecords(last: JournalWitnessRecord | undefined): Array<{ sequence: number; phase: JournalWitnessPhase }> {
+  if (last === undefined) return [{ sequence: 1, phase: 'intent' }];
+  if (last.phase === 'intent') return [{ sequence: last.sequence, phase: 'commit' }, { sequence: last.sequence, phase: 'abort' }];
+  if (last.phase === 'abort') return [{ sequence: last.sequence, phase: 'intent' }];
+  return [{ sequence: last.sequence + 1, phase: 'intent' }];
+}
+
+/**
+ * Reads the run's append-only checkpoint witness and proves it was not edited.
+ *
+ * Each record is HMACed over its predecessor's chain value, so a line cannot be
+ * altered, reordered, or spliced in without the bot token. The strict phase
+ * alternation is checked too, so a record cannot be dropped from the middle of the
+ * log; only trailing truncation survives, and that is what an interrupted checkpoint
+ * looks like anyway.
+ *
+ * A witness holding no records reads as an empty list rather than an error. TOG-2975:
+ * `appendJournalWitness` creates the file and then writes it, so a process killed in
+ * that window leaves a zero-byte witness — which carries exactly as much history as no
+ * witness at all. Callers decide what that means; `reconcileJournalWitness` treats it
+ * as absent and `assertLatestCheckpoint` refuses it, because a manifest cannot be shown
+ * to be the latest checkpoint by a log that records none.
+ */
+export function readJournalWitness(token: string, path: string): JournalWitnessRecord[] {
+  const records: JournalWitnessRecord[] = [];
+  let previousChain = '';
+  for (const [index, line] of readFileSync(path, 'utf8').split('\n').filter((item) => item.length > 0).entries()) {
+    let record: JournalWitnessRecord;
+    try {
+      record = JSON.parse(line) as JournalWitnessRecord;
+    } catch {
+      throw new Error(`Journal witness line ${index + 1} is not readable.`);
+    }
+    const { chain, ...body } = record;
+    if (witnessChain(token, previousChain, body) !== chain) throw new Error(`Journal witness line ${index + 1} is not authentic; the checkpoint log was edited outside a run.`);
+    const expected = expectedWitnessRecords(records.at(-1));
+    if (!expected.some((item) => item.sequence === body.sequence && item.phase === body.phase)) throw new Error(`Journal witness line ${index + 1} breaks the checkpoint sequence; the log was reordered or spliced.`);
+    records.push(record);
+    previousChain = chain;
+  }
+  return records;
+}
+
+export function appendJournalWitness(token: string, path: string, sequence: number, phase: JournalWitnessPhase, signature: string, inFlightId: string | null): void {
+  let previousChain = '';
+  let last: JournalWitnessRecord | undefined;
+  if (existsSync(path)) {
+    const line = readFileSync(path, 'utf8').split('\n').filter((item) => item.length > 0).at(-1);
+    if (line !== undefined) {
+      last = JSON.parse(line) as JournalWitnessRecord;
+      previousChain = last.chain;
+    }
+  }
+  // Refuse to write a record the reader would later reject. A caller that skipped
+  // reconciliation and is about to append a second `intent` fails loudly here rather
+  // than leaving behind a log nothing can read again.
+  const expected = expectedWitnessRecords(last);
+  if (!expected.some((item) => item.sequence === sequence && item.phase === phase)) {
+    throw new Error(`Refusing to append checkpoint ${sequence}/${phase} after ${last === undefined ? 'an empty log' : `${last.sequence}/${last.phase}`}; the witness would become unreadable. Reconcile the log first.`);
+  }
+  const body = { sequence, phase, journalSignature: signature, inFlightId };
+  const record: JournalWitnessRecord = { ...body, chain: witnessChain(token, previousChain, body) };
+  const fd = openSync(path, 'a', 0o600);
+  try {
+    appendFileSync(fd, `${JSON.stringify(record)}\n`);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+export type JournalWitnessReconciliation =
+  | { outcome: 'absent' }
+  | { outcome: 'clean' }
+  | { outcome: 'committed'; sequence: number }
+  | { outcome: 'aborted'; sequence: number };
+
+/**
+ * Closes a checkpoint that a crash left open, and must run before anything else reads
+ * or extends the witness.
+ *
+ * `checkpoint()` appends `intent`, writes the manifest, then appends `commit`. A
+ * process that dies inside that window leaves the tip an uncommitted `intent`, and
+ * TOG-2960 showed that state was terminal: the next checkpoint appended a second
+ * `intent` and every later read failed the sequence check, bricking a run that had
+ * only been interrupted. The crash is also invisible from the log alone — whether the
+ * manifest write landed is a property of the *manifest*, so reconciliation decides by
+ * comparing the two:
+ *
+ * - the manifest is the tip's checkpoint -> the write landed; append the `commit`.
+ * - the manifest is the last committed checkpoint (or there is none and no manifest
+ *   was ever written) -> the write did not land; append `abort`, and the sequence
+ *   number is retried.
+ * - anything else -> not a crash window. Refuse, rather than invent a history.
+ *
+ * This adds no replay surface. An `abort` never advances the latest durable
+ * checkpoint, and the records it must be reconciled against are themselves chained
+ * under the bot token, so reaching any of these states still requires writing the
+ * witness — the manifest+witness rollback boundary documented on
+ * `assertLatestCheckpoint`, not a manifest-only replay.
+ *
+ * Closing an intent is itself an append, so it must not be done on the strength of a
+ * manifest the run is about to reject. TOG-2975: `journalSequence` and
+ * `journalSignature` are plaintext in the tip record, so copying that pair into an
+ * otherwise corrupt manifest was enough to buy a `commit` — and once the log commits a
+ * checkpoint whose manifest fails validation, the intent can never be aborted instead
+ * and the run is stranded with no way back. `validateManifest` is therefore run first
+ * and a failure raises before any record is written, leaving the intent open and the
+ * run recoverable once a valid manifest is restored.
+ */
+export function reconcileJournalWitness(
+  token: string,
+  manifestPath: string,
+  validateManifest?: (manifest: CleanupManifest) => void,
+): JournalWitnessReconciliation {
+  const path = journalWitnessPath(manifestPath);
+  if (!existsSync(path)) return { outcome: 'absent' };
+  const records = readJournalWitness(token, path);
+  // A zero-byte witness is a torn file creation, not a checkpoint: it records no more
+  // history than a missing one, so there is nothing to reconcile.
+  if (records.length === 0) return { outcome: 'absent' };
+  const tip = records.at(-1)!;
+  if (tip.phase !== 'intent') return { outcome: 'clean' };
+  let manifest: CleanupManifest | null = null;
+  if (existsSync(manifestPath)) {
+    try {
+      manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as CleanupManifest;
+      if (!Array.isArray(manifest?.operations)) throw new Error('manifest has no operations array');
+      if (manifest.journalSignature !== journalSignature(token, manifest)) throw new Error('its journal signature does not cover this file');
+      validateManifest?.(manifest);
+    } catch (error) {
+      throw new Error(`Journal witness tip is an uncommitted checkpoint ${tip.sequence}, but the manifest beside it is not valid (${error instanceof Error ? error.message : String(error)}). Refusing to close the open checkpoint over it; restore a valid manifest and reconcile again.`);
+    }
+  }
+  if (manifest !== null && manifest.journalSequence === tip.sequence && manifest.journalSignature === tip.journalSignature) {
+    appendJournalWitness(token, path, tip.sequence, 'commit', tip.journalSignature, tip.inFlightId);
+    return { outcome: 'committed', sequence: tip.sequence };
+  }
+  const durable = records.filter((record) => record.phase === 'commit').at(-1);
+  const manifestIsLastDurable = durable === undefined
+    ? manifest === null
+    : manifest !== null && manifest.journalSequence === durable.sequence && manifest.journalSignature === durable.journalSignature;
+  if (manifestIsLastDurable) {
+    appendJournalWitness(token, path, tip.sequence, 'abort', tip.journalSignature, tip.inFlightId);
+    return { outcome: 'aborted', sequence: tip.sequence };
+  }
+  throw new Error(`Journal witness tip is an uncommitted checkpoint ${tip.sequence}, but the manifest is neither that checkpoint nor the last committed one. This is not an interrupted checkpoint; refusing to reconcile it.`);
+}
+
+/**
+ * Whether this manifest is the run's *latest* checkpoint, not merely an authentic one.
+ *
+ * TOG-2947: the journal HMAC closes forgery but not replay. Every checkpoint a run
+ * writes stays validly signed forever, so keeping a copy of the manifest from the
+ * moment an operation was `requesting` and dropping it back afterwards used to hand
+ * rollback a genuine in-flight exception over long-settled state — and rollback would
+ * then write `inverseWrite` across whatever a third party had done since. No forged
+ * signature and no token were needed; the later legitimate invocation supplied both.
+ *
+ * The witness log is appended outside the manifest, so restoring the manifest alone no
+ * longer rewinds the run. Each checkpoint appends `intent`, writes the manifest, then
+ * appends `commit`, so the run's latest *durable* checkpoint is its last committed
+ * record — an `intent` that `reconcileJournalWitness` closed as `abort` never landed
+ * and never advances it. The one uncommitted tip accepted here is an `intent` whose
+ * signature the manifest already carries: that write did land, and only its `commit`
+ * record was lost.
+ *
+ * This binds the manifest to the log, not to wall-clock time: an attacker who can
+ * roll back the whole run directory — witness included — is outside what a file in
+ * that directory can prove, and would need external state to detect.
+ */
+export function assertLatestCheckpoint(token: string, manifest: CleanupManifest, manifestPath: string): void {
+  const path = journalWitnessPath(manifestPath);
+  if (!existsSync(path)) throw new Error(`Journal witness ${path} is missing; this manifest cannot be shown to be the run's latest checkpoint.`);
+  const records = readJournalWitness(token, path);
+  if (records.length === 0) throw new Error(`Journal witness ${path} records no checkpoint; this manifest cannot be shown to be the run's latest checkpoint.`);
+  const tip = records.at(-1)!;
+  if (tip.phase === 'intent' && tip.sequence === manifest.journalSequence && tip.journalSignature === manifest.journalSignature) return;
+  const durable = records.filter((record) => record.phase === 'commit').at(-1);
+  if (durable !== undefined && durable.sequence === manifest.journalSequence && durable.journalSignature === manifest.journalSignature) return;
+  throw new Error(`Manifest is checkpoint ${manifest.journalSequence} but this run's witness log has reached ${tip.sequence}; refusing to act on a superseded checkpoint.`);
+}
+
+/**
+ * Whether a manifest's `requesting` operation may still be treated as genuinely in
+ * flight — the exception that lets rollback write `inverseWrite` over an object holding
+ * *any* live value, and so the one place a stale journal state can clobber a third
+ * party's write.
+ *
+ * `assertLatestCheckpoint` proves the manifest is the run's latest durable checkpoint,
+ * but TOG-2975 showed that is not sufficient. A checkpoint abandoned above it — an
+ * `intent` that reconciliation closed as `abort` — is still evidence about what the
+ * crashed write was going to record, and it is chained under the bot token, so unlike
+ * the manifest it cannot be substituted. Two crashes leave a `requesting` operation
+ * under an abandoned checkpoint, and they are not equally recoverable:
+ *
+ * - the abandoned checkpoint *also* held it in flight (apply journalling
+ *   `apply_failed` after a write that failed or tore) -> the live object may hold
+ *   anything, which is exactly what the exception is for.
+ * - the abandoned checkpoint held *nothing* in flight, or a different operation -> the
+ *   crashed write was the one clearing this operation to `applied`, and apply only
+ *   reaches that after Discord has returned and been verified equal to `write`. The
+ *   live object is therefore at `write`, not at an arbitrary value, and a manifest
+ *   claiming otherwise is a rewind rather than an interruption.
+ *
+ * Denying the exception in the second case does not brick the resume: apply's own
+ * `requesting` branch still recognises a live object sitting at `write` and marks it
+ * applied. It removes only the right to overwrite live drift on the strength of a
+ * `requesting` label the witness contradicts.
+ */
+export function inFlightExceptionIsAvailable(token: string, manifest: CleanupManifest, manifestPath: string): boolean {
+  const inFlightId = manifestInFlightId(manifest);
+  if (inFlightId === null) return false;
+  const path = journalWitnessPath(manifestPath);
+  if (!existsSync(path)) return false;
+  return readJournalWitness(token, path)
+    .filter((record) => record.phase === 'intent' && record.sequence > manifest.journalSequence)
+    .every((record) => record.inFlightId === inFlightId);
+}
+
+/**
+ * The children Discord's server-side sync would have carried along with a category
+ * PATCH: exactly those whose pre-snapshot overwrites match the category's, which is
+ * what "synchronized" means. A channel operation carries nothing but itself.
+ *
+ * Recovery reasoning has to be confined to this set. Every other child of the
+ * category is unsynchronized and our PATCH could not have touched it, so if one of
+ * those moved, a third party moved it.
+ */
+export function syncedChildIds(snapshot: Pick<LiveCleanupSnapshot, 'channels'>, operation: CleanupOperation): string[] {
+  if (operation.objectType !== 'category') return [];
+  const parentBefore = stable(normalizeOverwrites(operation.inverseWrite.permission_overwrites));
+  return snapshot.channels
+    .filter((channel) => channel.parent_id === operation.objectId && stable(normalizeOverwrites(channel.permission_overwrites ?? [])) === parentBefore)
+    .map((channel) => channel.id)
+    .sort();
+}
+
+/**
+ * Whether an interrupted operation's live state is one our own PATCH could have
+ * produced, and is therefore covered by the in-flight exception.
+ *
+ * The operation's own object may hold any value — not knowing whether the write
+ * landed is precisely what "in flight" means. Its synchronized children are a
+ * different matter. Our PATCH could only ever have left such a child in one of three
+ * places: still at the pre-write value (the write never reached it), at the
+ * post-write value (it did), or carried to whatever the category itself now holds
+ * (the sync followed a torn write down). A child sitting anywhere else was moved by
+ * a third party, and the exception must not be stretched to cover that — rollback
+ * would otherwise silently clobber someone else's write.
+ */
+export function inFlightDriftIsOurs(
+  snapshot: Pick<LiveCleanupSnapshot, 'channels'>,
+  operation: CleanupOperation,
+  liveOverwritesById: Map<string, Overwrite[]>,
+): boolean {
+  const liveTarget = liveOverwritesById.get(operation.objectId);
+  if (!liveTarget) return false;
+  const explicable = new Set([
+    stable(normalizeOverwrites(operation.expectedBefore.permission_overwrites)),
+    stable(normalizeOverwrites(operation.write.permission_overwrites)),
+    stable(normalizeOverwrites(liveTarget)),
+  ]);
+  return syncedChildIds(snapshot, operation).every((id) => {
+    const live = liveOverwritesById.get(id);
+    return live !== undefined && explicable.has(stable(normalizeOverwrites(live)));
+  });
 }
 
 export function normalizeOverwrites(overwrites: Overwrite[]): Overwrite[] {
@@ -163,9 +511,44 @@ export function archiveEveryoneOverwrite(guildId: string, overwrites: Overwrite[
   return normalized.map((overwrite, itemIndex) => itemIndex === index ? updated : overwrite);
 }
 
+export function basePermissions(member: Member, snapshot: LiveCleanupSnapshot): bigint {
+  return snapshot.roles
+    .filter((role) => role.id === snapshot.guildId || member.roles.includes(role.id))
+    .reduce((value, role) => value | BigInt(role.permissions), 0n);
+}
+
+/**
+ * The only principals this phase may leave able to see an archived object.
+ *
+ * `owner` and `owen` are deliberate — the guild Owner and Owen itself must keep
+ * archive access to operate and to roll back. `administrator` is not a choice:
+ * Discord ignores every channel overwrite for a principal holding Administrator,
+ * so no PATCH this phase can emit would hide the object from them. Bots are NOT
+ * exempt: a non-Owen bot without Administrator is denied and asserted like any
+ * human member.
+ *
+ * Administrator holders are returned rather than silently skipped so
+ * `buildManifest` can pin them onto the manifest for operator review.
+ */
+export function archiveExemption(member: Member, snapshot: LiveCleanupSnapshot): ArchiveExemptionReason | null {
+  const ownerId = typeof snapshot.guild.owner_id === 'string' ? snapshot.guild.owner_id : null;
+  if (ownerId !== null && member.id === ownerId) return 'owner';
+  if (member.id === LIVE_BOT_APPLICATION_ID) return 'owen';
+  if ((basePermissions(member, snapshot) & ADMINISTRATOR) !== 0n) return 'administrator';
+  return null;
+}
+
+export function archiveVisibilityExemptions(snapshot: LiveCleanupSnapshot): ArchiveVisibilityExemption[] {
+  return snapshot.members
+    .flatMap((member) => {
+      const reason = archiveExemption(member, snapshot);
+      return reason === null ? [] : [{ memberId: member.id, bot: member.bot, reason }];
+    })
+    .sort((a, b) => a.memberId.localeCompare(b.memberId));
+}
+
 function memberCanView(member: Member, snapshot: LiveCleanupSnapshot, overwrites: Overwrite[]): boolean {
-  const roles = snapshot.roles.filter((role) => role.id === snapshot.guildId || member.roles.includes(role.id));
-  let permissions = roles.reduce((value, role) => value | BigInt(role.permissions), 0n);
+  let permissions = basePermissions(member, snapshot);
   if ((permissions & ADMINISTRATOR) !== 0n) return true;
   const everyone = overwrites.find((overwrite) => overwrite.type === 0 && overwrite.id === snapshot.guildId);
   if (everyone) permissions = (permissions & ~BigInt(everyone.deny)) | BigInt(everyone.allow);
@@ -182,36 +565,55 @@ function memberCanView(member: Member, snapshot: LiveCleanupSnapshot, overwrites
   return (permissions & VIEW_CHANNEL) !== 0n;
 }
 
-function assertArchiveVisibility(snapshot: LiveCleanupSnapshot, category: Channel, overwrites: Overwrite[]): void {
-  const roles = new Map(snapshot.roles.map((role) => [role.id, role]));
-  const members = new Map(snapshot.members.map((member) => [member.id, member]));
-  for (const overwrite of overwrites) {
-    if ((BigInt(overwrite.allow) & VIEW_CHANNEL) === 0n) continue;
-    if (overwrite.type === 0 && overwrite.id !== snapshot.guildId && !roles.get(overwrite.id)?.managed) {
-      throw new Error(`Legacy category ${category.id} has an unmanaged role View Channel allow; @everyone deny would not keep it hidden.`);
-    }
-    if (overwrite.type === 1 && !members.get(overwrite.id)?.bot) {
-      throw new Error(`Legacy category ${category.id} has a non-bot member View Channel allow; @everyone deny would not keep it hidden.`);
-    }
-  }
-  const ownerId = typeof snapshot.guild.owner_id === 'string' ? snapshot.guild.owner_id : null;
+function assertArchiveVisibility(snapshot: LiveCleanupSnapshot, target: Channel, overwrites: Overwrite[]): void {
   for (const member of snapshot.members) {
-    if (member.bot || member.id === ownerId) continue;
-    const memberRoles = snapshot.roles.filter((role) => member.roles.includes(role.id));
-    if (memberRoles.some((role) => (BigInt(role.permissions) & ADMINISTRATOR) !== 0n)) continue;
+    if (archiveExemption(member, snapshot) !== null) continue;
     if (memberCanView(member, snapshot, overwrites)) {
-      throw new Error(`Legacy category ${category.id} remains visible to non-administrator member ${member.id} after the planned archive deny.`);
+      throw new Error(`Legacy object ${target.id} remains visible to ${member.bot ? 'bot' : 'member'} ${member.id} after the planned archive deny.`);
     }
   }
 }
 
-export function applyCategoryOverwrites(snapshot: Pick<LiveCleanupSnapshot, 'channels'>, categoryId: string, overwrites: Overwrite[]): void {
+function archiveVisibilityOverwrites(snapshot: LiveCleanupSnapshot, target: Channel, overwrites: Overwrite[]): Overwrite[] {
+  let write = archiveEveryoneOverwrite(snapshot.guildId, overwrites);
+  for (const member of snapshot.members) {
+    if (archiveExemption(member, snapshot) !== null) continue;
+    if (!memberCanView(member, snapshot, write)) continue;
+    const index = write.findIndex((overwrite) => overwrite.id === member.id && overwrite.type === 1);
+    if (index === -1) {
+      write = normalizeOverwrites([...write, { id: member.id, type: 1, allow: '0', deny: String(VIEW_CHANNEL) }]);
+      continue;
+    }
+    const current = write[index]!;
+    const memberDeny = {
+      ...current,
+      allow: String(BigInt(current.allow) & ~VIEW_CHANNEL),
+      deny: String(BigInt(current.deny) | VIEW_CHANNEL),
+    };
+    write = write.map((overwrite, itemIndex) => itemIndex === index ? memberDeny : overwrite);
+  }
+  if (write.length > OVERWRITE_CEILING_PER_CHANNEL) {
+    throw new Error(`Planned overwrites for ${target.id} (${write.length}) exceed this phase's per-channel ceiling of ${OVERWRITE_CEILING_PER_CHANNEL}.`);
+  }
+  assertArchiveVisibility(snapshot, target, write);
+  return write;
+}
+
+export function applyOperationOverwrites(
+  snapshot: Pick<LiveCleanupSnapshot, 'channels'>,
+  operation: Pick<CleanupOperation, 'objectId' | 'objectType'>,
+  overwrites: Overwrite[],
+): void {
+  const target = snapshot.channels.find((channel) => channel.id === operation.objectId);
+  if (!target) throw new Error(`${operation.objectType === 'category' ? 'Category' : 'Channel'} ${operation.objectId} is missing from snapshot.`);
+  const before = normalizeOverwrites(target.permission_overwrites ?? []);
   const normalized = normalizeOverwrites(overwrites);
-  const category = snapshot.channels.find((channel) => channel.id === categoryId);
-  if (!category) throw new Error(`Category ${categoryId} is missing from snapshot.`);
-  category.permission_overwrites = normalized;
+  target.permission_overwrites = normalized;
+  if (operation.objectType !== 'category') return;
   for (const channel of snapshot.channels) {
-    if (channel.parent_id === categoryId) channel.permission_overwrites = structuredClone(normalized);
+    if (channel.parent_id === operation.objectId && stable(normalizeOverwrites(channel.permission_overwrites ?? [])) === stable(before)) {
+      channel.permission_overwrites = structuredClone(normalized);
+    }
   }
 }
 
@@ -248,10 +650,6 @@ export function assertReviewedShape(snapshot: LiveCleanupSnapshot): void {
     const channel = snapshot.channels.find((item) => item.id === id);
     if (!channel || channel.type === 4) throw new Error(`Reviewed legacy channel ${id} is missing or is a category.`);
     if (!channel.parent_id || !LEGACY_CATEGORY_IDS.includes(channel.parent_id as never)) throw new Error(`Reviewed legacy channel ${id} is not under a reviewed legacy category.`);
-    const parent = snapshot.channels.find((item) => item.id === channel.parent_id)!;
-    if (stable(normalizeOverwrites(channel.permission_overwrites ?? [])) !== stable(normalizeOverwrites(parent.permission_overwrites ?? []))) {
-      throw new Error(`Reviewed legacy channel ${id} is permission-unsynchronized from category ${parent.id}; category-only archive cannot prove it will inherit the deny.`);
-    }
   }
   const reviewedUntouchedShapes = new Map([
     ['1545924265868525588', { type: 4, parentId: null }],
@@ -289,19 +687,29 @@ export function assertHierarchy(snapshot: LiveCleanupSnapshot): void {
 export function planArchiveOperations(snapshot: LiveCleanupSnapshot): CleanupOperation[] {
   assertReviewedShape(snapshot);
   assertHierarchy(snapshot);
-  return [...LEGACY_CATEGORY_IDS].sort().map((objectId, index) => {
-    const category = snapshot.channels.find((channel) => channel.id === objectId)!;
-    const before = normalizeOverwrites(category.permission_overwrites ?? []);
-    const write = archiveEveryoneOverwrite(snapshot.guildId, before);
-    assertArchiveVisibility(snapshot, category, write);
-    const body = { phase: ARCHIVE_PHASE, objectId, expectedBefore: { permission_overwrites: before }, write: { permission_overwrites: write }, inverseWrite: { permission_overwrites: before } };
+  const channels = [...LEGACY_CHANNEL_IDS].sort().flatMap((objectId) => {
+    const channel = snapshot.channels.find((item) => item.id === objectId)!;
+    const parent = snapshot.channels.find((item) => item.id === channel.parent_id)!;
+    const synchronized = stable(normalizeOverwrites(channel.permission_overwrites ?? [])) === stable(normalizeOverwrites(parent.permission_overwrites ?? []));
+    return synchronized ? [] : [{ objectId, objectType: 'channel' as const }];
+  });
+  const categories = [...LEGACY_CATEGORY_IDS].sort().map((objectId) => ({ objectId, objectType: 'category' as const }));
+  const writes = [...channels, ...categories].map(({ objectId, objectType }) => {
+    const target = snapshot.channels.find((channel) => channel.id === objectId)!;
+    const before = normalizeOverwrites(target.permission_overwrites ?? []);
+    const write = archiveVisibilityOverwrites(snapshot, target, before);
+    return { objectId, objectType, before, write };
+  });
+  return writes.map(({ objectId, objectType, before, write }, index) => {
+    const kind = objectType === 'category' ? 'patch-category-overwrites' as const : 'patch-channel-overwrites' as const;
+    const body = { phase: ARCHIVE_PHASE, kind, objectType, objectId, expectedBefore: { permission_overwrites: before }, write: { permission_overwrites: write }, inverseWrite: { permission_overwrites: before } };
     return {
       version: 1,
       sequence: index + 1,
-      id: `archive-legacy:${String(index + 1).padStart(3, '0')}:${objectId}:${sha256(body).slice(0, 16)}`,
+      id: `archive-legacy:${String(index + 1).padStart(3, '0')}:${objectType}:${objectId}:${sha256(body).slice(0, 16)}`,
       phase: ARCHIVE_PHASE,
-      kind: 'patch-category-overwrites',
-      objectType: 'category',
+      kind,
+      objectType,
       objectId,
       expectedBefore: { permission_overwrites: before },
       write: { permission_overwrites: write },
@@ -316,7 +724,7 @@ export function operationSemanticHash(operations: CleanupOperation[]): string {
 
 export function buildManifest(snapshot: LiveCleanupSnapshot, snapshotPath: string, operations: CleanupOperation[], token: string): CleanupManifest {
   const operationHash = operationSemanticHash(operations);
-  return {
+  const manifest: CleanupManifest = {
     version: 1,
     kind: 'live-clean-slate-cleanup',
     phase: ARCHIVE_PHASE,
@@ -328,12 +736,17 @@ export function buildManifest(snapshot: LiveCleanupSnapshot, snapshotPath: strin
     snapshotGeneratedAt: snapshot.generatedAt,
     snapshotSemanticHash: snapshot.semanticHash,
     planSignature: planSignature(token, snapshot.generatedAt, snapshot.semanticHash, operationHash),
+    journalSignature: '',
+    journalSequence: 0,
     operationSemanticHash: operationHash,
     operationCount: operations.length,
     reviewedLegacyChannelIds: [...LEGACY_CHANNEL_IDS],
     reviewedLegacyCategoryIds: [...LEGACY_CATEGORY_IDS],
     activeChannelIds: [...ACTIVE_CHANNEL_IDS],
     activeCategoryIds: [...ACTIVE_CATEGORY_IDS],
+    visibilityExemptions: archiveVisibilityExemptions(snapshot),
     operations: operations.map((operation) => ({ ...operation, state: 'pending' })),
   };
+  manifest.journalSignature = journalSignature(token, manifest);
+  return manifest;
 }

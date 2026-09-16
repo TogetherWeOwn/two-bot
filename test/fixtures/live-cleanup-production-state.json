@@ -1,0 +1,7128 @@
+{
+  "guild": {
+    "id": "326474832151838730",
+    "name": "TogetherWeOwn",
+    "owner_id": "275483498603741184",
+    "application_id": null,
+    "features": [
+      "ROLE_SUBSCRIPTIONS_ENABLED",
+      "VIDEO_BITRATE_ENHANCED",
+      "CHANNEL_ICON_EMOJIS_GENERATED",
+      "VIDEO_QUALITY_720_60FPS",
+      "COMMUNITY",
+      "GUILD_ONBOARDING_EVER_ENABLED",
+      "SOUNDBOARD",
+      "STAGE_CHANNEL_VIEWERS_50",
+      "AUTO_MODERATION",
+      "MEMBER_VERIFICATION_GATE_ENABLED",
+      "WELCOME_SCREEN_ENABLED",
+      "TIERLESS_BOOSTING",
+      "TIERLESS_BOOSTING_SYSTEM_MESSAGE",
+      "GUILD_PRODUCTS",
+      "CREATOR_MONETIZABLE_PROVISIONAL",
+      "CREATOR_ACCEPTED_NEW_TERMS",
+      "GUILD_SERVER_GUIDE",
+      "AUDIO_BITRATE_128_KBPS",
+      "PREVIEW_ENABLED",
+      "INVITE_SPLASH",
+      "NEWS",
+      "ANIMATED_ICON"
+    ]
+  },
+  "roles": [
+    {
+      "id": "326474832151838730",
+      "name": "@everyone",
+      "managed": false,
+      "permissions": "2111339353935424",
+      "position": 0
+    },
+    {
+      "id": "448584234907729940",
+      "name": "role-448584234907729940",
+      "managed": false,
+      "permissions": "968552205889",
+      "position": 96
+    },
+    {
+      "id": "448587293154869250",
+      "name": "role-448587293154869250",
+      "managed": false,
+      "permissions": "0",
+      "position": 106
+    },
+    {
+      "id": "448890318989819904",
+      "name": "role-448890318989819904",
+      "managed": false,
+      "permissions": "6478615104",
+      "position": 83
+    },
+    {
+      "id": "465229022130077697",
+      "name": "role-465229022130077697",
+      "managed": false,
+      "permissions": "6478615104",
+      "position": 82
+    },
+    {
+      "id": "508654771276873729",
+      "name": "role-508654771276873729",
+      "managed": false,
+      "permissions": "28587300746233",
+      "position": 186
+    },
+    {
+      "id": "1009516637600370719",
+      "name": "role-1009516637600370719",
+      "managed": true,
+      "permissions": "1071630504512",
+      "position": 110,
+      "tags": {
+        "premium_subscriber": null
+      }
+    },
+    {
+      "id": "1051260096333750322",
+      "name": "role-1051260096333750322",
+      "managed": false,
+      "permissions": "1071630373440",
+      "position": 114
+    },
+    {
+      "id": "1051260362873385000",
+      "name": "role-1051260362873385000",
+      "managed": false,
+      "permissions": "1071630373440",
+      "position": 113
+    },
+    {
+      "id": "1051260579022643281",
+      "name": "role-1051260579022643281",
+      "managed": false,
+      "permissions": "1071630373440",
+      "position": 112
+    },
+    {
+      "id": "1051260775995551784",
+      "name": "role-1051260775995551784",
+      "managed": false,
+      "permissions": "1071630373440",
+      "position": 111
+    },
+    {
+      "id": "1051272877871222915",
+      "name": "role-1051272877871222915",
+      "managed": false,
+      "permissions": "0",
+      "position": 79
+    },
+    {
+      "id": "1051273169782181923",
+      "name": "role-1051273169782181923",
+      "managed": true,
+      "permissions": "870576177",
+      "position": 86,
+      "tags": {
+        "bot_id": "235148962103951360"
+      }
+    },
+    {
+      "id": "1052647673724944484",
+      "name": "role-1052647673724944484",
+      "managed": false,
+      "permissions": "968552204865",
+      "position": 99
+    },
+    {
+      "id": "1055496084434206852",
+      "name": "role-1055496084434206852",
+      "managed": false,
+      "permissions": "1071630373440",
+      "position": 78
+    },
+    {
+      "id": "1055499052801855528",
+      "name": "role-1055499052801855528",
+      "managed": false,
+      "permissions": "0",
+      "position": 77
+    },
+    {
+      "id": "1055499317361782864",
+      "name": "role-1055499317361782864",
+      "managed": false,
+      "permissions": "0",
+      "position": 76
+    },
+    {
+      "id": "1055499328195666022",
+      "name": "role-1055499328195666022",
+      "managed": false,
+      "permissions": "0",
+      "position": 75
+    },
+    {
+      "id": "1056439099701076008",
+      "name": "role-1056439099701076008",
+      "managed": false,
+      "permissions": "1071630373440",
+      "position": 74
+    },
+    {
+      "id": "1060912046012633148",
+      "name": "role-1060912046012633148",
+      "managed": false,
+      "permissions": "1071697478209",
+      "position": 184
+    },
+    {
+      "id": "1063245872328081439",
+      "name": "role-1063245872328081439",
+      "managed": false,
+      "permissions": "0",
+      "position": 81
+    },
+    {
+      "id": "1063252694543913020",
+      "name": "role-1063252694543913020",
+      "managed": false,
+      "permissions": "0",
+      "position": 73
+    },
+    {
+      "id": "1063252753255776256",
+      "name": "role-1063252753255776256",
+      "managed": false,
+      "permissions": "0",
+      "position": 72
+    },
+    {
+      "id": "1063252816967249940",
+      "name": "role-1063252816967249940",
+      "managed": false,
+      "permissions": "0",
+      "position": 71
+    },
+    {
+      "id": "1063255307410739241",
+      "name": "role-1063255307410739241",
+      "managed": false,
+      "permissions": "0",
+      "position": 70
+    },
+    {
+      "id": "1063255343884406864",
+      "name": "role-1063255343884406864",
+      "managed": false,
+      "permissions": "0",
+      "position": 69
+    },
+    {
+      "id": "1063280360676409405",
+      "name": "role-1063280360676409405",
+      "managed": false,
+      "permissions": "0",
+      "position": 84
+    },
+    {
+      "id": "1063330746242191372",
+      "name": "role-1063330746242191372",
+      "managed": true,
+      "permissions": "120795963392",
+      "position": 68,
+      "tags": {
+        "bot_id": "402528814548254720"
+      }
+    },
+    {
+      "id": "1065438198316138507",
+      "name": "role-1065438198316138507",
+      "managed": false,
+      "permissions": "0",
+      "position": 67
+    },
+    {
+      "id": "1065438396069191700",
+      "name": "role-1065438396069191700",
+      "managed": false,
+      "permissions": "0",
+      "position": 66
+    },
+    {
+      "id": "1065438504521322526",
+      "name": "role-1065438504521322526",
+      "managed": false,
+      "permissions": "0",
+      "position": 65
+    },
+    {
+      "id": "1065438630253953044",
+      "name": "role-1065438630253953044",
+      "managed": false,
+      "permissions": "0",
+      "position": 64
+    },
+    {
+      "id": "1078084405026889750",
+      "name": "role-1078084405026889750",
+      "managed": false,
+      "permissions": "0",
+      "position": 63
+    },
+    {
+      "id": "1078424166212055174",
+      "name": "role-1078424166212055174",
+      "managed": true,
+      "permissions": "275146457112",
+      "position": 85,
+      "tags": {
+        "bot_id": "491769129318088714"
+      }
+    },
+    {
+      "id": "1078755185423286372",
+      "name": "role-1078755185423286372",
+      "managed": false,
+      "permissions": "968552205889",
+      "position": 98
+    },
+    {
+      "id": "1078755594950955189",
+      "name": "role-1078755594950955189",
+      "managed": false,
+      "permissions": "1071697478209",
+      "position": 100
+    },
+    {
+      "id": "1078755666191188029",
+      "name": "role-1078755666191188029",
+      "managed": false,
+      "permissions": "1071697478209",
+      "position": 101
+    },
+    {
+      "id": "1078755880343965777",
+      "name": "role-1078755880343965777",
+      "managed": false,
+      "permissions": "1071697478209",
+      "position": 102
+    },
+    {
+      "id": "1078755949814231160",
+      "name": "role-1078755949814231160",
+      "managed": false,
+      "permissions": "1071697478209",
+      "position": 103
+    },
+    {
+      "id": "1078756016071659605",
+      "name": "role-1078756016071659605",
+      "managed": false,
+      "permissions": "1071697478209",
+      "position": 104
+    },
+    {
+      "id": "1078756990710452365",
+      "name": "role-1078756990710452365",
+      "managed": false,
+      "permissions": "10967466766151",
+      "position": 126
+    },
+    {
+      "id": "1078757184021733426",
+      "name": "role-1078757184021733426",
+      "managed": false,
+      "permissions": "10967466764103",
+      "position": 127
+    },
+    {
+      "id": "1078757266469175386",
+      "name": "role-1078757266469175386",
+      "managed": false,
+      "permissions": "10967466764103",
+      "position": 128
+    },
+    {
+      "id": "1078757334504976384",
+      "name": "role-1078757334504976384",
+      "managed": false,
+      "permissions": "1071697478209",
+      "position": 129
+    },
+    {
+      "id": "1078757544169848933",
+      "name": "role-1078757544169848933",
+      "managed": false,
+      "permissions": "10986526343127",
+      "position": 130
+    },
+    {
+      "id": "1078863839199772702",
+      "name": "role-1078863839199772702",
+      "managed": false,
+      "permissions": "0",
+      "position": 108
+    },
+    {
+      "id": "1078868065275609171",
+      "name": "role-1078868065275609171",
+      "managed": true,
+      "permissions": "805362699",
+      "position": 185,
+      "tags": {
+        "bot_id": "456483983870394368"
+      }
+    },
+    {
+      "id": "1080508643558047754",
+      "name": "role-1080508643558047754",
+      "managed": false,
+      "permissions": "0",
+      "position": 94
+    },
+    {
+      "id": "1084500694423318558",
+      "name": "role-1084500694423318558",
+      "managed": false,
+      "permissions": "0",
+      "position": 62
+    },
+    {
+      "id": "1087192823767515219",
+      "name": "role-1087192823767515219",
+      "managed": false,
+      "permissions": "32957699452871",
+      "position": 61
+    },
+    {
+      "id": "1087897546741006456",
+      "name": "role-1087897546741006456",
+      "managed": false,
+      "permissions": "0",
+      "position": 59
+    },
+    {
+      "id": "1087897623538704475",
+      "name": "role-1087897623538704475",
+      "managed": false,
+      "permissions": "0",
+      "position": 58
+    },
+    {
+      "id": "1087897738265509938",
+      "name": "role-1087897738265509938",
+      "managed": false,
+      "permissions": "0",
+      "position": 57
+    },
+    {
+      "id": "1087897790681731122",
+      "name": "role-1087897790681731122",
+      "managed": false,
+      "permissions": "0",
+      "position": 56
+    },
+    {
+      "id": "1087897935045476402",
+      "name": "role-1087897935045476402",
+      "managed": false,
+      "permissions": "0",
+      "position": 55
+    },
+    {
+      "id": "1087898062669750353",
+      "name": "role-1087898062669750353",
+      "managed": false,
+      "permissions": "0",
+      "position": 54
+    },
+    {
+      "id": "1087930764974358568",
+      "name": "role-1087930764974358568",
+      "managed": false,
+      "permissions": "0",
+      "position": 53
+    },
+    {
+      "id": "1087930859346206740",
+      "name": "role-1087930859346206740",
+      "managed": true,
+      "permissions": "0",
+      "position": 52,
+      "tags": {
+        "guild_connections": null
+      }
+    },
+    {
+      "id": "1087930904866979931",
+      "name": "role-1087930904866979931",
+      "managed": false,
+      "permissions": "0",
+      "position": 51
+    },
+    {
+      "id": "1087930995875008522",
+      "name": "role-1087930995875008522",
+      "managed": false,
+      "permissions": "0",
+      "position": 91
+    },
+    {
+      "id": "1087931108945039470",
+      "name": "role-1087931108945039470",
+      "managed": false,
+      "permissions": "0",
+      "position": 90
+    },
+    {
+      "id": "1087931620964708392",
+      "name": "role-1087931620964708392",
+      "managed": true,
+      "permissions": "0",
+      "position": 50,
+      "tags": {
+        "guild_connections": null
+      }
+    },
+    {
+      "id": "1087931680985194496",
+      "name": "role-1087931680985194496",
+      "managed": true,
+      "permissions": "0",
+      "position": 49,
+      "tags": {
+        "guild_connections": null
+      }
+    },
+    {
+      "id": "1087931739126628353",
+      "name": "role-1087931739126628353",
+      "managed": false,
+      "permissions": "0",
+      "position": 48
+    },
+    {
+      "id": "1087931795347099748",
+      "name": "role-1087931795347099748",
+      "managed": false,
+      "permissions": "0",
+      "position": 47
+    },
+    {
+      "id": "1087931842432356373",
+      "name": "role-1087931842432356373",
+      "managed": false,
+      "permissions": "0",
+      "position": 46
+    },
+    {
+      "id": "1087931915933323329",
+      "name": "role-1087931915933323329",
+      "managed": false,
+      "permissions": "0",
+      "position": 45
+    },
+    {
+      "id": "1087931959864471612",
+      "name": "role-1087931959864471612",
+      "managed": true,
+      "permissions": "0",
+      "position": 44,
+      "tags": {
+        "guild_connections": null
+      }
+    },
+    {
+      "id": "1087932006278647908",
+      "name": "role-1087932006278647908",
+      "managed": true,
+      "permissions": "0",
+      "position": 43,
+      "tags": {
+        "guild_connections": null
+      }
+    },
+    {
+      "id": "1087932058388664350",
+      "name": "role-1087932058388664350",
+      "managed": true,
+      "permissions": "0",
+      "position": 42,
+      "tags": {
+        "guild_connections": null
+      }
+    },
+    {
+      "id": "1087932662519443546",
+      "name": "role-1087932662519443546",
+      "managed": true,
+      "permissions": "0",
+      "position": 41,
+      "tags": {
+        "guild_connections": null
+      }
+    },
+    {
+      "id": "1088287410632261642",
+      "name": "role-1088287410632261642",
+      "managed": true,
+      "permissions": "1",
+      "position": 40,
+      "tags": {
+        "bot_id": "115385224119975941"
+      }
+    },
+    {
+      "id": "1088981961789415546",
+      "name": "role-1088981961789415546",
+      "managed": false,
+      "permissions": "0",
+      "position": 38
+    },
+    {
+      "id": "1088982029523226728",
+      "name": "role-1088982029523226728",
+      "managed": false,
+      "permissions": "0",
+      "position": 37
+    },
+    {
+      "id": "1088982099375181864",
+      "name": "role-1088982099375181864",
+      "managed": false,
+      "permissions": "0",
+      "position": 36
+    },
+    {
+      "id": "1088982263292756059",
+      "name": "role-1088982263292756059",
+      "managed": false,
+      "permissions": "0",
+      "position": 35
+    },
+    {
+      "id": "1088982372122374185",
+      "name": "role-1088982372122374185",
+      "managed": false,
+      "permissions": "0",
+      "position": 34
+    },
+    {
+      "id": "1090627565934366863",
+      "name": "role-1090627565934366863",
+      "managed": false,
+      "permissions": "0",
+      "position": 33
+    },
+    {
+      "id": "1090651387236450416",
+      "name": "role-1090651387236450416",
+      "managed": false,
+      "permissions": "0",
+      "position": 32
+    },
+    {
+      "id": "1092247753574330458",
+      "name": "role-1092247753574330458",
+      "managed": false,
+      "permissions": "0",
+      "position": 92
+    },
+    {
+      "id": "1092248449786855595",
+      "name": "role-1092248449786855595",
+      "managed": false,
+      "permissions": "0",
+      "position": 89
+    },
+    {
+      "id": "1092250849717264475",
+      "name": "role-1092250849717264475",
+      "managed": false,
+      "permissions": "0",
+      "position": 88
+    },
+    {
+      "id": "1092570654349475863",
+      "name": "role-1092570654349475863",
+      "managed": true,
+      "permissions": "292326337616",
+      "position": 87,
+      "tags": {
+        "bot_id": "436515089441488907"
+      }
+    },
+    {
+      "id": "1092632907190894593",
+      "name": "role-1092632907190894593",
+      "managed": false,
+      "permissions": "0",
+      "position": 183
+    },
+    {
+      "id": "1092632909468405831",
+      "name": "role-1092632909468405831",
+      "managed": false,
+      "permissions": "0",
+      "position": 182
+    },
+    {
+      "id": "1092632911754309702",
+      "name": "role-1092632911754309702",
+      "managed": false,
+      "permissions": "0",
+      "position": 181
+    },
+    {
+      "id": "1092632914040197140",
+      "name": "role-1092632914040197140",
+      "managed": false,
+      "permissions": "0",
+      "position": 180
+    },
+    {
+      "id": "1092632916242219059",
+      "name": "role-1092632916242219059",
+      "managed": false,
+      "permissions": "0",
+      "position": 179
+    },
+    {
+      "id": "1092632918406471690",
+      "name": "role-1092632918406471690",
+      "managed": false,
+      "permissions": "0",
+      "position": 178
+    },
+    {
+      "id": "1092632920348438550",
+      "name": "role-1092632920348438550",
+      "managed": false,
+      "permissions": "0",
+      "position": 177
+    },
+    {
+      "id": "1092632923087323166",
+      "name": "role-1092632923087323166",
+      "managed": false,
+      "permissions": "0",
+      "position": 176
+    },
+    {
+      "id": "1092632925276753952",
+      "name": "role-1092632925276753952",
+      "managed": false,
+      "permissions": "0",
+      "position": 175
+    },
+    {
+      "id": "1092632927944318976",
+      "name": "role-1092632927944318976",
+      "managed": false,
+      "permissions": "0",
+      "position": 174
+    },
+    {
+      "id": "1092632930741923921",
+      "name": "role-1092632930741923921",
+      "managed": false,
+      "permissions": "0",
+      "position": 173
+    },
+    {
+      "id": "1092632933052993646",
+      "name": "role-1092632933052993646",
+      "managed": false,
+      "permissions": "0",
+      "position": 172
+    },
+    {
+      "id": "1092632935183679619",
+      "name": "role-1092632935183679619",
+      "managed": false,
+      "permissions": "0",
+      "position": 171
+    },
+    {
+      "id": "1092632937368928358",
+      "name": "role-1092632937368928358",
+      "managed": false,
+      "permissions": "0",
+      "position": 170
+    },
+    {
+      "id": "1092632939776442400",
+      "name": "role-1092632939776442400",
+      "managed": false,
+      "permissions": "0",
+      "position": 169
+    },
+    {
+      "id": "1092632942129459230",
+      "name": "role-1092632942129459230",
+      "managed": false,
+      "permissions": "0",
+      "position": 168
+    },
+    {
+      "id": "1092632944260157541",
+      "name": "role-1092632944260157541",
+      "managed": false,
+      "permissions": "0",
+      "position": 167
+    },
+    {
+      "id": "1092632946474745896",
+      "name": "role-1092632946474745896",
+      "managed": false,
+      "permissions": "0",
+      "position": 166
+    },
+    {
+      "id": "1092632949192675342",
+      "name": "role-1092632949192675342",
+      "managed": false,
+      "permissions": "0",
+      "position": 165
+    },
+    {
+      "id": "1092632951977672724",
+      "name": "role-1092632951977672724",
+      "managed": false,
+      "permissions": "0",
+      "position": 164
+    },
+    {
+      "id": "1092632954381013042",
+      "name": "role-1092632954381013042",
+      "managed": false,
+      "permissions": "0",
+      "position": 163
+    },
+    {
+      "id": "1092632956813709422",
+      "name": "role-1092632956813709422",
+      "managed": false,
+      "permissions": "0",
+      "position": 162
+    },
+    {
+      "id": "1092632959204470884",
+      "name": "role-1092632959204470884",
+      "managed": false,
+      "permissions": "0",
+      "position": 161
+    },
+    {
+      "id": "1092632961347768350",
+      "name": "role-1092632961347768350",
+      "managed": false,
+      "permissions": "0",
+      "position": 160
+    },
+    {
+      "id": "1092632963583332452",
+      "name": "role-1092632963583332452",
+      "managed": false,
+      "permissions": "0",
+      "position": 159
+    },
+    {
+      "id": "1092632965990842419",
+      "name": "role-1092632965990842419",
+      "managed": false,
+      "permissions": "0",
+      "position": 158
+    },
+    {
+      "id": "1092632968268361799",
+      "name": "role-1092632968268361799",
+      "managed": false,
+      "permissions": "0",
+      "position": 157
+    },
+    {
+      "id": "1092632970470379520",
+      "name": "role-1092632970470379520",
+      "managed": false,
+      "permissions": "0",
+      "position": 156
+    },
+    {
+      "id": "1092632972626243604",
+      "name": "role-1092632972626243604",
+      "managed": false,
+      "permissions": "0",
+      "position": 155
+    },
+    {
+      "id": "1092632974773719110",
+      "name": "role-1092632974773719110",
+      "managed": false,
+      "permissions": "0",
+      "position": 154
+    },
+    {
+      "id": "1092632977311285319",
+      "name": "role-1092632977311285319",
+      "managed": false,
+      "permissions": "0",
+      "position": 153
+    },
+    {
+      "id": "1092632979639111850",
+      "name": "role-1092632979639111850",
+      "managed": false,
+      "permissions": "0",
+      "position": 152
+    },
+    {
+      "id": "1092632981803372624",
+      "name": "role-1092632981803372624",
+      "managed": false,
+      "permissions": "0",
+      "position": 151
+    },
+    {
+      "id": "1092632983934095360",
+      "name": "role-1092632983934095360",
+      "managed": false,
+      "permissions": "0",
+      "position": 150
+    },
+    {
+      "id": "1092632986291273758",
+      "name": "role-1092632986291273758",
+      "managed": false,
+      "permissions": "0",
+      "position": 149
+    },
+    {
+      "id": "1092632988736573521",
+      "name": "role-1092632988736573521",
+      "managed": false,
+      "permissions": "0",
+      "position": 148
+    },
+    {
+      "id": "1092632990808559626",
+      "name": "role-1092632990808559626",
+      "managed": false,
+      "permissions": "0",
+      "position": 147
+    },
+    {
+      "id": "1092632993052495923",
+      "name": "role-1092632993052495923",
+      "managed": false,
+      "permissions": "0",
+      "position": 146
+    },
+    {
+      "id": "1092632995195785287",
+      "name": "role-1092632995195785287",
+      "managed": false,
+      "permissions": "0",
+      "position": 145
+    },
+    {
+      "id": "1092632997561380955",
+      "name": "role-1092632997561380955",
+      "managed": false,
+      "permissions": "0",
+      "position": 144
+    },
+    {
+      "id": "1092633000421904544",
+      "name": "role-1092633000421904544",
+      "managed": false,
+      "permissions": "0",
+      "position": 143
+    },
+    {
+      "id": "1092633003492126780",
+      "name": "role-1092633003492126780",
+      "managed": false,
+      "permissions": "0",
+      "position": 142
+    },
+    {
+      "id": "1092633005752864859",
+      "name": "role-1092633005752864859",
+      "managed": false,
+      "permissions": "0",
+      "position": 141
+    },
+    {
+      "id": "1092633008277827647",
+      "name": "role-1092633008277827647",
+      "managed": false,
+      "permissions": "0",
+      "position": 140
+    },
+    {
+      "id": "1092633011016699995",
+      "name": "role-1092633011016699995",
+      "managed": false,
+      "permissions": "0",
+      "position": 139
+    },
+    {
+      "id": "1092633013369712660",
+      "name": "role-1092633013369712660",
+      "managed": false,
+      "permissions": "0",
+      "position": 138
+    },
+    {
+      "id": "1092633015466860564",
+      "name": "role-1092633015466860564",
+      "managed": false,
+      "permissions": "0",
+      "position": 137
+    },
+    {
+      "id": "1092633018222514236",
+      "name": "role-1092633018222514236",
+      "managed": false,
+      "permissions": "0",
+      "position": 136
+    },
+    {
+      "id": "1092633020722331738",
+      "name": "role-1092633020722331738",
+      "managed": false,
+      "permissions": "0",
+      "position": 135
+    },
+    {
+      "id": "1092633022953705502",
+      "name": "role-1092633022953705502",
+      "managed": false,
+      "permissions": "0",
+      "position": 134
+    },
+    {
+      "id": "1092633025411563571",
+      "name": "role-1092633025411563571",
+      "managed": false,
+      "permissions": "0",
+      "position": 133
+    },
+    {
+      "id": "1092823497924956300",
+      "name": "role-1092823497924956300",
+      "managed": false,
+      "permissions": "39582418599936",
+      "position": 109
+    },
+    {
+      "id": "1094046641008418816",
+      "name": "role-1094046641008418816",
+      "managed": false,
+      "permissions": "0",
+      "position": 30
+    },
+    {
+      "id": "1101170473108242452",
+      "name": "role-1101170473108242452",
+      "managed": false,
+      "permissions": "0",
+      "position": 93
+    },
+    {
+      "id": "1101297337919340585",
+      "name": "role-1101297337919340585",
+      "managed": false,
+      "permissions": "0",
+      "position": 80
+    },
+    {
+      "id": "1101297505179816017",
+      "name": "role-1101297505179816017",
+      "managed": false,
+      "permissions": "0",
+      "position": 39
+    },
+    {
+      "id": "1101297643503767582",
+      "name": "role-1101297643503767582",
+      "managed": false,
+      "permissions": "0",
+      "position": 31
+    },
+    {
+      "id": "1101306065246752768",
+      "name": "role-1101306065246752768",
+      "managed": false,
+      "permissions": "0",
+      "position": 60
+    },
+    {
+      "id": "1101312355608035398",
+      "name": "role-1101312355608035398",
+      "managed": false,
+      "permissions": "0",
+      "position": 125
+    },
+    {
+      "id": "1101314731089862778",
+      "name": "role-1101314731089862778",
+      "managed": false,
+      "permissions": "0",
+      "position": 95
+    },
+    {
+      "id": "1101315895390900295",
+      "name": "role-1101315895390900295",
+      "managed": false,
+      "permissions": "0",
+      "position": 131
+    },
+    {
+      "id": "1101315995764805712",
+      "name": "role-1101315995764805712",
+      "managed": false,
+      "permissions": "0",
+      "position": 107
+    },
+    {
+      "id": "1103318655728627827",
+      "name": "role-1103318655728627827",
+      "managed": true,
+      "permissions": "140123794496",
+      "position": 29,
+      "tags": {
+        "bot_id": "628400349979344919"
+      }
+    },
+    {
+      "id": "1104855809323696208",
+      "name": "role-1104855809323696208",
+      "managed": false,
+      "permissions": "0",
+      "position": 105
+    },
+    {
+      "id": "1112759027554844763",
+      "name": "role-1112759027554844763",
+      "managed": false,
+      "permissions": "0",
+      "position": 28
+    },
+    {
+      "id": "1112801161163055255",
+      "name": "role-1112801161163055255",
+      "managed": false,
+      "permissions": "71199856074305",
+      "position": 115
+    },
+    {
+      "id": "1112809226427957379",
+      "name": "role-1112809226427957379",
+      "managed": false,
+      "permissions": "71199856074305",
+      "position": 116
+    },
+    {
+      "id": "1112809331398815824",
+      "name": "role-1112809331398815824",
+      "managed": false,
+      "permissions": "71199856074305",
+      "position": 117
+    },
+    {
+      "id": "1112809426349457459",
+      "name": "role-1112809426349457459",
+      "managed": false,
+      "permissions": "71199856074305",
+      "position": 118
+    },
+    {
+      "id": "1112809538396098720",
+      "name": "role-1112809538396098720",
+      "managed": false,
+      "permissions": "71199856074305",
+      "position": 119
+    },
+    {
+      "id": "1112809656885202974",
+      "name": "role-1112809656885202974",
+      "managed": false,
+      "permissions": "71199856074305",
+      "position": 120
+    },
+    {
+      "id": "1112809780222906509",
+      "name": "role-1112809780222906509",
+      "managed": false,
+      "permissions": "71199856074305",
+      "position": 121
+    },
+    {
+      "id": "1112810451785498654",
+      "name": "role-1112810451785498654",
+      "managed": false,
+      "permissions": "71199856074305",
+      "position": 122
+    },
+    {
+      "id": "1112811276771528855",
+      "name": "role-1112811276771528855",
+      "managed": false,
+      "permissions": "71199856074305",
+      "position": 123
+    },
+    {
+      "id": "1112811366944874536",
+      "name": "role-1112811366944874536",
+      "managed": false,
+      "permissions": "71199856074305",
+      "position": 124
+    },
+    {
+      "id": "1113180728381931630",
+      "name": "role-1113180728381931630",
+      "managed": false,
+      "permissions": "0",
+      "position": 27
+    },
+    {
+      "id": "1115004404949590116",
+      "name": "role-1115004404949590116",
+      "managed": true,
+      "permissions": "309238033408",
+      "position": 26,
+      "tags": {
+        "bot_id": "474051954998509571"
+      }
+    },
+    {
+      "id": "1119666971584237679",
+      "name": "role-1119666971584237679",
+      "managed": false,
+      "permissions": "0",
+      "position": 23
+    },
+    {
+      "id": "1132805194707644529",
+      "name": "role-1132805194707644529",
+      "managed": false,
+      "permissions": "0",
+      "position": 25
+    },
+    {
+      "id": "1132805520953184297",
+      "name": "role-1132805520953184297",
+      "managed": false,
+      "permissions": "0",
+      "position": 24
+    },
+    {
+      "id": "1132805628172173322",
+      "name": "role-1132805628172173322",
+      "managed": false,
+      "permissions": "0",
+      "position": 22
+    },
+    {
+      "id": "1135005206841663490",
+      "name": "role-1135005206841663490",
+      "managed": true,
+      "permissions": "17620103785536",
+      "position": 21,
+      "tags": {
+        "bot_id": "903380664336928798"
+      }
+    },
+    {
+      "id": "1138920512601464915",
+      "name": "role-1138920512601464915",
+      "managed": true,
+      "permissions": "17995913193552",
+      "position": 20,
+      "tags": {
+        "bot_id": "658698521570181140"
+      }
+    },
+    {
+      "id": "1140377116370804756",
+      "name": "role-1140377116370804756",
+      "managed": false,
+      "permissions": "0",
+      "position": 132
+    },
+    {
+      "id": "1144789677057003636",
+      "name": "role-1144789677057003636",
+      "managed": false,
+      "permissions": "0",
+      "position": 97
+    },
+    {
+      "id": "1146631068787671110",
+      "name": "role-1146631068787671110",
+      "managed": false,
+      "permissions": "0",
+      "position": 19
+    },
+    {
+      "id": "1146631222395670538",
+      "name": "role-1146631222395670538",
+      "managed": false,
+      "permissions": "0",
+      "position": 18
+    },
+    {
+      "id": "1146631481461055558",
+      "name": "role-1146631481461055558",
+      "managed": false,
+      "permissions": "0",
+      "position": 17
+    },
+    {
+      "id": "1147419475042377751",
+      "name": "role-1147419475042377751",
+      "managed": true,
+      "permissions": "84032",
+      "position": 16,
+      "tags": {
+        "bot_id": "491614535812120596"
+      }
+    },
+    {
+      "id": "1149888357439127573",
+      "name": "role-1149888357439127573",
+      "managed": false,
+      "permissions": "0",
+      "position": 15
+    },
+    {
+      "id": "1179233034713702511",
+      "name": "role-1179233034713702511",
+      "managed": false,
+      "permissions": "0",
+      "position": 14
+    },
+    {
+      "id": "1179233301295284385",
+      "name": "role-1179233301295284385",
+      "managed": false,
+      "permissions": "0",
+      "position": 13
+    },
+    {
+      "id": "1179233886178394142",
+      "name": "role-1179233886178394142",
+      "managed": false,
+      "permissions": "0",
+      "position": 12
+    },
+    {
+      "id": "1179233934303825920",
+      "name": "role-1179233934303825920",
+      "managed": false,
+      "permissions": "0",
+      "position": 11
+    },
+    {
+      "id": "1211391129031811204",
+      "name": "role-1211391129031811204",
+      "managed": true,
+      "permissions": "364870364415",
+      "position": 10,
+      "tags": {
+        "bot_id": "159985870458322944"
+      }
+    },
+    {
+      "id": "1233902645408825437",
+      "name": "role-1233902645408825437",
+      "managed": true,
+      "permissions": "268454912",
+      "position": 9,
+      "tags": {
+        "bot_id": "495388016756523020"
+      }
+    },
+    {
+      "id": "1244337842466066497",
+      "name": "role-1244337842466066497",
+      "managed": true,
+      "permissions": "301296759",
+      "position": 8,
+      "tags": {
+        "bot_id": "307998818547531777"
+      }
+    },
+    {
+      "id": "1254778753876496485",
+      "name": "role-1254778753876496485",
+      "managed": false,
+      "permissions": "0",
+      "position": 7
+    },
+    {
+      "id": "1391522751050809484",
+      "name": "role-1391522751050809484",
+      "managed": true,
+      "permissions": "1",
+      "position": 6,
+      "tags": {
+        "bot_id": "1263049996916359258"
+      }
+    },
+    {
+      "id": "1391524788513673236",
+      "name": "role-1391524788513673236",
+      "managed": false,
+      "permissions": "0",
+      "position": 5
+    },
+    {
+      "id": "1399098352314093631",
+      "name": "role-1399098352314093631",
+      "managed": true,
+      "permissions": "66561",
+      "position": 4,
+      "tags": {
+        "bot_id": "476259371912003597"
+      }
+    },
+    {
+      "id": "1399099000132473077",
+      "name": "role-1399099000132473077",
+      "managed": true,
+      "permissions": "19473",
+      "position": 3,
+      "tags": {
+        "bot_id": "302050872383242240"
+      }
+    },
+    {
+      "id": "1399100066287058966",
+      "name": "role-1399100066287058966",
+      "managed": true,
+      "permissions": "36776045648",
+      "position": 2,
+      "tags": {
+        "bot_id": "475744554910351370"
+      }
+    },
+    {
+      "id": "1399100719012778006",
+      "name": "role-1399100719012778006",
+      "managed": true,
+      "permissions": "285240336",
+      "position": 1,
+      "tags": {
+        "bot_id": "953577640403550248"
+      }
+    },
+    {
+      "id": "1539718644953514087",
+      "name": "role-1539718644953514087",
+      "managed": true,
+      "permissions": "8866461766385663",
+      "position": 187,
+      "tags": {
+        "bot_id": "1539711683898118154"
+      }
+    },
+    {
+      "id": "1545924268997615726",
+      "name": "role-1545924268997615726",
+      "managed": false,
+      "permissions": "0",
+      "position": 1
+    },
+    {
+      "id": "1546777855801954408",
+      "name": "role-1546777855801954408",
+      "managed": false,
+      "permissions": "0",
+      "position": 1
+    },
+    {
+      "id": "1546777856984481792",
+      "name": "role-1546777856984481792",
+      "managed": false,
+      "permissions": "1099780136966",
+      "position": 1
+    }
+  ],
+  "channels": [
+    {
+      "id": "327082608611557377",
+      "name": "channel-327082608611557377",
+      "type": 5,
+      "parent_id": "1087198131512430642",
+      "position": 3,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "551940064833",
+          "deny": "128089644792080"
+        }
+      ]
+    },
+    {
+      "id": "1045892418362417192",
+      "name": "channel-1045892418362417192",
+      "type": 0,
+      "parent_id": "1063309416365039649",
+      "position": 64,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1045943373007171674",
+      "name": "channel-1045943373007171674",
+      "type": 0,
+      "parent_id": "1087199234706640940",
+      "position": 24,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1045946491463807066",
+      "name": "channel-1045946491463807066",
+      "type": 4,
+      "parent_id": null,
+      "position": 7,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1045950023663370260",
+      "name": "channel-1045950023663370260",
+      "type": 2,
+      "parent_id": "1087199234706640940",
+      "position": 10,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1047562772407398500",
+      "name": "channel-1047562772407398500",
+      "type": 0,
+      "parent_id": "1432057164242878637",
+      "position": 23,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "377958173696"
+        }
+      ]
+    },
+    {
+      "id": "1055494206556225719",
+      "name": "channel-1055494206556225719",
+      "type": 4,
+      "parent_id": null,
+      "position": 1,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "240518479872",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1048576"
+        }
+      ]
+    },
+    {
+      "id": "1055494371019071570",
+      "name": "channel-1055494371019071570",
+      "type": 0,
+      "parent_id": "1055494206556225719",
+      "position": 17,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "240518479872",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1048576"
+        }
+      ]
+    },
+    {
+      "id": "1055500237831151716",
+      "name": "channel-1055500237831151716",
+      "type": 0,
+      "parent_id": "1055494206556225719",
+      "position": 16,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "240518479872",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1048576"
+        }
+      ]
+    },
+    {
+      "id": "1056439011088007261",
+      "name": "channel-1056439011088007261",
+      "type": 0,
+      "parent_id": "1055494206556225719",
+      "position": 18,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "377958173696"
+        }
+      ]
+    },
+    {
+      "id": "1056447465286541333",
+      "name": "channel-1056447465286541333",
+      "type": 0,
+      "parent_id": "1087199234706640940",
+      "position": 26,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1057456170320801802",
+      "name": "channel-1057456170320801802",
+      "type": 0,
+      "parent_id": "1087199234706640940",
+      "position": 32,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1058572808826933319",
+      "name": "channel-1058572808826933319",
+      "type": 0,
+      "parent_id": "1078761198708858891",
+      "position": 55,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "262144",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1058572809607073832",
+      "name": "channel-1058572809607073832",
+      "type": 0,
+      "parent_id": "1078761198708858891",
+      "position": 51,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078757544169848933",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1087192823767515219",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "262144",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1059534713695502337",
+      "name": "channel-1059534713695502337",
+      "type": 0,
+      "parent_id": "1078761198708858891",
+      "position": 54,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1063256513172484149",
+      "name": "channel-1063256513172484149",
+      "type": 0,
+      "parent_id": "1432057164242878637",
+      "position": 20,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "377958173696"
+        }
+      ]
+    },
+    {
+      "id": "1063269593914818600",
+      "name": "channel-1063269593914818600",
+      "type": 0,
+      "parent_id": "1063309416365039649",
+      "position": 66,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1063303397639454781",
+      "name": "channel-1063303397639454781",
+      "type": 0,
+      "parent_id": "1063309416365039649",
+      "position": 65,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1063309416365039649",
+      "name": "channel-1063309416365039649",
+      "type": 4,
+      "parent_id": null,
+      "position": 13,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1078083546054397982",
+      "name": "channel-1078083546054397982",
+      "type": 0,
+      "parent_id": "1087199234706640940",
+      "position": 31,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "549792514624",
+          "deny": "57565476031744"
+        }
+      ]
+    },
+    {
+      "id": "1078104807132373032",
+      "name": "channel-1078104807132373032",
+      "type": 0,
+      "parent_id": "1087198131512430642",
+      "position": 6,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "64",
+          "deny": "274878041088"
+        }
+      ]
+    },
+    {
+      "id": "1078761198708858891",
+      "name": "channel-1078761198708858891",
+      "type": 4,
+      "parent_id": null,
+      "position": 8,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078756990710452365",
+          "type": 0,
+          "allow": "1049600",
+          "deny": "0"
+        },
+        {
+          "id": "1078757184021733426",
+          "type": 0,
+          "allow": "1049600",
+          "deny": "0"
+        },
+        {
+          "id": "1078757266469175386",
+          "type": 0,
+          "allow": "1049600",
+          "deny": "0"
+        },
+        {
+          "id": "1078757334504976384",
+          "type": 0,
+          "allow": "1049600",
+          "deny": "0"
+        },
+        {
+          "id": "1078757544169848933",
+          "type": 0,
+          "allow": "1049600",
+          "deny": "0"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1078864674046627960",
+      "name": "channel-1078864674046627960",
+      "type": 0,
+      "parent_id": "1063309416365039649",
+      "position": 67,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1079390933159788714",
+      "name": "channel-1079390933159788714",
+      "type": 0,
+      "parent_id": "1078761198708858891",
+      "position": 53,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078756990710452365",
+          "type": 0,
+          "allow": "1049600",
+          "deny": "0"
+        },
+        {
+          "id": "1078757184021733426",
+          "type": 0,
+          "allow": "1049600",
+          "deny": "0"
+        },
+        {
+          "id": "1078757266469175386",
+          "type": 0,
+          "allow": "1049600",
+          "deny": "0"
+        },
+        {
+          "id": "1078757334504976384",
+          "type": 0,
+          "allow": "1049600",
+          "deny": "0"
+        },
+        {
+          "id": "1078757544169848933",
+          "type": 0,
+          "allow": "1049600",
+          "deny": "0"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1080624480382107728",
+      "name": "channel-1080624480382107728",
+      "type": 0,
+      "parent_id": "1063309416365039649",
+      "position": 68,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1086368551729905694",
+      "name": "channel-1086368551729905694",
+      "type": 2,
+      "parent_id": "1087199234706640940",
+      "position": 0,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1087198131512430642",
+      "name": "channel-1087198131512430642",
+      "type": 4,
+      "parent_id": null,
+      "position": 0,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "128641584856913"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1087198966346690570",
+      "name": "channel-1087198966346690570",
+      "type": 15,
+      "parent_id": "1087198131512430642",
+      "position": 1,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1087199234706640940",
+      "name": "channel-1087199234706640940",
+      "type": 4,
+      "parent_id": null,
+      "position": 3,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1087199559719067748",
+      "name": "channel-1087199559719067748",
+      "type": 0,
+      "parent_id": "1087199234706640940",
+      "position": 28,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "377957125120"
+        }
+      ]
+    },
+    {
+      "id": "1087199619546632232",
+      "name": "channel-1087199619546632232",
+      "type": 0,
+      "parent_id": "1087199234706640940",
+      "position": 25,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1087199767718809650",
+      "name": "channel-1087199767718809650",
+      "type": 0,
+      "parent_id": "1087199234706640940",
+      "position": 29,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1094046641008418816",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "826817972801",
+          "deny": "127814766884112"
+        }
+      ]
+    },
+    {
+      "id": "1087199860802986095",
+      "name": "channel-1087199860802986095",
+      "type": 0,
+      "parent_id": "1087198131512430642",
+      "position": 5,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "274877906944",
+          "deny": "103079218176"
+        },
+        {
+          "id": "474051954998509571",
+          "type": 1,
+          "allow": "377957124096",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1087199956600897557",
+      "name": "channel-1087199956600897557",
+      "type": 0,
+      "parent_id": "1045946491463807066",
+      "position": 42,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "274877908992",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "274878958592"
+        }
+      ]
+    },
+    {
+      "id": "1087200082505510972",
+      "name": "channel-1087200082505510972",
+      "type": 0,
+      "parent_id": "1087198131512430642",
+      "position": 10,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1087200619418357810",
+      "name": "channel-1087200619418357810",
+      "type": 0,
+      "parent_id": "1087198131512430642",
+      "position": 8,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1060912046012633148",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1092823497924956300",
+          "type": 0,
+          "allow": "1024",
+          "deny": "377957124096"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "377957125120"
+        }
+      ]
+    },
+    {
+      "id": "1087201563405193247",
+      "name": "channel-1087201563405193247",
+      "type": 4,
+      "parent_id": null,
+      "position": 10,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1048576"
+        }
+      ]
+    },
+    {
+      "id": "1087201627980714044",
+      "name": "channel-1087201627980714044",
+      "type": 0,
+      "parent_id": "1087201563405193247",
+      "position": 59,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078868065275609171",
+          "type": 0,
+          "allow": "377957124096",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "377958172672"
+        }
+      ]
+    },
+    {
+      "id": "1087910390802960414",
+      "name": "channel-1087910390802960414",
+      "type": 15,
+      "parent_id": "1045946491463807066",
+      "position": 43,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1063330746242191372",
+          "type": 0,
+          "allow": "274877908992",
+          "deny": "0"
+        },
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "551940063809",
+          "deny": "128089644793104"
+        }
+      ]
+    },
+    {
+      "id": "1090639835896746027",
+      "name": "channel-1090639835896746027",
+      "type": 4,
+      "parent_id": null,
+      "position": 14,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1090639980705099776",
+      "name": "channel-1090639980705099776",
+      "type": 0,
+      "parent_id": "1090639835896746027",
+      "position": 69,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1090640059524468797",
+      "name": "channel-1090640059524468797",
+      "type": 0,
+      "parent_id": "1090639835896746027",
+      "position": 70,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1090640094194565180",
+      "name": "channel-1090640094194565180",
+      "type": 0,
+      "parent_id": "1090639835896746027",
+      "position": 71,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1090640131200913589",
+      "name": "channel-1090640131200913589",
+      "type": 0,
+      "parent_id": "1090639835896746027",
+      "position": 72,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1090640168412786688",
+      "name": "channel-1090640168412786688",
+      "type": 0,
+      "parent_id": "1090639835896746027",
+      "position": 73,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1090640199475802202",
+      "name": "channel-1090640199475802202",
+      "type": 0,
+      "parent_id": "1090639835896746027",
+      "position": 74,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1090640261375340554",
+      "name": "channel-1090640261375340554",
+      "type": 0,
+      "parent_id": "1090639835896746027",
+      "position": 75,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1090640290882261092",
+      "name": "channel-1090640290882261092",
+      "type": 0,
+      "parent_id": "1090639835896746027",
+      "position": 76,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1090640324600266902",
+      "name": "channel-1090640324600266902",
+      "type": 0,
+      "parent_id": "1090639835896746027",
+      "position": 77,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1090640356627976263",
+      "name": "channel-1090640356627976263",
+      "type": 0,
+      "parent_id": "1090639835896746027",
+      "position": 78,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1090640385027616861",
+      "name": "channel-1090640385027616861",
+      "type": 0,
+      "parent_id": "1090639835896746027",
+      "position": 79,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1090640414568091700",
+      "name": "channel-1090640414568091700",
+      "type": 0,
+      "parent_id": "1090639835896746027",
+      "position": 80,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1090640441948512326",
+      "name": "channel-1090640441948512326",
+      "type": 0,
+      "parent_id": "1090639835896746027",
+      "position": 81,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1090640472449486908",
+      "name": "channel-1090640472449486908",
+      "type": 0,
+      "parent_id": "1090639835896746027",
+      "position": 82,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1090640510227582986",
+      "name": "channel-1090640510227582986",
+      "type": 0,
+      "parent_id": "1090639835896746027",
+      "position": 83,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1090642310846480445",
+      "name": "channel-1090642310846480445",
+      "type": 0,
+      "parent_id": "1090639835896746027",
+      "position": 84,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1090642341041291364",
+      "name": "channel-1090642341041291364",
+      "type": 0,
+      "parent_id": "1090639835896746027",
+      "position": 85,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1090642374226612404",
+      "name": "channel-1090642374226612404",
+      "type": 0,
+      "parent_id": "1090639835896746027",
+      "position": 86,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1090642415339192351",
+      "name": "channel-1090642415339192351",
+      "type": 0,
+      "parent_id": "1090639835896746027",
+      "position": 87,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1090642448579043388",
+      "name": "channel-1090642448579043388",
+      "type": 0,
+      "parent_id": "1090639835896746027",
+      "position": 88,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1090642477624590376",
+      "name": "channel-1090642477624590376",
+      "type": 0,
+      "parent_id": "1090639835896746027",
+      "position": 89,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1092312335529541632",
+      "name": "channel-1092312335529541632",
+      "type": 15,
+      "parent_id": "1087199234706640940",
+      "position": 27,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1092823790695751810",
+      "name": "channel-1092823790695751810",
+      "type": 0,
+      "parent_id": "1087198131512430642",
+      "position": 9,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "128641584856913"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1092929576491036672",
+      "name": "channel-1092929576491036672",
+      "type": 0,
+      "parent_id": "1087198131512430642",
+      "position": 11,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "377957125120"
+        }
+      ]
+    },
+    {
+      "id": "1104836077761593354",
+      "name": "channel-1104836077761593354",
+      "type": 0,
+      "parent_id": "1078761198708858891",
+      "position": 50,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1105881919062806588",
+      "name": "channel-1105881919062806588",
+      "type": 0,
+      "parent_id": "1090639835896746027",
+      "position": 90,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "262144",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1112742773829926983",
+      "name": "channel-1112742773829926983",
+      "type": 4,
+      "parent_id": null,
+      "position": 15,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1112742775578964099",
+      "name": "channel-1112742775578964099",
+      "type": 0,
+      "parent_id": "1112742773829926983",
+      "position": 91,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1112743065665413120",
+      "name": "channel-1112743065665413120",
+      "type": 0,
+      "parent_id": "1112742773829926983",
+      "position": 92,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1112762115992854600",
+      "name": "channel-1112762115992854600",
+      "type": 4,
+      "parent_id": null,
+      "position": 11,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1112759027554844763",
+          "type": 0,
+          "allow": "68608",
+          "deny": "0"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "68608"
+        }
+      ]
+    },
+    {
+      "id": "1112762118266159154",
+      "name": "channel-1112762118266159154",
+      "type": 4,
+      "parent_id": null,
+      "position": 12,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1112759027554844763",
+          "type": 0,
+          "allow": "68608",
+          "deny": "0"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "68608"
+        }
+      ]
+    },
+    {
+      "id": "1112873080293970002",
+      "name": "channel-1112873080293970002",
+      "type": 0,
+      "parent_id": "1087198131512430642",
+      "position": 7,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "128641584856913"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1113455405343977472",
+      "name": "channel-1113455405343977472",
+      "type": 4,
+      "parent_id": null,
+      "position": 9,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1113457081329139763",
+      "name": "channel-1113457081329139763",
+      "type": 0,
+      "parent_id": "1113455405343977472",
+      "position": 56,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1113457217706922035",
+      "name": "channel-1113457217706922035",
+      "type": 0,
+      "parent_id": "1113455405343977472",
+      "position": 57,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1113979181391429672",
+      "name": "channel-1113979181391429672",
+      "type": 0,
+      "parent_id": "1087199234706640940",
+      "position": 33,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1114833990315159622",
+      "name": "channel-1114833990315159622",
+      "type": 0,
+      "parent_id": "1112762118266159154",
+      "position": 61,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1112759027554844763",
+          "type": 0,
+          "allow": "68608",
+          "deny": "0"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "68608"
+        },
+        {
+          "id": "456483983870394368",
+          "type": 1,
+          "allow": "68608",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1117480270044594186",
+      "name": "channel-1117480270044594186",
+      "type": 15,
+      "parent_id": "1087199234706640940",
+      "position": 34,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1118994447036850369",
+      "name": "channel-1118994447036850369",
+      "type": 0,
+      "parent_id": "1178933610586308739",
+      "position": 39,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1118994739799281664",
+      "name": "channel-1118994739799281664",
+      "type": 0,
+      "parent_id": "1087198131512430642",
+      "position": 4,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "128641584856913"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1119073453291610123",
+      "name": "channel-1119073453291610123",
+      "type": 0,
+      "parent_id": "1112762118266159154",
+      "position": 60,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1112759027554844763",
+          "type": 0,
+          "allow": "68608",
+          "deny": "0"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "68608"
+        },
+        {
+          "id": "456483983870394368",
+          "type": 1,
+          "allow": "68608",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1119296196373139587",
+      "name": "channel-1119296196373139587",
+      "type": 0,
+      "parent_id": "1432057164242878637",
+      "position": 21,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "377958173696"
+        }
+      ]
+    },
+    {
+      "id": "1127785339486994473",
+      "name": "channel-1127785339486994473",
+      "type": 0,
+      "parent_id": "1112762118266159154",
+      "position": 62,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1112759027554844763",
+          "type": 0,
+          "allow": "68608",
+          "deny": "0"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "68608"
+        },
+        {
+          "id": "456483983870394368",
+          "type": 1,
+          "allow": "68608",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1128819815298125854",
+      "name": "channel-1128819815298125854",
+      "type": 0,
+      "parent_id": "1087201563405193247",
+      "position": 58,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1112759027554844763",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1132448261253369939",
+      "name": "channel-1132448261253369939",
+      "type": 0,
+      "parent_id": "1087198131512430642",
+      "position": 2,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "377957124096"
+        },
+        {
+          "id": "508654771276873729",
+          "type": 0,
+          "allow": "377957173248",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1132475979282006137",
+      "name": "channel-1132475979282006137",
+      "type": 0,
+      "parent_id": "1087198131512430642",
+      "position": 12,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "377957125120"
+        }
+      ]
+    },
+    {
+      "id": "1134893653832245428",
+      "name": "channel-1134893653832245428",
+      "type": 15,
+      "parent_id": "1045946491463807066",
+      "position": 41,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "274878958592"
+        }
+      ]
+    },
+    {
+      "id": "1138590687311446049",
+      "name": "channel-1138590687311446049",
+      "type": 0,
+      "parent_id": "1078761198708858891",
+      "position": 44,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1087192823767515219",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1138590808715571300",
+      "name": "channel-1138590808715571300",
+      "type": 0,
+      "parent_id": "1078761198708858891",
+      "position": 45,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1087192823767515219",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1539718644953514087",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1138591034163593336",
+      "name": "channel-1138591034163593336",
+      "type": 0,
+      "parent_id": "1078761198708858891",
+      "position": 46,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1087192823767515219",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1138591122927648908",
+      "name": "channel-1138591122927648908",
+      "type": 0,
+      "parent_id": "1078761198708858891",
+      "position": 48,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1087192823767515219",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1138593758443737140",
+      "name": "channel-1138593758443737140",
+      "type": 0,
+      "parent_id": "1078761198708858891",
+      "position": 49,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078757544169848933",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1139710398585651220",
+      "name": "channel-1139710398585651220",
+      "type": 0,
+      "parent_id": "1078761198708858891",
+      "position": 52,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078756990710452365",
+          "type": 0,
+          "allow": "1049600",
+          "deny": "0"
+        },
+        {
+          "id": "1078757184021733426",
+          "type": 0,
+          "allow": "1049600",
+          "deny": "0"
+        },
+        {
+          "id": "1078757266469175386",
+          "type": 0,
+          "allow": "1049600",
+          "deny": "0"
+        },
+        {
+          "id": "1078757334504976384",
+          "type": 0,
+          "allow": "1049600",
+          "deny": "0"
+        },
+        {
+          "id": "1078757544169848933",
+          "type": 0,
+          "allow": "1049600",
+          "deny": "0"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1139711707443368079",
+      "name": "channel-1139711707443368079",
+      "type": 4,
+      "parent_id": null,
+      "position": 16,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "235148962103951360",
+          "type": 1,
+          "allow": "27648",
+          "deny": "0"
+        },
+        {
+          "id": "275483498603741184",
+          "type": 1,
+          "allow": "27664",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1139711709980925962",
+      "name": "channel-1139711709980925962",
+      "type": 0,
+      "parent_id": "1139711707443368079",
+      "position": 93,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "235148962103951360",
+          "type": 1,
+          "allow": "27648",
+          "deny": "0"
+        },
+        {
+          "id": "275483498603741184",
+          "type": 1,
+          "allow": "27664",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1139711711851593848",
+      "name": "channel-1139711711851593848",
+      "type": 0,
+      "parent_id": "1139711707443368079",
+      "position": 94,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "235148962103951360",
+          "type": 1,
+          "allow": "27648",
+          "deny": "0"
+        },
+        {
+          "id": "275483498603741184",
+          "type": 1,
+          "allow": "27664",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1139711713525108896",
+      "name": "channel-1139711713525108896",
+      "type": 0,
+      "parent_id": "1139711707443368079",
+      "position": 95,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "235148962103951360",
+          "type": 1,
+          "allow": "27648",
+          "deny": "0"
+        },
+        {
+          "id": "275483498603741184",
+          "type": 1,
+          "allow": "27664",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1139711716129783950",
+      "name": "channel-1139711716129783950",
+      "type": 0,
+      "parent_id": "1139711707443368079",
+      "position": 96,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "235148962103951360",
+          "type": 1,
+          "allow": "27648",
+          "deny": "0"
+        },
+        {
+          "id": "275483498603741184",
+          "type": 1,
+          "allow": "27664",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1139711719065784414",
+      "name": "channel-1139711719065784414",
+      "type": 0,
+      "parent_id": "1139711707443368079",
+      "position": 97,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "235148962103951360",
+          "type": 1,
+          "allow": "27648",
+          "deny": "0"
+        },
+        {
+          "id": "275483498603741184",
+          "type": 1,
+          "allow": "27664",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1140914034686836766",
+      "name": "channel-1140914034686836766",
+      "type": 4,
+      "parent_id": null,
+      "position": 17,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1140914163934302289",
+      "name": "channel-1140914163934302289",
+      "type": 0,
+      "parent_id": "1140914034686836766",
+      "position": 98,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1146611215511081012",
+      "name": "channel-1146611215511081012",
+      "type": 0,
+      "parent_id": "1087198131512430642",
+      "position": 0,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "128641584856913"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1154904611799437404",
+      "name": "channel-1154904611799437404",
+      "type": 0,
+      "parent_id": "1087199234706640940",
+      "position": 30,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1112801161163055255",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1112809226427957379",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1112809331398815824",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1112809426349457459",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1112809538396098720",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1112809656885202974",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1112809780222906509",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1112810451785498654",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1112811276771528855",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1112811366944874536",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1175127344072118405",
+      "name": "channel-1175127344072118405",
+      "type": 2,
+      "parent_id": "1087199234706640940",
+      "position": 3,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1175150257278025771",
+      "name": "channel-1175150257278025771",
+      "type": 0,
+      "parent_id": "1432057164242878637",
+      "position": 22,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "377958173696"
+        }
+      ]
+    },
+    {
+      "id": "1175150463298060370",
+      "name": "channel-1175150463298060370",
+      "type": 0,
+      "parent_id": "1055494206556225719",
+      "position": 19,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "377958173696"
+        }
+      ]
+    },
+    {
+      "id": "1175151272438026280",
+      "name": "channel-1175151272438026280",
+      "type": 15,
+      "parent_id": "1087199234706640940",
+      "position": 35,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "1024"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1176294550294233169",
+      "name": "channel-1176294550294233169",
+      "type": 15,
+      "parent_id": "1055494206556225719",
+      "position": 13,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "240518479872",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1048576"
+        }
+      ]
+    },
+    {
+      "id": "1176386295384260648",
+      "name": "channel-1176386295384260648",
+      "type": 0,
+      "parent_id": "1087199234706640940",
+      "position": 36,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1178791853861113887",
+      "name": "channel-1178791853861113887",
+      "type": 0,
+      "parent_id": "1112762118266159154",
+      "position": 63,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1112759027554844763",
+          "type": 0,
+          "allow": "68608",
+          "deny": "0"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "68608"
+        },
+        {
+          "id": "456483983870394368",
+          "type": 1,
+          "allow": "68608",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1178933610586308739",
+      "name": "channel-1178933610586308739",
+      "type": 4,
+      "parent_id": null,
+      "position": 5,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1178936839151816715",
+      "name": "channel-1178936839151816715",
+      "type": 4,
+      "parent_id": null,
+      "position": 4,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1178937094035492884",
+      "name": "channel-1178937094035492884",
+      "type": 0,
+      "parent_id": "1178936839151816715",
+      "position": 38,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1179216170591715348",
+      "name": "channel-1179216170591715348",
+      "type": 4,
+      "parent_id": null,
+      "position": 6,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1179217198930202735",
+      "name": "channel-1179217198930202735",
+      "type": 0,
+      "parent_id": "1179216170591715348",
+      "position": 40,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1225192754020225176",
+      "name": "channel-1225192754020225176",
+      "type": 0,
+      "parent_id": "1078761198708858891",
+      "position": 47,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1087192823767515219",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1266840224835833920",
+      "name": "channel-1266840224835833920",
+      "type": 2,
+      "parent_id": "1087199234706640940",
+      "position": 1,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1266840693637255363",
+      "name": "channel-1266840693637255363",
+      "type": 2,
+      "parent_id": "1087199234706640940",
+      "position": 2,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1269750661722148954",
+      "name": "channel-1269750661722148954",
+      "type": 2,
+      "parent_id": "1087199234706640940",
+      "position": 4,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1269753028404056076",
+      "name": "channel-1269753028404056076",
+      "type": 2,
+      "parent_id": "1087199234706640940",
+      "position": 5,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1269753534346432644",
+      "name": "channel-1269753534346432644",
+      "type": 2,
+      "parent_id": "1087199234706640940",
+      "position": 6,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1269753860193521816",
+      "name": "channel-1269753860193521816",
+      "type": 2,
+      "parent_id": "1087199234706640940",
+      "position": 7,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1269754268265480242",
+      "name": "channel-1269754268265480242",
+      "type": 2,
+      "parent_id": "1087199234706640940",
+      "position": 8,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1269754877303721985",
+      "name": "channel-1269754877303721985",
+      "type": 2,
+      "parent_id": "1087199234706640940",
+      "position": 9,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1276964524150358138",
+      "name": "channel-1276964524150358138",
+      "type": 15,
+      "parent_id": "1087199234706640940",
+      "position": 37,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1009516637600370719",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1051260096333750322",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1051260362873385000",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1051260579022643281",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1051260775995551784",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1112801161163055255",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1112809226427957379",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1112809331398815824",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1112809426349457459",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1112809538396098720",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1112809656885202974",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1112809780222906509",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1112810451785498654",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1112811276771528855",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1112811366944874536",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "1140377116370804756",
+          "type": 0,
+          "allow": "1024",
+          "deny": "0"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1431742191620853791",
+      "name": "channel-1431742191620853791",
+      "type": 15,
+      "parent_id": "1055494206556225719",
+      "position": 15,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "240518479872",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1048576"
+        }
+      ]
+    },
+    {
+      "id": "1431746979540631622",
+      "name": "channel-1431746979540631622",
+      "type": 15,
+      "parent_id": "1055494206556225719",
+      "position": 14,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "240518479872",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1048576"
+        }
+      ]
+    },
+    {
+      "id": "1432057164242878637",
+      "name": "channel-1432057164242878637",
+      "type": 4,
+      "parent_id": null,
+      "position": 2,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1049600"
+        }
+      ]
+    },
+    {
+      "id": "1465060666972049439",
+      "name": "channel-1465060666972049439",
+      "type": 2,
+      "parent_id": "1087199234706640940",
+      "position": 11,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1078755185423286372",
+          "type": 0,
+          "allow": "137439264768",
+          "deny": "0"
+        },
+        {
+          "id": "1078756990710452365",
+          "type": 0,
+          "allow": "1048576",
+          "deny": "0"
+        },
+        {
+          "id": "1078757184021733426",
+          "type": 0,
+          "allow": "1048576",
+          "deny": "0"
+        },
+        {
+          "id": "1078757266469175386",
+          "type": 0,
+          "allow": "1048576",
+          "deny": "0"
+        },
+        {
+          "id": "1078757334504976384",
+          "type": 0,
+          "allow": "1048576",
+          "deny": "0"
+        },
+        {
+          "id": "1078757544169848933",
+          "type": 0,
+          "allow": "1048576",
+          "deny": "0"
+        },
+        {
+          "id": "1104855809323696208",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "0"
+        },
+        {
+          "id": "456483983870394368",
+          "type": 1,
+          "allow": "17826832",
+          "deny": "0"
+        },
+        {
+          "id": "83104159292723200",
+          "type": 1,
+          "allow": "286262544",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1499430425045766326",
+      "name": "channel-1499430425045766326",
+      "type": 0,
+      "parent_id": "1112762118266159154",
+      "position": 99,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "1112759027554844763",
+          "type": 0,
+          "allow": "68608",
+          "deny": "0"
+        },
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "68608"
+        },
+        {
+          "id": "456483983870394368",
+          "type": 1,
+          "allow": "68608",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1545924265247903884",
+      "name": "channel-1545924265247903884",
+      "type": 4,
+      "parent_id": null,
+      "position": 18,
+      "topic": null,
+      "permission_overwrites": []
+    },
+    {
+      "id": "1545924265868525588",
+      "name": "channel-1545924265868525588",
+      "type": 4,
+      "parent_id": null,
+      "position": 19,
+      "topic": null,
+      "permission_overwrites": []
+    },
+    {
+      "id": "1545924266590081115",
+      "name": "channel-1545924266590081115",
+      "type": 4,
+      "parent_id": null,
+      "position": 20,
+      "topic": null,
+      "permission_overwrites": []
+    },
+    {
+      "id": "1545924267453976696",
+      "name": "channel-1545924267453976696",
+      "type": 4,
+      "parent_id": null,
+      "position": 21,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1545924268489973841",
+      "name": "channel-1545924268489973841",
+      "type": 0,
+      "parent_id": "1545924265868525588",
+      "position": 100,
+      "topic": null,
+      "permission_overwrites": []
+    },
+    {
+      "id": "1546777858200965120",
+      "name": "channel-1546777858200965120",
+      "type": 4,
+      "parent_id": null,
+      "position": 22,
+      "topic": null,
+      "permission_overwrites": []
+    },
+    {
+      "id": "1546777859031433236",
+      "name": "channel-1546777859031433236",
+      "type": 4,
+      "parent_id": null,
+      "position": 23,
+      "topic": null,
+      "permission_overwrites": []
+    },
+    {
+      "id": "1546777860046454784",
+      "name": "channel-1546777860046454784",
+      "type": 4,
+      "parent_id": null,
+      "position": 24,
+      "topic": null,
+      "permission_overwrites": []
+    },
+    {
+      "id": "1546777861199896589",
+      "name": "channel-1546777861199896589",
+      "type": 0,
+      "parent_id": "1546777858200965120",
+      "position": 101,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "1024",
+          "deny": "2048"
+        }
+      ]
+    },
+    {
+      "id": "1546777862952976455",
+      "name": "channel-1546777862952976455",
+      "type": 0,
+      "parent_id": "1546777858200965120",
+      "position": 102,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "1024",
+          "deny": "2048"
+        }
+      ]
+    },
+    {
+      "id": "1546777864211529748",
+      "name": "channel-1546777864211529748",
+      "type": 0,
+      "parent_id": "1546777859031433236",
+      "position": 103,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "3072",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1546777865348063255",
+      "name": "channel-1546777865348063255",
+      "type": 0,
+      "parent_id": "1546777859031433236",
+      "position": 104,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "3072",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1546777866648289300",
+      "name": "channel-1546777866648289300",
+      "type": 2,
+      "parent_id": "1545924266590081115",
+      "position": 12,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "3146752",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1546777867978018887",
+      "name": "channel-1546777867978018887",
+      "type": 2,
+      "parent_id": "1545924266590081115",
+      "position": 13,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "3146752",
+          "deny": "0"
+        }
+      ]
+    },
+    {
+      "id": "1546777869320192072",
+      "name": "channel-1546777869320192072",
+      "type": 0,
+      "parent_id": "1546777860046454784",
+      "position": 105,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1546777870511116368",
+      "name": "channel-1546777870511116368",
+      "type": 0,
+      "parent_id": "1546777860046454784",
+      "position": 106,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1546777871811346432",
+      "name": "channel-1546777871811346432",
+      "type": 0,
+      "parent_id": "1546777860046454784",
+      "position": 107,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    },
+    {
+      "id": "1546777873313046598",
+      "name": "channel-1546777873313046598",
+      "type": 0,
+      "parent_id": "1546777860046454784",
+      "position": 108,
+      "topic": null,
+      "permission_overwrites": [
+        {
+          "id": "326474832151838730",
+          "type": 0,
+          "allow": "0",
+          "deny": "1024"
+        }
+      ]
+    }
+  ],
+  "integrations": [
+    {
+      "id": "1051273168628760607",
+      "name": null,
+      "application": {
+        "id": "235148962103951360"
+      },
+      "role_id": null
+    },
+    {
+      "id": "1063330740508569642",
+      "name": null,
+      "application": {
+        "id": "402528814548254720"
+      },
+      "role_id": null
+    },
+    {
+      "id": "1078424161912889475",
+      "name": null,
+      "application": {
+        "id": "491769129318088714"
+      },
+      "role_id": null
+    },
+    {
+      "id": "1078868061131653270",
+      "name": null,
+      "application": {
+        "id": "456483983870394368"
+      },
+      "role_id": null
+    },
+    {
+      "id": "1088287391279763456",
+      "name": null,
+      "application": {
+        "id": "162469056312639488"
+      },
+      "role_id": null
+    },
+    {
+      "id": "1092570628315426928",
+      "name": null,
+      "application": {
+        "id": "436515089441488907"
+      },
+      "role_id": null
+    },
+    {
+      "id": "1103318624611086397",
+      "name": null,
+      "application": {
+        "id": "628400349979344919"
+      },
+      "role_id": null
+    },
+    {
+      "id": "1114916892310781978",
+      "name": null,
+      "application": {
+        "id": "474051954998509571"
+      },
+      "role_id": null
+    },
+    {
+      "id": "1135005167075475526",
+      "name": null,
+      "application": {
+        "id": "903380664336928798"
+      },
+      "role_id": null
+    },
+    {
+      "id": "1138920456083222559",
+      "name": null,
+      "application": {
+        "id": "658698521570181140"
+      },
+      "role_id": null
+    },
+    {
+      "id": "1147419443337646121",
+      "name": null,
+      "application": {
+        "id": "491614535812120596"
+      },
+      "role_id": null
+    },
+    {
+      "id": "1211391128599793775",
+      "name": null,
+      "application": {
+        "id": "159985415099514880"
+      },
+      "role_id": null
+    },
+    {
+      "id": "1233902644972748850",
+      "name": null,
+      "application": {
+        "id": "495388016756523020"
+      },
+      "role_id": null
+    },
+    {
+      "id": "1244337842466066494",
+      "name": null,
+      "application": {
+        "id": "307998818547531777"
+      },
+      "role_id": null
+    },
+    {
+      "id": "1262112608107106386",
+      "name": null,
+      "application": {
+        "id": "613156357239078913"
+      },
+      "role_id": null
+    },
+    {
+      "id": "1391522750602154136",
+      "name": null,
+      "application": {
+        "id": "1263049996916359258"
+      },
+      "role_id": null
+    },
+    {
+      "id": "1399098352314093628",
+      "name": null,
+      "application": {
+        "id": "476259371912003597"
+      },
+      "role_id": null
+    },
+    {
+      "id": "1399098994654973993",
+      "name": null,
+      "application": {
+        "id": "302050872383242240"
+      },
+      "role_id": null
+    },
+    {
+      "id": "1399100065628295169",
+      "name": null,
+      "application": {
+        "id": "475744554910351370"
+      },
+      "role_id": null
+    },
+    {
+      "id": "1399100718518112346",
+      "name": null,
+      "application": {
+        "id": "953577640403550248"
+      },
+      "role_id": null
+    },
+    {
+      "id": "1539718644442075216",
+      "name": null,
+      "application": {
+        "id": "1539711683898118154"
+      },
+      "role_id": null
+    },
+    {
+      "id": "741452755373129741",
+      "name": null,
+      "application": {
+        "id": "412940959857508352"
+      },
+      "role_id": null
+    }
+  ],
+  "application": {
+    "id": "1539711683898118154",
+    "name": "Owen"
+  },
+  "members": [
+    {
+      "user": {
+        "id": "1053530821434277888",
+        "username": "member-1053530821434277888",
+        "bot": false
+      },
+      "roles": [
+        "1051272877871222915",
+        "1087897546741006456",
+        "1087930995875008522",
+        "1087931108945039470",
+        "1088982029523226728",
+        "1088982372122374185",
+        "1090651387236450416",
+        "1092247753574330458",
+        "1092248449786855595",
+        "1094046641008418816",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1113180728381931630",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "1056699779809284207",
+        "username": "member-1056699779809284207",
+        "bot": false
+      },
+      "roles": [
+        "1078755185423286372",
+        "1078755880343965777",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "1062906203535052832",
+        "username": "member-1062906203535052832",
+        "bot": false
+      },
+      "roles": [
+        "1051272877871222915",
+        "1055499052801855528",
+        "1056439099701076008",
+        "1078755185423286372",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "1086425470876274899",
+        "username": "member-1086425470876274899",
+        "bot": false
+      },
+      "roles": [
+        "1051272877871222915",
+        "1078755185423286372",
+        "1087897738265509938",
+        "1087931108945039470",
+        "1088982263292756059",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "1093663578290135080",
+        "username": "member-1093663578290135080",
+        "bot": false
+      },
+      "roles": [
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "1095159248725483643",
+        "username": "member-1095159248725483643",
+        "bot": false
+      },
+      "roles": [
+        "1078755185423286372",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "1119746788941901925",
+        "username": "member-1119746788941901925",
+        "bot": false
+      },
+      "roles": [
+        "1051272877871222915",
+        "1078755185423286372",
+        "1078755880343965777",
+        "1087897546741006456",
+        "1088982029523226728",
+        "1088982372122374185",
+        "1092247753574330458",
+        "1092248449786855595",
+        "1092250849717264475",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "1119750191197733004",
+        "username": "member-1119750191197733004",
+        "bot": false
+      },
+      "roles": [
+        "1078755185423286372",
+        "1078755880343965777",
+        "1087897546741006456",
+        "1088982029523226728",
+        "1092247753574330458",
+        "1101170473108242452",
+        "1101297505179816017",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "1119750513567740054",
+        "username": "member-1119750513567740054",
+        "bot": false
+      },
+      "roles": [
+        "1051272877871222915",
+        "1078755185423286372",
+        "1078755880343965777",
+        "1087897546741006456",
+        "1088982029523226728",
+        "1088982372122374185",
+        "1092247753574330458",
+        "1092248449786855595",
+        "1092250849717264475",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "1135795571031027882",
+        "username": "member-1135795571031027882",
+        "bot": false
+      },
+      "roles": [
+        "1087897546741006456",
+        "1087930995875008522",
+        "1088982029523226728",
+        "1088982099375181864",
+        "1088982372122374185",
+        "1090651387236450416",
+        "1092248449786855595",
+        "1101170473108242452",
+        "1101297505179816017",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "115385224119975941",
+        "username": "member-115385224119975941",
+        "bot": true
+      },
+      "roles": [
+        "1088287410632261642",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "1154369422400692235",
+        "username": "member-1154369422400692235",
+        "bot": false
+      },
+      "roles": [
+        "1051272877871222915",
+        "1078755185423286372",
+        "1087898062669750353",
+        "1088982029523226728",
+        "1092250849717264475",
+        "1101170473108242452",
+        "1101297505179816017",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "1167199721824190498",
+        "username": "member-1167199721824190498",
+        "bot": false
+      },
+      "roles": [
+        "1051272877871222915",
+        "1078755185423286372",
+        "1087897546741006456",
+        "1087930995875008522",
+        "1088982029523226728",
+        "1088982099375181864",
+        "1088982263292756059",
+        "1090651387236450416",
+        "1101170473108242452",
+        "1101297505179816017",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1144789677057003636",
+        "1179233034713702511"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "1184851859962343465",
+        "username": "member-1184851859962343465",
+        "bot": false
+      },
+      "roles": [
+        "1051272877871222915",
+        "1087897790681731122",
+        "1088982029523226728",
+        "1088982099375181864",
+        "1092247753574330458",
+        "1101170473108242452",
+        "1101297505179816017",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "125192383091441665",
+        "username": "member-125192383091441665",
+        "bot": false
+      },
+      "roles": [
+        "1051272877871222915",
+        "1078755185423286372",
+        "1080508643558047754",
+        "1087897546741006456",
+        "1088982029523226728",
+        "1088982099375181864",
+        "1088982263292756059",
+        "1090651387236450416",
+        "1092247753574330458",
+        "1092823497924956300",
+        "1094046641008418816",
+        "1101170473108242452",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1112759027554844763",
+        "1144789677057003636",
+        "1146631068787671110",
+        "1146631222395670538",
+        "1179233034713702511",
+        "1179233886178394142"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "1263049996916359258",
+        "username": "member-1263049996916359258",
+        "bot": true
+      },
+      "roles": [
+        "1391522751050809484"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "126479118224064513",
+        "username": "member-126479118224064513",
+        "bot": false
+      },
+      "roles": [
+        "1078755185423286372",
+        "1113180728381931630",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "1276558195908935806",
+        "username": "member-1276558195908935806",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1314414560253579357",
+        "username": "member-1314414560253579357",
+        "bot": false
+      },
+      "roles": [
+        "1051272877871222915",
+        "1078755185423286372",
+        "1087897546741006456",
+        "1087930995875008522",
+        "1088982263292756059",
+        "1101170473108242452",
+        "1101297505179816017",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "1329703071709925399",
+        "username": "member-1329703071709925399",
+        "bot": false
+      },
+      "roles": [
+        "1104855809323696208",
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1329703159110832129",
+        "username": "member-1329703159110832129",
+        "bot": false
+      },
+      "roles": [
+        "1104855809323696208",
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1329710775484416040",
+        "username": "member-1329710775484416040",
+        "bot": false
+      },
+      "roles": [
+        "1104855809323696208",
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1329712485594431530",
+        "username": "member-1329712485594431530",
+        "bot": false
+      },
+      "roles": [
+        "1104855809323696208",
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1339533243464159252",
+        "username": "member-1339533243464159252",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1339549469838151680",
+        "username": "member-1339549469838151680",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1339557021581574155",
+        "username": "member-1339557021581574155",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1339563407900151818",
+        "username": "member-1339563407900151818",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1339587917957300348",
+        "username": "member-1339587917957300348",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1339630090551824475",
+        "username": "member-1339630090551824475",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1339634848268161096",
+        "username": "member-1339634848268161096",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1339652189265858689",
+        "username": "member-1339652189265858689",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1339673011288277198",
+        "username": "member-1339673011288277198",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1339678817475624981",
+        "username": "member-1339678817475624981",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1339696051208061048",
+        "username": "member-1339696051208061048",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1339704533416149002",
+        "username": "member-1339704533416149002",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1339838674690510858",
+        "username": "member-1339838674690510858",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1339853764869226604",
+        "username": "member-1339853764869226604",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1339869459560796252",
+        "username": "member-1339869459560796252",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1356655053942947920",
+        "username": "member-1356655053942947920",
+        "bot": false
+      },
+      "roles": [],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "1369838350739046491",
+        "username": "member-1369838350739046491",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1370054553432490218",
+        "username": "member-1370054553432490218",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1370059860565032960",
+        "username": "member-1370059860565032960",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1370071022891565168",
+        "username": "member-1370071022891565168",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1385516821766996050",
+        "username": "member-1385516821766996050",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1385886828858572810",
+        "username": "member-1385886828858572810",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1386054625068843201",
+        "username": "member-1386054625068843201",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1386429423913533491",
+        "username": "member-1386429423913533491",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1386807336940605562",
+        "username": "member-1386807336940605562",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "1386810834193223770",
+        "username": "member-1386810834193223770",
+        "bot": false
+      },
+      "roles": [
+        "1391524788513673236"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "141447925543731201",
+        "username": "member-141447925543731201",
+        "bot": false
+      },
+      "roles": [
+        "1051272877871222915",
+        "1078755185423286372",
+        "1087897546741006456",
+        "1088982372122374185",
+        "1092247753574330458",
+        "1101170473108242452",
+        "1101297505179816017",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "1539711683898118154",
+        "username": "member-1539711683898118154",
+        "bot": true
+      },
+      "roles": [
+        "1144789677057003636",
+        "1539718644953514087"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "159985870458322944",
+        "username": "member-159985870458322944",
+        "bot": true
+      },
+      "roles": [
+        "1211391129031811204"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "166112072881537024",
+        "username": "member-166112072881537024",
+        "bot": false
+      },
+      "roles": [
+        "1051272877871222915",
+        "1078755185423286372",
+        "1078755880343965777",
+        "1087897546741006456",
+        "1088982029523226728",
+        "1088982099375181864",
+        "1092247753574330458",
+        "1101170473108242452",
+        "1101297505179816017",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1144789677057003636",
+        "1179233034713702511",
+        "448584234907729940"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "171073133275643904",
+        "username": "member-171073133275643904",
+        "bot": false
+      },
+      "roles": [
+        "1051272877871222915",
+        "1078755185423286372",
+        "1087897546741006456",
+        "1087930995875008522",
+        "1088982029523226728",
+        "1101170473108242452",
+        "1101297505179816017",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1144789677057003636",
+        "1179233034713702511"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "179309489164386304",
+        "username": "member-179309489164386304",
+        "bot": false
+      },
+      "roles": [
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "219235564707119115",
+        "username": "member-219235564707119115",
+        "bot": false
+      },
+      "roles": [
+        "1078755185423286372",
+        "1087897546741006456",
+        "1088982029523226728",
+        "1088982099375181864",
+        "1088982263292756059",
+        "1090651387236450416",
+        "1092247753574330458",
+        "1101170473108242452",
+        "1101297505179816017",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1144789677057003636",
+        "1149888357439127573"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "235148962103951360",
+        "username": "member-235148962103951360",
+        "bot": true
+      },
+      "roles": [
+        "1051273169782181923",
+        "1060912046012633148",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "268487774615633922",
+        "username": "member-268487774615633922",
+        "bot": false
+      },
+      "roles": [
+        "1078755185423286372",
+        "1087897623538704475",
+        "1088982029523226728",
+        "1088982099375181864",
+        "1088982263292756059",
+        "1090651387236450416",
+        "1092247753574330458",
+        "1101170473108242452",
+        "1101297505179816017",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "275483498603741184",
+        "username": "member-275483498603741184",
+        "bot": false
+      },
+      "roles": [
+        "1009516637600370719",
+        "1051272877871222915",
+        "1063280360676409405",
+        "1078755185423286372",
+        "1078755666191188029",
+        "1078755880343965777",
+        "1078755949814231160",
+        "1078756016071659605",
+        "1078757544169848933",
+        "1080508643558047754",
+        "1087192823767515219",
+        "1087897546741006456",
+        "1087932662519443546",
+        "1088981961789415546",
+        "1088982029523226728",
+        "1088982099375181864",
+        "1088982263292756059",
+        "1090651387236450416",
+        "1092247753574330458",
+        "1092248449786855595",
+        "1092250849717264475",
+        "1092633005752864859",
+        "1092823497924956300",
+        "1094046641008418816",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315895390900295",
+        "1101315995764805712",
+        "1112759027554844763",
+        "1119666971584237679",
+        "1144789677057003636",
+        "1146631222395670538",
+        "1146631481461055558",
+        "1179233034713702511",
+        "448587293154869250",
+        "508654771276873729"
+      ],
+      "premium_since": "2022-08-17T17:38:42.316000+00:00",
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "302050872383242240",
+        "username": "member-302050872383242240",
+        "bot": true
+      },
+      "roles": [
+        "1399099000132473077"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "307998818547531777",
+        "username": "member-307998818547531777",
+        "bot": true
+      },
+      "roles": [
+        "1060912046012633148",
+        "1244337842466066497"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "313526979037102086",
+        "username": "member-313526979037102086",
+        "bot": false
+      },
+      "roles": [
+        "1078755185423286372",
+        "1113180728381931630",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "317510862048985093",
+        "username": "member-317510862048985093",
+        "bot": false
+      },
+      "roles": [
+        "1113180728381931630"
+      ],
+      "premium_since": null,
+      "pending": true
+    },
+    {
+      "user": {
+        "id": "368291980272467968",
+        "username": "member-368291980272467968",
+        "bot": false
+      },
+      "roles": [
+        "1051272877871222915",
+        "1078755185423286372",
+        "1087897790681731122",
+        "1088982029523226728",
+        "1088982099375181864",
+        "1088982263292756059",
+        "1090651387236450416",
+        "1092247753574330458",
+        "1101170473108242452",
+        "1101297505179816017",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "402528814548254720",
+        "username": "member-402528814548254720",
+        "bot": true
+      },
+      "roles": [
+        "1060912046012633148",
+        "1063330746242191372",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "405298292683964418",
+        "username": "member-405298292683964418",
+        "bot": false
+      },
+      "roles": [
+        "1051272877871222915",
+        "1078755185423286372",
+        "1087897546741006456",
+        "1088982029523226728",
+        "1088982099375181864",
+        "1092247753574330458",
+        "1092248449786855595",
+        "1101170473108242452",
+        "1101297505179816017",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1144789677057003636",
+        "1179233034713702511"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "409582351568601099",
+        "username": "member-409582351568601099",
+        "bot": false
+      },
+      "roles": [
+        "1078755185423286372",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1119666971584237679",
+        "1144789677057003636",
+        "1146631068787671110",
+        "1149888357439127573"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "436515089441488907",
+        "username": "member-436515089441488907",
+        "bot": true
+      },
+      "roles": [
+        "1060912046012633148",
+        "1092570654349475863",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "441034097813356545",
+        "username": "member-441034097813356545",
+        "bot": false
+      },
+      "roles": [
+        "1051272877871222915",
+        "1078755185423286372",
+        "1078755880343965777",
+        "1087192823767515219",
+        "1087897546741006456",
+        "1087930995875008522",
+        "1088981961789415546",
+        "1088982029523226728",
+        "1088982099375181864",
+        "1088982263292756059",
+        "1092247753574330458",
+        "1092248449786855595",
+        "1092632963583332452",
+        "1092823497924956300",
+        "1094046641008418816",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315895390900295",
+        "1101315995764805712",
+        "1112759027554844763",
+        "1119666971584237679",
+        "1144789677057003636",
+        "1146631222395670538",
+        "1146631481461055558",
+        "1149888357439127573"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "449059682204778503",
+        "username": "member-449059682204778503",
+        "bot": false
+      },
+      "roles": [
+        "1051272877871222915",
+        "1078755185423286372",
+        "1087897546741006456",
+        "1088982263292756059",
+        "1092247753574330458",
+        "1101170473108242452",
+        "1101297505179816017",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "452890077333553154",
+        "username": "member-452890077333553154",
+        "bot": false
+      },
+      "roles": [
+        "1009516637600370719",
+        "1051272877871222915",
+        "1078755185423286372",
+        "1078755594950955189",
+        "1078755880343965777",
+        "1078755949814231160",
+        "1078756016071659605",
+        "1078757544169848933",
+        "1080508643558047754",
+        "1087192823767515219",
+        "1087897546741006456",
+        "1088981961789415546",
+        "1088982029523226728",
+        "1088982099375181864",
+        "1088982263292756059",
+        "1088982372122374185",
+        "1090651387236450416",
+        "1092247753574330458",
+        "1092632949192675342",
+        "1092823497924956300",
+        "1094046641008418816",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315895390900295",
+        "1101315995764805712",
+        "1112759027554844763",
+        "1144789677057003636",
+        "1146631222395670538",
+        "1146631481461055558",
+        "1149888357439127573",
+        "448587293154869250"
+      ],
+      "premium_since": "2022-12-28T19:24:14.373000+00:00",
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "456483983870394368",
+        "username": "member-456483983870394368",
+        "bot": true
+      },
+      "roles": [
+        "1060912046012633148",
+        "1078868065275609171",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "474051954998509571",
+        "username": "member-474051954998509571",
+        "bot": true
+      },
+      "roles": [
+        "1060912046012633148",
+        "1115004404949590116"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "475104164528259093",
+        "username": "member-475104164528259093",
+        "bot": false
+      },
+      "roles": [
+        "1078755185423286372",
+        "1078755880343965777",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "475744554910351370",
+        "username": "member-475744554910351370",
+        "bot": true
+      },
+      "roles": [
+        "1399100066287058966"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "476259371912003597",
+        "username": "member-476259371912003597",
+        "bot": true
+      },
+      "roles": [
+        "1399098352314093631"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "486171171491151882",
+        "username": "member-486171171491151882",
+        "bot": false
+      },
+      "roles": [
+        "1078755880343965777",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "491614535812120596",
+        "username": "member-491614535812120596",
+        "bot": true
+      },
+      "roles": [
+        "1060912046012633148",
+        "1147419475042377751"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "491769129318088714",
+        "username": "member-491769129318088714",
+        "bot": true
+      },
+      "roles": [
+        "1060912046012633148",
+        "1078424166212055174",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "495388016756523020",
+        "username": "member-495388016756523020",
+        "bot": true
+      },
+      "roles": [
+        "1060912046012633148",
+        "1233902645408825437"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "501903020418793482",
+        "username": "member-501903020418793482",
+        "bot": false
+      },
+      "roles": [],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "513163188263583745",
+        "username": "member-513163188263583745",
+        "bot": false
+      },
+      "roles": [
+        "1078755880343965777",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "515696139736186913",
+        "username": "member-515696139736186913",
+        "bot": false
+      },
+      "roles": [
+        "1078755880343965777",
+        "1078755949814231160",
+        "1078756016071659605",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "561736287145426954",
+        "username": "member-561736287145426954",
+        "bot": false
+      },
+      "roles": [
+        "1078755185423286372",
+        "1078755880343965777",
+        "1078755949814231160",
+        "1078756016071659605",
+        "1080508643558047754",
+        "1087192823767515219",
+        "1087897546741006456",
+        "1087930995875008522",
+        "1088981961789415546",
+        "1088982029523226728",
+        "1088982099375181864",
+        "1088982263292756059",
+        "1090651387236450416",
+        "1092247753574330458",
+        "1092632979639111850",
+        "1094046641008418816",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315895390900295",
+        "1101315995764805712",
+        "1112759027554844763",
+        "1144789677057003636",
+        "1146631068787671110",
+        "1146631222395670538",
+        "1149888357439127573",
+        "448587293154869250"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "579797466308935682",
+        "username": "member-579797466308935682",
+        "bot": false
+      },
+      "roles": [
+        "1078755185423286372",
+        "1087897546741006456",
+        "1087930995875008522",
+        "1088982029523226728",
+        "1088982099375181864",
+        "1088982372122374185",
+        "1090651387236450416",
+        "1092247753574330458",
+        "1092248449786855595",
+        "1092250849717264475",
+        "1101170473108242452",
+        "1101297505179816017",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "589624542343725067",
+        "username": "member-589624542343725067",
+        "bot": false
+      },
+      "roles": [
+        "1051272877871222915",
+        "1078755185423286372",
+        "1087897546741006456",
+        "1087930995875008522",
+        "1088982029523226728",
+        "1092247753574330458",
+        "1094046641008418816",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1144789677057003636",
+        "1149888357439127573"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "613156357239078913",
+        "username": "member-613156357239078913",
+        "bot": true
+      },
+      "roles": [
+        "1060912046012633148"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "616112510969315358",
+        "username": "member-616112510969315358",
+        "bot": false
+      },
+      "roles": [
+        "1078755185423286372",
+        "1087897546741006456",
+        "1088982263292756059",
+        "1092247753574330458",
+        "1101170473108242452",
+        "1101297505179816017",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1144789677057003636",
+        "1179233034713702511"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "628400349979344919",
+        "username": "member-628400349979344919",
+        "bot": true
+      },
+      "roles": [
+        "1060912046012633148",
+        "1103318655728627827"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "632944518802571284",
+        "username": "member-632944518802571284",
+        "bot": false
+      },
+      "roles": [
+        "1078755185423286372",
+        "1101297643503767582",
+        "1101314731089862778",
+        "1113180728381931630",
+        "1132805194707644529",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "658698521570181140",
+        "username": "member-658698521570181140",
+        "bot": true
+      },
+      "roles": [
+        "1060912046012633148",
+        "1138920512601464915"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "715980560534732900",
+        "username": "member-715980560534732900",
+        "bot": false
+      },
+      "roles": [
+        "1078755185423286372",
+        "1087897546741006456",
+        "1087930995875008522",
+        "1087931108945039470",
+        "1088982263292756059",
+        "1092247753574330458",
+        "1092248449786855595",
+        "1092250849717264475",
+        "1094046641008418816",
+        "1101170473108242452",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1144789677057003636",
+        "1149888357439127573"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "724432214212870195",
+        "username": "member-724432214212870195",
+        "bot": false
+      },
+      "roles": [
+        "1078755185423286372",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "747971850423894037",
+        "username": "member-747971850423894037",
+        "bot": false
+      },
+      "roles": [
+        "1078755185423286372",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "769606880867516427",
+        "username": "member-769606880867516427",
+        "bot": false
+      },
+      "roles": [
+        "1078755185423286372",
+        "1087897790681731122",
+        "1088982372122374185",
+        "1092247753574330458",
+        "1101170473108242452",
+        "1101297505179816017",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1144789677057003636",
+        "1146631068787671110"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "792082580136132619",
+        "username": "member-792082580136132619",
+        "bot": false
+      },
+      "roles": [
+        "1051272877871222915",
+        "1078755185423286372",
+        "1078755880343965777",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1144789677057003636",
+        "1149888357439127573"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "820011481063227432",
+        "username": "member-820011481063227432",
+        "bot": false
+      },
+      "roles": [
+        "1051272877871222915",
+        "1078755185423286372",
+        "1087897546741006456",
+        "1087930995875008522",
+        "1088982263292756059",
+        "1101170473108242452",
+        "1101297505179816017",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "83104159292723200",
+        "username": "member-83104159292723200",
+        "bot": false
+      },
+      "roles": [
+        "1051272877871222915",
+        "1063280360676409405",
+        "1078755185423286372",
+        "1078755594950955189",
+        "1078755949814231160",
+        "1078757544169848933",
+        "1080508643558047754",
+        "1087192823767515219",
+        "1087897546741006456",
+        "1087930995875008522",
+        "1087931108945039470",
+        "1088981961789415546",
+        "1088982029523226728",
+        "1088982099375181864",
+        "1090651387236450416",
+        "1092247753574330458",
+        "1092248449786855595",
+        "1092250849717264475",
+        "1092632920348438550",
+        "1092823497924956300",
+        "1094046641008418816",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297643503767582",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315895390900295",
+        "1101315995764805712",
+        "1112759027554844763",
+        "1119666971584237679",
+        "1144789677057003636",
+        "1146631222395670538",
+        "1149888357439127573",
+        "1179233034713702511"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "845530433285259274",
+        "username": "member-845530433285259274",
+        "bot": false
+      },
+      "roles": [
+        "1051272877871222915",
+        "1078755185423286372",
+        "1078755880343965777",
+        "1087897546741006456",
+        "1087930995875008522",
+        "1087931108945039470",
+        "1088982029523226728",
+        "1088982099375181864",
+        "1088982263292756059",
+        "1088982372122374185",
+        "1090651387236450416",
+        "1092247753574330458",
+        "1092250849717264475",
+        "1101170473108242452",
+        "1101297505179816017",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1119666971584237679",
+        "1144789677057003636",
+        "1179233034713702511",
+        "448584234907729940"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "897970263017287772",
+        "username": "member-897970263017287772",
+        "bot": false
+      },
+      "roles": [
+        "1051272877871222915",
+        "1078755185423286372",
+        "1078755594950955189",
+        "1078755880343965777",
+        "1078755949814231160",
+        "1078756016071659605",
+        "1078757266469175386",
+        "1080508643558047754",
+        "1087192823767515219",
+        "1087897546741006456",
+        "1087930995875008522",
+        "1088981961789415546",
+        "1088982099375181864",
+        "1092247753574330458",
+        "1092632990808559626",
+        "1092823497924956300",
+        "1094046641008418816",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315895390900295",
+        "1101315995764805712",
+        "1112759027554844763",
+        "1144789677057003636",
+        "1146631068787671110",
+        "1146631222395670538",
+        "1149888357439127573",
+        "448587293154869250"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "903380664336928798",
+        "username": "member-903380664336928798",
+        "bot": true
+      },
+      "roles": [
+        "1060912046012633148",
+        "1135005206841663490"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "915800156522299412",
+        "username": "member-915800156522299412",
+        "bot": false
+      },
+      "roles": [
+        "1051272877871222915",
+        "1087897546741006456",
+        "1087931108945039470",
+        "1088982029523226728",
+        "1088982099375181864",
+        "1088982263292756059",
+        "1092247753574330458",
+        "1101170473108242452",
+        "1101297505179816017",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1119666971584237679",
+        "1144789677057003636",
+        "1179233034713702511"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "953577640403550248",
+        "username": "member-953577640403550248",
+        "bot": true
+      },
+      "roles": [
+        "1399100719012778006"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "957752070503563406",
+        "username": "member-957752070503563406",
+        "bot": false
+      },
+      "roles": [
+        "1078755185423286372",
+        "1087897546741006456",
+        "1088982372122374185",
+        "1092247753574330458",
+        "1101170473108242452",
+        "1101297505179816017",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315995764805712",
+        "1113180728381931630",
+        "1144789677057003636",
+        "1179233034713702511"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "963933987745701938",
+        "username": "member-963933987745701938",
+        "bot": false
+      },
+      "roles": [
+        "1113180728381931630",
+        "1144789677057003636"
+      ],
+      "premium_since": null,
+      "pending": false
+    },
+    {
+      "user": {
+        "id": "976510029127643147",
+        "username": "member-976510029127643147",
+        "bot": false
+      },
+      "roles": [
+        "1051272877871222915",
+        "1078755880343965777",
+        "1078755949814231160",
+        "1078756016071659605",
+        "1101170473108242452",
+        "1101297337919340585",
+        "1101297505179816017",
+        "1101297643503767582",
+        "1101306065246752768",
+        "1101312355608035398",
+        "1101314731089862778",
+        "1101315895390900295",
+        "1101315995764805712",
+        "1144789677057003636",
+        "448587293154869250"
+      ],
+      "premium_since": null,
+      "pending": false
+    }
+  ]
+}

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,12 +9,22 @@ import { test } from 'node:test';
 import {
   ACTIVE_CATEGORY_IDS,
   ACTIVE_CHANNEL_IDS,
+  appendJournalWitness,
+  applyOperationOverwrites,
+  basePermissions,
+  journalWitnessPath,
   LEGACY_CATEGORY_IDS,
   LEGACY_CHANNEL_IDS,
   type Channel,
   type CleanupManifest,
   type JsonObject,
+  journalSignature,
+  type LiveCleanupSnapshot,
+  type Member as SnapshotMember,
+  normalizeOverwrites,
   operationSemanticHash,
+  type Overwrite,
+  readJournalWitness,
   type Role,
   stable,
 } from '../src/redesign/live-cleanup.ts';
@@ -45,61 +55,45 @@ type Stub = {
   rollbackOrder: string[];
   failNextWrite(status: number): void;
   partialNextWrite(): void;
+  /** Tear the write to one specific object rather than whichever comes first. */
+  partialWriteOn(objectId: string): void;
+  /**
+   * Move a child the way a third party would, out from under the phase. Because sync
+   * is decided by value, this also drops the child out of the synchronized set.
+   */
+  desyncChild(childId: string, overwrites: Channel['permission_overwrites']): void;
   close(): Promise<void>;
 };
 type Run = { code: number; stdout: string; stderr: string };
+type PermissionDriftFixture = {
+  capturedAt: string;
+  guildId: string;
+  mismatchCount: number;
+  mismatches: Array<{
+    channelId: string;
+    parentId: string;
+    channelOverwrites: Channel['permission_overwrites'];
+    parentOverwrites: Channel['permission_overwrites'];
+  }>;
+};
+const PERMISSION_DRIFT = JSON.parse(readFileSync(fileURLToPath(new URL('./fixtures/live-cleanup-permission-drift.json', import.meta.url)), 'utf8')) as PermissionDriftFixture;
+const PRODUCTION_STATE = JSON.parse(readFileSync(fileURLToPath(new URL('./fixtures/live-cleanup-production-state.json', import.meta.url)), 'utf8')) as State;
+const EXPECTED_OPERATIONS = JSON.parse(readFileSync(fileURLToPath(new URL('./fixtures/live-cleanup-expected-operations.json', import.meta.url)), 'utf8')) as {
+  operationCount: number;
+  operationSemanticHash: string;
+  operations: Array<{ sequence: number; id: string; objectType: 'category' | 'channel'; objectId: string }>;
+};
 
 function fixtureState(): State {
-  const everyone = { id: LIVE_GUILD_ID, type: 0, allow: VIEW, deny: '0' };
-  const channels: Channel[] = [];
-  for (const [index, id] of ACTIVE_CATEGORY_IDS.entries()) channels.push({ id, name: `active-category-${index}`, type: 4, parent_id: null, position: index, permission_overwrites: [everyone] });
-  for (const [index, id] of ACTIVE_CHANNEL_IDS.entries()) channels.push({ id, name: `active-channel-${index}`, type: 0, parent_id: ACTIVE_CATEGORY_IDS[index % ACTIVE_CATEGORY_IDS.length]!, position: index, topic: `history-${id}`, permission_overwrites: [everyone] });
-  for (const [index, id] of LEGACY_CATEGORY_IDS.entries()) channels.push({
-    id,
-    name: `legacy-category-${index}`,
-    type: 4,
-    parent_id: null,
-    position: 100 + index,
-    permission_overwrites: [
-      everyone,
-      { id: ID(50), type: 0, allow: '0', deny: String((1n << 10n) | (1n << 11n)) },
-      { id: ID(51), type: 0, allow: VIEW, deny: '0' },
-    ],
+  const state = structuredClone(PRODUCTION_STATE);
+  assert.equal(state.guild.id, LIVE_GUILD_ID);
+  const mismatches = state.channels.filter((channel) => LEGACY_CHANNEL_IDS.includes(channel.id as never)).filter((channel) => {
+    const parent = state.channels.find((item) => item.id === channel.parent_id)!;
+    return stable(normalizeOverwrites(channel.permission_overwrites)) !== stable(normalizeOverwrites(parent.permission_overwrites));
   });
-  for (const [index, id] of LEGACY_CHANNEL_IDS.entries()) channels.push({
-    id,
-    name: `legacy-channel-${index}`,
-    type: index % 7 === 0 ? 2 : 0,
-    parent_id: LEGACY_CATEGORY_IDS[index % LEGACY_CATEGORY_IDS.length]!,
-    position: 200 + index,
-    topic: `preserved-history-${id}`,
-    permission_overwrites: [
-      everyone,
-      { id: ID(50), type: 0, allow: '0', deny: String((1n << 10n) | (1n << 11n)) },
-      { id: ID(51), type: 0, allow: VIEW, deny: '0' },
-    ],
-  });
-  channels.push({ id: '1545924265868525588', name: '💬 CHAT', type: 4, parent_id: null, permission_overwrites: [] });
-  channels.push({ id: '1545924268489973841', name: 'looking-to-play', type: 0, parent_id: '1545924265868525588', permission_overwrites: [] });
-  channels.push({ id: '1545924265247903884', name: '📌 START HERE', type: 4, parent_id: null, permission_overwrites: [] });
-  channels.push({ id: '1545924267453976696', name: '⚙️ SYSTEM', type: 4, parent_id: null, permission_overwrites: [] });
-  return {
-    guild: { id: LIVE_GUILD_ID, name: LIVE_GUILD_NAME, owner_id: ID(99), application_id: null, features: ['COMMUNITY'] },
-    roles: [
-      { id: LIVE_GUILD_ID, name: '@everyone', managed: false, permissions: '0', position: 0 },
-      { id: ID(1), name: 'Owen', managed: true, permissions: ADMIN, position: 200, tags: { bot_id: LIVE_BOT_APPLICATION_ID } },
-      { id: ID(50), name: 'Explicit deny', managed: false, permissions: '0', position: 10 },
-      { id: ID(51), name: 'Required integration', managed: true, permissions: '0', position: 20, tags: { integration_id: ID(52) } },
-    ],
-    channels,
-    integrations: [{ id: ID(52), name: 'kept integration', application: { id: ID(53) }, role_id: ID(51) }],
-    application: { id: LIVE_BOT_APPLICATION_ID, name: 'Owen' },
-    members: [
-      { user: { id: LIVE_BOT_APPLICATION_ID, username: 'Owen', bot: true }, roles: [ID(1)], premium_since: null, pending: false },
-      { user: { id: ID(60), username: 'holder', bot: false }, roles: [ID(50)], premium_since: null, pending: false },
-      { user: { id: ID(61), username: 'integration', bot: true }, roles: [ID(51)], premium_since: null, pending: false },
-    ],
-  };
+  assert.equal(mismatches.length, PERMISSION_DRIFT.mismatchCount);
+  assert.deepEqual(mismatches.map((channel) => channel.id).sort(), PERMISSION_DRIFT.mismatches.map((mismatch) => mismatch.channelId).sort());
+  return state;
 }
 
 async function stubDiscord(): Promise<Stub> {
@@ -109,6 +103,7 @@ async function stubDiscord(): Promise<Stub> {
   const rollbackOrder: string[] = [];
   let nextFailure = 0;
   let partialNextWrite = false;
+  let partialWriteTarget: string | null = null;
   const server: Server = createServer((req, res) => {
     const method = req.method ?? 'GET';
     const path = req.url ?? '';
@@ -135,17 +130,25 @@ async function stubDiscord(): Promise<Stub> {
         const channel = match && state.channels.find((item) => item.id === match[1]);
         if (!channel) return send(404, {});
         let overwrites = body.permission_overwrites as Channel['permission_overwrites'];
-        if (partialNextWrite) {
+        if (partialNextWrite && (partialWriteTarget === null || partialWriteTarget === channel.id)) {
           partialNextWrite = false;
+          partialWriteTarget = null;
           overwrites = overwrites.filter((overwrite) => overwrite.id !== LIVE_GUILD_ID);
         }
         const everyone = overwrites.find((overwrite) => overwrite.id === LIVE_GUILD_ID);
         if (everyone && (BigInt(everyone.deny) & (1n << 10n)) !== 0n) writeOrder.push(channel.id);
         else rollbackOrder.push(channel.id);
+        // Discord decides which children a category PATCH carries by value: a child is
+        // synchronized exactly while its overwrites equal the category's, so the edit
+        // carries the children that matched the category's *previous* value and leaves
+        // every other one where it is. Modelling this as sticky set membership instead
+        // hides the case TOG-2934 hit, where a category restored ahead of its children
+        // re-syncs nothing and the children are stranded at the applied value.
+        const previous = stable(normalizeOverwrites(channel.permission_overwrites));
         channel.permission_overwrites = structuredClone(overwrites);
         if (channel.type === 4) {
           for (const child of state.channels.filter((item) => item.parent_id === channel.id)) {
-            child.permission_overwrites = structuredClone(overwrites);
+            if (stable(normalizeOverwrites(child.permission_overwrites)) === previous) child.permission_overwrites = structuredClone(overwrites);
           }
         }
         return send(200, channel);
@@ -176,6 +179,10 @@ async function stubDiscord(): Promise<Stub> {
     rollbackOrder,
     failNextWrite(status: number) { nextFailure = status; },
     partialNextWrite() { partialNextWrite = true; },
+    partialWriteOn(objectId: string) { partialNextWrite = true; partialWriteTarget = objectId; },
+    desyncChild(childId: string, overwrites: Channel['permission_overwrites']) {
+      state.channels.find((item) => item.id === childId)!.permission_overwrites = structuredClone(overwrites);
+    },
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }
@@ -197,6 +204,43 @@ const cleanupArgs = (dir: string, apply = false) => ['--phase', 'archive-legacy'
 const manifestPath = (dir: string) => join(dir, 'phase-01', 'rollback.json');
 const planManifestPath = (dir: string) => join(dir, 'plan', 'rollback.json');
 
+/**
+ * Discord's channel permission stack, written independently of the planner's own
+ * assertion so the visibility test is not the planner agreeing with itself:
+ * base role permissions -> @everyone overwrite -> union of role overwrites ->
+ * member overwrite. Administrator short-circuits, which is why it cannot be denied.
+ */
+function canView(member: SnapshotMember, snapshot: LiveCleanupSnapshot, overwrites: Overwrite[]): boolean {
+  let permissions = basePermissions(member, snapshot);
+  if ((permissions & BigInt(ADMIN)) !== 0n) return true;
+  const everyone = overwrites.find((overwrite) => overwrite.type === 0 && overwrite.id === snapshot.guildId);
+  if (everyone) permissions = (permissions & ~BigInt(everyone.deny)) | BigInt(everyone.allow);
+  let allow = 0n;
+  let deny = 0n;
+  for (const overwrite of overwrites) {
+    if (overwrite.type !== 0 || overwrite.id === snapshot.guildId || !member.roles.includes(overwrite.id)) continue;
+    allow |= BigInt(overwrite.allow);
+    deny |= BigInt(overwrite.deny);
+  }
+  permissions = (permissions & ~deny) | allow;
+  const mine = overwrites.find((overwrite) => overwrite.type === 1 && overwrite.id === member.id);
+  if (mine) permissions = (permissions & ~BigInt(mine.deny)) | BigInt(mine.allow);
+  return (permissions & BigInt(VIEW)) !== 0n;
+}
+
+function operationChangesState(operation: CleanupManifest['operations'][number]): boolean {
+  return stable(operation.write.permission_overwrites) !== stable(operation.inverseWrite.permission_overwrites);
+}
+
+function rollbackRequiresPatch(manifest: CleanupManifest, snapshotChannels: Channel[], operation: CleanupManifest['operations'][number]): boolean {
+  if (operationChangesState(operation)) return true;
+  if (operation.objectType !== 'channel') return false;
+  const original = snapshotChannels.find((channel) => channel.id === operation.objectId)!;
+  const parentOperation = manifest.operations.find((item) => item.objectType === 'category' && item.objectId === original.parent_id)!;
+  return operationChangesState(parentOperation)
+    && stable(operation.inverseWrite.permission_overwrites) === stable(parentOperation.write.permission_overwrites);
+}
+
 async function plan(stub: Stub, dir: string): Promise<Run> {
   return run(CLEANUP, cleanupArgs(dir), { MAIN_GUILD_API_BASE: stub.base });
 }
@@ -207,20 +251,42 @@ async function rollback(stub: Stub, dir: string): Promise<Run> {
   return run(ROLLBACK, ['--manifest', manifestPath(dir), '--confirm-main-guild', '--apply'], { MAIN_GUILD_API_BASE: stub.base });
 }
 
-test('production-shaped fixture pins 18 stable operations and dry-run writes nothing', async () => {
+test('production-shaped 51-channel drift fixture pins 69 stable operations and dry-run writes nothing', async () => {
   const stub = await stubDiscord();
   try {
+    const runtimeMismatches = stub.state.channels.filter((channel) => LEGACY_CHANNEL_IDS.includes(channel.id as never)).filter((channel) => {
+      const parent = stub.state.channels.find((item) => item.id === channel.parent_id)!;
+      return stable(normalizeOverwrites(channel.permission_overwrites)) !== stable(normalizeOverwrites(parent.permission_overwrites));
+    });
+    assert.equal(runtimeMismatches.length, PERMISSION_DRIFT.mismatchCount);
+    assert.deepEqual(runtimeMismatches.map((channel) => channel.id).sort(), PERMISSION_DRIFT.mismatches.map((mismatch) => mismatch.channelId).sort());
     const firstDir = mkdtempSync(join(tmpdir(), 'two-live-clean-plan-'));
     const first = await plan(stub, firstDir);
     assert.equal(first.code, 0, first.stderr);
     assert.equal(stub.writes.length, 0);
     const firstManifest = JSON.parse(readFileSync(planManifestPath(firstDir), 'utf8')) as CleanupManifest;
-    assert.equal(firstManifest.operationCount, 18);
+    assert.equal(firstManifest.operationCount, EXPECTED_OPERATIONS.operationCount);
     assert.equal(firstManifest.reviewedLegacyChannelIds.length, 112);
     assert.equal(firstManifest.reviewedLegacyCategoryIds.length, 18);
     assert.equal(firstManifest.operationSemanticHash, operationSemanticHash(firstManifest.operations));
-    assert.equal(new Set(firstManifest.operations.map((operation) => operation.id)).size, 18);
-    assert.ok(firstManifest.operations.every((operation, index) => operation.sequence === index + 1));
+    assert.equal(firstManifest.operationSemanticHash, EXPECTED_OPERATIONS.operationSemanticHash);
+    assert.equal(new Set(firstManifest.operations.map((operation) => operation.id)).size, EXPECTED_OPERATIONS.operationCount);
+    assert.equal(firstManifest.operations.filter((operation) => operation.objectType === 'category').length, 18);
+    const channelOperations = firstManifest.operations.filter((operation) => operation.objectType === 'channel');
+    assert.equal(channelOperations.length, 51);
+    assert.deepEqual(firstManifest.operations.map(({ sequence, id, objectType, objectId }) => ({ sequence, id, objectType, objectId })), EXPECTED_OPERATIONS.operations);
+    for (const operation of channelOperations) {
+      const mismatch = PERMISSION_DRIFT.mismatches.find((item) => item.channelId === operation.objectId)!;
+      assert.equal(stable(operation.expectedBefore.permission_overwrites), stable(mismatch.channelOverwrites));
+      assert.equal(stable(operation.inverseWrite.permission_overwrites), stable(mismatch.channelOverwrites));
+      for (const original of mismatch.channelOverwrites) {
+        const updated = operation.write.permission_overwrites.find((overwrite) => overwrite.id === original.id && overwrite.type === original.type)!;
+        assert.equal(BigInt(updated.allow) & ~BigInt(VIEW), BigInt(original.allow) & ~BigInt(VIEW));
+        assert.equal(BigInt(updated.deny) & ~BigInt(VIEW), BigInt(original.deny) & ~BigInt(VIEW));
+      }
+      const everyone = operation.write.permission_overwrites.find((overwrite) => overwrite.id === LIVE_GUILD_ID && overwrite.type === 0)!;
+      assert.notEqual(BigInt(everyone.deny) & BigInt(VIEW), 0n);
+    }
     for (const file of ['snapshot/pre.json', 'snapshot/holders.csv', 'snapshot/references.json', 'plan/operations.json', 'plan/rollback.json', 'plan.log']) {
       const path = join(firstDir, file);
       assert.ok(existsSync(path), file);
@@ -235,29 +301,115 @@ test('production-shaped fixture pins 18 stable operations and dry-run writes not
   } finally { await stub.close(); }
 });
 
-test('unmanaged role visibility allow is refused because @everyone deny would not keep legacy channels hidden', async () => {
+test('unmanaged role visibility is neutralized with an additive member deny', async () => {
   const stub = await stubDiscord();
   try {
+    const roleId = ID(50);
+    const memberId = ID(60);
+    stub.state.roles.push({ id: roleId, name: 'fixture-visible-role', managed: false, permissions: '0', position: 10 });
+    stub.state.members.push({ user: { id: memberId, username: 'fixture-holder', bot: false }, roles: [roleId], premium_since: null, pending: false });
     const category = stub.state.channels.find((channel) => channel.id === LEGACY_CATEGORY_IDS[0])!;
-    category.permission_overwrites.push({ id: ID(50), type: 0, allow: VIEW, deny: '0' });
+    category.permission_overwrites.push({ id: roleId, type: 0, allow: VIEW, deny: '0' });
     for (const child of stub.state.channels.filter((channel) => channel.parent_id === category.id)) {
       child.permission_overwrites = structuredClone(category.permission_overwrites);
     }
-    const result = await plan(stub, mkdtempSync(join(tmpdir(), 'two-live-clean-visible-role-')));
+    const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-visible-role-'));
+    const result = await plan(stub, dir);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(stub.writes.length, 0);
+    const manifest = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    const operation = manifest.operations.find((item) => item.objectId === category.id)!;
+    assert.ok(operation.write.permission_overwrites.some((overwrite) => overwrite.id === roleId && overwrite.type === 0 && overwrite.allow === VIEW));
+    const memberDeny = operation.write.permission_overwrites.find((overwrite) => overwrite.id === memberId && overwrite.type === 1)!;
+    assert.notEqual(BigInt(memberDeny.deny) & BigInt(VIEW), 0n);
+  } finally { await stub.close(); }
+});
+
+test('only Owner, Owen and Administrator holders keep visibility; every other bot is denied and recorded', async () => {
+  const stub = await stubDiscord();
+  try {
+    const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-bot-visibility-'));
+    const result = await plan(stub, dir);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(stub.writes.length, 0);
+    const manifest = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    const snapshot = JSON.parse(readFileSync(join(dir, 'snapshot', 'pre.json'), 'utf8')) as LiveCleanupSnapshot;
+
+    // TOG-2920 finding: this non-Owen bot held ViewChannel on this reviewed legacy
+    // channel through a role allow that operation 17 preserves. The role allow must
+    // survive; the bot must not.
+    const REVIEWED_BOT = '235148962103951360';
+    const ALLOWING_ROLE = '1060912046012633148';
+    const DRIFTED_CHANNEL = '1087200619418357810';
+    const operation = manifest.operations.find((item) => item.objectId === DRIFTED_CHANNEL)!;
+    const roleBefore = operation.expectedBefore.permission_overwrites.find((item) => item.id === ALLOWING_ROLE && item.type === 0)!;
+    const roleAfter = operation.write.permission_overwrites.find((item) => item.id === ALLOWING_ROLE && item.type === 0)!;
+    assert.equal(BigInt(roleAfter.allow) & ~BigInt(VIEW), BigInt(roleBefore.allow) & ~BigInt(VIEW), 'unrelated role bits must survive');
+    assert.equal(roleAfter.allow, roleBefore.allow, 'the explicit role allow must be preserved, not stripped');
+    const botDeny = operation.write.permission_overwrites.find((item) => item.id === REVIEWED_BOT && item.type === 1);
+    assert.ok(botDeny, 'the non-Administrator bot must receive an additive member deny');
+    assert.notEqual(BigInt(botDeny.deny) & BigInt(VIEW), 0n);
+
+    // Nobody outside the recorded exemption set may see any of the 112 after the plan.
+    const after = structuredClone(snapshot);
+    for (const item of manifest.operations) applyOperationOverwrites(after, item, item.write.permission_overwrites);
+    const exempt = new Map(manifest.visibilityExemptions.map((item) => [item.memberId, item.reason]));
+    const stillVisible = snapshot.members.filter((member) => LEGACY_CHANNEL_IDS.some((id) => {
+      const channel = after.channels.find((item) => item.id === id)!;
+      return canView(member, snapshot, normalizeOverwrites(channel.permission_overwrites ?? []));
+    }));
+    assert.deepEqual(stillVisible.map((member) => member.id).sort(), [...exempt.keys()].sort());
+    assert.ok(stillVisible.some((member) => member.bot && member.id === LIVE_BOT_APPLICATION_ID), 'Owen must retain access');
+    assert.ok(stillVisible.some((member) => member.id === String(snapshot.guild.owner_id)), 'the guild Owner must retain access');
+    assert.ok(!stillVisible.some((member) => member.id === REVIEWED_BOT));
+    for (const member of stillVisible) {
+      const reason = exempt.get(member.id)!;
+      if (reason === 'administrator') {
+        assert.notEqual(basePermissions(member, snapshot) & BigInt(ADMIN), 0n, `${member.id} is recorded as Administrator but does not hold it`);
+      } else {
+        assert.ok(reason === 'owner' || reason === 'owen');
+      }
+    }
+    assert.match(result.stdout, /Principals that still see the archived objects after this plan: \d+/);
+    for (const item of manifest.visibilityExemptions) assert.match(result.stdout, new RegExp(`RETAINS-VIEW ${item.reason} \\w+ ${item.memberId}`));
+  } finally { await stub.close(); }
+});
+
+test('a tampered visibility-exemption set refuses apply before writes', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-exemption-tamper-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    const path = planManifestPath(dir);
+    const manifest = JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest;
+    manifest.visibilityExemptions = [...manifest.visibilityExemptions, { memberId: ID(77), bot: true, reason: 'administrator' }];
+    writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
+    chmodSync(path, 0o600);
+    const result = await apply(stub, dir);
     assert.equal(result.code, 1);
-    assert.match(result.stderr, /unmanaged role View Channel allow|remains visible/);
+    assert.match(result.stderr, /visibility-exemption set/);
     assert.equal(stub.writes.length, 0);
   } finally { await stub.close(); }
 });
 
-test('permission-unsynchronized legacy child is refused because category archive would not prove it hidden', async () => {
+test('additional permission drift becomes a child PATCH that preserves explicit overwrites', async () => {
   const stub = await stubDiscord();
   try {
-    stub.state.channels.find((channel) => channel.id === LEGACY_CHANNEL_IDS[0])!.permission_overwrites = [{ id: ID(51), type: 0, allow: VIEW, deny: '0' }];
-    const result = await plan(stub, mkdtempSync(join(tmpdir(), 'two-live-clean-unsynchronized-')));
-    assert.equal(result.code, 1);
-    assert.match(result.stderr, /permission-unsynchronized/);
+    const reviewedDriftIds = new Set(PERMISSION_DRIFT.mismatches.map((mismatch) => mismatch.channelId));
+    const channelId = LEGACY_CHANNEL_IDS.find((id) => !reviewedDriftIds.has(id))!;
+    const channel = stub.state.channels.find((item) => item.id === channelId)!;
+    const explicit = [{ id: ID(51), type: 0, allow: VIEW, deny: '0' }];
+    channel.permission_overwrites = structuredClone(explicit);
+    const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-additional-drift-'));
+    const result = await plan(stub, dir);
+    assert.equal(result.code, 0, result.stderr);
     assert.equal(stub.writes.length, 0);
+    const manifest = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    assert.equal(manifest.operationCount, 70);
+    const operation = manifest.operations.find((item) => item.objectId === channelId)!;
+    assert.equal(operation.objectType, 'channel');
+    assert.equal(stable(operation.inverseWrite.permission_overwrites), stable(explicit));
+    assert.equal(stable(operation.write.permission_overwrites.filter((overwrite) => overwrite.id !== LIVE_GUILD_ID)), stable(explicit));
   } finally { await stub.close(); }
 });
 
@@ -269,10 +421,16 @@ test('reviewed untouched objects and legacy-category children must retain their 
     startHere.type = 0;
     startHere.parent_id = parent.id;
     startHere.permission_overwrites = [...parent.permission_overwrites, { id: ID(50), type: 0, allow: VIEW, deny: '0' }];
-    const result = await plan(movedStub, mkdtempSync(join(tmpdir(), 'two-live-clean-moved-untouched-')));
+    const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-moved-untouched-'));
+    const result = await plan(movedStub, dir);
     assert.equal(result.code, 1);
     assert.match(result.stderr, /pinned type and parent|unexpected child/);
     assert.equal(movedStub.writes.length, 0);
+    assert.ok(existsSync(join(dir, 'snapshot', 'pre.json')), 'planning refusal must preserve the fresh pre-snapshot');
+    assert.ok(existsSync(join(dir, 'snapshot', 'holders.csv')));
+    assert.ok(existsSync(join(dir, 'snapshot', 'references.json')));
+    assert.ok(existsSync(join(dir, 'plan.log')));
+    assert.ok(!existsSync(join(dir, 'plan', 'operations.json')));
   } finally { await movedStub.close(); }
 
   const extraChildStub = await stubDiscord();
@@ -378,7 +536,8 @@ test('stale snapshot, wrong application/guild token, and hierarchy refusal fail 
     const wrongGuild = await run(CLEANUP, cleanupArgs(mkdtempSync(join(tmpdir(), 'two-live-clean-wrong-guild-'))), { DISCORD_GUILD_ID: ID(997), MAIN_GUILD_API_BASE: 'http://127.0.0.1:1/api/v10' });
     assert.equal(wrongGuild.code, 2);
 
-    stub.state.roles.find((role) => role.name === 'Owen')!.permissions = '0';
+    const owen = stub.state.members.find((member) => member.user.id === LIVE_BOT_APPLICATION_ID)!;
+    stub.state.roles.find((role) => owen.roles.includes(role.id) && (BigInt(role.permissions) & BigInt(ADMIN)) !== 0n)!.permissions = '0';
     const hierarchy = await plan(stub, mkdtempSync(join(tmpdir(), 'two-live-clean-noadmin-')));
     assert.equal(hierarchy.code, 1);
     assert.match(hierarchy.stderr, /Administrator/);
@@ -408,7 +567,7 @@ test('429 and partial failure stop immediately with a recoverable manifest', asy
     assert.equal((await apply(resumeStub, resumeDir)).code, 1);
     const resumed = await apply(resumeStub, resumeDir);
     assert.equal(resumed.code, 0, resumed.stderr);
-    assert.equal(resumeStub.writeOrder.length, 18);
+    assert.equal(resumeStub.writeOrder.length, 68);
   } finally { await resumeStub.close(); }
 
   const partialStub = await stubDiscord();
@@ -425,6 +584,67 @@ test('429 and partial failure stop immediately with a recoverable manifest', asy
   } finally { await partialStub.close(); }
 });
 
+test('a partial write leaves one in-flight operation that resume names and rollback recovers exactly', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-partial-recover-'));
+  const before = structuredClone(stub.state.channels);
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    stub.partialNextWrite();
+    const partial = await apply(stub, dir);
+    assert.equal(partial.code, 1);
+    assert.match(partial.stderr, /partial\/unexpected state/);
+
+    // The interrupted operation is journalled `requesting`, and the live object now
+    // matches neither its expected-before nor its full write. That is the state
+    // TOG-2920 showed was unrecoverable: resume refused and rollback refused.
+    const manifest = JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest;
+    const requesting = manifest.operations.filter((operation) => operation.state === 'requesting');
+    assert.equal(requesting.length, 1);
+    const inFlight = requesting[0]!;
+    const live = stub.state.channels.find((channel) => channel.id === inFlight.objectId)!;
+    const liveShape = stable(normalizeOverwrites(live.permission_overwrites));
+    assert.notEqual(liveShape, stable(inFlight.write.permission_overwrites), 'the live object must be a genuine partial, not the full write');
+    assert.notEqual(liveShape, stable(inFlight.expectedBefore.permission_overwrites), 'the live object must be a genuine partial, not the untouched before-state');
+
+    // Resume still refuses to push forward over an ambiguous write, but must now
+    // name the operation and hand the operator the rollback command.
+    const writesBeforeResume = stub.writes.length;
+    const resumed = await apply(stub, dir);
+    assert.equal(resumed.code, 1);
+    assert.match(resumed.stderr, new RegExp(`Interrupted operation ${inFlight.id} left a partial write`));
+    assert.match(resumed.stderr, /live-clean-slate-cleanup-rollback\.ts/);
+    assert.equal(stub.writes.length, writesBeforeResume, 'a refused resume must not write');
+
+    const rolledBack = await rollback(stub, dir);
+    assert.equal(rolledBack.code, 0, rolledBack.stderr);
+    assert.match(rolledBack.stdout, new RegExp(`RECOVERING in-flight ${inFlight.id}`));
+    assert.equal(stable(stub.state.channels), stable(before), 'rollback must reach the exact pre-snapshot state');
+    const finalManifest = JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest;
+    assert.equal(finalManifest.status, 'rolled_back');
+    assert.ok(finalManifest.operations.every((operation) => operation.state === 'rolled_back' || operation.state === 'pending'));
+  } finally { await stub.close(); }
+});
+
+test('rollback still refuses third-party drift on an operation that is not in flight', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-applied-drift-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    assert.equal((await apply(stub, dir)).code, 0);
+    const manifest = JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest;
+    assert.equal(manifest.operations.filter((operation) => operation.state === 'requesting').length, 0);
+    const applied = manifest.operations.findLast((operation) => operation.objectType === 'channel' && operationChangesState(operation))!;
+    const target = stub.state.channels.find((channel) => channel.id === applied.objectId)!;
+    target.permission_overwrites = [...target.permission_overwrites, { id: ID(88), type: 0, allow: VIEW, deny: '0' }];
+    const writesBefore = stub.writes.length;
+    const result = await rollback(stub, dir);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /drifted from both applied and inverse state/);
+    assert.equal(stub.writes.length, writesBefore, 'a refused rollback must not write');
+  } finally { await stub.close(); }
+});
+
 test('interrupted apply resumes without replay, then rollback restores exact semantic state in reverse order', async () => {
   const stub = await stubDiscord();
   const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-interrupt-'));
@@ -436,26 +656,50 @@ test('interrupted apply resumes without replay, then rollback restores exact sem
     assert.equal(stub.writes.length, 3);
     const resumed = await apply(stub, dir);
     assert.equal(resumed.code, 0, resumed.stderr);
-    assert.equal(stub.writeOrder.length, 18);
-    assert.equal(new Set(stub.writeOrder).size, 18, 'retry must not replay completed writes');
+    assert.equal(stub.writeOrder.length, 69);
+    assert.equal(new Set(stub.writeOrder).size, 69, 'retry must not replay completed writes');
     assert.equal(stub.state.channels.length, before.length, 'channel IDs/history must be preserved');
     for (const original of before) assert.equal(stub.state.channels.find((channel) => channel.id === original.id)?.topic, original.topic);
 
     const manifest = JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest;
     assert.equal(manifest.status, 'applied');
     assert.ok(manifest.operations.every((operation) => operation.state === 'applied'));
-    const interruptedRollback = manifest.operations.at(-1)!;
+    const interruptedRollback = manifest.operations.findLast(operationChangesState)!;
     stub.state.channels.find((channel) => channel.id === interruptedRollback.objectId)!.permission_overwrites = structuredClone(interruptedRollback.inverseWrite.permission_overwrites);
     for (const child of stub.state.channels.filter((channel) => channel.parent_id === interruptedRollback.objectId)) {
       child.permission_overwrites = structuredClone(interruptedRollback.inverseWrite.permission_overwrites);
     }
+    const expectedRollbackOrder = manifest.operations
+      .filter((operation) => operation.id !== interruptedRollback.id && rollbackRequiresPatch(manifest, before, operation))
+      .reverse()
+      .map((operation) => operation.objectId);
+    const rollbackWritesBefore = stub.writes.length;
     const rolledBack = await rollback(stub, dir);
     assert.equal(rolledBack.code, 0, rolledBack.stderr);
-    assert.deepEqual(stub.rollbackOrder, [...stub.writeOrder].reverse().slice(1));
+    const rollbackRequestOrder = stub.writes.slice(rollbackWritesBefore).map((write) => /\/channels\/(\d+)$/.exec(write.path)![1]);
+    assert.deepEqual(rollbackRequestOrder, expectedRollbackOrder);
     assert.equal(stable(stub.state.channels), stable(before));
     const finalManifest = JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest;
     assert.equal(finalManifest.status, 'rolled_back');
     assert.ok(finalManifest.operations.every((operation) => operation.state === 'rolled_back'));
+  } finally { await stub.close(); }
+});
+
+test('rollback accepts pending no-op operations after an interrupted apply', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-interrupted-rollback-'));
+  const before = structuredClone(stub.state.channels);
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    const interrupted = await apply(stub, dir, { LIVE_CLEANUP_TEST_ABORT_AFTER_WRITES: '2' });
+    assert.equal(interrupted.code, 86);
+    const manifest = JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest;
+    assert.ok(manifest.operations.some((operation) => operation.state === 'pending' && stable(operation.write.permission_overwrites) === stable(operation.inverseWrite.permission_overwrites)));
+    const result = await rollback(stub, dir);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(stable(stub.state.channels), stable(before));
+    const finalManifest = JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest;
+    assert.equal(finalManifest.status, 'rolled_back');
   } finally { await stub.close(); }
 });
 
@@ -467,15 +711,614 @@ test('rollback repairs a mixed category/child state before checkpointing and rem
     assert.equal((await plan(stub, dir)).code, 0);
     assert.equal((await apply(stub, dir)).code, 0);
     const manifest = JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest;
-    const mixed = manifest.operations.at(-1)!;
+    const mixed = manifest.operations.findLast((operation) => operation.objectType === 'category'
+      && stable(operation.write.permission_overwrites) !== stable(operation.inverseWrite.permission_overwrites)
+      && before.some((channel) => channel.parent_id === operation.objectId && stable(channel.permission_overwrites) === stable(operation.inverseWrite.permission_overwrites)))!;
     stub.state.channels.find((channel) => channel.id === mixed.objectId)!.permission_overwrites = structuredClone(mixed.inverseWrite.permission_overwrites);
-    const rollbackWritesBefore = stub.rollbackOrder.length;
+    const syncedChildren = before
+      .filter((channel) => channel.parent_id === mixed.objectId && stable(normalizeOverwrites(channel.permission_overwrites)) === stable(mixed.inverseWrite.permission_overwrites))
+      .map((channel) => channel.id);
+    assert.ok(syncedChildren.length > 0, 'the mixed category must have synchronized children to strand');
+    const rollbackWritesBefore = stub.writes.length;
     const result = await rollback(stub, dir);
     assert.equal(result.code, 0, result.stderr);
-    assert.equal(stub.rollbackOrder.length - rollbackWritesBefore, 18, 'mixed state must PATCH the category rather than checkpoint it');
+    const rollbackTargets = stub.writes.slice(rollbackWritesBefore).map((write) => /\/channels\/(\d+)$/.exec(write.path)![1]);
+    assert.ok(rollbackTargets.includes(mixed.objectId), 'mixed state must PATCH the category rather than checkpoint it');
+    // TOG-2934: the category is restored ahead of its children, so it no longer matches
+    // them and Discord's sync carries nothing. Every child that was synchronized in the
+    // pre-snapshot has to be PATCHed explicitly before the operation is checkpointed, or
+    // it is stranded at the applied value with nothing left for a retry to re-enter.
+    for (const childId of syncedChildren) {
+      assert.match(result.stdout, new RegExp(`RESYNCED ${childId} under ${mixed.id}`));
+      assert.ok(rollbackTargets.includes(childId), `synchronized child ${childId} must be restored explicitly`);
+    }
     assert.equal(stable(stub.state.channels), stable(before));
     const finalManifest = JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest;
     assert.equal(finalManifest.status, 'rolled_back');
     assert.ok(finalManifest.operations.every((operation) => operation.state === 'rolled_back'));
+  } finally { await stub.close(); }
+});
+
+test('a forged journal state refuses rollback before any write and leaves third-party drift alone', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-journal-forge-rollback-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    assert.equal((await apply(stub, dir)).code, 0);
+    const path = manifestPath(dir);
+    const manifest = JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest;
+    assert.equal(manifest.operations.filter((operation) => operation.state === 'requesting').length, 0);
+    // TOG-2935: relabelling a long-applied operation `requesting` was all it took to buy
+    // the in-flight recovery exception, and rollback would then overwrite live state it
+    // had never written. `planSignature` covers only immutable plan content, so only the
+    // separate journal signature can refuse this.
+    const forged = manifest.operations.findLast((operation) => operation.objectType === 'channel' && operationChangesState(operation))!;
+    forged.state = 'requesting';
+    writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
+    chmodSync(path, 0o600);
+    const target = stub.state.channels.find((channel) => channel.id === forged.objectId)!;
+    target.permission_overwrites = [...target.permission_overwrites, { id: ID(88), type: 0, allow: VIEW, deny: '0' }];
+    const drifted = structuredClone(stub.state.channels);
+    const writesBefore = stub.writes.length;
+    const result = await rollback(stub, dir);
+    assert.equal(result.code, 2);
+    assert.match(result.stderr, /journal signature is invalid/);
+    assert.equal(stub.writes.length, writesBefore, 'a forged journal must be refused before any write');
+    assert.equal(stable(stub.state.channels), stable(drifted), "the third party's write must be left exactly as it was");
+  } finally { await stub.close(); }
+});
+
+test('a forged journal state refuses an apply resume before any write', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-journal-forge-resume-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    assert.equal((await apply(stub, dir, { LIVE_CLEANUP_TEST_ABORT_AFTER_WRITES: '3' })).code, 86);
+    const path = manifestPath(dir);
+    const manifest = JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest;
+    // Exactly one `requesting` operation, or the refusal proves nothing: the resume
+    // path rejects a second in-flight operation on its own, and that guard would mask
+    // the journal check. Settle the genuine in-flight operation — its write did land
+    // before the interruption — and move the label onto one that has long been applied,
+    // which is the relabelling that buys the recovery exception.
+    const genuine = manifest.operations.find((operation) => operation.state === 'requesting')!;
+    genuine.state = 'applied';
+    genuine.appliedAt = new Date().toISOString();
+    const forged = manifest.operations.find((operation) => operation.state === 'applied' && operation.id !== genuine.id)!;
+    forged.state = 'requesting';
+    assert.equal(manifest.operations.filter((operation) => operation.state === 'requesting').length, 1);
+    writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
+    chmodSync(path, 0o600);
+    const writesBefore = stub.writes.length;
+    const resumed = await apply(stub, dir);
+    assert.equal(resumed.code, 1);
+    assert.match(resumed.stderr, /journal signature is invalid/);
+    assert.doesNotMatch(resumed.stderr, /more than one requesting operation/);
+    assert.equal(stub.writes.length, writesBefore, 'a forged journal must be refused before any write');
+  } finally { await stub.close(); }
+});
+
+/**
+ * The first category operation whose write changes state and that carries synchronized
+ * children. `unsyncedChildIds` are its other children — pre-snapshot they did not match
+ * the category, so Discord's sync could never have carried them and they each have their
+ * own channel operation. Pass `requireUnsynced` when the test needs both kinds.
+ */
+function tearableCategory(manifest: CleanupManifest, channels: Channel[], requireUnsynced = false): { operation: CleanupManifest['operations'][number]; childIds: string[]; unsyncedChildIds: string[] } {
+  for (const operation of manifest.operations) {
+    if (operation.objectType !== 'category' || !operationChangesState(operation)) continue;
+    const children = channels.filter((channel) => channel.parent_id === operation.objectId);
+    const childIds = children
+      .filter((channel) => stable(normalizeOverwrites(channel.permission_overwrites)) === stable(operation.inverseWrite.permission_overwrites))
+      .map((channel) => channel.id);
+    const unsyncedChildIds = children.map((channel) => channel.id).filter((id) => !childIds.includes(id));
+    if (childIds.length === 0 || (requireUnsynced && unsyncedChildIds.length === 0)) continue;
+    return { operation, childIds, unsyncedChildIds };
+  }
+  throw new Error('the fixture has no category operation with the required child shape');
+}
+
+/** The recovery hint apply prints only when it accepts the drift as its own in-flight write. */
+const RECOVERY_HINT = /left a partial write on|live-clean-slate-cleanup-rollback\.ts/;
+
+test('a torn category write is recovered in flight and every synchronized child returns to the pre-snapshot', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-category-inflight-'));
+  const before = structuredClone(stub.state.channels);
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    const planned = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    const { operation: category, childIds } = tearableCategory(planned, before);
+
+    stub.partialWriteOn(category.objectId);
+    const partial = await apply(stub, dir);
+    assert.equal(partial.code, 1);
+    assert.match(partial.stderr, /partial\/unexpected state/);
+
+    // A torn category write carries its synchronized children down with it, so the
+    // in-flight subtree is wider than the operation's own object. Recovery has to cover
+    // the children too, and their live value here is one our own PATCH produced.
+    const torn = stub.state.channels.find((channel) => channel.id === category.objectId)!;
+    const tornShape = stable(normalizeOverwrites(torn.permission_overwrites));
+    assert.notEqual(tornShape, stable(category.write.permission_overwrites));
+    assert.notEqual(tornShape, stable(category.inverseWrite.permission_overwrites));
+    for (const childId of childIds) {
+      assert.equal(stable(normalizeOverwrites(stub.state.channels.find((channel) => channel.id === childId)!.permission_overwrites)), tornShape);
+    }
+
+    const writesBeforeResume = stub.writes.length;
+    const resumed = await apply(stub, dir);
+    assert.equal(resumed.code, 1);
+    assert.match(resumed.stderr, new RegExp(`Interrupted operation ${category.id} left a partial write`));
+    assert.equal(stub.writes.length, writesBeforeResume, 'a refused resume must not write');
+
+    const rolledBack = await rollback(stub, dir);
+    assert.equal(rolledBack.code, 0, rolledBack.stderr);
+    assert.match(rolledBack.stdout, new RegExp(`RECOVERING in-flight ${category.id}`));
+    assert.equal(stable(stub.state.channels), stable(before), 'rollback must reach the exact pre-snapshot state');
+    const finalManifest = JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest;
+    assert.equal(finalManifest.status, 'rolled_back');
+  } finally { await stub.close(); }
+});
+
+test('a third party on a synchronized child denies the in-flight exception and rollback refuses', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-inflight-scope-'));
+  const before = structuredClone(stub.state.channels);
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    const planned = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    const { operation: category, childIds } = tearableCategory(planned, before);
+
+    stub.partialWriteOn(category.objectId);
+    assert.equal((await apply(stub, dir)).code, 1);
+
+    // TOG-2934: the in-flight exception used to cover every child of the category, so a
+    // third party's write on one of them read as our own partial write and rollback
+    // clobbered it. A value this phase could not have produced must revoke the exception.
+    stub.desyncChild(childIds[0]!, [{ id: ID(88), type: 0, allow: VIEW, deny: '0' }]);
+    const drifted = structuredClone(stub.state.channels);
+    const writesBefore = stub.writes.length;
+    const result = await rollback(stub, dir);
+    assert.equal(result.code, 1);
+    assert.match(result.stdout, new RegExp(`In-flight operation ${category.id} is NOT eligible for the recovery exception`));
+    assert.match(result.stderr, /drifted from both applied and inverse state/);
+    assert.equal(stub.writes.length, writesBefore, 'a refused rollback must not write');
+    assert.equal(stable(stub.state.channels), stable(drifted), "the third party's write must be left exactly as it was");
+  } finally { await stub.close(); }
+});
+
+test('apply resume withholds the recovery exception when a synchronized child holds an inexplicable value', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-resume-scope-child-'));
+  const before = structuredClone(stub.state.channels);
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    const planned = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    const { operation: category, childIds } = tearableCategory(planned, before);
+
+    stub.partialWriteOn(category.objectId);
+    assert.equal((await apply(stub, dir)).code, 1);
+
+    // The adversarial control for the torn-write case above: same interruption, but a
+    // third party has put a synchronized child somewhere our PATCH could not have. The
+    // exception must be withheld, which means apply refuses as ordinary drift and does
+    // NOT send the operator to rollback — rollback would clobber that write.
+    stub.desyncChild(childIds[0]!, [{ id: ID(88), type: 0, allow: VIEW, deny: '0' }]);
+    const drifted = structuredClone(stub.state.channels);
+    const writesBefore = stub.writes.length;
+    const resumed = await apply(stub, dir);
+    assert.equal(resumed.code, 1);
+    assert.match(resumed.stderr, /Live state drifted since dry-run\/resume/);
+    assert.doesNotMatch(resumed.stderr, RECOVERY_HINT);
+    assert.equal(stub.writes.length, writesBefore, 'a refused resume must not write');
+    assert.equal(stable(stub.state.channels), stable(drifted), "the third party's write must be left exactly as it was");
+  } finally { await stub.close(); }
+});
+
+test('apply resume keeps the in-flight subtree off unsynchronized siblings of the torn category', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-resume-scope-sibling-'));
+  const before = structuredClone(stub.state.channels);
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    const planned = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    const { operation: category, unsyncedChildIds } = tearableCategory(planned, before, true);
+
+    stub.partialWriteOn(category.objectId);
+    assert.equal((await apply(stub, dir)).code, 1);
+
+    // The other half of the scope control. This sibling was never synchronized with the
+    // category, so the torn write cannot explain it and its live value must not be
+    // substituted into the expected state. Widening the subtree to every child would
+    // absorb this drift silently and hand the operator a rollback that overwrites it.
+    const sibling = stub.state.channels.find((channel) => channel.id === unsyncedChildIds[0]!)!;
+    sibling.permission_overwrites = [...sibling.permission_overwrites, { id: ID(89), type: 0, allow: VIEW, deny: '0' }];
+    const drifted = structuredClone(stub.state.channels);
+    const writesBefore = stub.writes.length;
+    const resumed = await apply(stub, dir);
+    assert.equal(resumed.code, 1);
+    assert.match(resumed.stderr, /Live state drifted since dry-run\/resume/);
+    assert.doesNotMatch(resumed.stderr, RECOVERY_HINT);
+    assert.equal(stub.writes.length, writesBefore, 'a refused resume must not write');
+    assert.equal(stable(stub.state.channels), stable(drifted), "the third party's write must be left exactly as it was");
+  } finally { await stub.close(); }
+});
+
+test('a replayed earlier checkpoint is refused before any write even though it is genuinely signed', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-journal-replay-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    const planned = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    // Interrupt after the final write, so the last operation is journalled `requesting`
+    // with its PATCH already accepted. Nothing here is forged: this checkpoint is one
+    // the run really wrote, and it stays validly signed forever.
+    const interrupted = await apply(stub, dir, { LIVE_CLEANUP_TEST_ABORT_AFTER_WRITES: String(planned.operations.length) });
+    assert.equal(interrupted.code, 86);
+    const path = manifestPath(dir);
+    const saved = readFileSync(path, 'utf8');
+    const savedManifest = JSON.parse(saved) as CleanupManifest;
+    const inFlight = savedManifest.operations.filter((operation) => operation.state === 'requesting');
+    assert.equal(inFlight.length, 1);
+
+    assert.equal((await apply(stub, dir)).code, 0);
+    assert.equal((JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest).status, 'applied');
+
+    // TOG-2947: with the run settled, a third party edits the object that was in flight,
+    // and the saved checkpoint is dropped back over the manifest. The journal HMAC still
+    // verifies — replay needs no token — so only the append-only witness log can tell
+    // rollback that this checkpoint has been superseded.
+    const target = stub.state.channels.find((channel) => channel.id === inFlight[0]!.objectId)!;
+    target.permission_overwrites = [...target.permission_overwrites, { id: ID(90), type: 0, allow: VIEW, deny: '0' }];
+    const drifted = structuredClone(stub.state.channels);
+    writeFileSync(path, saved);
+    chmodSync(path, 0o600);
+    const writesBefore = stub.writes.length;
+    const replayed = await rollback(stub, dir);
+    assert.equal(replayed.code, 2);
+    assert.match(replayed.stderr, /superseded checkpoint/);
+    assert.doesNotMatch(replayed.stdout, /RECOVERING in-flight/);
+
+    // Apply must refuse the same replay rather than diagnose it as a partial write and
+    // point the operator at the rollback that would do the clobbering.
+    const resumed = await apply(stub, dir);
+    assert.equal(resumed.code, 1);
+    assert.match(resumed.stderr, /superseded checkpoint/);
+    assert.doesNotMatch(resumed.stderr, RECOVERY_HINT);
+
+    // And the witness cannot simply be re-pointed at the replayed checkpoint: every
+    // record is chained under the bot token, so editing one is not possible without it.
+    const witnessFile = `${path}.witness`;
+    const lines = readFileSync(witnessFile, 'utf8').split('\n').filter((line) => line.length > 0);
+    const tip = JSON.parse(lines.at(-1)!) as { sequence: number; phase: string; journalSignature: string; chain: string };
+    lines[lines.length - 1] = JSON.stringify({ ...tip, sequence: savedManifest.journalSequence, journalSignature: savedManifest.journalSignature });
+    writeFileSync(witnessFile, `${lines.join('\n')}\n`);
+    const forgedWitness = await rollback(stub, dir);
+    assert.equal(forgedWitness.code, 2);
+    assert.match(forgedWitness.stderr, /is not authentic/);
+
+    assert.equal(stub.writes.length, writesBefore, 'a replayed checkpoint must be refused before any write');
+    assert.equal(stable(stub.state.channels), stable(drifted), "the third party's write must be left exactly as it was");
+  } finally { await stub.close(); }
+});
+
+/**
+ * TOG-2960 — a crash *inside* `checkpoint()`.
+ *
+ * The witness brackets the manifest write (`intent`, write, `commit`), so a process
+ * killed in that window leaves the tip an uncommitted `intent`. Both halves of the
+ * window used to be terminal: the next checkpoint appended a second `intent`, and
+ * every later read failed the sequence check, so a run that had merely been
+ * interrupted could never be resumed or rolled back again. Recovery has to close the
+ * open checkpoint first, and which way it closes is a property of the manifest, not
+ * of the log — hence one test per half.
+ */
+test('a crash between the checkpoint intent and its manifest write is recoverable', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-crash-pre-write-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    assert.equal((await apply(stub, dir, { LIVE_CLEANUP_TEST_ABORT_AFTER_WRITES: '5' })).code, 86);
+    const path = manifestPath(dir);
+    const witnessFile = journalWitnessPath(path);
+    const before = JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest;
+    assert.equal(readJournalWitness(TOKEN, witnessFile).at(-1)!.phase, 'commit');
+
+    // The crash: the next checkpoint's `intent` reached the log; its manifest write did
+    // not. That checkpoint was the one clearing the in-flight operation to `applied`, so
+    // it declares nothing in flight — which is also why the resume below has to settle
+    // the operation from its live value rather than from a recovery exception.
+    const abandoned = before.journalSequence + 1;
+    appendJournalWitness(TOKEN, witnessFile, abandoned, 'intent', 'signature-of-a-manifest-that-never-landed', null);
+
+    const resumed = await apply(stub, dir);
+    assert.equal(resumed.code, 0, resumed.stderr);
+    assert.match(resumed.stdout, /RECOVERED checkpoint \d+: its manifest write never landed/);
+    assert.equal((JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest).status, 'applied');
+
+    // The abandoned intent is closed as `abort` — which does not advance the run's
+    // latest durable checkpoint — and its sequence number is then retried for real.
+    const records = readJournalWitness(TOKEN, witnessFile);
+    assert.deepEqual(
+      records.filter((record) => record.sequence === abandoned).map((record) => record.phase),
+      ['intent', 'abort', 'intent', 'commit'],
+    );
+    assert.equal(records.at(-1)!.phase, 'commit');
+  } finally { await stub.close(); }
+});
+
+test('a crash between the checkpoint manifest write and its commit record is recoverable', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-crash-post-write-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    assert.equal((await apply(stub, dir, { LIVE_CLEANUP_TEST_ABORT_AFTER_WRITES: '5' })).code, 86);
+    const path = manifestPath(dir);
+    const witnessFile = journalWitnessPath(path);
+    const before = JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest;
+
+    // The crash: the manifest write landed, only its `commit` record was lost. Drop
+    // the trailing commit — trailing truncation is exactly what this crash looks like.
+    const lines = readFileSync(witnessFile, 'utf8').split('\n').filter((line) => line.length > 0);
+    assert.equal((JSON.parse(lines.at(-1)!) as { phase: string }).phase, 'commit');
+    writeFileSync(witnessFile, `${lines.slice(0, -1).join('\n')}\n`, { mode: 0o600 });
+    const tip = readJournalWitness(TOKEN, witnessFile).at(-1)!;
+    assert.equal(tip.phase, 'intent');
+    assert.equal(tip.sequence, before.journalSequence);
+
+    const resumed = await apply(stub, dir);
+    assert.equal(resumed.code, 0, resumed.stderr);
+    assert.match(resumed.stdout, /RECOVERED checkpoint \d+: its manifest write landed/);
+    assert.equal((JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest).status, 'applied');
+
+    const records = readJournalWitness(TOKEN, witnessFile);
+    const closed = records.filter((record) => record.sequence === before.journalSequence);
+    assert.deepEqual(closed.map((record) => record.phase), ['intent', 'commit']);
+    assert.equal(closed.at(-1)!.journalSignature, before.journalSignature, 'the recovered commit must name the manifest that actually landed');
+  } finally { await stub.close(); }
+});
+
+test('a crash inside the very first checkpoint leaves a restartable run, not a bricked one', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-crash-first-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    // The first checkpoint died before writing any manifest, so the phase directory
+    // holds a witness and nothing else. This used to refuse apply outright.
+    const path = manifestPath(dir);
+    mkdirSync(join(dir, 'phase-01'), { recursive: true, mode: 0o700 });
+    appendJournalWitness(TOKEN, journalWitnessPath(path), 1, 'intent', 'signature-of-a-manifest-that-never-landed', null);
+    assert.equal(existsSync(path), false);
+
+    const started = await apply(stub, dir);
+    assert.equal(started.code, 0, started.stderr);
+    assert.match(started.stdout, /RECOVERED checkpoint 1: its manifest write never landed/);
+    assert.equal((JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest).status, 'applied');
+    const records = readJournalWitness(TOKEN, journalWitnessPath(path));
+    assert.deepEqual(records.slice(0, 3).map((record) => record.phase), ['intent', 'abort', 'intent']);
+  } finally { await stub.close(); }
+});
+
+test('recovery does not launder a replayed checkpoint or a removed journal', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-crash-abuse-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    const planned = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    assert.equal((await apply(stub, dir, { LIVE_CLEANUP_TEST_ABORT_AFTER_WRITES: String(planned.operations.length) })).code, 86);
+    const path = manifestPath(dir);
+    const witnessFile = journalWitnessPath(path);
+    const saved = readFileSync(path, 'utf8');
+    const savedManifest = JSON.parse(saved) as CleanupManifest;
+    assert.equal((await apply(stub, dir)).code, 0);
+    const settled = JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest;
+    assert.equal(settled.status, 'applied');
+
+    const writesBefore = stub.writes.length;
+    const drifted = structuredClone(stub.state.channels);
+
+    // A witness that ever committed a checkpoint still proves a manifest existed, so
+    // losing the manifest must not silently start a fresh journal over that history.
+    // Checked here, on a cleanly committed tip, so it is this guard being exercised.
+    unlinkSync(path);
+    const removed = await apply(stub, dir);
+    assert.equal(removed.code, 2);
+    assert.match(removed.stderr, /records a committed checkpoint without its manifest/);
+
+    // An open checkpoint must not become a way to smuggle a superseded manifest past
+    // the freshness check: reconciliation only closes an intent whose manifest is
+    // either that checkpoint or the last committed one, and a replay is neither.
+    writeFileSync(path, saved, { mode: 0o600 });
+    // Named in flight exactly as the replayed manifest wants it, so the refusal below is
+    // the checkpoint classification and not the witness descriptor doing the work.
+    appendJournalWitness(TOKEN, witnessFile, settled.journalSequence + 1, 'intent', 'signature-of-a-manifest-that-never-landed', savedManifest.operations.find((operation) => operation.state === 'requesting')?.id ?? null);
+    const laundered = await rollback(stub, dir);
+    assert.equal(laundered.code, 2);
+    assert.match(laundered.stderr, /not an interrupted checkpoint/);
+    assert.doesNotMatch(laundered.stdout, /RECOVERING in-flight/);
+    assert.ok(savedManifest.journalSequence < settled.journalSequence);
+
+    assert.equal(stub.writes.length, writesBefore, 'neither refusal may touch Discord');
+    assert.equal(stable(stub.state.channels), stable(drifted));
+  } finally { await stub.close(); }
+});
+
+/**
+ * TOG-2975 — the three windows round 5 reproduced in the TOG-2960 recovery path.
+ *
+ * All three are about a witness record being trusted for slightly more than it proves:
+ * an empty file read as a corrupt one, an open `intent` closed as `commit` over a
+ * manifest the run will then reject, and a stale `requesting` label taken as evidence
+ * of an interrupted write when the abandoned checkpoint says otherwise.
+ */
+test('a torn witness file creation leaves a restartable run, not an unreadable one', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-witness-torn-create-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    const path = manifestPath(dir);
+    const witnessFile = journalWitnessPath(path);
+
+    // The crash: the very first `appendJournalWitness` creates the file and then writes
+    // to it. A process killed between the two leaves a zero-byte witness and no
+    // manifest — which records no more history than no witness at all.
+    mkdirSync(join(dir, 'phase-01'), { recursive: true, mode: 0o700 });
+    writeFileSync(witnessFile, '', { mode: 0o600 });
+    assert.equal(existsSync(path), false);
+    assert.equal(statSync(witnessFile).size, 0);
+
+    const started = await apply(stub, dir);
+    assert.equal(started.code, 0, started.stderr);
+    assert.equal((JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest).status, 'applied');
+    assert.equal(readJournalWitness(TOKEN, witnessFile).at(0)!.phase, 'intent');
+
+    // Reading an empty witness as "no checkpoint" is not the same as reading it as
+    // "this manifest is current": a log that records nothing cannot show the manifest
+    // beside it is the run's latest checkpoint, so acting on it is still refused.
+    writeFileSync(witnessFile, '', { mode: 0o600 });
+    const writesBefore = stub.writes.length;
+    const refused = await rollback(stub, dir);
+    assert.equal(refused.code, 2);
+    assert.match(refused.stderr, /records no checkpoint/);
+    assert.equal(stub.writes.length, writesBefore, 'an unprovable manifest must be refused before any write');
+  } finally { await stub.close(); }
+});
+
+test('an open checkpoint is not closed over a manifest the run would reject', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-crash-invalid-manifest-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    assert.equal((await apply(stub, dir, { LIVE_CLEANUP_TEST_ABORT_AFTER_WRITES: '5' })).code, 86);
+    const path = manifestPath(dir);
+    const witnessFile = journalWitnessPath(path);
+    const good = readFileSync(path, 'utf8');
+    const goodManifest = JSON.parse(good) as CleanupManifest;
+
+    // The crash: an `intent` for the next checkpoint landed; its manifest write did not.
+    // The journal signature covers only the mutable journal half, so an editor can
+    // corrupt everything else — here the pre-snapshot the whole plan is pinned to — and
+    // still present a file whose signature matches the abandoned checkpoint exactly.
+    const abandoned = goodManifest.journalSequence + 1;
+    const forged = { ...goodManifest, journalSequence: abandoned, snapshotSemanticHash: `${goodManifest.snapshotSemanticHash.slice(0, -1)}${goodManifest.snapshotSemanticHash.endsWith('0') ? '1' : '0'}` };
+    forged.journalSignature = journalSignature(TOKEN, forged as CleanupManifest);
+    assert.notEqual(forged.snapshotSemanticHash, goodManifest.snapshotSemanticHash);
+    appendJournalWitness(TOKEN, witnessFile, abandoned, 'intent', forged.journalSignature, null);
+    writeFileSync(path, `${JSON.stringify(forged, null, 2)}\n`, { mode: 0o600 });
+
+    const writesBefore = stub.writes.length;
+    const drifted = structuredClone(stub.state.channels);
+    const refusedApply = await apply(stub, dir);
+    assert.equal(refusedApply.code, 2, `${refusedApply.stdout}\n${refusedApply.stderr}`);
+    assert.match(refusedApply.stderr, /Refusing to close the open checkpoint/);
+    assert.match(refusedApply.stderr, /Manifest snapshot semantic hash mismatch/);
+    // Rollback validates the manifest before it reconciles, so it refuses one step
+    // earlier and never reaches the open checkpoint at all. Its reconciliation
+    // validator is therefore defence in depth against that order being changed, not
+    // the guard doing the work here — what matters is that neither entry point
+    // appends over the intent.
+    const refusedRollback = await rollback(stub, dir);
+    assert.equal(refusedRollback.code, 2, `${refusedRollback.stdout}\n${refusedRollback.stderr}`);
+    assert.match(refusedRollback.stderr, /Pre-snapshot hash does not match the manifest/);
+
+    // Nothing was appended. An open `intent` is recoverable and a wrongly written
+    // `commit` is not, so the refusal has to come before the append, not after it.
+    const records = readJournalWitness(TOKEN, witnessFile);
+    assert.deepEqual(records.filter((record) => record.sequence === abandoned).map((record) => record.phase), ['intent']);
+    assert.equal(stub.writes.length, writesBefore, 'neither refusal may touch Discord');
+    assert.equal(stable(stub.state.channels), stable(drifted));
+
+    // And the point of refusing rather than closing: restoring the real manifest lets
+    // the interrupted run finish. A `commit` for the forged checkpoint would have moved
+    // the durable tip past the sequence the real manifest carries and stranded it.
+    writeFileSync(path, good, { mode: 0o600 });
+    const resumed = await apply(stub, dir);
+    assert.equal(resumed.code, 0, resumed.stderr);
+    assert.equal((JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest).status, 'applied');
+  } finally { await stub.close(); }
+});
+
+/**
+ * The in-flight exception is the one place a journal state licenses writing over a
+ * value we did not put there, so it has to be earned by the abandoned checkpoint and
+ * not by the manifest alone. Both crash shapes leave the same operation `requesting` in
+ * the manifest and an open `intent` above it; the only thing separating them is which
+ * operation that record says was in flight, and it is chained under the bot token so
+ * trailing truncation cannot manufacture one. Hence a matched pair, both crashed inside
+ * `checkpoint()` by the script itself so the recorded descriptor is the real one.
+ */
+test('a checkpoint abandoned with nothing in flight denies the recovery exception', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-inflight-deny-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    assert.equal((await apply(stub, dir, { LIVE_CLEANUP_TEST_ABORT_AFTER_WRITES: '5' })).code, 86);
+    const path = manifestPath(dir);
+    const witnessFile = journalWitnessPath(path);
+    const crashed = JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest;
+    const inFlight = crashed.operations.filter((operation) => operation.state === 'requesting');
+    assert.equal(inFlight.length, 1);
+    const operation = inFlight[0]!;
+    assert.equal(operation.objectType, 'channel', 'a channel operation has no synchronized children, so the witness alone decides');
+
+    // The second crash lands in the checkpoint that clears this operation to `applied`.
+    // Apply only reaches it after Discord returned the write and it was verified equal,
+    // so that checkpoint declares nothing in flight — and the object was at `write`.
+    assert.equal((await apply(stub, dir, { LIVE_CLEANUP_TEST_ABORT_IN_CHECKPOINT: String(crashed.journalSequence + 2) })).code, 86);
+    const records = readJournalWitness(TOKEN, witnessFile);
+    assert.equal(records.at(-1)!.phase, 'intent');
+    assert.equal(records.at(-1)!.inFlightId, null);
+    const resumed = JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest;
+    assert.equal(resumed.journalSequence, records.at(-1)!.sequence - 1, 'the abandoned checkpoint sits one above the manifest');
+    assert.equal(resumed.operations.find((candidate) => candidate.id === operation.id)!.state, 'requesting');
+
+    // A third party then moves that object. The stale `requesting` label must not buy
+    // the right to write over them.
+    const target = stub.state.channels.find((channel) => channel.id === operation.objectId)!;
+    target.permission_overwrites = [...(target.permission_overwrites ?? []), { id: ID(91), type: 0, allow: VIEW, deny: '0' }];
+    const drifted = structuredClone(stub.state.channels);
+    const writesBefore = stub.writes.length;
+
+    const refused = await rollback(stub, dir);
+    assert.equal(refused.code, 1, `${refused.stdout}\n${refused.stderr}`);
+    assert.match(refused.stdout, /the checkpoint witness records no interrupted write for it/);
+    assert.doesNotMatch(refused.stdout, /RECOVERING in-flight/);
+    assert.match(refused.stderr, new RegExp(`operation ${operation.id} drifted from both applied and inverse state`));
+    assert.equal(stub.writes.length, writesBefore, 'a denied exception must not write');
+    assert.equal(stable(stub.state.channels), stable(drifted), "the third party's write must be left exactly as it was");
+  } finally { await stub.close(); }
+});
+
+test('a checkpoint abandoned while that operation was in flight still recovers it', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-inflight-allow-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    const before = structuredClone(stub.state.channels);
+    assert.equal((await apply(stub, dir, { LIVE_CLEANUP_TEST_ABORT_AFTER_WRITES: '5' })).code, 86);
+    const path = manifestPath(dir);
+    const witnessFile = journalWitnessPath(path);
+    const crashed = JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest;
+    const operation = crashed.operations.find((candidate) => candidate.state === 'requesting')!;
+
+    // The same manifest and the same open checkpoint one sequence above it — but this
+    // crash lands in the resume's opening checkpoint, taken while the request is still
+    // outstanding. It names the operation, so the partial value below is ours to undo.
+    assert.equal((await apply(stub, dir, { LIVE_CLEANUP_TEST_ABORT_IN_CHECKPOINT: String(crashed.journalSequence + 1) })).code, 86);
+    const records = readJournalWitness(TOKEN, witnessFile);
+    assert.equal(records.at(-1)!.phase, 'intent');
+    assert.equal(records.at(-1)!.inFlightId, operation.id);
+    assert.equal((JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest).journalSequence, crashed.journalSequence);
+
+    const target = stub.state.channels.find((channel) => channel.id === operation.objectId)!;
+    target.permission_overwrites = operation.write.permission_overwrites.slice(0, -1);
+    assert.notEqual(stable(normalizeOverwrites(target.permission_overwrites)), stable(normalizeOverwrites(operation.write.permission_overwrites)));
+    assert.notEqual(stable(normalizeOverwrites(target.permission_overwrites)), stable(normalizeOverwrites(operation.inverseWrite.permission_overwrites)));
+
+    const recovered = await rollback(stub, dir);
+    assert.equal(recovered.code, 0, `${recovered.stdout}\n${recovered.stderr}`);
+    assert.match(recovered.stdout, new RegExp(`RECOVERING in-flight ${operation.id}`));
+    assert.equal(stable(stub.state.channels), stable(before), 'the guild must be returned to the pre-snapshot state');
   } finally { await stub.close(); }
 });

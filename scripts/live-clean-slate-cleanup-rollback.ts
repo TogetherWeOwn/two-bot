@@ -11,10 +11,17 @@ import { dirname, resolve } from 'node:path';
 import { applicationIdFromToken, LIVE_BOT_APPLICATION_ID, LIVE_GUILD_ID, LIVE_GUILD_NAME } from '../src/staging/spec.ts';
 import {
   ADMINISTRATOR,
+  appendJournalWitness,
+  assertLatestCheckpoint,
   type Channel,
   type CleanupManifest,
   type JsonObject,
+  inFlightDriftIsOurs,
+  inFlightExceptionIsAvailable,
+  journalSignature,
+  journalWitnessPath,
   type LiveCleanupSnapshot,
+  manifestInFlightId,
   normalizeOverwrites,
   semanticSnapshot,
   sha256,
@@ -22,6 +29,8 @@ import {
   operationSemanticHash,
   planArchiveOperations,
   planSignature,
+  reconcileJournalWitness,
+  syncedChildIds,
 } from '../src/redesign/live-cleanup.ts';
 
 const argv = process.argv.slice(2);
@@ -67,6 +76,22 @@ function atomicJson(path: string, valueToWrite: unknown): void {
   const dirFd = openSync(dirname(path), 'r');
   try { fsyncSync(dirFd); } finally { closeSync(dirFd); }
 }
+/**
+ * The only sanctioned way to persist the manifest. Re-signs the mutable journal on
+ * every write so a manifest edited between runs fails verification rather than being
+ * trusted — journal state is what grants the in-flight exception below — and extends
+ * the append-only witness log so a *superseded* checkpoint cannot be replayed back
+ * over a run that has moved on.
+ */
+function checkpoint(path: string, valueToWrite: CleanupManifest): void {
+  valueToWrite.journalSequence += 1;
+  valueToWrite.journalSignature = journalSignature(token!, valueToWrite);
+  const witness = journalWitnessPath(path);
+  const inFlightId = manifestInFlightId(valueToWrite);
+  appendJournalWitness(token!, witness, valueToWrite.journalSequence, 'intent', valueToWrite.journalSignature, inFlightId);
+  atomicJson(path, valueToWrite);
+  appendJournalWitness(token!, witness, valueToWrite.journalSequence, 'commit', valueToWrite.journalSignature, inFlightId);
+}
 
 if (!token) die(2, 'Missing DISCORD_BOT_TOKEN.');
 if (applicationIdFromToken(token) !== LIVE_BOT_APPLICATION_ID) die(2, `This token is not live Owen (${LIVE_BOT_APPLICATION_ID}). Nothing was contacted.`);
@@ -80,9 +105,47 @@ if (snapshot.generatedAt !== manifest.snapshotGeneratedAt) die(2, 'Pre-snapshot 
 if (snapshot.semanticHash !== manifest.snapshotSemanticHash || snapshot.semanticHash !== sha256(semanticSnapshot(snapshot))) die(2, 'Pre-snapshot hash does not match the manifest.');
 const deterministicOperations = planArchiveOperations(snapshot);
 const deterministicHash = operationSemanticHash(deterministicOperations);
-if (manifest.planSignature !== planSignature(token, snapshot.generatedAt, snapshot.semanticHash, deterministicHash)) die(2, 'Manifest plan signature is invalid for this token, snapshot, and operation hash.');
-if (manifest.operationCount !== deterministicOperations.length || manifest.operationSemanticHash !== deterministicHash || manifest.operations.length !== deterministicOperations.length) die(2, 'Manifest operation count/hash differs from the deterministic plan.');
-if (stable(manifest.operations.map(({ state: _state, requestStartedAt: _requestStartedAt, appliedAt: _appliedAt, rolledBackAt: _rolledBackAt, ...operation }) => operation)) !== stable(deterministicOperations)) die(2, 'Manifest operation bodies differ from the deterministic plan.');
+
+/**
+ * Everything rollback needs to believe about a manifest before it will act on it, as a
+ * function rather than a run of top-level checks, because reconciliation has to apply
+ * the same bar. Closing an open checkpoint appends to the witness, and a `commit`
+ * written for a manifest this would have rejected can never be aborted instead — the
+ * run is then stranded with no way back (TOG-2975).
+ */
+function assertRollbackManifest(candidate: CleanupManifest): void {
+  if (candidate.version !== 1 || candidate.kind !== 'live-clean-slate-cleanup' || candidate.applicationId !== LIVE_BOT_APPLICATION_ID || candidate.guildId !== LIVE_GUILD_ID) throw new Error('Manifest identity is invalid.');
+  if (candidate.snapshotGeneratedAt !== snapshot.generatedAt) throw new Error('Pre-snapshot timestamp does not match the manifest.');
+  if (candidate.snapshotSemanticHash !== snapshot.semanticHash) throw new Error('Pre-snapshot hash does not match the manifest.');
+  if (candidate.planSignature !== planSignature(token!, snapshot.generatedAt, snapshot.semanticHash, deterministicHash)) throw new Error('Manifest plan signature is invalid for this token, snapshot, and operation hash.');
+  // The plan signature covers only immutable plan content. Operation states select which
+  // operations rollback touches and which one gets the in-flight exception, so they are
+  // authenticated separately — otherwise relabelling an applied operation `requesting`
+  // would be enough to make rollback overwrite unrelated live drift.
+  if (candidate.journalSignature !== journalSignature(token!, candidate)) throw new Error('Manifest journal signature is invalid; operation states or timestamps were modified outside a run.');
+  if (candidate.operationCount !== deterministicOperations.length || candidate.operationSemanticHash !== deterministicHash || candidate.operations.length !== deterministicOperations.length) throw new Error('Manifest operation count/hash differs from the deterministic plan.');
+  if (stable(candidate.operations.map(({ state: _state, requestStartedAt: _requestStartedAt, appliedAt: _appliedAt, rolledBackAt: _rolledBackAt, ...operation }) => operation)) !== stable(deterministicOperations)) throw new Error('Manifest operation bodies differ from the deterministic plan.');
+}
+try {
+  assertRollbackManifest(manifest);
+} catch (error) {
+  die(2, error instanceof Error ? error.message : String(error));
+}
+// Authentic is not current. Every checkpoint an apply wrote stays validly signed, so
+// without this a saved `requesting` checkpoint could be dropped back over a finished
+// run to buy the in-flight exception and have rollback overwrite later live state.
+// An apply that died inside `checkpoint()` leaves the witness tip an uncommitted
+// `intent`. Rollback is the recovery path for exactly that kind of interruption, so it
+// closes the open checkpoint first — otherwise its own next checkpoint would append a
+// second `intent` and leave the log unreadable (TOG-2960).
+try {
+  const reconciled = reconcileJournalWitness(token, manifestPath, assertRollbackManifest);
+  if (reconciled.outcome === 'committed') console.log(`RECOVERED checkpoint ${reconciled.sequence}: its manifest write landed, only the commit record was lost.`);
+  if (reconciled.outcome === 'aborted') console.log(`RECOVERED checkpoint ${reconciled.sequence}: its manifest write never landed, so the checkpoint is abandoned and the sequence retried.`);
+  assertLatestCheckpoint(token, manifest, manifestPath);
+} catch (error) {
+  die(2, error instanceof Error ? error.message : String(error));
+}
 const API = apiBase();
 
 async function api<T>(method: 'GET' | 'PATCH', path: string, body?: unknown): Promise<ApiResult<T>> {
@@ -182,10 +245,24 @@ if (!botMember || !roles.some((role) => botMember.roles?.includes(role.id) && (B
 const preRollbackChannels = await mustGet<Channel[]>(`/guilds/${guildId}/channels`, 'Read rollback channel preflight');
 if (stable(preRollbackChannels.map((channel) => channel.id).sort()) !== stable(snapshot.channels.map((channel) => channel.id).sort())) die(1, 'Rollback preflight channel/category inventory drifted from the pre-snapshot.');
 const preRollbackById = new Map(preRollbackChannels.map((channel) => [channel.id, channel]));
-function operationState(operation: CleanupManifest['operations'][number], channels: Map<string, Channel>): 'applied' | 'inverse' | 'mixed' | 'drifted' {
-  const affected = [operation.objectId, ...snapshot.channels.filter((channel) => channel.parent_id === operation.objectId).map((channel) => channel.id)];
+function operationState(operation: CleanupManifest['operations'][number], channels: Map<string, Channel>): 'applied' | 'inverse' | 'parent_inverse' | 'mixed' | 'drifted' {
   const expectedApplied = stable(normalizeOverwrites(operation.write.permission_overwrites));
   const expectedInverse = stable(normalizeOverwrites(operation.inverseWrite.permission_overwrites));
+  if (operation.objectType === 'channel') {
+    const current = channels.get(operation.objectId);
+    if (!current) return 'drifted';
+    const overwrites = stable(normalizeOverwrites(current.permission_overwrites ?? []));
+    if (expectedApplied === expectedInverse && overwrites === expectedInverse) return 'inverse';
+    if (overwrites === expectedApplied) return 'applied';
+    if (overwrites === expectedInverse) return 'inverse';
+    const original = snapshot.channels.find((channel) => channel.id === operation.objectId)!;
+    const parentOperation = manifest.operations.find((item) => item.objectType === 'category' && item.objectId === original.parent_id);
+    if (parentOperation && overwrites === stable(normalizeOverwrites(parentOperation.inverseWrite.permission_overwrites))) return 'parent_inverse';
+    return 'drifted';
+  }
+  const affected = [operation.objectId, ...snapshot.channels
+    .filter((channel) => channel.parent_id === operation.objectId && stable(normalizeOverwrites(channel.permission_overwrites ?? [])) === expectedInverse)
+    .map((channel) => channel.id)];
   const states = affected.map((id) => {
     const current = channels.get(id);
     if (!current) return 'drifted';
@@ -195,16 +272,47 @@ function operationState(operation: CleanupManifest['operations'][number], channe
     return 'drifted';
   });
   if (states.includes('drifted')) return 'drifted';
+  if (expectedApplied === expectedInverse && states.every((state) => state === 'applied')) return 'inverse';
   if (states.every((state) => state === 'applied')) return 'applied';
   if (states.every((state) => state === 'inverse')) return 'inverse';
   return 'mixed';
+}
+// Apply journals `requesting` before it issues the PATCH and never leaves more than
+// one, so at most one operation can be in flight. That operation's own object — and
+// only that object — is allowed to hold an arbitrary live value: not knowing whether
+// the write landed is exactly the case rollback exists to undo. `inverseWrite` is a
+// complete replacement of the object's overwrites, so writing it restores the
+// pre-snapshot state from any starting point, and the post-rollback semantic-hash
+// equality check still has to pass before this run is called rolled back.
+//
+// The exception stops there. `inFlightDriftIsOurs` refuses it when a synchronized
+// child sits at a value our PATCH could not have produced, because that is a third
+// party's write and granting the exception would clobber it. The journal signature
+// checked above is what makes `state === 'requesting'` trustworthy enough to key
+// this on at all.
+const inFlight = manifest.operations.filter((operation) => operation.state === 'requesting');
+if (inFlight.length > 1) die(1, `Rollback manifest has ${inFlight.length} in-flight operations; at most one is recoverable.`);
+const inFlightCandidate = inFlight[0] ?? null;
+// The witness has the second say. An abandoned checkpoint above this manifest that held
+// nothing in flight proves the crashed write was the one clearing this operation to
+// `applied`, which apply only reaches after Discord has returned and been verified — so
+// the object is at `write`, and a `requesting` label over live drift is a rewind rather
+// than an interruption (TOG-2975). `manifestInFlightId` agrees with the filter above.
+const witnessAgrees = inFlightCandidate !== null
+  && manifestInFlightId(manifest) === inFlightCandidate.id
+  && inFlightExceptionIsAvailable(token, manifest, manifestPath);
+const inFlightId = witnessAgrees && inFlightDriftIsOurs(snapshot, inFlightCandidate!, new Map(preRollbackChannels.map((channel) => [channel.id, normalizeOverwrites(channel.permission_overwrites ?? [])])))
+  ? inFlightCandidate!.id
+  : null;
+if (inFlightCandidate !== null && inFlightId === null) {
+  console.log(`In-flight operation ${inFlightCandidate.id} is NOT eligible for the recovery exception: ${witnessAgrees ? 'a synchronized child holds a value this phase could not have written' : 'the checkpoint witness records no interrupted write for it'}. Treating it as ordinary drift.`);
 }
 for (const operation of manifest.operations) {
   const state = operationState(operation, preRollbackById);
   if ((operation.state === 'pending' || operation.state === 'rolled_back') && state !== 'inverse') {
     die(1, `Rollback preflight operation ${operation.id} must be coherently inverse while ${operation.state}.`);
   }
-  if (operation.state !== 'pending' && operation.state !== 'rolled_back' && state === 'drifted') {
+  if (operation.state !== 'pending' && operation.state !== 'rolled_back' && state === 'drifted' && operation.id !== inFlightId) {
     die(1, `Rollback preflight operation ${operation.id} drifted from both applied and inverse state.`);
   }
 }
@@ -217,7 +325,7 @@ for (const current of preRollbackChannels) {
   if (stable(currentShape) !== stable(originalShape)) die(1, `Rollback preflight untouched channel ${current.id} drifted from the pre-snapshot.`);
 }
 manifest.status = 'rolling_back';
-atomicJson(manifestPath, manifest);
+checkpoint(manifestPath, manifest);
 const rollbackOrder: string[] = [];
 
 for (const operation of [...manifest.operations].reverse()) {
@@ -227,30 +335,48 @@ for (const operation of [...manifest.operations].reverse()) {
   if (currentState === 'inverse') {
     operation.state = 'rolled_back';
     operation.rolledBackAt = new Date().toISOString();
-    atomicJson(manifestPath, manifest);
+    checkpoint(manifestPath, manifest);
     continue;
   }
-  if (currentState === 'drifted') {
+  if (currentState === 'drifted' && operation.id !== inFlightId) {
     manifest.status = 'rollback_failed';
-    atomicJson(manifestPath, manifest);
+    checkpoint(manifestPath, manifest);
     die(1, `Rollback target ${operation.objectId} drifted from both applied and inverse state.`);
   }
+  if (currentState === 'drifted') console.log(`RECOVERING in-flight ${operation.id} from a partial write on ${operation.objectId}`);
   const result = await api<Channel>('PATCH', `/channels/${operation.objectId}`, operation.inverseWrite);
   if (result.status === 429 || result.status >= 300 || !result.body) {
     manifest.status = 'rollback_failed';
-    atomicJson(manifestPath, manifest);
+    checkpoint(manifestPath, manifest);
     die(1, `Rollback failed for ${operation.id}: HTTP ${result.status}. No retry was attempted.`);
   }
   const restored = normalizeOverwrites(result.body.permission_overwrites ?? []);
   if (stable(restored) !== stable(operation.inverseWrite.permission_overwrites)) {
     manifest.status = 'rollback_failed';
-    atomicJson(manifestPath, manifest);
+    checkpoint(manifestPath, manifest);
     die(1, `Rollback returned a partial/unexpected state for ${operation.id}.`);
+  }
+  // Discord's sync only carries children that matched the category's *previous* value,
+  // so a category left at a partial value re-syncs nothing and its children stay where
+  // the interrupted write put them. Restore every synchronized child explicitly before
+  // checkpointing, or the operation would be marked `rolled_back` while children remain
+  // at the applied value — which is what made the post-rollback hash fail with the
+  // operation already checkpointed, leaving nothing for a retry to re-enter.
+  for (const childId of syncedChildIds(snapshot, operation)) {
+    const child = (await mustGet<Channel>(`/channels/${childId}`, `Read rollback child ${childId}`));
+    if (stable(normalizeOverwrites(child.permission_overwrites ?? [])) === stable(operation.inverseWrite.permission_overwrites)) continue;
+    const childResult = await api<Channel>('PATCH', `/channels/${childId}`, operation.inverseWrite);
+    if (childResult.status === 429 || childResult.status >= 300 || !childResult.body || stable(normalizeOverwrites(childResult.body.permission_overwrites ?? [])) !== stable(operation.inverseWrite.permission_overwrites)) {
+      manifest.status = 'rollback_failed';
+      checkpoint(manifestPath, manifest);
+      die(1, `Rollback could not restore synchronized child ${childId} of ${operation.id}: HTTP ${childResult.status}. No retry was attempted.`);
+    }
+    console.log(`RESYNCED ${childId} under ${operation.id}`);
   }
   operation.state = 'rolled_back';
   operation.rolledBackAt = new Date().toISOString();
   rollbackOrder.push(operation.id);
-  atomicJson(manifestPath, manifest);
+  checkpoint(manifestPath, manifest);
   console.log(`UNDID ${operation.id}`);
 }
 
@@ -307,7 +433,7 @@ const restored = {
 const restoredHash = sha256(semanticSnapshot(restored));
 if (restoredHash !== snapshot.semanticHash) die(1, `Post-rollback semantic hash mismatch: expected ${snapshot.semanticHash}, got ${restoredHash}.`);
 manifest.status = 'rolled_back';
-atomicJson(manifestPath, manifest);
+checkpoint(manifestPath, manifest);
 console.log(`Rollback complete: ${manifestPath}`);
 console.log(`Reverse order: ${rollbackOrder.join(', ')}`);
 console.log(`Restored snapshot semantic hash: ${restoredHash}`);
