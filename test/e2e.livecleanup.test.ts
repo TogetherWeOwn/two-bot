@@ -225,32 +225,53 @@ test('production-shaped fixture pins 18 stable operations and dry-run writes not
   } finally { await stub.close(); }
 });
 
-test('explicit channel View allow is refused because category archive would not hide it', async () => {
+test('permission-unsynchronized legacy child is refused because category archive would not prove it hidden', async () => {
   const stub = await stubDiscord();
   try {
-    stub.state.channels.find((channel) => channel.id === LEGACY_CHANNEL_IDS[0])!.permission_overwrites = [{ id: LIVE_GUILD_ID, type: 0, allow: VIEW, deny: '0' }];
-    const result = await plan(stub, mkdtempSync(join(tmpdir(), 'two-live-clean-explicit-allow-')));
+    stub.state.channels.find((channel) => channel.id === LEGACY_CHANNEL_IDS[0])!.permission_overwrites = [{ id: ID(51), type: 0, allow: VIEW, deny: '0' }];
+    const result = await plan(stub, mkdtempSync(join(tmpdir(), 'two-live-clean-unsynchronized-')));
     assert.equal(result.code, 1);
-    assert.match(result.stderr, /explicitly allows @everyone View/);
+    assert.match(result.stderr, /permission-unsynchronized/);
     assert.equal(stub.writes.length, 0);
   } finally { await stub.close(); }
 });
 
-test('tampered manifest operation body refuses apply and rollback before writes', async () => {
-  const stub = await stubDiscord();
-  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-tamper-'));
+test('tampered plan and phase operation bodies refuse apply and rollback before writes', async () => {
+  const planStub = await stubDiscord();
+  const planDir = mkdtempSync(join(tmpdir(), 'two-live-clean-plan-tamper-'));
   try {
-    assert.equal((await plan(stub, dir)).code, 0);
-    const path = planManifestPath(dir);
+    assert.equal((await plan(planStub, planDir)).code, 0);
+    const path = planManifestPath(planDir);
     const manifest = JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest;
     manifest.operations[0]!.write.permission_overwrites = [];
     writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
     chmodSync(path, 0o600);
-    const result = await apply(stub, dir);
+    const result = await apply(planStub, planDir);
     assert.equal(result.code, 1);
     assert.match(result.stderr, /operation bodies|semantic hash/);
-    assert.equal(stub.writes.length, 0);
-  } finally { await stub.close(); }
+    assert.equal(planStub.writes.length, 0);
+  } finally { await planStub.close(); }
+
+  const phaseStub = await stubDiscord();
+  const phaseDir = mkdtempSync(join(tmpdir(), 'two-live-clean-phase-tamper-'));
+  try {
+    assert.equal((await plan(phaseStub, phaseDir)).code, 0);
+    assert.equal((await apply(phaseStub, phaseDir, { LIVE_CLEANUP_TEST_ABORT_AFTER_WRITES: '1' })).code, 86);
+    const path = manifestPath(phaseDir);
+    const manifest = JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest;
+    manifest.operations[1]!.write.permission_overwrites = [];
+    writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
+    chmodSync(path, 0o600);
+    const writesBefore = phaseStub.writes.length;
+    const resumed = await apply(phaseStub, phaseDir);
+    assert.equal(resumed.code, 1);
+    assert.match(resumed.stderr, /operation bodies|deterministic plan|Stored manifest/);
+    assert.equal(phaseStub.writes.length, writesBefore);
+    const rolledBack = await rollback(phaseStub, phaseDir);
+    assert.equal(rolledBack.code, 2);
+    assert.match(rolledBack.stderr, /operation bodies|deterministic plan/);
+    assert.equal(phaseStub.writes.length, writesBefore);
+  } finally { await phaseStub.close(); }
 });
 
 test('one reviewed-ID mutation refuses apply before writes', async () => {
@@ -284,7 +305,23 @@ test('stale snapshot, wrong application/guild token, and hierarchy refusal fail 
     utimesSync(snapshotPath, new Date(), new Date());
     const stale = await apply(stub, staleDir);
     assert.equal(stale.code, 1);
-    assert.match(stale.stderr, /fresh enough/);
+    assert.match(stale.stderr, /signature|fresh enough/);
+
+    const refreshedDir = mkdtempSync(join(tmpdir(), 'two-live-clean-refreshed-'));
+    assert.equal((await plan(stub, refreshedDir)).code, 0);
+    const refreshedSnapshotPath = join(refreshedDir, 'snapshot', 'pre.json');
+    const refreshedSnapshot = JSON.parse(readFileSync(refreshedSnapshotPath, 'utf8')) as JsonObject;
+    refreshedSnapshot.generatedAt = new Date().toISOString();
+    writeFileSync(refreshedSnapshotPath, `${JSON.stringify(refreshedSnapshot, null, 2)}\n`);
+    const refreshedManifestPath = planManifestPath(refreshedDir);
+    const refreshedManifest = JSON.parse(readFileSync(refreshedManifestPath, 'utf8')) as CleanupManifest;
+    refreshedManifest.snapshotGeneratedAt = refreshedSnapshot.generatedAt as string;
+    writeFileSync(refreshedManifestPath, `${JSON.stringify(refreshedManifest, null, 2)}\n`);
+    chmodSync(refreshedSnapshotPath, 0o600);
+    chmodSync(refreshedManifestPath, 0o600);
+    const refreshed = await apply(stub, refreshedDir);
+    assert.equal(refreshed.code, 1);
+    assert.match(refreshed.stderr, /signature/);
 
     const wrongToken = await run(CLEANUP, cleanupArgs(mkdtempSync(join(tmpdir(), 'two-live-clean-wrong-token-'))), { DISCORD_BOT_TOKEN: `${Buffer.from(ID(998)).toString('base64url')}.x.y`, MAIN_GUILD_API_BASE: 'http://127.0.0.1:1/api/v10' });
     assert.equal(wrongToken.code, 2);

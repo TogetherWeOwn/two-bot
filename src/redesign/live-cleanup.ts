@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { LIVE_BOT_APPLICATION_ID, LIVE_GUILD_ID, LIVE_GUILD_NAME } from '../staging/spec.ts';
 
 export const ARCHIVE_PHASE = 'archive-legacy';
@@ -119,6 +119,7 @@ export type CleanupManifest = {
   snapshotPath: string;
   snapshotGeneratedAt: string;
   snapshotSemanticHash: string;
+  planSignature: string;
   operationSemanticHash: string;
   operationCount: number;
   reviewedLegacyChannelIds: string[];
@@ -138,6 +139,10 @@ export function stable(value: unknown): string {
 
 export function sha256(value: unknown): string {
   return createHash('sha256').update(typeof value === 'string' ? value : stable(value)).digest('hex');
+}
+
+export function planSignature(token: string, snapshotGeneratedAt: string, snapshotSemanticHash: string, operationHash: string): string {
+  return createHmac('sha256', token).update(stable({ snapshotGeneratedAt, snapshotSemanticHash, operationHash })).digest('hex');
 }
 
 export function normalizeOverwrites(overwrites: Overwrite[]): Overwrite[] {
@@ -191,8 +196,7 @@ export function assertReviewedShape(snapshot: LiveCleanupSnapshot): void {
     const channel = snapshot.channels.find((item) => item.id === id);
     if (!channel || channel.type === 4) throw new Error(`Reviewed legacy channel ${id} is missing or is a category.`);
     if (!channel.parent_id || !LEGACY_CATEGORY_IDS.includes(channel.parent_id as never)) throw new Error(`Reviewed legacy channel ${id} is not under a reviewed legacy category.`);
-    const everyone = normalizeOverwrites(channel.permission_overwrites ?? []).find((overwrite) => overwrite.id === snapshot.guildId && overwrite.type === 0);
-    if (everyone && (BigInt(everyone.allow) & VIEW_CHANNEL) !== 0n) throw new Error(`Reviewed legacy channel ${id} explicitly allows @everyone View and would not be hidden by its category.`);
+    if ((channel.permission_overwrites ?? []).length > 0) throw new Error(`Reviewed legacy channel ${id} is permission-unsynchronized; category-only archive cannot prove it will inherit the deny.`);
   }
   const reviewed = new Set([...ACTIVE_CATEGORY_IDS, ...ACTIVE_CHANNEL_IDS, ...LEGACY_CATEGORY_IDS, ...LEGACY_CHANNEL_IDS]);
   const duplicateMergeIds = new Set(['1545924265868525588', '1545924268489973841']);
@@ -239,7 +243,8 @@ export function operationSemanticHash(operations: CleanupOperation[]): string {
   return sha256(operations.map(({ sequence, id, phase, kind, objectType, objectId, expectedBefore, write, inverseWrite }) => ({ sequence, id, phase, kind, objectType, objectId, expectedBefore, write, inverseWrite })));
 }
 
-export function buildManifest(snapshot: LiveCleanupSnapshot, snapshotPath: string, operations: CleanupOperation[]): CleanupManifest {
+export function buildManifest(snapshot: LiveCleanupSnapshot, snapshotPath: string, operations: CleanupOperation[], token: string): CleanupManifest {
+  const operationHash = operationSemanticHash(operations);
   return {
     version: 1,
     kind: 'live-clean-slate-cleanup',
@@ -251,7 +256,8 @@ export function buildManifest(snapshot: LiveCleanupSnapshot, snapshotPath: strin
     snapshotPath,
     snapshotGeneratedAt: snapshot.generatedAt,
     snapshotSemanticHash: snapshot.semanticHash,
-    operationSemanticHash: operationSemanticHash(operations),
+    planSignature: planSignature(token, snapshot.generatedAt, snapshot.semanticHash, operationHash),
+    operationSemanticHash: operationHash,
     operationCount: operations.length,
     reviewedLegacyChannelIds: [...LEGACY_CHANNEL_IDS],
     reviewedLegacyCategoryIds: [...LEGACY_CATEGORY_IDS],

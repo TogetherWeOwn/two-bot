@@ -20,6 +20,8 @@ import {
   sha256,
   stable,
   operationSemanticHash,
+  planArchiveOperations,
+  planSignature,
 } from '../src/redesign/live-cleanup.ts';
 
 const argv = process.argv.slice(2);
@@ -76,7 +78,11 @@ if (manifest.version !== 1 || manifest.kind !== 'live-clean-slate-cleanup' || ma
 const snapshot = JSON.parse(readFileSync(resolve(manifest.snapshotPath), 'utf8')) as LiveCleanupSnapshot;
 if (snapshot.generatedAt !== manifest.snapshotGeneratedAt) die(2, 'Pre-snapshot timestamp does not match the manifest.');
 if (snapshot.semanticHash !== manifest.snapshotSemanticHash || snapshot.semanticHash !== sha256(semanticSnapshot(snapshot))) die(2, 'Pre-snapshot hash does not match the manifest.');
-if (manifest.operationCount !== manifest.operations.length || operationSemanticHash(manifest.operations) !== manifest.operationSemanticHash) die(2, 'Manifest operation bodies do not match their recorded semantic hash.');
+const deterministicOperations = planArchiveOperations(snapshot);
+const deterministicHash = operationSemanticHash(deterministicOperations);
+if (manifest.planSignature !== planSignature(token, snapshot.generatedAt, snapshot.semanticHash, deterministicHash)) die(2, 'Manifest plan signature is invalid for this token, snapshot, and operation hash.');
+if (manifest.operationCount !== deterministicOperations.length || manifest.operationSemanticHash !== deterministicHash || manifest.operations.length !== deterministicOperations.length) die(2, 'Manifest operation count/hash differs from the deterministic plan.');
+if (stable(manifest.operations.map(({ state: _state, requestStartedAt: _requestStartedAt, appliedAt: _appliedAt, rolledBackAt: _rolledBackAt, ...operation }) => operation)) !== stable(deterministicOperations)) die(2, 'Manifest operation bodies differ from the deterministic plan.');
 const API = apiBase();
 
 async function api<T>(method: 'GET' | 'PATCH', path: string, body?: unknown): Promise<ApiResult<T>> {
@@ -107,6 +113,56 @@ async function members(): Promise<RawMember[]> {
   }
 }
 
+function nonChannelSemantic(
+  currentGuild: JsonObject,
+  currentRoles: Role[],
+  rawMembers: RawMember[],
+  currentIntegrations: JsonObject[],
+  currentWelcome: ApiResult<JsonObject>,
+  currentOnboarding: ApiResult<JsonObject>,
+  currentScreening: ApiResult<JsonObject>,
+): JsonObject {
+  return {
+    version: 1,
+    applicationId: LIVE_BOT_APPLICATION_ID,
+    guildId,
+    guild: currentGuild,
+    roles: [...currentRoles].sort((a, b) => a.id.localeCompare(b.id)),
+    members: rawMembers.map((member) => ({
+      id: member.user?.id ?? '',
+      bot: Boolean(member.user?.bot),
+      username: member.user?.username ?? null,
+      roles: [...(member.roles ?? [])].sort(),
+      premiumSince: member.premium_since ?? null,
+      pending: Boolean(member.pending),
+    })).filter((member) => member.id).sort((a, b) => a.id.localeCompare(b.id)),
+    integrations: currentIntegrations.map((integration) => {
+      const linkedApplication = integration.application as JsonObject | undefined;
+      return {
+        id: typeof integration.id === 'string' ? integration.id : '',
+        name: typeof integration.name === 'string' ? integration.name : null,
+        applicationId: typeof linkedApplication?.id === 'string' ? linkedApplication.id : null,
+        roleId: typeof integration.role_id === 'string' ? integration.role_id : null,
+      };
+    }).sort((a, b) => a.id.localeCompare(b.id)),
+    references: {
+      welcomeScreen: { status: currentWelcome.status, body: currentWelcome.body },
+      onboarding: { status: currentOnboarding.status, body: currentOnboarding.body },
+      membershipScreening: { status: currentScreening.status, body: currentScreening.body },
+      guildReferences: {
+        applicationId: currentGuild.application_id ?? null,
+        systemChannelId: currentGuild.system_channel_id ?? null,
+        rulesChannelId: currentGuild.rules_channel_id ?? null,
+        publicUpdatesChannelId: currentGuild.public_updates_channel_id ?? null,
+        safetyAlertsChannelId: currentGuild.safety_alerts_channel_id ?? null,
+      },
+    },
+  };
+}
+
+const snapshotSemantic = semanticSnapshot(snapshot);
+const { channels: _snapshotChannels, ...snapshotNonChannel } = snapshotSemantic;
+
 const [me, guilds, guild, roles, currentMembers, integrations, application, welcome, onboarding, screening] = await Promise.all([
   mustGet<{ id: string }>('/users/@me', 'Authenticate bot'),
   mustGet<Array<{ id: string }>>('/users/@me/guilds', 'Read bot guilds'),
@@ -120,6 +176,7 @@ const [me, guilds, guild, roles, currentMembers, integrations, application, welc
   api<JsonObject>('GET', `/guilds/${guildId}/member-verification`),
 ]);
 if (me.id !== LIVE_BOT_APPLICATION_ID || application.id !== LIVE_BOT_APPLICATION_ID || !guilds.some((item) => item.id === guildId) || guild.name !== LIVE_GUILD_NAME) die(1, 'Rollback identity preflight failed.');
+if (stable(nonChannelSemantic(guild, roles, currentMembers, integrations, welcome, onboarding, screening)) !== stable(snapshotNonChannel)) die(1, 'Rollback preflight found non-channel drift from the pre-snapshot.');
 const botMember = currentMembers.find((member) => member.user?.id === LIVE_BOT_APPLICATION_ID && member.user.bot);
 if (!botMember || !roles.some((role) => botMember.roles?.includes(role.id) && (BigInt(role.permissions) & ADMINISTRATOR) !== 0n)) die(1, 'Rollback preflight: Owen does not have Administrator.');
 manifest.status = 'rolling_back';

@@ -25,6 +25,7 @@ import {
   LEGACY_CHANNEL_IDS,
   normalizeOverwrites,
   operationSemanticHash,
+  planSignature,
   planArchiveOperations,
   type Role,
   SNAPSHOT_MAX_AGE_MS,
@@ -269,6 +270,8 @@ function assertManifest(manifest: CleanupManifest, snapshot: LiveCleanupSnapshot
   if (manifest.snapshotGeneratedAt !== snapshot.generatedAt) throw new Error('Manifest snapshot timestamp mismatch.');
   if (manifest.snapshotSemanticHash !== snapshot.semanticHash) throw new Error('Manifest snapshot semantic hash mismatch.');
   const generatedOperationHash = operationSemanticHash(operations);
+  const expectedSignature = planSignature(token!, snapshot.generatedAt, snapshot.semanticHash, generatedOperationHash);
+  if (manifest.planSignature !== expectedSignature) throw new Error('Manifest plan signature is invalid for this token, snapshot, and operation hash.');
   if (manifest.operationCount !== operations.length || manifest.operationSemanticHash !== generatedOperationHash) throw new Error('Generated operation count/hash differs from the reviewed dry-run manifest.');
   if (manifest.operationCount !== manifest.operations.length || operationSemanticHash(manifest.operations) !== manifest.operationSemanticHash) throw new Error('Stored manifest operations do not match their recorded semantic hash.');
   if (stable(manifest.operations.map(({ state: _state, requestStartedAt: _requestStartedAt, appliedAt: _appliedAt, rolledBackAt: _rolledBackAt, ...operation }) => operation)) !== stable(operations)) throw new Error('Stored manifest operation bodies differ from the deterministic plan.');
@@ -285,7 +288,7 @@ async function dryRun(): Promise<void> {
   ensurePrivateDir(planDir);
   const snapshot = await captureSnapshot();
   const operations = planArchiveOperations(snapshot);
-  const manifest = buildManifest(snapshot, snapshotPath, operations);
+  const manifest = buildManifest(snapshot, snapshotPath, operations, token!);
   const operationFile: OperationFile = {
     version: 1,
     phase: ARCHIVE_PHASE,
@@ -322,7 +325,8 @@ async function apply(): Promise<void> {
     phaseManifest = readJson<CleanupManifest>(phaseRollbackPath);
     if (phaseManifest.status === 'applied') die(2, 'Phase is already applied; no writes were replayed.');
     if (phaseManifest.status === 'rolled_back' || phaseManifest.status === 'rolling_back' || phaseManifest.status === 'rollback_failed') die(2, `Phase manifest is in ${phaseManifest.status}; apply cannot resume it.`);
-    if (phaseManifest.operationSemanticHash !== planned.operationSemanticHash || phaseManifest.snapshotSemanticHash !== planned.snapshotSemanticHash) die(2, 'Resume manifest does not match the dry-run manifest.');
+    assertManifest(phaseManifest, snapshot);
+    if (phaseManifest.operationSemanticHash !== planned.operationSemanticHash || phaseManifest.snapshotSemanticHash !== planned.snapshotSemanticHash || phaseManifest.planSignature !== planned.planSignature) die(2, 'Resume manifest does not match the dry-run manifest.');
   } else {
     phaseManifest = structuredClone(planned);
     phaseManifest.status = 'applying';
