@@ -749,7 +749,23 @@ export function onboardingReferencedChannels(snapshot: Pick<LiveCleanupSnapshot,
   note(guildReferences?.rulesChannelId, 'guild.rules_channel_id');
   note(guildReferences?.publicUpdatesChannelId, 'guild.public_updates_channel_id');
   note(guildReferences?.safetyAlertsChannelId, 'guild.safety_alerts_channel_id');
-  const onboarding = jsonObject(jsonObject(references.onboarding)?.body);
+  // `captureSnapshot` reads onboarding with best-effort `api()`, not `mustGet()`, because
+  // losing the pre-snapshot to a transient 429 costs more than it buys. That is fine while
+  // the read is only evidence. It is not fine here, where it decides which channels this
+  // phase must leave alone: an error body carries no `enabled`/`default_channel_ids`/
+  // `prompts`, so a 403/429/500 is indistinguishable from a Server Guide that pins nothing.
+  // Measured on the production fixture with one legacy channel pinned: 200 -> 1 exclusion,
+  // 68 operations; 500 -> 0 exclusions, 69 operations with that channel PATCHed. Nothing
+  // downstream catches it — `assertManifest` and the snapshot hash compare dry-run against
+  // apply, and both read the same failing endpoint, so they agree on the wrong answer; the
+  // independent audit derives its exclusions from this same field and corroborates it.
+  // A status we cannot read is a claim we cannot check, so refuse rather than plan blind.
+  const onboardingRead = jsonObject(references.onboarding);
+  const onboardingStatus = typeof onboardingRead?.status === 'number' ? onboardingRead.status : null;
+  if (onboardingStatus !== 200) {
+    throw new Error(`Server Guide (GET /guilds/{id}/onboarding) answered HTTP ${onboardingStatus === null ? 'no recorded status' : String(onboardingStatus)}, so the set of channels Discord pins publicly readable is unknown. Planning refuses rather than treat an unreadable Server Guide as one that pins nothing. Re-run the dry-run once that read returns 200.`);
+  }
+  const onboarding = jsonObject(onboardingRead?.body);
   // A disabled Server Guide pins nothing, and treating it as if it did would leave
   // its channels visible forever. Absent `enabled` is read as enabled: the guild
   // reference is the claim, and an unreadable claim must fail towards refusing.

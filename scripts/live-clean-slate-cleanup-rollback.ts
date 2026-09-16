@@ -103,6 +103,11 @@ if (manifest.version !== 1 || manifest.kind !== 'live-clean-slate-cleanup' || ma
 const snapshot = JSON.parse(readFileSync(resolve(manifest.snapshotPath), 'utf8')) as LiveCleanupSnapshot;
 if (snapshot.generatedAt !== manifest.snapshotGeneratedAt) die(2, 'Pre-snapshot timestamp does not match the manifest.');
 if (snapshot.semanticHash !== manifest.snapshotSemanticHash || snapshot.semanticHash !== sha256(semanticSnapshot(snapshot))) die(2, 'Pre-snapshot hash does not match the manifest.');
+// Re-planned from the hash-bound pre-snapshot above, never from a fresh read. That is what
+// keeps the planner's Server-Guide refusals — an unreadable `/onboarding`, a pinned channel
+// synchronized with its category — from ever stranding a rollback: the references this
+// re-plan reads were captured and hashed before the first write, so it cannot start
+// refusing because the live guild changed underneath a run that needs undoing.
 const deterministicOperations = planArchiveOperations(snapshot);
 const deterministicHash = operationSemanticHash(deterministicOperations);
 

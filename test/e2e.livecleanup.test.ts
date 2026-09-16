@@ -57,6 +57,7 @@ type Stub = {
   writes: Array<{ method: string; path: string; body: unknown }>;
   writeOrder: string[];
   rollbackOrder: string[];
+  failOnboardingRead(status: number): void;
   failNextWrite(status: number): void;
   partialNextWrite(): void;
   /** Tear the write to one specific object rather than whichever comes first. */
@@ -111,6 +112,7 @@ async function stubDiscord(): Promise<Stub> {
   let nextFailure = 0;
   let partialNextWrite = false;
   let partialWriteTarget: string | null = null;
+  let onboardingStatus = 200;
   const server: Server = createServer((req, res) => {
     const method = req.method ?? 'GET';
     const path = req.url ?? '';
@@ -180,7 +182,11 @@ async function stubDiscord(): Promise<Stub> {
     if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/integrations`) return send(200, state.integrations);
     if (path === '/api/v10/oauth2/applications/@me') return send(200, state.application);
     if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/welcome-screen`) return send(200, { enabled: true });
-    if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/onboarding`) return send(200, references.onboarding);
+    // `captureSnapshot` reads this one best-effort, so the stub has to be able to fail it
+    // the way Discord does — an error body, not the onboarding object with a bad status.
+    if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/onboarding`) {
+      return onboardingStatus === 200 ? send(200, references.onboarding) : send(onboardingStatus, { message: 'stubbed failure', code: 0 });
+    }
     if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/member-verification`) return send(200, { form_fields: [] });
     const channel = /\/channels\/(\d+)$/.exec(path);
     if (channel) return send(200, state.channels.find((item) => item.id === channel[1]) ?? {});
@@ -196,6 +202,7 @@ async function stubDiscord(): Promise<Stub> {
     writes,
     writeOrder,
     rollbackOrder,
+    failOnboardingRead(status: number) { onboardingStatus = status; },
     failNextWrite(status: number) { nextFailure = status; },
     partialNextWrite() { partialNextWrite = true; },
     partialWriteOn(objectId: string) { partialNextWrite = true; partialWriteTarget = objectId; },
@@ -446,6 +453,56 @@ test('a pinned channel synchronized with its legacy category refuses the whole p
     assert.match(result.stderr, new RegExp(`permission-synchronized with category ${parentId}`));
     // The refusal still has to leave the stop evidence behind.
     assert.ok(existsSync(join(dir, 'snapshot', 'pre.json')));
+  } finally { await stub.close(); }
+});
+
+/**
+ * The Server Guide read is best-effort in `captureSnapshot` — a transient failure must not
+ * cost the pre-snapshot. But this PR promoted it from evidence to a planning input, and an
+ * error body has no `enabled`/`default_channel_ids`/`prompts`, so a 403/429/500 is
+ * indistinguishable from a Server Guide that pins nothing. Nothing downstream catches it:
+ * `assertManifest` compares dry-run against apply and both read the same failing endpoint,
+ * and the independent audit derives its exclusions from the same field. Left unguarded the
+ * synchronized case is silent — no exclusion, so no refusal, no channel PATCH for Discord
+ * to answer 350003 to, and the category deny hides the pinned channel by inheritance while
+ * the run reports `will hide: 112 of 112` and exits 0.
+ */
+test('an unreadable Server Guide refuses the plan instead of pinning nothing', async () => {
+  for (const status of [403, 429, 500]) {
+    const stub = await stubDiscord();
+    try {
+      const drifted = new Set(PERMISSION_DRIFT.mismatches.map((mismatch) => mismatch.channelId));
+      const synchronized = LEGACY_CHANNEL_IDS.find((id) => !drifted.has(id))!;
+      // Read at 200 this pins a synchronized legacy channel, which refuses loudly. The
+      // failing read must not turn that refusal into a clean 69-operation plan.
+      stub.references.onboarding = { enabled: true, default_channel_ids: [synchronized], prompts: [] };
+      stub.failOnboardingRead(status);
+      const dir = mkdtempSync(join(tmpdir(), `two-live-clean-guide-${status}-`));
+      const result = await plan(stub, dir);
+      assert.notEqual(result.code, 0);
+      assert.equal(stub.writes.length, 0);
+      assert.match(result.stderr, new RegExp(`Server Guide .* answered HTTP ${status}`));
+      assert.ok(!existsSync(planManifestPath(dir)), `HTTP ${status} produced a plan manifest`);
+      // Refusing still has to leave the stop evidence behind.
+      assert.ok(existsSync(join(dir, 'snapshot', 'pre.json')));
+    } finally { await stub.close(); }
+  }
+});
+
+test('a Server Guide with no `enabled` field is read as enabled and still excludes', async () => {
+  const stub = await stubDiscord();
+  try {
+    const pinned = PERMISSION_DRIFT.mismatches[0]!.channelId;
+    // Absent `enabled` is the claim we cannot check, so it has to fail towards excluding:
+    // reading it as disabled would plan a PATCH Discord answers 350003 to. Without this the
+    // `enabled !== false` gate passes just as well written `enabled === true`.
+    stub.references.onboarding = { default_channel_ids: [pinned], prompts: [] };
+    const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-guide-noenabled-'));
+    const result = await plan(stub, dir);
+    assert.equal(result.code, 0, result.stderr);
+    const manifest = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    assert.deepEqual(manifest.onboardingExclusions, [{ channelId: pinned, referencedBy: ['onboarding.default_channel_ids'] }]);
+    assert.equal(manifest.operationCount, EXPECTED_OPERATIONS.operationCount - 1);
   } finally { await stub.close(); }
 });
 
