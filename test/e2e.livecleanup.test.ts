@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
-import { chmodSync, existsSync, mkdtempSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,8 +9,10 @@ import { test } from 'node:test';
 import {
   ACTIVE_CATEGORY_IDS,
   ACTIVE_CHANNEL_IDS,
+  appendJournalWitness,
   applyOperationOverwrites,
   basePermissions,
+  journalWitnessPath,
   LEGACY_CATEGORY_IDS,
   LEGACY_CHANNEL_IDS,
   type Channel,
@@ -21,6 +23,7 @@ import {
   normalizeOverwrites,
   operationSemanticHash,
   type Overwrite,
+  readJournalWitness,
   type Role,
   stable,
 } from '../src/redesign/live-cleanup.ts';
@@ -996,5 +999,141 @@ test('a replayed earlier checkpoint is refused before any write even though it i
 
     assert.equal(stub.writes.length, writesBefore, 'a replayed checkpoint must be refused before any write');
     assert.equal(stable(stub.state.channels), stable(drifted), "the third party's write must be left exactly as it was");
+  } finally { await stub.close(); }
+});
+
+/**
+ * TOG-2960 — a crash *inside* `checkpoint()`.
+ *
+ * The witness brackets the manifest write (`intent`, write, `commit`), so a process
+ * killed in that window leaves the tip an uncommitted `intent`. Both halves of the
+ * window used to be terminal: the next checkpoint appended a second `intent`, and
+ * every later read failed the sequence check, so a run that had merely been
+ * interrupted could never be resumed or rolled back again. Recovery has to close the
+ * open checkpoint first, and which way it closes is a property of the manifest, not
+ * of the log — hence one test per half.
+ */
+test('a crash between the checkpoint intent and its manifest write is recoverable', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-crash-pre-write-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    assert.equal((await apply(stub, dir, { LIVE_CLEANUP_TEST_ABORT_AFTER_WRITES: '5' })).code, 86);
+    const path = manifestPath(dir);
+    const witnessFile = journalWitnessPath(path);
+    const before = JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest;
+    assert.equal(readJournalWitness(TOKEN, witnessFile).at(-1)!.phase, 'commit');
+
+    // The crash: the next checkpoint's `intent` reached the log; its manifest write did not.
+    const abandoned = before.journalSequence + 1;
+    appendJournalWitness(TOKEN, witnessFile, abandoned, 'intent', 'signature-of-a-manifest-that-never-landed');
+
+    const resumed = await apply(stub, dir);
+    assert.equal(resumed.code, 0, resumed.stderr);
+    assert.match(resumed.stdout, /RECOVERED checkpoint \d+: its manifest write never landed/);
+    assert.equal((JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest).status, 'applied');
+
+    // The abandoned intent is closed as `abort` — which does not advance the run's
+    // latest durable checkpoint — and its sequence number is then retried for real.
+    const records = readJournalWitness(TOKEN, witnessFile);
+    assert.deepEqual(
+      records.filter((record) => record.sequence === abandoned).map((record) => record.phase),
+      ['intent', 'abort', 'intent', 'commit'],
+    );
+    assert.equal(records.at(-1)!.phase, 'commit');
+  } finally { await stub.close(); }
+});
+
+test('a crash between the checkpoint manifest write and its commit record is recoverable', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-crash-post-write-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    assert.equal((await apply(stub, dir, { LIVE_CLEANUP_TEST_ABORT_AFTER_WRITES: '5' })).code, 86);
+    const path = manifestPath(dir);
+    const witnessFile = journalWitnessPath(path);
+    const before = JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest;
+
+    // The crash: the manifest write landed, only its `commit` record was lost. Drop
+    // the trailing commit — trailing truncation is exactly what this crash looks like.
+    const lines = readFileSync(witnessFile, 'utf8').split('\n').filter((line) => line.length > 0);
+    assert.equal((JSON.parse(lines.at(-1)!) as { phase: string }).phase, 'commit');
+    writeFileSync(witnessFile, `${lines.slice(0, -1).join('\n')}\n`, { mode: 0o600 });
+    const tip = readJournalWitness(TOKEN, witnessFile).at(-1)!;
+    assert.equal(tip.phase, 'intent');
+    assert.equal(tip.sequence, before.journalSequence);
+
+    const resumed = await apply(stub, dir);
+    assert.equal(resumed.code, 0, resumed.stderr);
+    assert.match(resumed.stdout, /RECOVERED checkpoint \d+: its manifest write landed/);
+    assert.equal((JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest).status, 'applied');
+
+    const records = readJournalWitness(TOKEN, witnessFile);
+    const closed = records.filter((record) => record.sequence === before.journalSequence);
+    assert.deepEqual(closed.map((record) => record.phase), ['intent', 'commit']);
+    assert.equal(closed.at(-1)!.journalSignature, before.journalSignature, 'the recovered commit must name the manifest that actually landed');
+  } finally { await stub.close(); }
+});
+
+test('a crash inside the very first checkpoint leaves a restartable run, not a bricked one', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-crash-first-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    // The first checkpoint died before writing any manifest, so the phase directory
+    // holds a witness and nothing else. This used to refuse apply outright.
+    const path = manifestPath(dir);
+    mkdirSync(join(dir, 'phase-01'), { recursive: true, mode: 0o700 });
+    appendJournalWitness(TOKEN, journalWitnessPath(path), 1, 'intent', 'signature-of-a-manifest-that-never-landed');
+    assert.equal(existsSync(path), false);
+
+    const started = await apply(stub, dir);
+    assert.equal(started.code, 0, started.stderr);
+    assert.match(started.stdout, /RECOVERED checkpoint 1: its manifest write never landed/);
+    assert.equal((JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest).status, 'applied');
+    const records = readJournalWitness(TOKEN, journalWitnessPath(path));
+    assert.deepEqual(records.slice(0, 3).map((record) => record.phase), ['intent', 'abort', 'intent']);
+  } finally { await stub.close(); }
+});
+
+test('recovery does not launder a replayed checkpoint or a removed journal', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-crash-abuse-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    const planned = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    assert.equal((await apply(stub, dir, { LIVE_CLEANUP_TEST_ABORT_AFTER_WRITES: String(planned.operations.length) })).code, 86);
+    const path = manifestPath(dir);
+    const witnessFile = journalWitnessPath(path);
+    const saved = readFileSync(path, 'utf8');
+    const savedManifest = JSON.parse(saved) as CleanupManifest;
+    assert.equal((await apply(stub, dir)).code, 0);
+    const settled = JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest;
+    assert.equal(settled.status, 'applied');
+
+    const writesBefore = stub.writes.length;
+    const drifted = structuredClone(stub.state.channels);
+
+    // A witness that ever committed a checkpoint still proves a manifest existed, so
+    // losing the manifest must not silently start a fresh journal over that history.
+    // Checked here, on a cleanly committed tip, so it is this guard being exercised.
+    unlinkSync(path);
+    const removed = await apply(stub, dir);
+    assert.equal(removed.code, 2);
+    assert.match(removed.stderr, /records a committed checkpoint without its manifest/);
+
+    // An open checkpoint must not become a way to smuggle a superseded manifest past
+    // the freshness check: reconciliation only closes an intent whose manifest is
+    // either that checkpoint or the last committed one, and a replay is neither.
+    writeFileSync(path, saved, { mode: 0o600 });
+    appendJournalWitness(TOKEN, witnessFile, settled.journalSequence + 1, 'intent', 'signature-of-a-manifest-that-never-landed');
+    const laundered = await rollback(stub, dir);
+    assert.equal(laundered.code, 2);
+    assert.match(laundered.stderr, /not an interrupted checkpoint/);
+    assert.doesNotMatch(laundered.stdout, /RECOVERING in-flight/);
+    assert.ok(savedManifest.journalSequence < settled.journalSequence);
+
+    assert.equal(stub.writes.length, writesBefore, 'neither refusal may touch Discord');
+    assert.equal(stable(stub.state.channels), stable(drifted));
   } finally { await stub.close(); }
 });

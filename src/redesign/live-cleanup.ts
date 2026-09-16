@@ -192,7 +192,8 @@ export function journalSignature(token: string, manifest: CleanupManifest): stri
   })).digest('hex');
 }
 
-export type JournalWitnessRecord = { sequence: number; phase: 'intent' | 'commit'; journalSignature: string; chain: string };
+export type JournalWitnessPhase = 'intent' | 'commit' | 'abort';
+export type JournalWitnessRecord = { sequence: number; phase: JournalWitnessPhase; journalSignature: string; chain: string };
 
 export function journalWitnessPath(manifestPath: string): string {
   return `${manifestPath}.witness`;
@@ -203,13 +204,31 @@ function witnessChain(token: string, previous: string, record: Omit<JournalWitne
 }
 
 /**
+ * The records that may legally follow `last`, which is what makes the log a protocol
+ * rather than a list.
+ *
+ * An `intent` is closed either way: `commit` once the manifest write landed, or
+ * `abort` when it did not (TOG-2960 — a crash inside `checkpoint()` leaves a dangling
+ * intent, and without a way to close it the next checkpoint appends a second intent
+ * and the log becomes permanently unreadable). An aborted sequence number is retried,
+ * so `abort` is followed by an `intent` at the *same* sequence; only a `commit`
+ * advances it.
+ */
+function expectedWitnessRecords(last: JournalWitnessRecord | undefined): Array<{ sequence: number; phase: JournalWitnessPhase }> {
+  if (last === undefined) return [{ sequence: 1, phase: 'intent' }];
+  if (last.phase === 'intent') return [{ sequence: last.sequence, phase: 'commit' }, { sequence: last.sequence, phase: 'abort' }];
+  if (last.phase === 'abort') return [{ sequence: last.sequence, phase: 'intent' }];
+  return [{ sequence: last.sequence + 1, phase: 'intent' }];
+}
+
+/**
  * Reads the run's append-only checkpoint witness and proves it was not edited.
  *
  * Each record is HMACed over its predecessor's chain value, so a line cannot be
- * altered, reordered, or spliced in without the bot token. The strict
- * intent/commit alternation is checked too, so a record cannot be dropped from the
- * middle of the log; only trailing truncation survives, and that is what an
- * interrupted checkpoint looks like anyway.
+ * altered, reordered, or spliced in without the bot token. The strict phase
+ * alternation is checked too, so a record cannot be dropped from the middle of the
+ * log; only trailing truncation survives, and that is what an interrupted checkpoint
+ * looks like anyway.
  */
 export function readJournalWitness(token: string, path: string): JournalWitnessRecord[] {
   const records: JournalWitnessRecord[] = [];
@@ -223,11 +242,8 @@ export function readJournalWitness(token: string, path: string): JournalWitnessR
     }
     const { chain, ...body } = record;
     if (witnessChain(token, previousChain, body) !== chain) throw new Error(`Journal witness line ${index + 1} is not authentic; the checkpoint log was edited outside a run.`);
-    const last = records.at(-1);
-    const expected = last === undefined
-      ? { sequence: 1, phase: 'intent' }
-      : last.phase === 'intent' ? { sequence: last.sequence, phase: 'commit' } : { sequence: last.sequence + 1, phase: 'intent' };
-    if (body.sequence !== expected.sequence || body.phase !== expected.phase) throw new Error(`Journal witness line ${index + 1} breaks the checkpoint sequence; the log was reordered or spliced.`);
+    const expected = expectedWitnessRecords(records.at(-1));
+    if (!expected.some((item) => item.sequence === body.sequence && item.phase === body.phase)) throw new Error(`Journal witness line ${index + 1} breaks the checkpoint sequence; the log was reordered or spliced.`);
     records.push(record);
     previousChain = chain;
   }
@@ -235,11 +251,22 @@ export function readJournalWitness(token: string, path: string): JournalWitnessR
   return records;
 }
 
-export function appendJournalWitness(token: string, path: string, sequence: number, phase: 'intent' | 'commit', signature: string): void {
+export function appendJournalWitness(token: string, path: string, sequence: number, phase: JournalWitnessPhase, signature: string): void {
   let previousChain = '';
+  let last: JournalWitnessRecord | undefined;
   if (existsSync(path)) {
-    const last = readFileSync(path, 'utf8').split('\n').filter((item) => item.length > 0).at(-1);
-    if (last !== undefined) previousChain = (JSON.parse(last) as JournalWitnessRecord).chain;
+    const line = readFileSync(path, 'utf8').split('\n').filter((item) => item.length > 0).at(-1);
+    if (line !== undefined) {
+      last = JSON.parse(line) as JournalWitnessRecord;
+      previousChain = last.chain;
+    }
+  }
+  // Refuse to write a record the reader would later reject. A caller that skipped
+  // reconciliation and is about to append a second `intent` fails loudly here rather
+  // than leaving behind a log nothing can read again.
+  const expected = expectedWitnessRecords(last);
+  if (!expected.some((item) => item.sequence === sequence && item.phase === phase)) {
+    throw new Error(`Refusing to append checkpoint ${sequence}/${phase} after ${last === undefined ? 'an empty log' : `${last.sequence}/${last.phase}`}; the witness would become unreadable. Reconcile the log first.`);
   }
   const body = { sequence, phase, journalSignature: signature };
   const record: JournalWitnessRecord = { ...body, chain: witnessChain(token, previousChain, body) };
@@ -250,6 +277,58 @@ export function appendJournalWitness(token: string, path: string, sequence: numb
   } finally {
     closeSync(fd);
   }
+}
+
+export type JournalWitnessReconciliation =
+  | { outcome: 'absent' }
+  | { outcome: 'clean' }
+  | { outcome: 'committed'; sequence: number }
+  | { outcome: 'aborted'; sequence: number };
+
+/**
+ * Closes a checkpoint that a crash left open, and must run before anything else reads
+ * or extends the witness.
+ *
+ * `checkpoint()` appends `intent`, writes the manifest, then appends `commit`. A
+ * process that dies inside that window leaves the tip an uncommitted `intent`, and
+ * TOG-2960 showed that state was terminal: the next checkpoint appended a second
+ * `intent` and every later read failed the sequence check, bricking a run that had
+ * only been interrupted. The crash is also invisible from the log alone — whether the
+ * manifest write landed is a property of the *manifest*, so reconciliation decides by
+ * comparing the two:
+ *
+ * - the manifest is the tip's checkpoint -> the write landed; append the `commit`.
+ * - the manifest is the last committed checkpoint (or there is none and no manifest
+ *   was ever written) -> the write did not land; append `abort`, and the sequence
+ *   number is retried.
+ * - anything else -> not a crash window. Refuse, rather than invent a history.
+ *
+ * This adds no replay surface. An `abort` never advances the latest durable
+ * checkpoint, and the records it must be reconciled against are themselves chained
+ * under the bot token, so reaching any of these states still requires writing the
+ * witness — the manifest+witness rollback boundary documented on
+ * `assertLatestCheckpoint`, not a manifest-only replay.
+ */
+export function reconcileJournalWitness(token: string, manifestPath: string): JournalWitnessReconciliation {
+  const path = journalWitnessPath(manifestPath);
+  if (!existsSync(path)) return { outcome: 'absent' };
+  const records = readJournalWitness(token, path);
+  const tip = records.at(-1)!;
+  if (tip.phase !== 'intent') return { outcome: 'clean' };
+  const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) as CleanupManifest : null;
+  if (manifest !== null && manifest.journalSequence === tip.sequence && manifest.journalSignature === tip.journalSignature) {
+    appendJournalWitness(token, path, tip.sequence, 'commit', tip.journalSignature);
+    return { outcome: 'committed', sequence: tip.sequence };
+  }
+  const durable = records.filter((record) => record.phase === 'commit').at(-1);
+  const manifestIsLastDurable = durable === undefined
+    ? manifest === null
+    : manifest !== null && manifest.journalSequence === durable.sequence && manifest.journalSignature === durable.journalSignature;
+  if (manifestIsLastDurable) {
+    appendJournalWitness(token, path, tip.sequence, 'abort', tip.journalSignature);
+    return { outcome: 'aborted', sequence: tip.sequence };
+  }
+  throw new Error(`Journal witness tip is an uncommitted checkpoint ${tip.sequence}, but the manifest is neither that checkpoint nor the last committed one. This is not an interrupted checkpoint; refusing to reconcile it.`);
 }
 
 /**
@@ -264,8 +343,11 @@ export function appendJournalWitness(token: string, path: string, sequence: numb
  *
  * The witness log is appended outside the manifest, so restoring the manifest alone no
  * longer rewinds the run. Each checkpoint appends `intent`, writes the manifest, then
- * appends `commit`; a crash inside that window leaves the manifest one checkpoint
- * behind an uncommitted `intent` tip, which is the single case accepted below.
+ * appends `commit`, so the run's latest *durable* checkpoint is its last committed
+ * record — an `intent` that `reconcileJournalWitness` closed as `abort` never landed
+ * and never advances it. The one uncommitted tip accepted here is an `intent` whose
+ * signature the manifest already carries: that write did land, and only its `commit`
+ * record was lost.
  *
  * This binds the manifest to the log, not to wall-clock time: an attacker who can
  * roll back the whole run directory — witness included — is outside what a file in
@@ -276,10 +358,9 @@ export function assertLatestCheckpoint(token: string, manifest: CleanupManifest,
   if (!existsSync(path)) throw new Error(`Journal witness ${path} is missing; this manifest cannot be shown to be the run's latest checkpoint.`);
   const records = readJournalWitness(token, path);
   const tip = records.at(-1)!;
-  if (tip.sequence === manifest.journalSequence && tip.journalSignature === manifest.journalSignature) return;
-  const previous = records.at(-2);
-  if (tip.phase === 'intent' && tip.sequence === manifest.journalSequence + 1
-    && previous !== undefined && previous.sequence === manifest.journalSequence && previous.journalSignature === manifest.journalSignature) return;
+  if (tip.phase === 'intent' && tip.sequence === manifest.journalSequence && tip.journalSignature === manifest.journalSignature) return;
+  const durable = records.filter((record) => record.phase === 'commit').at(-1);
+  if (durable !== undefined && durable.sequence === manifest.journalSequence && durable.journalSignature === manifest.journalSignature) return;
   throw new Error(`Manifest is checkpoint ${manifest.journalSequence} but this run's witness log has reached ${tip.sequence}; refusing to act on a superseded checkpoint.`);
 }
 

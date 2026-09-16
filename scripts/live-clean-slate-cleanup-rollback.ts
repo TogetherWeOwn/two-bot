@@ -27,6 +27,7 @@ import {
   operationSemanticHash,
   planArchiveOperations,
   planSignature,
+  reconcileJournalWitness,
   syncedChildIds,
 } from '../src/redesign/live-cleanup.ts';
 
@@ -110,7 +111,14 @@ if (manifest.journalSignature !== journalSignature(token, manifest)) die(2, 'Man
 // Authentic is not current. Every checkpoint an apply wrote stays validly signed, so
 // without this a saved `requesting` checkpoint could be dropped back over a finished
 // run to buy the in-flight exception and have rollback overwrite later live state.
+// An apply that died inside `checkpoint()` leaves the witness tip an uncommitted
+// `intent`. Rollback is the recovery path for exactly that kind of interruption, so it
+// closes the open checkpoint first — otherwise its own next checkpoint would append a
+// second `intent` and leave the log unreadable (TOG-2960).
 try {
+  const reconciled = reconcileJournalWitness(token, manifestPath);
+  if (reconciled.outcome === 'committed') console.log(`RECOVERED checkpoint ${reconciled.sequence}: its manifest write landed, only the commit record was lost.`);
+  if (reconciled.outcome === 'aborted') console.log(`RECOVERED checkpoint ${reconciled.sequence}: its manifest write never landed, so the checkpoint is abandoned and the sequence retried.`);
   assertLatestCheckpoint(token, manifest, manifestPath);
 } catch (error) {
   die(2, error instanceof Error ? error.message : String(error));

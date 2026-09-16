@@ -34,6 +34,8 @@ import {
   operationSemanticHash,
   planSignature,
   planArchiveOperations,
+  readJournalWitness,
+  reconcileJournalWitness,
   type Role,
   syncedChildIds,
   SNAPSHOT_MAX_AGE_MS,
@@ -370,6 +372,18 @@ async function apply(): Promise<void> {
   const planned = readJson<CleanupManifest>(planRollbackPath);
   assertManifest(planned, snapshot);
   let phaseManifest: CleanupManifest;
+  // A process that died inside `checkpoint()` left the witness tip an uncommitted
+  // `intent`. Close it before anything reads or extends the log: the next checkpoint
+  // would otherwise append a second `intent` and make the witness permanently
+  // unreadable, stranding a run that had only been interrupted (TOG-2960).
+  let reconciled: ReturnType<typeof reconcileJournalWitness>;
+  try {
+    reconciled = reconcileJournalWitness(token!, phaseRollbackPath);
+  } catch (error) {
+    die(2, error instanceof Error ? error.message : String(error));
+  }
+  if (reconciled!.outcome === 'committed') log(`RECOVERED checkpoint ${reconciled!.sequence}: its manifest write landed, only the commit record was lost.`);
+  if (reconciled!.outcome === 'aborted') log(`RECOVERED checkpoint ${reconciled!.sequence}: its manifest write never landed, so the checkpoint is abandoned and the sequence retried.`);
   if (existsSync(phaseRollbackPath)) {
     phaseManifest = readJson<CleanupManifest>(phaseRollbackPath);
     if (phaseManifest.status === 'applied') die(2, 'Phase is already applied; no writes were replayed.');
@@ -380,7 +394,14 @@ async function apply(): Promise<void> {
     assertLatestCheckpoint(token!, phaseManifest, phaseRollbackPath);
     if (phaseManifest.operationSemanticHash !== planned.operationSemanticHash || phaseManifest.snapshotSemanticHash !== planned.snapshotSemanticHash || phaseManifest.planSignature !== planned.planSignature) die(2, 'Resume manifest does not match the dry-run manifest.');
   } else {
-    if (existsSync(journalWitnessPath(phaseRollbackPath))) die(2, 'A checkpoint witness exists without its manifest; the phase journal was removed. Refusing to start a fresh journal over it.');
+    // A witness that ever committed a checkpoint proves a manifest existed, so its
+    // absence means the journal was removed and a fresh one would write over history.
+    // A witness holding only abandoned attempts at checkpoint 1 proves the opposite —
+    // no manifest ever landed — and that run is safe to start again.
+    const witness = journalWitnessPath(phaseRollbackPath);
+    if (existsSync(witness) && readJournalWitness(token!, witness).some((record) => record.phase === 'commit')) {
+      die(2, 'A checkpoint witness records a committed checkpoint without its manifest; the phase journal was removed. Refusing to start a fresh journal over it.');
+    }
     phaseManifest = structuredClone(planned);
     phaseManifest.status = 'applying';
     ensurePrivateDir(phaseDir);
