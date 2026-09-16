@@ -144,7 +144,9 @@ export class TempVoiceService {
    *      is not ours to delete, no matter what the caller believes.
    *
    * Relaxing either one is the failure this feature is most likely to have, so
-   * both are covered by dedicated tests in test/unit.tempvoice.service.test.ts.
+   * both are covered by dedicated tests in test/unit.tempvoice.test.ts, and
+   * `node scripts/mutate-tempvoice.ts` proves those tests actually fail when
+   * the guards are relaxed rather than merely exercising the happy path.
    */
   async deleteGeneratedChannel(
     guildId: string,
