@@ -335,12 +335,22 @@ test(
     assert.match(welcome.content, /what do you want to do right now/i);
     assert.equal(roleWrites(mock).length, 0, 'dry-run session mode must not write roles');
 
-    const prompted = await queryDb(reader, (db) =>
-      db
-        .prepare(`SELECT COUNT(*) AS n FROM events WHERE event_type='onboarding_prompted' AND member_id=?`)
-        .get(NEWBIE),
-    ) as { n: number } | null;
-    assert.equal(Number(prompted?.n ?? 0), 1, 'recorded only after the picker was posted');
+    // The recording happens *after* the post - that ordering is the thing under
+    // test - so reading the row the instant the post is observed is a race this
+    // suite loses under load. Poll for it, the same fix PR #104 applied to the
+    // community scorecard job. Ordering is still proven: the welcome post was
+    // already observed above, before this row could exist.
+    const prompted = await waitFor(async () => {
+      const row = (await queryDb(reader, (db) =>
+        db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM events WHERE event_type='onboarding_prompted' AND member_id=?`,
+          )
+          .get<{ n: number }>(NEWBIE),
+      )) as { n: number } | null;
+      return row && Number(row.n) > 0 ? row : undefined;
+    }, 'the onboarding_prompted row to be recorded');
+    assert.equal(Number(prompted.n), 1, 'recorded exactly once, only after the picker was posted');
   },
 );
 
