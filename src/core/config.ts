@@ -42,7 +42,7 @@ export interface Config {
    * on a live server if the copy lands badly.
    */
   anchorWelcomeChannelId: string | null;
-  /** Onboarding observes and logs but changes nothing. */
+  /** Show and record onboarding, but suppress legacy role writes. */
   onboardingDryRun: boolean;
   /** Self-role panels observe and audit but change no roles. */
   selfRoleDryRun: boolean;
@@ -112,6 +112,14 @@ function requiredToken(): string {
   return v;
 }
 
+export function parseOnboardingMode(
+  raw = process.env.TWO_ONBOARDING_MODE ?? '',
+): Config['onboardingMode'] {
+  if (raw === '' || raw === 'legacy') return 'legacy';
+  if (raw === 'session') return 'session';
+  throw new Error('TWO_ONBOARDING_MODE must be exactly "legacy" or "session" when set.');
+}
+
 /**
  * Pick the datastore.
  *
@@ -140,7 +148,7 @@ export function loadConfig(): Config {
     anchorWelcomeChannelId: process.env.DISCORD_ANCHOR_WELCOME_CHANNEL_ID || null,
     onboardingDryRun: process.env.TWO_ONBOARDING_DRY_RUN === '1',
     selfRoleDryRun: process.env.TWO_SELF_ROLE_DRY_RUN === '1',
-    onboardingMode: process.env.TWO_ONBOARDING_MODE === 'session' ? 'session' : 'legacy',
+    onboardingMode: parseOnboardingMode(),
     goodbyeChannelIds: (process.env.DISCORD_GOODBYE_CHANNEL_IDS || '')
       .split(',')
       .map((s) => s.trim())
