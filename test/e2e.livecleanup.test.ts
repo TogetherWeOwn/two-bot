@@ -73,6 +73,12 @@ type Stub = {
    * is decided by value, this also drops the child out of the synchronized set.
    */
   desyncChild(childId: string, overwrites: Channel['permission_overwrites']): void;
+  /**
+   * Omit `permission_overwrites` from the single-object read `GET /channels/{id}` only,
+   * leaving the list read complete. That splits the plan from apply's own second-opinion
+   * read, so a test can pin the apply-side gate on a plan built from a full answer.
+   */
+  hideOverwritesOnObjectRead(objectId: string): void;
   close(): Promise<void>;
 };
 type Run = { code: number; stdout: string; stderr: string };
@@ -124,6 +130,7 @@ async function stubDiscord(): Promise<Stub> {
   let partialWriteTarget: string | null = null;
   let onboardingStatus = 200;
   let onboardingRaw: { contentType: string; payload: string | null; status: number } | null = null;
+  const hiddenOverwriteReads = new Set<string>();
   const server: Server = createServer((req, res) => {
     const method = req.method ?? 'GET';
     const path = req.url ?? '';
@@ -210,7 +217,14 @@ async function stubDiscord(): Promise<Stub> {
     }
     if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/member-verification`) return send(200, { form_fields: [] });
     const channel = /\/channels\/(\d+)$/.exec(path);
-    if (channel) return send(200, state.channels.find((item) => item.id === channel[1]) ?? {});
+    if (channel) {
+      const found = state.channels.find((item) => item.id === channel[1]);
+      if (found && hiddenOverwriteReads.has(found.id)) {
+        const { permission_overwrites: _absent, ...rest } = found;
+        return send(200, rest);
+      }
+      return send(200, found ?? {});
+    }
     return send(404, { path });
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -231,6 +245,7 @@ async function stubDiscord(): Promise<Stub> {
     desyncChild(childId: string, overwrites: Channel['permission_overwrites']) {
       state.channels.find((item) => item.id === childId)!.permission_overwrites = structuredClone(overwrites);
     },
+    hideOverwritesOnObjectRead(objectId: string) { hiddenOverwriteReads.add(objectId); },
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }
@@ -626,6 +641,164 @@ test('an unreadable guild reference block refuses the plan', async () => {
       assert.ok(existsSync(join(dir, 'snapshot', 'pre.json')), label);
     } finally { await stub.close(); }
   }
+});
+
+/**
+ * The guild-reference defect class again, on the field that carries this phase's entire
+ * rollback guarantee. `permission_overwrites ?? []` read a channel object that arrived
+ * inside a 200 without the key as a channel with no overwrites — and that invented empty
+ * list is what gets signed as the operation's `expectedBefore` *and* its `inverseWrite`,
+ * so rollback would have deleted the overwrites it promises to restore rather than merely
+ * failing to restore them.
+ *
+ * Measured on the live 2026-09-16T12:20:52Z pre-snapshot before the gate: dropping the key
+ * from channel 1047562772407398500 left all 67 operations in place and shipped a *signed*
+ * `inverseWrite` of 0 overwrites against its 2 real ones. Nothing downstream could catch
+ * it — apply re-reads the same collapsed field and agrees with the plan.
+ *
+ * Driven off both halves, because they fail differently: a drifted channel is its own
+ * operation, and its category decides the synchronized set that picks which children are
+ * written at all.
+ */
+test('a channel that omits permission_overwrites inside a 200 refuses the plan', async () => {
+  const drifted = PERMISSION_DRIFT.mismatches[0]!;
+  const variants: Array<{ label: string; wreck: (state: State) => void; expect: RegExp }> = [
+    {
+      label: 'absent on a drifted legacy channel',
+      wreck: (state) => { delete (state.channels.find((channel) => channel.id === drifted.channelId) as Partial<Channel>).permission_overwrites; },
+      expect: new RegExp(`Reviewed object ${drifted.channelId} carried no \`permission_overwrites\` key at all`),
+    },
+    {
+      label: 'absent on the parent legacy category',
+      wreck: (state) => { delete (state.channels.find((channel) => channel.id === drifted.parentId) as Partial<Channel>).permission_overwrites; },
+      expect: new RegExp(`Reviewed object ${drifted.parentId} carried no \`permission_overwrites\` key at all`),
+    },
+    {
+      label: 'present but null',
+      wreck: (state) => { (state.channels.find((channel) => channel.id === drifted.channelId) as JsonObject).permission_overwrites = null; },
+      expect: /carried a `permission_overwrites` that is not an array \(null\)/,
+    },
+    {
+      label: 'an entry with no allow/deny',
+      wreck: (state) => { state.channels.find((channel) => channel.id === drifted.channelId)!.permission_overwrites = [{ id: LIVE_GUILD_ID, type: 0 } as unknown as Overwrite]; },
+      expect: /carried a `permission_overwrites\[0\]` with no readable `allow`, `deny`/,
+    },
+  ];
+  for (const { label, wreck, expect } of variants) {
+    const stub = await stubDiscord();
+    try {
+      wreck(stub.state);
+      const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-absent-overwrites-'));
+      const result = await plan(stub, dir);
+      assert.notEqual(result.code, 0, `${label} produced a plan`);
+      assert.equal(stub.writes.length, 0, label);
+      assert.match(result.stderr, expect, label);
+      assert.ok(!existsSync(planManifestPath(dir)), `${label} produced a plan manifest`);
+      // The unanswered read is the evidence; refusing must not destroy it.
+      assert.ok(existsSync(join(dir, 'snapshot', 'pre.json')), label);
+    } finally { await stub.close(); }
+  }
+});
+
+/**
+ * `assertReviewedShape` covers the channel objects a snapshot read produced, but
+ * `expectedBefore`, `write` and `inverseWrite` arrive from a *manifest file on disk* and
+ * reach `inFlightDriftIsOurs` and the rollback script through `normalizeOverwrites` alone.
+ * That makes the throw inside `normalizeOverwrites` the only gate on those, not a duplicate
+ * of the snapshot one — and it is also what stops `String(overwrite.allow)` turning an
+ * absent `allow` into the literal string `"undefined"`, which used to compare equal to
+ * itself at plan time and then fail as a 400 on operation N, live, mid-phase.
+ *
+ * Called directly because no snapshot read can reach it: the snapshot gate refuses first.
+ */
+test('normalizeOverwrites refuses an unanswered list rather than returning an empty one', async () => {
+  const cases: Array<{ label: string; value: unknown; expect: RegExp }> = [
+    { label: 'absent', value: undefined, expect: /carried no `permission_overwrites` key at all/ },
+    { label: 'null', value: null, expect: /carried a `permission_overwrites` that is not an array \(null\)/ },
+    { label: 'an entry with no allow', value: [{ id: LIVE_GUILD_ID, type: 0, deny: '1024' }], expect: /`permission_overwrites\[0\]` with no readable `allow`/ },
+    { label: 'an entry with a numeric allow', value: [{ id: LIVE_GUILD_ID, type: 0, allow: 0, deny: '1024' }], expect: /`permission_overwrites\[0\]` with no readable `allow`/ },
+    { label: 'an entry that is not an object', value: ['1024'], expect: /`permission_overwrites\[0\]` that is not an object/ },
+  ];
+  for (const { label, value, expect } of cases) {
+    assert.throws(() => normalizeOverwrites(value as Overwrite[], 'Manifest operation body'), expect, label);
+    assert.throws(() => normalizeOverwrites(value as Overwrite[], 'Manifest operation body'), /Refusing rather than read an unanswered permission overwrite list as an empty one/, label);
+  }
+  // A readable list still normalizes: the gate is not a blanket refusal.
+  assert.deepEqual(
+    normalizeOverwrites([{ id: 'b', type: 0, allow: '0', deny: '1024' }, { id: 'a', type: 0, allow: '0', deny: '1024' }] as Overwrite[]),
+    [{ id: 'a', type: 0, allow: '0', deny: '1024' }, { id: 'b', type: 0, allow: '0', deny: '1024' }],
+  );
+});
+
+/**
+ * `assertHierarchy` is the check that proves Owen outranks every managed role before this
+ * phase writes anything, and it failed open on exactly the absence above: `role.position ??
+ * -1` read an unanswered rank as the bottom of the list, and a falsy `managed` dropped the
+ * role out of the target set entirely. Both absences passed a snapshot the control refuses.
+ *
+ * The control runs first and has to trip, or the two absence variants below prove nothing:
+ * they are the *same role*, lifted to the same position that the control refuses.
+ */
+test('a role that omits position or managed refuses the plan instead of failing the hierarchy check open', async () => {
+  const control = await stubDiscord();
+  let liftedRoleId = '';
+  let liftedPosition = 0;
+  try {
+    const owen = control.state.members.find((member) => member.user.id === LIVE_BOT_APPLICATION_ID)!;
+    const highestOwen = Math.max(...control.state.roles.filter((role) => owen.roles.includes(role.id)).map((role) => role.position));
+    const target = control.state.roles.find((role) => role.managed && role.id !== LIVE_GUILD_ID && !owen.roles.includes(role.id))!;
+    liftedRoleId = target.id;
+    liftedPosition = highestOwen + 5;
+    target.position = liftedPosition;
+    const result = await plan(control, mkdtempSync(join(tmpdir(), 'two-live-clean-hierarchy-control-')));
+    assert.notEqual(result.code, 0, 'control: a managed role above Owen produced a plan');
+    assert.match(result.stderr, /Owen is not above every managed target role/);
+    assert.equal(control.writes.length, 0);
+  } finally { await control.close(); }
+
+  const variants: Array<{ label: string; wreck: (role: Role) => void; expect: RegExp }> = [
+    { label: 'position absent', wreck: (role) => { delete (role as Partial<Role>).position; }, expect: /carried no readable `position`/ },
+    { label: 'managed absent', wreck: (role) => { delete (role as Partial<Role>).managed; }, expect: /carried no readable `managed`/ },
+    { label: 'position present but a string', wreck: (role) => { (role as JsonObject).position = String(liftedPosition); }, expect: /carried no readable `position`/ },
+  ];
+  for (const { label, wreck, expect } of variants) {
+    const stub = await stubDiscord();
+    try {
+      const role = stub.state.roles.find((item) => item.id === liftedRoleId)!;
+      role.position = liftedPosition;
+      wreck(role);
+      const result = await plan(stub, mkdtempSync(join(tmpdir(), 'two-live-clean-hierarchy-absent-')));
+      assert.notEqual(result.code, 0, `${label} produced a plan`);
+      assert.equal(stub.writes.length, 0, label);
+      assert.match(result.stderr, new RegExp(`Role ${liftedRoleId} `), label);
+      assert.match(result.stderr, expect, label);
+    } finally { await stub.close(); }
+  }
+});
+
+/**
+ * Apply's own per-operation before-state check is the second opinion on the plan — a fresh
+ * `GET /channels/{id}` compared against the signed `expectedBefore`. It laundered an absent
+ * list exactly as the plan side did, so when the same read was unanswered at both times the
+ * two agreed on `[]` and the PATCH went out under a signed, empty `inverseWrite`.
+ *
+ * Here the list read stays complete, so the plan is built and signed from a full answer and
+ * only apply's own read is unanswered. It has to stop mid-phase, before any write, naming
+ * the read rather than blaming the plan for a before-state mismatch.
+ */
+test("an unreadable live read refuses apply mid-phase, before that operation's PATCH", async () => {
+  const stub = await stubDiscord();
+  try {
+    const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-apply-absent-'));
+    assert.equal((await plan(stub, dir)).code, 0);
+    const manifest = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    const first = manifest.operations[0]!;
+    stub.hideOverwritesOnObjectRead(first.objectId);
+    const result = await apply(stub, dir);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, new RegExp(`Live read of ${first.objectType} ${first.objectId} \\(GET /channels/\\{id\\}\\) carried no \`permission_overwrites\` key at all`));
+    assert.equal(stub.writes.length, 0, 'apply issued a write after an unanswered live read');
+  } finally { await stub.close(); }
 });
 
 /**

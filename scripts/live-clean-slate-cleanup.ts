@@ -35,6 +35,7 @@ import {
   LEGACY_CHANNEL_IDS,
   manifestInFlightId,
   normalizeOverwrites,
+  normalizedChannel,
   operationSemanticHash,
   planSignature,
   planArchiveOperations,
@@ -45,6 +46,7 @@ import {
   SNAPSHOT_MAX_AGE_MS,
   stable,
   type LiveCleanupSnapshot,
+  unreadableOverwrites,
   withSemanticHash,
 } from '../src/redesign/live-cleanup.ts';
 
@@ -263,7 +265,11 @@ async function captureSnapshot(): Promise<LiveCleanupSnapshot> {
     guildId,
     guild,
     roles,
-    channels: channels.map((channel) => ({ ...channel, permission_overwrites: normalizeOverwrites(channel.permission_overwrites ?? []) })),
+    // An unreadable overwrite list is carried into the pre-snapshot verbatim rather than
+    // collapsed to `[]` here, so the evidence of what Discord actually returned survives
+    // to disk and `assertReviewedShape` is what refuses to plan on it. See
+    // `normalizedChannel`.
+    channels: channels.map(normalizedChannel),
     members: members.map((member) => ({
       id: member.user?.id ?? '',
       bot: Boolean(member.user?.bot),
@@ -455,7 +461,7 @@ async function apply(): Promise<void> {
     // Substituting live state for those too would let unrelated third-party drift be
     // misread as our own partial write — and rollback would then clobber it.
     const inFlight = requesting[0];
-    const liveOverwrites = new Map(fresh.channels.map((channel) => [channel.id, normalizeOverwrites(channel.permission_overwrites ?? [])]));
+    const liveOverwrites = new Map(fresh.channels.map((channel) => [channel.id, normalizeOverwrites(channel.permission_overwrites, `Live channel ${channel.id}`)]));
     // An abandoned checkpoint above this manifest that held nothing in flight proves the
     // write this operation is still labelled `requesting` for had already been verified,
     // so the ambiguity the rollback hint offers to resolve does not exist (TOG-2975).
@@ -469,7 +475,7 @@ async function apply(): Promise<void> {
       for (const id of subtree) {
         const live = fresh.channels.find((channel) => channel.id === id);
         const target = confined.channels.find((channel) => channel.id === id);
-        if (live && target) target.permission_overwrites = normalizeOverwrites(live.permission_overwrites ?? []);
+        if (live && target) target.permission_overwrites = normalizeOverwrites(live.permission_overwrites, `Live channel ${id}`);
       }
       const { semanticHash: _confinedHash, ...confinedInput } = confined;
       if (withSemanticHash({ ...confinedInput, generatedAt: fresh.generatedAt }).semanticHash === fresh.semanticHash) {
@@ -486,7 +492,11 @@ async function apply(): Promise<void> {
   const abortAfter = Number(process.env.LIVE_CLEANUP_TEST_ABORT_AFTER_WRITES ?? '0');
   for (const operation of phaseManifest.operations) {
     const liveCategory = await mustGet<Channel>(`/channels/${operation.objectId}`, `Read category ${operation.objectId}`);
-    const liveBefore = normalizeOverwrites(liveCategory.permission_overwrites ?? []);
+    // This is the independent check that catches a plan disagreeing with live state, and
+    // `?? []` used to launder an absent list here exactly as the plan side did — so the
+    // comparison below became `[] !== []` and passed, on the one read that was supposed
+    // to be a second opinion. It refuses now, mid-phase, before the PATCH.
+    const liveBefore = normalizeOverwrites(liveCategory.permission_overwrites, `Live read of ${operation.objectType} ${operation.objectId} (GET /channels/{id})`);
     if (operation.state === 'applied') {
       if (stable(liveBefore) !== stable(operation.write.permission_overwrites)) die(1, `Applied operation ${operation.id} drifted; refusing replay.`);
       continue;
@@ -511,11 +521,15 @@ async function apply(): Promise<void> {
       checkpoint(phaseRollbackPath, phaseManifest);
       die(1, `Discord write failed for ${operation.id}: HTTP ${result.status}. No retry was attempted.`);
     }
-    const returned = normalizeOverwrites(result.body.permission_overwrites ?? []);
-    if (stable(returned) !== stable(operation.write.permission_overwrites)) {
+    // The only post-write site, and the one place the absence must NOT raise: this
+    // operation's PATCH has already reached Discord, so the run owes the journal an
+    // `apply_failed` checkpoint before it stops. An unreadable response is folded into
+    // the existing partial-write branch rather than thrown past it.
+    const unreadableReturn = unreadableOverwrites(result.body.permission_overwrites);
+    if (unreadableReturn !== null || stable(normalizeOverwrites(result.body.permission_overwrites)) !== stable(operation.write.permission_overwrites)) {
       phaseManifest.status = 'apply_failed';
       checkpoint(phaseRollbackPath, phaseManifest);
-      die(1, `Discord returned a partial/unexpected state for ${operation.id}.`);
+      die(1, `Discord returned a partial/unexpected state for ${operation.id}${unreadableReturn === null ? '' : `: the response carried ${unreadableReturn}, so what the write left behind is unknown`}.`);
     }
     discordWrites++;
     if (abortAfter > 0 && discordWrites >= abortAfter) die(86, `Test interruption after ${discordWrites} accepted write(s).`);
