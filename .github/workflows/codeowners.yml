@@ -51,6 +51,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Install GitHub CLI
+        run: |
+          if ! command -v gh >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y gh
+          fi
+
       # The checker's own ability to fail, re-proved before it is trusted.
       # Offline, no credential: every case is a saved response. A check nobody
       # has watched fail is a check nobody knows works, and this one guards a
