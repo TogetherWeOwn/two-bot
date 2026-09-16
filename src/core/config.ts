@@ -39,10 +39,23 @@ export interface Config {
    * on a live server if the copy lands badly.
    */
   anchorWelcomeChannelId: string | null;
-  /** Onboarding observes and logs but changes nothing. */
+  /** Show and record onboarding, but suppress legacy role writes. */
   onboardingDryRun: boolean;
   /** Self-role panels observe and audit but change no roles. */
   selfRoleDryRun: boolean;
+  /**
+   * TOG-1654 / TOG-1644. `session` = the roleless flow: welcome with a
+   * "what do you want to do" picker routing to #looking-to-play or the Lobby,
+   * goodbye on leave, and NO role writes anywhere. `legacy` (the default) =
+   * the TOG-94 game-role picker, unchanged. One flag, reversible in seconds.
+   */
+  onboardingMode: 'legacy' | 'session';
+  /** Where session-mode goodbyes go. Empty = goodbyes are log-only. */
+  goodbyeChannelIds: string[];
+  /** Session-mode destination for "Find people to play with". */
+  sessionLookingToPlayChannelId: string | null;
+  /** Session-mode destination for "Join voice now". */
+  sessionLobbyVoiceChannelId: string | null;
   /**
    * Staff channel for join-burst alerts (TWO-56). Null = alerts go to the log
    * only. Never a member-facing channel: this posts member IDs.
@@ -96,6 +109,14 @@ function requiredToken(): string {
   return v;
 }
 
+export function parseOnboardingMode(
+  raw = process.env.TWO_ONBOARDING_MODE ?? '',
+): Config['onboardingMode'] {
+  if (raw === '' || raw === 'legacy') return 'legacy';
+  if (raw === 'session') return 'session';
+  throw new Error('TWO_ONBOARDING_MODE must be exactly "legacy" or "session" when set.');
+}
+
 /**
  * Read the Postgres connection URL.
  *
@@ -126,6 +147,13 @@ export function loadConfig(): Config {
     anchorWelcomeChannelId: process.env.DISCORD_ANCHOR_WELCOME_CHANNEL_ID || null,
     onboardingDryRun: process.env.TWO_ONBOARDING_DRY_RUN === '1',
     selfRoleDryRun: process.env.TWO_SELF_ROLE_DRY_RUN === '1',
+    onboardingMode: parseOnboardingMode(),
+    goodbyeChannelIds: (process.env.DISCORD_GOODBYE_CHANNEL_IDS || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+    sessionLookingToPlayChannelId: process.env.DISCORD_SESSION_LOOKING_TO_PLAY_CHANNEL_ID || null,
+    sessionLobbyVoiceChannelId: process.env.DISCORD_SESSION_LOBBY_VOICE_CHANNEL_ID || null,
     staffAlertChannelId: process.env.DISCORD_STAFF_ALERT_CHANNEL_ID || null,
     raidJoinThreshold: Number(process.env.TWO_RAID_JOIN_THRESHOLD ?? 5),
     raidWindowSeconds: Number(process.env.TWO_RAID_WINDOW_SECONDS ?? 60),

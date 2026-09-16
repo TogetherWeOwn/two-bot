@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { Client, GatewayIntentBits, Events, Options, Partials, type Guild } from 'discord.js';
+import { Client, GatewayIntentBits, Events, Options, Partials, type Guild, type GuildMember } from 'discord.js';
 import { nowIso } from '../core/events.ts';
 import type { FunnelHandlers } from '../core/handlers.ts';
 import type { InviteTracker, InviteState } from '../core/inviteTracker.ts';
@@ -76,6 +76,13 @@ export interface BotDeps {
    */
   expectedJoins?: ExpectedJoins;
   leveling?: LevelingService;
+  /**
+   * Whether an earned reward role is actually written to the member. Defaults
+   * to true; session onboarding passes false so XP and `/rank` keep working
+   * while `member.roles.add` is never reached. See
+   * `levelRoleWritesForOnboardingMode`.
+   */
+  levelRoleWrites?: boolean;
   automod?: { service: AutomodService; guildId: string };
   /** Flag-only join risk scoring. It never changes or removes the member. */
   joinRisk?: JoinRiskScorer;
@@ -136,6 +143,17 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     handlers, invites, community, raid, expectedJoins, leveling, automod, joinRisk, audit, auditGuildId,
     moderationAuditSecret,
   } = deps;
+  const levelRoleWrites = deps.levelRoleWrites ?? true;
+
+  /**
+   * The only place a level-up turns into a role write. Both the message and the
+   * voice path go through here, so session mode is suppressed in exactly one
+   * spot rather than at each call site.
+   */
+  const levelUpRoleHook = (member: GuildMember | null | undefined) =>
+    leveling && member && levelRoleWrites
+      ? (level: number) => applyLevelRoles(member, leveling, level)
+      : undefined;
 
   const auditSafely = (event: Parameters<NonNullable<BotDeps['audit']>['record']>[0]) => {
     if (!audit || (auditGuildId && event.guildId !== auditGuildId)) return;
@@ -337,10 +355,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
       channelId: msg.channelId,
       channelClass,
       occurredAt,
-      onLevelUp:
-        leveling && msg.member
-          ? (level) => applyLevelRoles(msg.member!, leveling, level)
-          : undefined,
+      onLevelUp: levelUpRoleHook(msg.member),
     });
     // Downstream message automations run only after automod accepts the event
     // and the ordinary funnel/leveling path has completed. A private event keeps
@@ -408,10 +423,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
         isBot,
         channelId: oldState.channelId,
         occurredAt: at,
-        onLevelUp:
-          leveling && member
-            ? (level) => applyLevelRoles(member, leveling, level)
-            : undefined,
+        onLevelUp: levelUpRoleHook(member),
       });
     }
     if (newState.channelId) {
