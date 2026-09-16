@@ -81,8 +81,8 @@ jobs:
           PGPORT: ${{ job.services.postgres.ports['5432'] }}
         run: |
           echo "PGPORT=$PGPORT" >> "$GITHUB_ENV"
-          echo "TWO_TEST_DATABASE_URL=postgres://two:two@localhost:$PGPORT/two_test" >> "$GITHUB_ENV"
-          echo "TWO_DATABASE_URL=postgres://two:two@localhost:$PGPORT/two_test" >> "$GITHUB_ENV"
+          echo "TWO_TEST_DATABASE_URL=postgres://two:two@127.0.0.1:$PGPORT/two_test" >> "$GITHUB_ENV"
+          echo "TWO_DATABASE_URL=postgres://two:two@127.0.0.1:$PGPORT/two_test" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
