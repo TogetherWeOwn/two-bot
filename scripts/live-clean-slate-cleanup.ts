@@ -16,15 +16,18 @@ import {
   ACTIVE_CATEGORY_IDS,
   ACTIVE_CHANNEL_IDS,
   ADMINISTRATOR,
+  appendJournalWitness,
   applyOperationOverwrites,
   ARCHIVE_PHASE,
   archiveVisibilityExemptions,
+  assertLatestCheckpoint,
   buildManifest,
   type Channel,
   type CleanupManifest,
   type JsonObject,
   inFlightDriftIsOurs,
   journalSignature,
+  journalWitnessPath,
   LEGACY_CATEGORY_IDS,
   LEGACY_CHANNEL_IDS,
   normalizeOverwrites,
@@ -120,10 +123,19 @@ function atomicJson(path: string, valueToWrite: unknown): void {
  * before every write so that a manifest edited between runs — in particular one whose
  * operation states were relabelled to buy a recovery exception — fails verification
  * instead of being trusted. Never call `atomicJson` on a manifest directly.
+ *
+ * The sequence number and the surrounding intent/commit witness records are what make
+ * that signature mean *current* rather than merely genuine; see `assertLatestCheckpoint`.
+ * Intent is appended first so the witness can never trail the manifest by more than the
+ * one checkpoint a crash inside this function can lose.
  */
 function checkpoint(path: string, manifest: CleanupManifest): void {
+  manifest.journalSequence += 1;
   manifest.journalSignature = journalSignature(token!, manifest);
+  const witness = journalWitnessPath(path);
+  appendJournalWitness(token!, witness, manifest.journalSequence, 'intent', manifest.journalSignature);
   atomicJson(path, manifest);
+  appendJournalWitness(token!, witness, manifest.journalSequence, 'commit', manifest.journalSignature);
 }
 
 function createImmutable(path: string, body: string): void {
@@ -363,8 +375,12 @@ async function apply(): Promise<void> {
     if (phaseManifest.status === 'applied') die(2, 'Phase is already applied; no writes were replayed.');
     if (phaseManifest.status === 'rolled_back' || phaseManifest.status === 'rolling_back' || phaseManifest.status === 'rollback_failed') die(2, `Phase manifest is in ${phaseManifest.status}; apply cannot resume it.`);
     assertManifest(phaseManifest, snapshot);
+    // A valid signature only proves the journal is one this run wrote; the witness log
+    // is what proves it is the one this run wrote *last*.
+    assertLatestCheckpoint(token!, phaseManifest, phaseRollbackPath);
     if (phaseManifest.operationSemanticHash !== planned.operationSemanticHash || phaseManifest.snapshotSemanticHash !== planned.snapshotSemanticHash || phaseManifest.planSignature !== planned.planSignature) die(2, 'Resume manifest does not match the dry-run manifest.');
   } else {
+    if (existsSync(journalWitnessPath(phaseRollbackPath))) die(2, 'A checkpoint witness exists without its manifest; the phase journal was removed. Refusing to start a fresh journal over it.');
     phaseManifest = structuredClone(planned);
     phaseManifest.status = 'applying';
     ensurePrivateDir(phaseDir);

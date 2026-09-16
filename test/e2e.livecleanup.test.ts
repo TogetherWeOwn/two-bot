@@ -772,30 +772,50 @@ test('a forged journal state refuses an apply resume before any write', async ()
     assert.equal((await apply(stub, dir, { LIVE_CLEANUP_TEST_ABORT_AFTER_WRITES: '3' })).code, 86);
     const path = manifestPath(dir);
     const manifest = JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest;
-    const applied = manifest.operations.filter((operation) => operation.state === 'applied');
-    assert.ok(applied.length > 0);
-    applied.at(-1)!.state = 'requesting';
+    // Exactly one `requesting` operation, or the refusal proves nothing: the resume
+    // path rejects a second in-flight operation on its own, and that guard would mask
+    // the journal check. Settle the genuine in-flight operation — its write did land
+    // before the interruption — and move the label onto one that has long been applied,
+    // which is the relabelling that buys the recovery exception.
+    const genuine = manifest.operations.find((operation) => operation.state === 'requesting')!;
+    genuine.state = 'applied';
+    genuine.appliedAt = new Date().toISOString();
+    const forged = manifest.operations.find((operation) => operation.state === 'applied' && operation.id !== genuine.id)!;
+    forged.state = 'requesting';
+    assert.equal(manifest.operations.filter((operation) => operation.state === 'requesting').length, 1);
     writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
     chmodSync(path, 0o600);
     const writesBefore = stub.writes.length;
     const resumed = await apply(stub, dir);
     assert.equal(resumed.code, 1);
     assert.match(resumed.stderr, /journal signature is invalid/);
+    assert.doesNotMatch(resumed.stderr, /more than one requesting operation/);
     assert.equal(stub.writes.length, writesBefore, 'a forged journal must be refused before any write');
   } finally { await stub.close(); }
 });
 
-/** The first category operation whose write changes state and that carries synchronized children. */
-function tearableCategory(manifest: CleanupManifest, channels: Channel[]): { operation: CleanupManifest['operations'][number]; childIds: string[] } {
+/**
+ * The first category operation whose write changes state and that carries synchronized
+ * children. `unsyncedChildIds` are its other children — pre-snapshot they did not match
+ * the category, so Discord's sync could never have carried them and they each have their
+ * own channel operation. Pass `requireUnsynced` when the test needs both kinds.
+ */
+function tearableCategory(manifest: CleanupManifest, channels: Channel[], requireUnsynced = false): { operation: CleanupManifest['operations'][number]; childIds: string[]; unsyncedChildIds: string[] } {
   for (const operation of manifest.operations) {
     if (operation.objectType !== 'category' || !operationChangesState(operation)) continue;
-    const childIds = channels
-      .filter((channel) => channel.parent_id === operation.objectId && stable(normalizeOverwrites(channel.permission_overwrites)) === stable(operation.inverseWrite.permission_overwrites))
+    const children = channels.filter((channel) => channel.parent_id === operation.objectId);
+    const childIds = children
+      .filter((channel) => stable(normalizeOverwrites(channel.permission_overwrites)) === stable(operation.inverseWrite.permission_overwrites))
       .map((channel) => channel.id);
-    if (childIds.length > 0) return { operation, childIds };
+    const unsyncedChildIds = children.map((channel) => channel.id).filter((id) => !childIds.includes(id));
+    if (childIds.length === 0 || (requireUnsynced && unsyncedChildIds.length === 0)) continue;
+    return { operation, childIds, unsyncedChildIds };
   }
-  throw new Error('the fixture has no category operation with synchronized children');
+  throw new Error('the fixture has no category operation with the required child shape');
 }
+
+/** The recovery hint apply prints only when it accepts the drift as its own in-flight write. */
+const RECOVERY_HINT = /left a partial write on|live-clean-slate-cleanup-rollback\.ts/;
 
 test('a torn category write is recovered in flight and every synchronized child returns to the pre-snapshot', async () => {
   const stub = await stubDiscord();
@@ -860,6 +880,121 @@ test('a third party on a synchronized child denies the in-flight exception and r
     assert.match(result.stdout, new RegExp(`In-flight operation ${category.id} is NOT eligible for the recovery exception`));
     assert.match(result.stderr, /drifted from both applied and inverse state/);
     assert.equal(stub.writes.length, writesBefore, 'a refused rollback must not write');
+    assert.equal(stable(stub.state.channels), stable(drifted), "the third party's write must be left exactly as it was");
+  } finally { await stub.close(); }
+});
+
+test('apply resume withholds the recovery exception when a synchronized child holds an inexplicable value', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-resume-scope-child-'));
+  const before = structuredClone(stub.state.channels);
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    const planned = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    const { operation: category, childIds } = tearableCategory(planned, before);
+
+    stub.partialWriteOn(category.objectId);
+    assert.equal((await apply(stub, dir)).code, 1);
+
+    // The adversarial control for the torn-write case above: same interruption, but a
+    // third party has put a synchronized child somewhere our PATCH could not have. The
+    // exception must be withheld, which means apply refuses as ordinary drift and does
+    // NOT send the operator to rollback — rollback would clobber that write.
+    stub.desyncChild(childIds[0]!, [{ id: ID(88), type: 0, allow: VIEW, deny: '0' }]);
+    const drifted = structuredClone(stub.state.channels);
+    const writesBefore = stub.writes.length;
+    const resumed = await apply(stub, dir);
+    assert.equal(resumed.code, 1);
+    assert.match(resumed.stderr, /Live state drifted since dry-run\/resume/);
+    assert.doesNotMatch(resumed.stderr, RECOVERY_HINT);
+    assert.equal(stub.writes.length, writesBefore, 'a refused resume must not write');
+    assert.equal(stable(stub.state.channels), stable(drifted), "the third party's write must be left exactly as it was");
+  } finally { await stub.close(); }
+});
+
+test('apply resume keeps the in-flight subtree off unsynchronized siblings of the torn category', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-resume-scope-sibling-'));
+  const before = structuredClone(stub.state.channels);
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    const planned = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    const { operation: category, unsyncedChildIds } = tearableCategory(planned, before, true);
+
+    stub.partialWriteOn(category.objectId);
+    assert.equal((await apply(stub, dir)).code, 1);
+
+    // The other half of the scope control. This sibling was never synchronized with the
+    // category, so the torn write cannot explain it and its live value must not be
+    // substituted into the expected state. Widening the subtree to every child would
+    // absorb this drift silently and hand the operator a rollback that overwrites it.
+    const sibling = stub.state.channels.find((channel) => channel.id === unsyncedChildIds[0]!)!;
+    sibling.permission_overwrites = [...sibling.permission_overwrites, { id: ID(89), type: 0, allow: VIEW, deny: '0' }];
+    const drifted = structuredClone(stub.state.channels);
+    const writesBefore = stub.writes.length;
+    const resumed = await apply(stub, dir);
+    assert.equal(resumed.code, 1);
+    assert.match(resumed.stderr, /Live state drifted since dry-run\/resume/);
+    assert.doesNotMatch(resumed.stderr, RECOVERY_HINT);
+    assert.equal(stub.writes.length, writesBefore, 'a refused resume must not write');
+    assert.equal(stable(stub.state.channels), stable(drifted), "the third party's write must be left exactly as it was");
+  } finally { await stub.close(); }
+});
+
+test('a replayed earlier checkpoint is refused before any write even though it is genuinely signed', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-journal-replay-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    const planned = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    // Interrupt after the final write, so the last operation is journalled `requesting`
+    // with its PATCH already accepted. Nothing here is forged: this checkpoint is one
+    // the run really wrote, and it stays validly signed forever.
+    const interrupted = await apply(stub, dir, { LIVE_CLEANUP_TEST_ABORT_AFTER_WRITES: String(planned.operations.length) });
+    assert.equal(interrupted.code, 86);
+    const path = manifestPath(dir);
+    const saved = readFileSync(path, 'utf8');
+    const savedManifest = JSON.parse(saved) as CleanupManifest;
+    const inFlight = savedManifest.operations.filter((operation) => operation.state === 'requesting');
+    assert.equal(inFlight.length, 1);
+
+    assert.equal((await apply(stub, dir)).code, 0);
+    assert.equal((JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest).status, 'applied');
+
+    // TOG-2947: with the run settled, a third party edits the object that was in flight,
+    // and the saved checkpoint is dropped back over the manifest. The journal HMAC still
+    // verifies — replay needs no token — so only the append-only witness log can tell
+    // rollback that this checkpoint has been superseded.
+    const target = stub.state.channels.find((channel) => channel.id === inFlight[0]!.objectId)!;
+    target.permission_overwrites = [...target.permission_overwrites, { id: ID(90), type: 0, allow: VIEW, deny: '0' }];
+    const drifted = structuredClone(stub.state.channels);
+    writeFileSync(path, saved);
+    chmodSync(path, 0o600);
+    const writesBefore = stub.writes.length;
+    const replayed = await rollback(stub, dir);
+    assert.equal(replayed.code, 2);
+    assert.match(replayed.stderr, /superseded checkpoint/);
+    assert.doesNotMatch(replayed.stdout, /RECOVERING in-flight/);
+
+    // Apply must refuse the same replay rather than diagnose it as a partial write and
+    // point the operator at the rollback that would do the clobbering.
+    const resumed = await apply(stub, dir);
+    assert.equal(resumed.code, 1);
+    assert.match(resumed.stderr, /superseded checkpoint/);
+    assert.doesNotMatch(resumed.stderr, RECOVERY_HINT);
+
+    // And the witness cannot simply be re-pointed at the replayed checkpoint: every
+    // record is chained under the bot token, so editing one is not possible without it.
+    const witnessFile = `${path}.witness`;
+    const lines = readFileSync(witnessFile, 'utf8').split('\n').filter((line) => line.length > 0);
+    const tip = JSON.parse(lines.at(-1)!) as { sequence: number; phase: string; journalSignature: string; chain: string };
+    lines[lines.length - 1] = JSON.stringify({ ...tip, sequence: savedManifest.journalSequence, journalSignature: savedManifest.journalSignature });
+    writeFileSync(witnessFile, `${lines.join('\n')}\n`);
+    const forgedWitness = await rollback(stub, dir);
+    assert.equal(forgedWitness.code, 2);
+    assert.match(forgedWitness.stderr, /is not authentic/);
+
+    assert.equal(stub.writes.length, writesBefore, 'a replayed checkpoint must be refused before any write');
     assert.equal(stable(stub.state.channels), stable(drifted), "the third party's write must be left exactly as it was");
   } finally { await stub.close(); }
 });

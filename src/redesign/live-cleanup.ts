@@ -1,4 +1,5 @@
 import { createHash, createHmac } from 'node:crypto';
+import { appendFileSync, closeSync, existsSync, fsyncSync, openSync, readFileSync } from 'node:fs';
 import { LIVE_BOT_APPLICATION_ID, LIVE_GUILD_ID, LIVE_GUILD_NAME } from '../staging/spec.ts';
 
 export const ARCHIVE_PHASE = 'archive-legacy';
@@ -123,6 +124,7 @@ export type CleanupManifest = {
   snapshotSemanticHash: string;
   planSignature: string;
   journalSignature: string;
+  journalSequence: number;
   operationSemanticHash: string;
   operationCount: number;
   reviewedLegacyChannelIds: string[];
@@ -170,11 +172,16 @@ export function planSignature(token: string, snapshotGeneratedAt: string, snapsh
  *
  * Every checkpoint must re-sign before it writes; see `checkpoint()` in the apply
  * and rollback scripts, which is the only sanctioned way to persist a manifest.
+ *
+ * Authenticity is not freshness: every checkpoint a run ever wrote carries a valid
+ * signature forever, so `journalSequence` is signed here and corroborated against the
+ * append-only witness log by `assertLatestCheckpoint`.
  */
 export function journalSignature(token: string, manifest: CleanupManifest): string {
   return createHmac('sha256', token).update(stable({
     planSignature: manifest.planSignature,
     status: manifest.status,
+    journalSequence: manifest.journalSequence,
     operations: manifest.operations.map((operation) => ({
       id: operation.id,
       state: operation.state,
@@ -183,6 +190,97 @@ export function journalSignature(token: string, manifest: CleanupManifest): stri
       rolledBackAt: operation.rolledBackAt ?? null,
     })),
   })).digest('hex');
+}
+
+export type JournalWitnessRecord = { sequence: number; phase: 'intent' | 'commit'; journalSignature: string; chain: string };
+
+export function journalWitnessPath(manifestPath: string): string {
+  return `${manifestPath}.witness`;
+}
+
+function witnessChain(token: string, previous: string, record: Omit<JournalWitnessRecord, 'chain'>): string {
+  return createHmac('sha256', token).update(stable({ previous, ...record })).digest('hex');
+}
+
+/**
+ * Reads the run's append-only checkpoint witness and proves it was not edited.
+ *
+ * Each record is HMACed over its predecessor's chain value, so a line cannot be
+ * altered, reordered, or spliced in without the bot token. The strict
+ * intent/commit alternation is checked too, so a record cannot be dropped from the
+ * middle of the log; only trailing truncation survives, and that is what an
+ * interrupted checkpoint looks like anyway.
+ */
+export function readJournalWitness(token: string, path: string): JournalWitnessRecord[] {
+  const records: JournalWitnessRecord[] = [];
+  let previousChain = '';
+  for (const [index, line] of readFileSync(path, 'utf8').split('\n').filter((item) => item.length > 0).entries()) {
+    let record: JournalWitnessRecord;
+    try {
+      record = JSON.parse(line) as JournalWitnessRecord;
+    } catch {
+      throw new Error(`Journal witness line ${index + 1} is not readable.`);
+    }
+    const { chain, ...body } = record;
+    if (witnessChain(token, previousChain, body) !== chain) throw new Error(`Journal witness line ${index + 1} is not authentic; the checkpoint log was edited outside a run.`);
+    const last = records.at(-1);
+    const expected = last === undefined
+      ? { sequence: 1, phase: 'intent' }
+      : last.phase === 'intent' ? { sequence: last.sequence, phase: 'commit' } : { sequence: last.sequence + 1, phase: 'intent' };
+    if (body.sequence !== expected.sequence || body.phase !== expected.phase) throw new Error(`Journal witness line ${index + 1} breaks the checkpoint sequence; the log was reordered or spliced.`);
+    records.push(record);
+    previousChain = chain;
+  }
+  if (records.length === 0) throw new Error('Journal witness is empty.');
+  return records;
+}
+
+export function appendJournalWitness(token: string, path: string, sequence: number, phase: 'intent' | 'commit', signature: string): void {
+  let previousChain = '';
+  if (existsSync(path)) {
+    const last = readFileSync(path, 'utf8').split('\n').filter((item) => item.length > 0).at(-1);
+    if (last !== undefined) previousChain = (JSON.parse(last) as JournalWitnessRecord).chain;
+  }
+  const body = { sequence, phase, journalSignature: signature };
+  const record: JournalWitnessRecord = { ...body, chain: witnessChain(token, previousChain, body) };
+  const fd = openSync(path, 'a', 0o600);
+  try {
+    appendFileSync(fd, `${JSON.stringify(record)}\n`);
+    fsyncSync(fd);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/**
+ * Whether this manifest is the run's *latest* checkpoint, not merely an authentic one.
+ *
+ * TOG-2947: the journal HMAC closes forgery but not replay. Every checkpoint a run
+ * writes stays validly signed forever, so keeping a copy of the manifest from the
+ * moment an operation was `requesting` and dropping it back afterwards used to hand
+ * rollback a genuine in-flight exception over long-settled state — and rollback would
+ * then write `inverseWrite` across whatever a third party had done since. No forged
+ * signature and no token were needed; the later legitimate invocation supplied both.
+ *
+ * The witness log is appended outside the manifest, so restoring the manifest alone no
+ * longer rewinds the run. Each checkpoint appends `intent`, writes the manifest, then
+ * appends `commit`; a crash inside that window leaves the manifest one checkpoint
+ * behind an uncommitted `intent` tip, which is the single case accepted below.
+ *
+ * This binds the manifest to the log, not to wall-clock time: an attacker who can
+ * roll back the whole run directory — witness included — is outside what a file in
+ * that directory can prove, and would need external state to detect.
+ */
+export function assertLatestCheckpoint(token: string, manifest: CleanupManifest, manifestPath: string): void {
+  const path = journalWitnessPath(manifestPath);
+  if (!existsSync(path)) throw new Error(`Journal witness ${path} is missing; this manifest cannot be shown to be the run's latest checkpoint.`);
+  const records = readJournalWitness(token, path);
+  const tip = records.at(-1)!;
+  if (tip.sequence === manifest.journalSequence && tip.journalSignature === manifest.journalSignature) return;
+  const previous = records.at(-2);
+  if (tip.phase === 'intent' && tip.sequence === manifest.journalSequence + 1
+    && previous !== undefined && previous.sequence === manifest.journalSequence && previous.journalSignature === manifest.journalSignature) return;
+  throw new Error(`Manifest is checkpoint ${manifest.journalSequence} but this run's witness log has reached ${tip.sequence}; refusing to act on a superseded checkpoint.`);
 }
 
 /**
@@ -478,6 +576,7 @@ export function buildManifest(snapshot: LiveCleanupSnapshot, snapshotPath: strin
     snapshotSemanticHash: snapshot.semanticHash,
     planSignature: planSignature(token, snapshot.generatedAt, snapshot.semanticHash, operationHash),
     journalSignature: '',
+    journalSequence: 0,
     operationSemanticHash: operationHash,
     operationCount: operations.length,
     reviewedLegacyChannelIds: [...LEGACY_CHANNEL_IDS],

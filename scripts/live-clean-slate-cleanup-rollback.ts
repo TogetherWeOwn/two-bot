@@ -11,11 +11,14 @@ import { dirname, resolve } from 'node:path';
 import { applicationIdFromToken, LIVE_BOT_APPLICATION_ID, LIVE_GUILD_ID, LIVE_GUILD_NAME } from '../src/staging/spec.ts';
 import {
   ADMINISTRATOR,
+  appendJournalWitness,
+  assertLatestCheckpoint,
   type Channel,
   type CleanupManifest,
   type JsonObject,
   inFlightDriftIsOurs,
   journalSignature,
+  journalWitnessPath,
   type LiveCleanupSnapshot,
   normalizeOverwrites,
   semanticSnapshot,
@@ -73,11 +76,17 @@ function atomicJson(path: string, valueToWrite: unknown): void {
 /**
  * The only sanctioned way to persist the manifest. Re-signs the mutable journal on
  * every write so a manifest edited between runs fails verification rather than being
- * trusted — journal state is what grants the in-flight exception below.
+ * trusted — journal state is what grants the in-flight exception below — and extends
+ * the append-only witness log so a *superseded* checkpoint cannot be replayed back
+ * over a run that has moved on.
  */
 function checkpoint(path: string, valueToWrite: CleanupManifest): void {
+  valueToWrite.journalSequence += 1;
   valueToWrite.journalSignature = journalSignature(token!, valueToWrite);
+  const witness = journalWitnessPath(path);
+  appendJournalWitness(token!, witness, valueToWrite.journalSequence, 'intent', valueToWrite.journalSignature);
   atomicJson(path, valueToWrite);
+  appendJournalWitness(token!, witness, valueToWrite.journalSequence, 'commit', valueToWrite.journalSignature);
 }
 
 if (!token) die(2, 'Missing DISCORD_BOT_TOKEN.');
@@ -98,6 +107,14 @@ if (manifest.planSignature !== planSignature(token, snapshot.generatedAt, snapsh
 // authenticated separately — otherwise relabelling an applied operation `requesting`
 // would be enough to make rollback overwrite unrelated live drift.
 if (manifest.journalSignature !== journalSignature(token, manifest)) die(2, 'Manifest journal signature is invalid; operation states or timestamps were modified outside a run.');
+// Authentic is not current. Every checkpoint an apply wrote stays validly signed, so
+// without this a saved `requesting` checkpoint could be dropped back over a finished
+// run to buy the in-flight exception and have rollback overwrite later live state.
+try {
+  assertLatestCheckpoint(token, manifest, manifestPath);
+} catch (error) {
+  die(2, error instanceof Error ? error.message : String(error));
+}
 if (manifest.operationCount !== deterministicOperations.length || manifest.operationSemanticHash !== deterministicHash || manifest.operations.length !== deterministicOperations.length) die(2, 'Manifest operation count/hash differs from the deterministic plan.');
 if (stable(manifest.operations.map(({ state: _state, requestStartedAt: _requestStartedAt, appliedAt: _appliedAt, rolledBackAt: _rolledBackAt, ...operation }) => operation)) !== stable(deterministicOperations)) die(2, 'Manifest operation bodies differ from the deterministic plan.');
 const API = apiBase();
