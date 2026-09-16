@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url';
 import {
   ADMINISTRATOR,
   applyOperationOverwrites,
+  archiveOnboardingExclusions,
   archiveVisibilityExemptions,
   type Channel,
   type JsonObject,
@@ -99,9 +100,16 @@ for (const operation of operations) applyOperationOverwrites(after, operation, o
 
 const roleById = new Map(snapshot.roles.map((role) => [role.id, role]));
 const ownerId = String(snapshot.guild.owner_id);
+// Channels Discord will not let this phase hide while the Server Guide points at
+// them. They are excluded from the sweep rather than allowed to fail it — but they
+// are printed, because an audit that quietly narrows its own scope is worse than a
+// red one.
+const onboardingExclusions = archiveOnboardingExclusions(snapshot);
+const excludedIds = new Set(onboardingExclusions.map((exclusion) => exclusion.channelId));
+const auditedIds = LEGACY_CHANNEL_IDS.filter((id) => !excludedIds.has(id));
 const visible = new Map<string, string[]>();
 for (const member of snapshot.members) {
-  const seen = LEGACY_CHANNEL_IDS.filter((id) => {
+  const seen = auditedIds.filter((id) => {
     const channel = after.channels.find((item) => item.id === id)!;
     return canSee(member, roleById, snapshot.guildId, normalizeOverwrites(channel.permission_overwrites ?? []));
   });
@@ -110,7 +118,11 @@ for (const member of snapshot.members) {
 
 const exemptions = new Map(archiveVisibilityExemptions(snapshot).map((item) => [item.memberId, item.reason]));
 let unexplained = 0;
-console.log(`operations: ${operations.length} · reviewed legacy channels: ${LEGACY_CHANNEL_IDS.length} · principals: ${snapshot.members.length}`);
+console.log(`operations: ${operations.length} · reviewed legacy channels: ${LEGACY_CHANNEL_IDS.length} · audited: ${auditedIds.length} · principals: ${snapshot.members.length}`);
+for (const exclusion of onboardingExclusions) {
+  const channel = snapshot.channels.find((item) => item.id === exclusion.channelId);
+  console.log(`  NOT-AUDITED   ${exclusion.channelId} ${channel?.name ?? '?'} — Discord refuses to hide it while referenced by ${exclusion.referencedBy.join(', ')}`);
+}
 for (const [memberId, seen] of [...visible].sort((a, b) => a[0].localeCompare(b[0]))) {
   const member = snapshot.members.find((item) => item.id === memberId)!;
   const reason = memberId === ownerId ? 'owner' : memberId === LIVE_BOT_APPLICATION_ID ? 'owen' : exemptions.get(memberId) ?? 'UNEXPLAINED';

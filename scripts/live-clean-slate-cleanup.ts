@@ -19,6 +19,7 @@ import {
   appendJournalWitness,
   applyOperationOverwrites,
   ARCHIVE_PHASE,
+  archiveOnboardingExclusions,
   archiveVisibilityExemptions,
   assertLatestCheckpoint,
   buildManifest,
@@ -322,6 +323,11 @@ function assertManifest(manifest: CleanupManifest, snapshot: LiveCleanupSnapshot
   if (stable(manifest.reviewedLegacyCategoryIds) !== stable([...LEGACY_CATEGORY_IDS])) throw new Error('Reviewed 18-category allowlist differs.');
   if (stable(manifest.activeChannelIds) !== stable([...ACTIVE_CHANNEL_IDS]) || stable(manifest.activeCategoryIds) !== stable([...ACTIVE_CATEGORY_IDS])) throw new Error('Active-tree allowlist differs.');
   if (stable(manifest.visibilityExemptions ?? []) !== stable(archiveVisibilityExemptions(snapshot))) throw new Error('Reviewed visibility-exemption set differs from the fresh snapshot.');
+  // The exclusion list sits outside the plan signature, like the exemption set, and it
+  // is the only place the manifest admits it is hiding fewer than 112 channels. A
+  // manifest that under-reports it still carries a valid signature over a short
+  // operation list, and reads as a complete plan. Check it against the live guild.
+  if (stable(manifest.onboardingExclusions ?? []) !== stable(archiveOnboardingExclusions(snapshot))) throw new Error("Manifest onboarding exclusions do not match this guild's Server Guide/rules/public-updates/safety references; re-plan before applying.");
   const expectedIds = operations.map((operation) => operation.id);
   if (stable(manifest.operations.map((operation) => operation.id)) !== stable(expectedIds)) throw new Error('Generated operation IDs differ from the reviewed dry-run manifest.');
 }
@@ -359,6 +365,13 @@ async function dryRun(): Promise<void> {
   createImmutableJson(planRollbackPath, manifest);
   const channelOperationCount = operations.filter((operation) => operation.objectType === 'channel').length;
   log(`Dry-run complete: ${operations.length} deterministic overwrite operations (${operations.length - channelOperationCount} category PATCHes, ${channelOperationCount} direct channel PATCHes).`);
+  // A plan that silently skips channels reads as a plan that hides all 112. Say the
+  // number here, in the artifact the operator compares against, not just in a comment.
+  log(`Reviewed legacy channels this plan will hide: ${LEGACY_CHANNEL_IDS.length - manifest.onboardingExclusions.length} of ${LEGACY_CHANNEL_IDS.length}.`);
+  for (const exclusion of manifest.onboardingExclusions) {
+    const channel = snapshot.channels.find((item) => item.id === exclusion.channelId);
+    log(`  STAYS-VISIBLE ${exclusion.channelId} ${channel?.name ?? '?'} — Discord refuses (400/350003) while referenced by ${exclusion.referencedBy.join(', ')}`);
+  }
   log(`Snapshot semantic hash: ${snapshot.semanticHash}`);
   log(`Operation semantic hash: ${manifest.operationSemanticHash}`);
   // Everyone else — human or bot — is denied View and asserted hidden by the planner.

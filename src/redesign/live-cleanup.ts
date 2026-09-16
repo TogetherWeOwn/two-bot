@@ -111,6 +111,8 @@ export type OperationState = 'pending' | 'requesting' | 'applied' | 'rolled_back
 export type RollbackEntry = CleanupOperation & { state: OperationState; requestStartedAt?: string; appliedAt?: string; rolledBackAt?: string };
 export type ArchiveExemptionReason = 'owner' | 'owen' | 'administrator';
 export type ArchiveVisibilityExemption = { memberId: string; bot: boolean; reason: ArchiveExemptionReason };
+/** A reviewed legacy channel Discord refuses to hide, and every guild reference that pins it. */
+export type ArchiveOnboardingExclusion = { channelId: string; referencedBy: string[] };
 export type CleanupManifest = {
   version: 1;
   kind: 'live-clean-slate-cleanup';
@@ -132,6 +134,7 @@ export type CleanupManifest = {
   activeChannelIds: string[];
   activeCategoryIds: string[];
   visibilityExemptions: ArchiveVisibilityExemption[];
+  onboardingExclusions: ArchiveOnboardingExclusion[];
   operations: RollbackEntry[];
 };
 
@@ -617,12 +620,30 @@ export function applyOperationOverwrites(
   }
 }
 
+/**
+ * `GET /guilds/{id}` returns `features` in a different order on essentially every
+ * request. Two live reads three minutes apart were set-equal and hash-different,
+ * so `--apply`'s "live state drifted" check could never be satisfied on this guild
+ * — it refused 15 consecutive attempts before the operator patched it out by hand
+ * (TOG-2806, operator run 2026-09-16T16:35Z).
+ *
+ * Feature order carries no meaning in Discord's model, so canonicalize it here
+ * rather than weakening the drift check, which is the only thing standing between
+ * a stale plan and the live guild. Nothing else in the guild payload has been
+ * observed to reorder; add a field to this function only with a live measurement
+ * behind it, because every field normalized away is drift the check stops seeing.
+ */
+function normalizeGuild(guild: JsonObject): JsonObject {
+  if (!Array.isArray(guild.features)) return guild;
+  return { ...guild, features: [...guild.features].map(String).sort() };
+}
+
 export function semanticSnapshot(input: Omit<LiveCleanupSnapshot, 'semanticHash'>): JsonObject {
   return {
     version: input.version,
     applicationId: input.applicationId,
     guildId: input.guildId,
-    guild: input.guild,
+    guild: normalizeGuild(input.guild),
     roles: [...input.roles].sort((a, b) => a.id.localeCompare(b.id)),
     channels: [...input.channels].map((channel) => ({ ...channel, permission_overwrites: normalizeOverwrites(channel.permission_overwrites ?? []) })).sort((a, b) => a.id.localeCompare(b.id)),
     members: [...input.members].map((member) => ({ ...member, roles: [...member.roles].sort() })).sort((a, b) => a.id.localeCompare(b.id)),
@@ -684,13 +705,94 @@ export function assertHierarchy(snapshot: LiveCleanupSnapshot): void {
   if (managedTargets.some((role) => (role.position ?? -1) >= highestOwen)) throw new Error('Owen is not above every managed target role.');
 }
 
+function referencedId(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function jsonArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function jsonObject(value: unknown): JsonObject | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : undefined;
+}
+
+/**
+ * Channel IDs the live guild pins as publicly readable, read out of the references
+ * block `captureSnapshot` already stores beside the snapshot.
+ *
+ * Discord rejects any channel PATCH that would deny `@everyone` View on one of these
+ * with **400 code 350003 `Onboarding channels must be readable by everyone`**, and a
+ * bot cannot clear the reference itself: `PUT /guilds/{id}/onboarding` answers
+ * 403 code 20001 `Bots cannot use this endpoint`. Measured live on TOG-2806, where
+ * apply stopped on operation 31 and five reviewed legacy channels stayed visible.
+ *
+ * Sources, all four observed to 400 in that run:
+ *   - `rules_channel_id`, `public_updates_channel_id`, `safety_alerts_channel_id`
+ *   - the Server Guide's default channels and every prompt option's channels
+ *
+ * The welcome screen is deliberately *not* a source: its channels were not observed
+ * to refuse, and excluding a channel Discord would have accepted leaves it visible
+ * for no reason, which is the exact failure this phase exists to fix.
+ */
+export function onboardingReferencedChannels(snapshot: Pick<LiveCleanupSnapshot, 'references'>): ArchiveOnboardingExclusion[] {
+  const sources = new Map<string, Set<string>>();
+  const note = (value: unknown, source: string): void => {
+    const channelId = referencedId(value);
+    if (!channelId) return;
+    const existing = sources.get(channelId) ?? new Set<string>();
+    existing.add(source);
+    sources.set(channelId, existing);
+  };
+  const references = snapshot.references ?? {};
+  const guildReferences = jsonObject(references.guildReferences);
+  note(guildReferences?.rulesChannelId, 'guild.rules_channel_id');
+  note(guildReferences?.publicUpdatesChannelId, 'guild.public_updates_channel_id');
+  note(guildReferences?.safetyAlertsChannelId, 'guild.safety_alerts_channel_id');
+  const onboarding = jsonObject(jsonObject(references.onboarding)?.body);
+  // A disabled Server Guide pins nothing, and treating it as if it did would leave
+  // its channels visible forever. Absent `enabled` is read as enabled: the guild
+  // reference is the claim, and an unreadable claim must fail towards refusing.
+  if (onboarding && onboarding.enabled !== false) {
+    for (const id of jsonArray(onboarding.default_channel_ids)) note(id, 'onboarding.default_channel_ids');
+    for (const prompt of jsonArray(onboarding.prompts)) {
+      const promptId = referencedId(jsonObject(prompt)?.id) ?? 'unknown';
+      for (const option of jsonArray(jsonObject(prompt)?.options)) {
+        for (const id of jsonArray(jsonObject(option)?.channel_ids)) note(id, `onboarding.prompt:${promptId}`);
+      }
+    }
+  }
+  return [...sources]
+    .map(([channelId, referencedBy]) => ({ channelId, referencedBy: [...referencedBy].sort() }))
+    .sort((a, b) => a.channelId.localeCompare(b.channelId));
+}
+
+/** The subset of `onboardingReferencedChannels` that this phase would otherwise have hidden. */
+export function archiveOnboardingExclusions(snapshot: LiveCleanupSnapshot): ArchiveOnboardingExclusion[] {
+  const reviewed = new Set<string>(LEGACY_CHANNEL_IDS);
+  return onboardingReferencedChannels(snapshot).filter((exclusion) => reviewed.has(exclusion.channelId));
+}
+
 export function planArchiveOperations(snapshot: LiveCleanupSnapshot): CleanupOperation[] {
   assertReviewedShape(snapshot);
   assertHierarchy(snapshot);
+  const excluded = new Map(archiveOnboardingExclusions(snapshot).map((exclusion) => [exclusion.channelId, exclusion]));
   const channels = [...LEGACY_CHANNEL_IDS].sort().flatMap((objectId) => {
     const channel = snapshot.channels.find((item) => item.id === objectId)!;
     const parent = snapshot.channels.find((item) => item.id === channel.parent_id)!;
     const synchronized = stable(normalizeOverwrites(channel.permission_overwrites ?? [])) === stable(normalizeOverwrites(parent.permission_overwrites ?? []));
+    const exclusion = excluded.get(objectId);
+    if (exclusion) {
+      // Skipping the channel PATCH is only half of it. A synchronized child inherits
+      // whatever the category is set to, so the category deny would hide this channel
+      // anyway — through a write Discord never gets to refuse, silently breaking the
+      // reference that protects it. There is no partial plan that is honest here, so
+      // refuse and name the reference the operator has to move first.
+      if (synchronized) {
+        throw new Error(`Reviewed legacy channel ${objectId} is pinned publicly readable by ${exclusion.referencedBy.join(', ')}, and Discord refuses to hide it (400 code 350003) — but it is permission-synchronized with category ${parent.id}, so the category deny would hide it by inheritance. Repoint that reference to an active channel before planning.`);
+      }
+      return [];
+    }
     return synchronized ? [] : [{ objectId, objectType: 'channel' as const }];
   });
   const categories = [...LEGACY_CATEGORY_IDS].sort().map((objectId) => ({ objectId, objectType: 'category' as const }));
@@ -745,6 +847,7 @@ export function buildManifest(snapshot: LiveCleanupSnapshot, snapshotPath: strin
     activeChannelIds: [...ACTIVE_CHANNEL_IDS],
     activeCategoryIds: [...ACTIVE_CATEGORY_IDS],
     visibilityExemptions: archiveVisibilityExemptions(snapshot),
+    onboardingExclusions: archiveOnboardingExclusions(snapshot),
     operations: operations.map((operation) => ({ ...operation, state: 'pending' })),
   };
   manifest.journalSignature = journalSignature(token, manifest);

@@ -30,6 +30,7 @@ import {
   planArchiveOperations,
   planSignature,
   reconcileJournalWitness,
+  type Role,
   syncedChildIds,
 } from '../src/redesign/live-cleanup.ts';
 
@@ -40,7 +41,6 @@ const token = process.env.DISCORD_BOT_TOKEN;
 const guildId = process.env.DISCORD_GUILD_ID ?? LIVE_GUILD_ID;
 
 type ApiResult<T> = { status: number; body: T | null };
-type Role = { id: string; permissions: string; position?: number };
 type RawMember = { user?: { id: string; username?: string; bot?: boolean }; roles?: string[]; premium_since?: string | null; pending?: boolean };
 
 function die(code: number, message: string): never {
@@ -185,12 +185,18 @@ function nonChannelSemantic(
   currentOnboarding: ApiResult<JsonObject>,
   currentScreening: ApiResult<JsonObject>,
 ): JsonObject {
-  return {
+  // Built through `semanticSnapshot` rather than hand-mirrored, so both sides of the
+  // comparison below get exactly the same canonicalization. A local copy is how the
+  // sorted-`guild.features` fix first showed up here: the pre-snapshot side was
+  // canonical, this side was raw, and every rollback read it as live guild drift.
+  const { channels: _channels, ...nonChannel } = semanticSnapshot({
     version: 1,
+    generatedAt: '',
     applicationId: LIVE_BOT_APPLICATION_ID,
     guildId,
     guild: currentGuild,
-    roles: [...currentRoles].sort((a, b) => a.id.localeCompare(b.id)),
+    roles: currentRoles,
+    channels: [],
     members: rawMembers.map((member) => ({
       id: member.user?.id ?? '',
       bot: Boolean(member.user?.bot),
@@ -198,7 +204,7 @@ function nonChannelSemantic(
       roles: [...(member.roles ?? [])].sort(),
       premiumSince: member.premium_since ?? null,
       pending: Boolean(member.pending),
-    })).filter((member) => member.id).sort((a, b) => a.id.localeCompare(b.id)),
+    })).filter((member) => member.id),
     integrations: currentIntegrations.map((integration) => {
       const linkedApplication = integration.application as JsonObject | undefined;
       return {
@@ -207,7 +213,7 @@ function nonChannelSemantic(
         applicationId: typeof linkedApplication?.id === 'string' ? linkedApplication.id : null,
         roleId: typeof integration.role_id === 'string' ? integration.role_id : null,
       };
-    }).sort((a, b) => a.id.localeCompare(b.id)),
+    }),
     references: {
       welcomeScreen: { status: currentWelcome.status, body: currentWelcome.body },
       onboarding: { status: currentOnboarding.status, body: currentOnboarding.body },
@@ -220,7 +226,8 @@ function nonChannelSemantic(
         safetyAlertsChannelId: currentGuild.safety_alerts_channel_id ?? null,
       },
     },
-  };
+  });
+  return nonChannel;
 }
 
 const snapshotSemantic = semanticSnapshot(snapshot);

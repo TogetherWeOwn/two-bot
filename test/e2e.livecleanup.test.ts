@@ -50,6 +50,10 @@ type State = {
 type Stub = {
   base: string;
   state: State;
+  /** Mutable Server Guide payload, served from `GET /guilds/{id}/onboarding`. */
+  references: { onboarding: JsonObject };
+  /** Every `guild.features` ordering this stub has served, newest last. */
+  featureOrders: string[];
   writes: Array<{ method: string; path: string; body: unknown }>;
   writeOrder: string[];
   rollbackOrder: string[];
@@ -101,6 +105,9 @@ async function stubDiscord(): Promise<Stub> {
   const writes: Stub['writes'] = [];
   const writeOrder: string[] = [];
   const rollbackOrder: string[] = [];
+  const references: Stub['references'] = { onboarding: { enabled: false, prompts: [] } };
+  const featureOrders: string[] = [];
+  let guildReads = 0;
   let nextFailure = 0;
   let partialNextWrite = false;
   let partialWriteTarget: string | null = null;
@@ -156,14 +163,24 @@ async function stubDiscord(): Promise<Stub> {
     }
     if (path === '/api/v10/users/@me') return send(200, { id: LIVE_BOT_APPLICATION_ID });
     if (path === '/api/v10/users/@me/guilds') return send(200, [{ id: LIVE_GUILD_ID }]);
-    if (path === `/api/v10/guilds/${LIVE_GUILD_ID}`) return send(200, state.guild);
+    if (path === `/api/v10/guilds/${LIVE_GUILD_ID}`) {
+      // Discord hands back `features` in a different order on essentially every
+      // request, so every hash the tooling compares across two reads has to survive
+      // that. Rotating it on each GET keeps the whole suite honest about it rather
+      // than parking the behaviour in one test nobody else exercises.
+      const features = Array.isArray(state.guild.features) ? state.guild.features as string[] : [];
+      const at = features.length === 0 ? 0 : guildReads++ % features.length;
+      const rotated = [...features.slice(at), ...features.slice(0, at)];
+      featureOrders.push(rotated.join(','));
+      return send(200, { ...state.guild, features: rotated });
+    }
     if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/roles`) return send(200, state.roles);
     if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/channels`) return send(200, state.channels);
     if (path.startsWith(`/api/v10/guilds/${LIVE_GUILD_ID}/members?`)) return send(200, state.members);
     if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/integrations`) return send(200, state.integrations);
     if (path === '/api/v10/oauth2/applications/@me') return send(200, state.application);
     if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/welcome-screen`) return send(200, { enabled: true });
-    if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/onboarding`) return send(200, { enabled: false, prompts: [] });
+    if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/onboarding`) return send(200, references.onboarding);
     if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/member-verification`) return send(200, { form_fields: [] });
     const channel = /\/channels\/(\d+)$/.exec(path);
     if (channel) return send(200, state.channels.find((item) => item.id === channel[1]) ?? {});
@@ -174,6 +191,8 @@ async function stubDiscord(): Promise<Stub> {
   return {
     base: `http://127.0.0.1:${port}/api/v10`,
     state,
+    references,
+    featureOrders,
     writes,
     writeOrder,
     rollbackOrder,
@@ -298,6 +317,135 @@ test('production-shaped 51-channel drift fixture pins 69 stable operations and d
     const secondManifest = JSON.parse(readFileSync(planManifestPath(secondDir), 'utf8')) as CleanupManifest;
     assert.equal(secondManifest.operationSemanticHash, firstManifest.operationSemanticHash);
     assert.deepEqual(secondManifest.operations.map((operation) => operation.id), firstManifest.operations.map((operation) => operation.id));
+  } finally { await stub.close(); }
+});
+
+/**
+ * The live failure this pins (TOG-2806, 2026-09-16): `--apply` refused 15 consecutive
+ * times with `Live state drifted`, because `guild.features` comes back in a fresh
+ * order per request and the snapshot hash therefore never repeated. Two reads three
+ * minutes apart were set-equal and hash-different. Nothing about the guild changed.
+ */
+test('a reordered guild.features is not live drift, through plan, apply and rollback', async () => {
+  const stub = await stubDiscord();
+  try {
+    const firstDir = mkdtempSync(join(tmpdir(), 'two-live-clean-features-a-'));
+    const first = await plan(stub, firstDir);
+    assert.equal(first.code, 0, first.stderr);
+    const secondDir = mkdtempSync(join(tmpdir(), 'two-live-clean-features-b-'));
+    const second = await plan(stub, secondDir);
+    assert.equal(second.code, 0, second.stderr);
+    // The guild is untouched between these two reads, so the semantic hash — which
+    // excludes generatedAt — has to be identical, whatever order the features arrived in.
+    const firstSnapshot = JSON.parse(readFileSync(join(firstDir, 'snapshot', 'pre.json'), 'utf8')) as LiveCleanupSnapshot;
+    const secondSnapshot = JSON.parse(readFileSync(join(secondDir, 'snapshot', 'pre.json'), 'utf8')) as LiveCleanupSnapshot;
+    assert.ok(stub.featureOrders.length >= 2, 'the stub must have served the guild more than once');
+    assert.ok(new Set(stub.featureOrders).size > 1, 'the stub must have served more than one feature ordering');
+    assert.equal(secondSnapshot.semanticHash, firstSnapshot.semanticHash);
+    // And the drift gate that consumes that hash has to agree, which is the part the
+    // operator could not get past: apply re-reads the guild before its first write.
+    const applied = await apply(stub, firstDir);
+    assert.equal(applied.code, 0, applied.stderr);
+    assert.doesNotMatch(applied.stderr, /Live state drifted/);
+    // Rollback re-reads it again and compares the non-channel half against the
+    // pre-snapshot, so a second canonicalization site would surface right here.
+    const restored = await rollback(stub, firstDir);
+    assert.equal(restored.code, 0, restored.stderr);
+    assert.doesNotMatch(restored.stderr, /non-channel drift/);
+  } finally { await stub.close(); }
+});
+
+/**
+ * Discord answers 400 code 350003 `Onboarding channels must be readable by everyone`
+ * for any channel the Server Guide or the community guild references point at, and a
+ * bot cannot clear the reference (403 code 20001 on `PUT /guilds/{id}/onboarding`).
+ * Measured live on TOG-2806: apply stopped on operation 31 and five reviewed legacy
+ * channels stayed visible. The plan has to say so up front instead of dying into it.
+ */
+test('a Server Guide reference drops its channel from the plan and is reported, not hidden', async () => {
+  const stub = await stubDiscord();
+  try {
+    const pinned = PERMISSION_DRIFT.mismatches[0]!.channelId;
+    const promptId = ID(90);
+    stub.references.onboarding = {
+      enabled: true,
+      default_channel_ids: [],
+      prompts: [{ id: promptId, options: [{ id: ID(91), channel_ids: [pinned] }] }],
+    };
+    const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-onboarding-'));
+    const result = await plan(stub, dir);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(stub.writes.length, 0);
+    const manifest = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    assert.equal(manifest.operationCount, EXPECTED_OPERATIONS.operationCount - 1);
+    assert.equal(manifest.operations.filter((operation) => operation.objectId === pinned).length, 0);
+    assert.deepEqual(manifest.onboardingExclusions, [{ channelId: pinned, referencedBy: [`onboarding.prompt:${promptId}`] }]);
+    assert.match(result.stdout, new RegExp(`STAYS-VISIBLE ${pinned}`));
+    assert.match(result.stdout, /will hide: 111 of 112/);
+    // A manifest that under-reports its exclusions claims to hide all 112 while
+    // planning 68 operations, which is exactly the shape the operator would sign off
+    // on by mistake. The exclusion list is outside the plan signature — like the
+    // exemption set — so apply has to check it against the live guild itself.
+    writeFileSync(planManifestPath(dir), `${JSON.stringify({ ...manifest, onboardingExclusions: [] }, null, 2)}\n`);
+    chmodSync(planManifestPath(dir), 0o600);
+    const applied = await apply(stub, dir);
+    assert.equal(applied.code, 1);
+    assert.equal(stub.writes.length, 0);
+    assert.match(applied.stderr, /Manifest onboarding exclusions do not match/);
+  } finally { await stub.close(); }
+});
+
+test('guild references exclude too, and a Server Guide that is off pins nothing', async () => {
+  const stub = await stubDiscord();
+  try {
+    const pinned = PERMISSION_DRIFT.mismatches[1]!.channelId;
+    stub.state.guild.rules_channel_id = pinned;
+    const referencedDir = mkdtempSync(join(tmpdir(), 'two-live-clean-rules-ref-'));
+    const referenced = await plan(stub, referencedDir);
+    assert.equal(referenced.code, 0, referenced.stderr);
+    const referencedManifest = JSON.parse(readFileSync(planManifestPath(referencedDir), 'utf8')) as CleanupManifest;
+    assert.deepEqual(referencedManifest.onboardingExclusions, [{ channelId: pinned, referencedBy: ['guild.rules_channel_id'] }]);
+    assert.equal(referencedManifest.operationCount, EXPECTED_OPERATIONS.operationCount - 1);
+    // A Server Guide that is switched off pins nothing, so excluding its channels
+    // would leave them visible for no reason. Without this the `enabled` gate is free
+    // to be vacuous.
+    delete stub.state.guild.rules_channel_id;
+    stub.references.onboarding = {
+      enabled: false,
+      default_channel_ids: [pinned],
+      prompts: [{ id: ID(92), options: [{ id: ID(93), channel_ids: [PERMISSION_DRIFT.mismatches[0]!.channelId] }] }],
+    };
+    const offDir = mkdtempSync(join(tmpdir(), 'two-live-clean-guide-off-'));
+    const off = await plan(stub, offDir);
+    assert.equal(off.code, 0, off.stderr);
+    const offManifest = JSON.parse(readFileSync(planManifestPath(offDir), 'utf8')) as CleanupManifest;
+    assert.deepEqual(offManifest.onboardingExclusions, []);
+    assert.equal(offManifest.operationCount, EXPECTED_OPERATIONS.operationCount);
+  } finally { await stub.close(); }
+});
+
+test('a pinned channel synchronized with its legacy category refuses the whole plan', async () => {
+  const stub = await stubDiscord();
+  try {
+    const drifted = new Set(PERMISSION_DRIFT.mismatches.map((mismatch) => mismatch.channelId));
+    const synchronized = LEGACY_CHANNEL_IDS.find((id) => !drifted.has(id))!;
+    const parentId = stub.state.channels.find((channel) => channel.id === synchronized)!.parent_id!;
+    stub.references.onboarding = {
+      enabled: true,
+      default_channel_ids: [synchronized],
+      prompts: [],
+    };
+    const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-guide-synced-'));
+    const result = await plan(stub, dir);
+    // Skipping the channel PATCH would not save it: the category deny reaches it by
+    // inheritance, through a write Discord never gets the chance to refuse. There is
+    // no honest partial plan, so refuse and name the reference to move.
+    assert.notEqual(result.code, 0);
+    assert.equal(stub.writes.length, 0);
+    assert.match(result.stderr, new RegExp(`Reviewed legacy channel ${synchronized} is pinned publicly readable`));
+    assert.match(result.stderr, new RegExp(`permission-synchronized with category ${parentId}`));
+    // The refusal still has to leave the stop evidence behind.
+    assert.ok(existsSync(join(dir, 'snapshot', 'pre.json')));
   } finally { await stub.close(); }
 });
 
