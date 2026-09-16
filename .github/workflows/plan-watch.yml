@@ -96,10 +96,17 @@ permissions:
 
 jobs:
   protection-available:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
+
+      - name: Install GitHub CLI
+        run: |
+          if ! command -v gh >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y gh
+          fi
 
       - name: Probe, and speak up if branch protection is possible now
         env:
