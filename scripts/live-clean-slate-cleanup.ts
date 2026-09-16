@@ -16,7 +16,7 @@ import {
   ACTIVE_CATEGORY_IDS,
   ACTIVE_CHANNEL_IDS,
   ADMINISTRATOR,
-  applyCategoryOverwrites,
+  applyOperationOverwrites,
   ARCHIVE_PHASE,
   buildManifest,
   type Channel,
@@ -288,7 +288,18 @@ async function dryRun(): Promise<void> {
   ensurePrivateDir(snapshotDir);
   ensurePrivateDir(planDir);
   const snapshot = await captureSnapshot();
-  const operations = planArchiveOperations(snapshot);
+  createImmutableJson(snapshotPath, snapshot);
+  createImmutable(holdersPath, holdersCsv(snapshot));
+  createImmutableJson(referencesPath, snapshot.references);
+  log(`Fresh pre-snapshot captured: ${snapshotPath}`);
+  let operations: ReturnType<typeof planArchiveOperations>;
+  try {
+    operations = planArchiveOperations(snapshot);
+  } catch (error) {
+    log(`Planning refused after preserving the pre-snapshot: ${error instanceof Error ? error.message : String(error)}`);
+    finalizeLog();
+    throw error;
+  }
   const manifest = buildManifest(snapshot, snapshotPath, operations, token!);
   const operationFile: OperationFile = {
     version: 1,
@@ -301,12 +312,10 @@ async function dryRun(): Promise<void> {
     operationCount: operations.length,
     operations: manifest.operations,
   };
-  createImmutableJson(snapshotPath, snapshot);
-  createImmutable(holdersPath, holdersCsv(snapshot));
-  createImmutableJson(referencesPath, snapshot.references);
   createImmutableJson(operationsPath, operationFile);
   createImmutableJson(planRollbackPath, manifest);
-  log(`Dry-run complete: ${operations.length} deterministic category-overwrite operations; 112 legacy channels are hidden through 18 reviewed categories.`);
+  const channelOperationCount = operations.filter((operation) => operation.objectType === 'channel').length;
+  log(`Dry-run complete: ${operations.length} deterministic overwrite operations (${operations.length - channelOperationCount} category PATCHes, ${channelOperationCount} direct channel PATCHes).`);
   log(`Snapshot semantic hash: ${snapshot.semanticHash}`);
   log(`Operation semantic hash: ${manifest.operationSemanticHash}`);
   log('Applied 0 Discord write(s).');
@@ -343,7 +352,7 @@ async function apply(): Promise<void> {
     const acceptable = structuredClone(snapshot);
     for (const operation of phaseManifest.operations) {
       if (operation.state !== 'applied' && !(requestingApplied && operation.state === 'requesting')) continue;
-      applyCategoryOverwrites(acceptable, operation.objectId, operation.write.permission_overwrites);
+      applyOperationOverwrites(acceptable, operation, operation.write.permission_overwrites);
     }
     const { semanticHash: _acceptableHash, ...acceptableInput } = acceptable;
     acceptableHashes.add(withSemanticHash({ ...acceptableInput, generatedAt: fresh.generatedAt }).semanticHash);
@@ -398,7 +407,7 @@ async function apply(): Promise<void> {
   const post = await captureSnapshot();
   const { semanticHash: _ignoredSemanticHash, ...expectedPostInput } = structuredClone(snapshot);
   for (const operation of phaseManifest.operations) {
-    applyCategoryOverwrites(expectedPostInput, operation.objectId, operation.write.permission_overwrites);
+    applyOperationOverwrites(expectedPostInput, operation, operation.write.permission_overwrites);
   }
   const expectedPostHashed = withSemanticHash({ ...expectedPostInput, generatedAt: post.generatedAt });
   if (post.semanticHash !== expectedPostHashed.semanticHash) {

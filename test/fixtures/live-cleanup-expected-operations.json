@@ -1,0 +1,420 @@
+{
+  "operationCount": 69,
+  "operationSemanticHash": "364a6194a6538f4ee1a0636554ce93b6c2dba11694aa2b984eac7b9c0e5e022a",
+  "operations": [
+    {
+      "sequence": 1,
+      "id": "archive-legacy:001:channel:1047562772407398500:f83fe5fcc6360993",
+      "objectType": "channel",
+      "objectId": "1047562772407398500"
+    },
+    {
+      "sequence": 2,
+      "id": "archive-legacy:002:channel:1056439011088007261:7d3a32d6e931e8f0",
+      "objectType": "channel",
+      "objectId": "1056439011088007261"
+    },
+    {
+      "sequence": 3,
+      "id": "archive-legacy:003:channel:1056447465286541333:0f543e695bd7fa90",
+      "objectType": "channel",
+      "objectId": "1056447465286541333"
+    },
+    {
+      "sequence": 4,
+      "id": "archive-legacy:004:channel:1057456170320801802:2224a2834d234079",
+      "objectType": "channel",
+      "objectId": "1057456170320801802"
+    },
+    {
+      "sequence": 5,
+      "id": "archive-legacy:005:channel:1058572808826933319:714a467066f3eda2",
+      "objectType": "channel",
+      "objectId": "1058572808826933319"
+    },
+    {
+      "sequence": 6,
+      "id": "archive-legacy:006:channel:1058572809607073832:befffa7ad1880682",
+      "objectType": "channel",
+      "objectId": "1058572809607073832"
+    },
+    {
+      "sequence": 7,
+      "id": "archive-legacy:007:channel:1059534713695502337:cf248753db1ea169",
+      "objectType": "channel",
+      "objectId": "1059534713695502337"
+    },
+    {
+      "sequence": 8,
+      "id": "archive-legacy:008:channel:1063256513172484149:a578d356eda5e60f",
+      "objectType": "channel",
+      "objectId": "1063256513172484149"
+    },
+    {
+      "sequence": 9,
+      "id": "archive-legacy:009:channel:1078083546054397982:a82216ad4ca63137",
+      "objectType": "channel",
+      "objectId": "1078083546054397982"
+    },
+    {
+      "sequence": 10,
+      "id": "archive-legacy:010:channel:1078104807132373032:4cebb02d25d66d34",
+      "objectType": "channel",
+      "objectId": "1078104807132373032"
+    },
+    {
+      "sequence": 11,
+      "id": "archive-legacy:011:channel:1087198966346690570:2ea15ca8877d933a",
+      "objectType": "channel",
+      "objectId": "1087198966346690570"
+    },
+    {
+      "sequence": 12,
+      "id": "archive-legacy:012:channel:1087199559719067748:e28206b12e7f1dc3",
+      "objectType": "channel",
+      "objectId": "1087199559719067748"
+    },
+    {
+      "sequence": 13,
+      "id": "archive-legacy:013:channel:1087199767718809650:feb8d3487f5cd42e",
+      "objectType": "channel",
+      "objectId": "1087199767718809650"
+    },
+    {
+      "sequence": 14,
+      "id": "archive-legacy:014:channel:1087199860802986095:afaa248b6a2077f1",
+      "objectType": "channel",
+      "objectId": "1087199860802986095"
+    },
+    {
+      "sequence": 15,
+      "id": "archive-legacy:015:channel:1087199956600897557:4475adea32729aa6",
+      "objectType": "channel",
+      "objectId": "1087199956600897557"
+    },
+    {
+      "sequence": 16,
+      "id": "archive-legacy:016:channel:1087200082505510972:d53247fea3a9774a",
+      "objectType": "channel",
+      "objectId": "1087200082505510972"
+    },
+    {
+      "sequence": 17,
+      "id": "archive-legacy:017:channel:1087200619418357810:ea339b9d1f2162ba",
+      "objectType": "channel",
+      "objectId": "1087200619418357810"
+    },
+    {
+      "sequence": 18,
+      "id": "archive-legacy:018:channel:1087201627980714044:64d8a74bb995b25f",
+      "objectType": "channel",
+      "objectId": "1087201627980714044"
+    },
+    {
+      "sequence": 19,
+      "id": "archive-legacy:019:channel:1087910390802960414:346a81aa3db1d0f0",
+      "objectType": "channel",
+      "objectId": "1087910390802960414"
+    },
+    {
+      "sequence": 20,
+      "id": "archive-legacy:020:channel:1092823790695751810:20cd99b0829638a7",
+      "objectType": "channel",
+      "objectId": "1092823790695751810"
+    },
+    {
+      "sequence": 21,
+      "id": "archive-legacy:021:channel:1092929576491036672:e302ffc0af67b4c9",
+      "objectType": "channel",
+      "objectId": "1092929576491036672"
+    },
+    {
+      "sequence": 22,
+      "id": "archive-legacy:022:channel:1104836077761593354:01849b19b799682e",
+      "objectType": "channel",
+      "objectId": "1104836077761593354"
+    },
+    {
+      "sequence": 23,
+      "id": "archive-legacy:023:channel:1105881919062806588:9fbc3674c528ae07",
+      "objectType": "channel",
+      "objectId": "1105881919062806588"
+    },
+    {
+      "sequence": 24,
+      "id": "archive-legacy:024:channel:1113979181391429672:c5d6b40900125fc5",
+      "objectType": "channel",
+      "objectId": "1113979181391429672"
+    },
+    {
+      "sequence": 25,
+      "id": "archive-legacy:025:channel:1114833990315159622:d13187f2de02413f",
+      "objectType": "channel",
+      "objectId": "1114833990315159622"
+    },
+    {
+      "sequence": 26,
+      "id": "archive-legacy:026:channel:1117480270044594186:4b36772fa8668aea",
+      "objectType": "channel",
+      "objectId": "1117480270044594186"
+    },
+    {
+      "sequence": 27,
+      "id": "archive-legacy:027:channel:1119073453291610123:ff635afdea1bf812",
+      "objectType": "channel",
+      "objectId": "1119073453291610123"
+    },
+    {
+      "sequence": 28,
+      "id": "archive-legacy:028:channel:1119296196373139587:efffce0d5aab0ad8",
+      "objectType": "channel",
+      "objectId": "1119296196373139587"
+    },
+    {
+      "sequence": 29,
+      "id": "archive-legacy:029:channel:1127785339486994473:67f34d93a8019275",
+      "objectType": "channel",
+      "objectId": "1127785339486994473"
+    },
+    {
+      "sequence": 30,
+      "id": "archive-legacy:030:channel:1128819815298125854:94a79b1f9aed1c26",
+      "objectType": "channel",
+      "objectId": "1128819815298125854"
+    },
+    {
+      "sequence": 31,
+      "id": "archive-legacy:031:channel:1132448261253369939:2399ab7fe4f3e7df",
+      "objectType": "channel",
+      "objectId": "1132448261253369939"
+    },
+    {
+      "sequence": 32,
+      "id": "archive-legacy:032:channel:1132475979282006137:ea1054af7a0f138c",
+      "objectType": "channel",
+      "objectId": "1132475979282006137"
+    },
+    {
+      "sequence": 33,
+      "id": "archive-legacy:033:channel:1134893653832245428:42773144bd52f414",
+      "objectType": "channel",
+      "objectId": "1134893653832245428"
+    },
+    {
+      "sequence": 34,
+      "id": "archive-legacy:034:channel:1138590687311446049:cdff8f359f69149f",
+      "objectType": "channel",
+      "objectId": "1138590687311446049"
+    },
+    {
+      "sequence": 35,
+      "id": "archive-legacy:035:channel:1138590808715571300:ab64e62a100db66f",
+      "objectType": "channel",
+      "objectId": "1138590808715571300"
+    },
+    {
+      "sequence": 36,
+      "id": "archive-legacy:036:channel:1138591034163593336:ab28d72f157487af",
+      "objectType": "channel",
+      "objectId": "1138591034163593336"
+    },
+    {
+      "sequence": 37,
+      "id": "archive-legacy:037:channel:1138591122927648908:d8b4a28cfb62f2b2",
+      "objectType": "channel",
+      "objectId": "1138591122927648908"
+    },
+    {
+      "sequence": 38,
+      "id": "archive-legacy:038:channel:1138593758443737140:f888e0e99088947e",
+      "objectType": "channel",
+      "objectId": "1138593758443737140"
+    },
+    {
+      "sequence": 39,
+      "id": "archive-legacy:039:channel:1140914163934302289:31a5680717dc3417",
+      "objectType": "channel",
+      "objectId": "1140914163934302289"
+    },
+    {
+      "sequence": 40,
+      "id": "archive-legacy:040:channel:1146611215511081012:29f00550ef1e2cd0",
+      "objectType": "channel",
+      "objectId": "1146611215511081012"
+    },
+    {
+      "sequence": 41,
+      "id": "archive-legacy:041:channel:1154904611799437404:e26557816d9976b0",
+      "objectType": "channel",
+      "objectId": "1154904611799437404"
+    },
+    {
+      "sequence": 42,
+      "id": "archive-legacy:042:channel:1175150257278025771:b820f2f1379d8658",
+      "objectType": "channel",
+      "objectId": "1175150257278025771"
+    },
+    {
+      "sequence": 43,
+      "id": "archive-legacy:043:channel:1175150463298060370:c65756604d0fd0d4",
+      "objectType": "channel",
+      "objectId": "1175150463298060370"
+    },
+    {
+      "sequence": 44,
+      "id": "archive-legacy:044:channel:1175151272438026280:620f55bc394a41b7",
+      "objectType": "channel",
+      "objectId": "1175151272438026280"
+    },
+    {
+      "sequence": 45,
+      "id": "archive-legacy:045:channel:1176386295384260648:4a476fbe728def42",
+      "objectType": "channel",
+      "objectId": "1176386295384260648"
+    },
+    {
+      "sequence": 46,
+      "id": "archive-legacy:046:channel:1178791853861113887:ed77127e247de423",
+      "objectType": "channel",
+      "objectId": "1178791853861113887"
+    },
+    {
+      "sequence": 47,
+      "id": "archive-legacy:047:channel:1225192754020225176:4053127772e528a4",
+      "objectType": "channel",
+      "objectId": "1225192754020225176"
+    },
+    {
+      "sequence": 48,
+      "id": "archive-legacy:048:channel:1276964524150358138:2b6fbc2778c5c00b",
+      "objectType": "channel",
+      "objectId": "1276964524150358138"
+    },
+    {
+      "sequence": 49,
+      "id": "archive-legacy:049:channel:1465060666972049439:e688dbbd2bc8c85b",
+      "objectType": "channel",
+      "objectId": "1465060666972049439"
+    },
+    {
+      "sequence": 50,
+      "id": "archive-legacy:050:channel:1499430425045766326:173e100815a2f237",
+      "objectType": "channel",
+      "objectId": "1499430425045766326"
+    },
+    {
+      "sequence": 51,
+      "id": "archive-legacy:051:channel:327082608611557377:471c37e3cc1d4fd3",
+      "objectType": "channel",
+      "objectId": "327082608611557377"
+    },
+    {
+      "sequence": 52,
+      "id": "archive-legacy:052:category:1045946491463807066:305e575dac389c91",
+      "objectType": "category",
+      "objectId": "1045946491463807066"
+    },
+    {
+      "sequence": 53,
+      "id": "archive-legacy:053:category:1055494206556225719:d5f3829de3445be5",
+      "objectType": "category",
+      "objectId": "1055494206556225719"
+    },
+    {
+      "sequence": 54,
+      "id": "archive-legacy:054:category:1063309416365039649:d8ba2202a957eb30",
+      "objectType": "category",
+      "objectId": "1063309416365039649"
+    },
+    {
+      "sequence": 55,
+      "id": "archive-legacy:055:category:1078761198708858891:e62bb94331f3ef0f",
+      "objectType": "category",
+      "objectId": "1078761198708858891"
+    },
+    {
+      "sequence": 56,
+      "id": "archive-legacy:056:category:1087198131512430642:51b9505e636428ee",
+      "objectType": "category",
+      "objectId": "1087198131512430642"
+    },
+    {
+      "sequence": 57,
+      "id": "archive-legacy:057:category:1087199234706640940:3d26d94c295af209",
+      "objectType": "category",
+      "objectId": "1087199234706640940"
+    },
+    {
+      "sequence": 58,
+      "id": "archive-legacy:058:category:1087201563405193247:0cf831b95987de49",
+      "objectType": "category",
+      "objectId": "1087201563405193247"
+    },
+    {
+      "sequence": 59,
+      "id": "archive-legacy:059:category:1090639835896746027:56c528ecac16d5a7",
+      "objectType": "category",
+      "objectId": "1090639835896746027"
+    },
+    {
+      "sequence": 60,
+      "id": "archive-legacy:060:category:1112742773829926983:5bfd2758fff52404",
+      "objectType": "category",
+      "objectId": "1112742773829926983"
+    },
+    {
+      "sequence": 61,
+      "id": "archive-legacy:061:category:1112762115992854600:ea16cbddd535215e",
+      "objectType": "category",
+      "objectId": "1112762115992854600"
+    },
+    {
+      "sequence": 62,
+      "id": "archive-legacy:062:category:1112762118266159154:3165728d27436b8e",
+      "objectType": "category",
+      "objectId": "1112762118266159154"
+    },
+    {
+      "sequence": 63,
+      "id": "archive-legacy:063:category:1113455405343977472:c6c73db74a42bd3c",
+      "objectType": "category",
+      "objectId": "1113455405343977472"
+    },
+    {
+      "sequence": 64,
+      "id": "archive-legacy:064:category:1139711707443368079:55728d40fb39de1f",
+      "objectType": "category",
+      "objectId": "1139711707443368079"
+    },
+    {
+      "sequence": 65,
+      "id": "archive-legacy:065:category:1140914034686836766:b755b85e2e88ddbf",
+      "objectType": "category",
+      "objectId": "1140914034686836766"
+    },
+    {
+      "sequence": 66,
+      "id": "archive-legacy:066:category:1178933610586308739:468f23acc9e4344c",
+      "objectType": "category",
+      "objectId": "1178933610586308739"
+    },
+    {
+      "sequence": 67,
+      "id": "archive-legacy:067:category:1178936839151816715:403fcd507c3ca44f",
+      "objectType": "category",
+      "objectId": "1178936839151816715"
+    },
+    {
+      "sequence": 68,
+      "id": "archive-legacy:068:category:1179216170591715348:b9d9fd1eecf377cd",
+      "objectType": "category",
+      "objectId": "1179216170591715348"
+    },
+    {
+      "sequence": 69,
+      "id": "archive-legacy:069:category:1432057164242878637:a0d550200997a7bc",
+      "objectType": "category",
+      "objectId": "1432057164242878637"
+    }
+  ]
+}

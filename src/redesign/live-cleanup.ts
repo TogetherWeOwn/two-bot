@@ -99,8 +99,8 @@ export type CleanupOperation = {
   sequence: number;
   id: string;
   phase: typeof ARCHIVE_PHASE;
-  kind: 'patch-category-overwrites';
-  objectType: 'category';
+  kind: 'patch-category-overwrites' | 'patch-channel-overwrites';
+  objectType: 'category' | 'channel';
   objectId: string;
   expectedBefore: { permission_overwrites: Overwrite[] };
   write: { permission_overwrites: Overwrite[] };
@@ -182,36 +182,58 @@ function memberCanView(member: Member, snapshot: LiveCleanupSnapshot, overwrites
   return (permissions & VIEW_CHANNEL) !== 0n;
 }
 
-function assertArchiveVisibility(snapshot: LiveCleanupSnapshot, category: Channel, overwrites: Overwrite[]): void {
-  const roles = new Map(snapshot.roles.map((role) => [role.id, role]));
-  const members = new Map(snapshot.members.map((member) => [member.id, member]));
-  for (const overwrite of overwrites) {
-    if ((BigInt(overwrite.allow) & VIEW_CHANNEL) === 0n) continue;
-    if (overwrite.type === 0 && overwrite.id !== snapshot.guildId && !roles.get(overwrite.id)?.managed) {
-      throw new Error(`Legacy category ${category.id} has an unmanaged role View Channel allow; @everyone deny would not keep it hidden.`);
-    }
-    if (overwrite.type === 1 && !members.get(overwrite.id)?.bot) {
-      throw new Error(`Legacy category ${category.id} has a non-bot member View Channel allow; @everyone deny would not keep it hidden.`);
-    }
-  }
+function assertArchiveVisibility(snapshot: LiveCleanupSnapshot, target: Channel, overwrites: Overwrite[]): void {
   const ownerId = typeof snapshot.guild.owner_id === 'string' ? snapshot.guild.owner_id : null;
   for (const member of snapshot.members) {
     if (member.bot || member.id === ownerId) continue;
     const memberRoles = snapshot.roles.filter((role) => member.roles.includes(role.id));
     if (memberRoles.some((role) => (BigInt(role.permissions) & ADMINISTRATOR) !== 0n)) continue;
     if (memberCanView(member, snapshot, overwrites)) {
-      throw new Error(`Legacy category ${category.id} remains visible to non-administrator member ${member.id} after the planned archive deny.`);
+      throw new Error(`Legacy object ${target.id} remains visible to non-administrator member ${member.id} after the planned archive deny.`);
     }
   }
 }
 
-export function applyCategoryOverwrites(snapshot: Pick<LiveCleanupSnapshot, 'channels'>, categoryId: string, overwrites: Overwrite[]): void {
+function archiveVisibilityOverwrites(snapshot: LiveCleanupSnapshot, target: Channel, overwrites: Overwrite[]): Overwrite[] {
+  let write = archiveEveryoneOverwrite(snapshot.guildId, overwrites);
+  const ownerId = typeof snapshot.guild.owner_id === 'string' ? snapshot.guild.owner_id : null;
+  for (const member of snapshot.members) {
+    if (member.bot || member.id === ownerId) continue;
+    const memberRoles = snapshot.roles.filter((role) => member.roles.includes(role.id));
+    if (memberRoles.some((role) => (BigInt(role.permissions) & ADMINISTRATOR) !== 0n)) continue;
+    if (!memberCanView(member, snapshot, write)) continue;
+    const index = write.findIndex((overwrite) => overwrite.id === member.id && overwrite.type === 1);
+    if (index === -1) {
+      write = normalizeOverwrites([...write, { id: member.id, type: 1, allow: '0', deny: String(VIEW_CHANNEL) }]);
+      continue;
+    }
+    const current = write[index]!;
+    const memberDeny = {
+      ...current,
+      allow: String(BigInt(current.allow) & ~VIEW_CHANNEL),
+      deny: String(BigInt(current.deny) | VIEW_CHANNEL),
+    };
+    write = write.map((overwrite, itemIndex) => itemIndex === index ? memberDeny : overwrite);
+  }
+  assertArchiveVisibility(snapshot, target, write);
+  return write;
+}
+
+export function applyOperationOverwrites(
+  snapshot: Pick<LiveCleanupSnapshot, 'channels'>,
+  operation: Pick<CleanupOperation, 'objectId' | 'objectType'>,
+  overwrites: Overwrite[],
+): void {
+  const target = snapshot.channels.find((channel) => channel.id === operation.objectId);
+  if (!target) throw new Error(`${operation.objectType === 'category' ? 'Category' : 'Channel'} ${operation.objectId} is missing from snapshot.`);
+  const before = normalizeOverwrites(target.permission_overwrites ?? []);
   const normalized = normalizeOverwrites(overwrites);
-  const category = snapshot.channels.find((channel) => channel.id === categoryId);
-  if (!category) throw new Error(`Category ${categoryId} is missing from snapshot.`);
-  category.permission_overwrites = normalized;
+  target.permission_overwrites = normalized;
+  if (operation.objectType !== 'category') return;
   for (const channel of snapshot.channels) {
-    if (channel.parent_id === categoryId) channel.permission_overwrites = structuredClone(normalized);
+    if (channel.parent_id === operation.objectId && stable(normalizeOverwrites(channel.permission_overwrites ?? [])) === stable(before)) {
+      channel.permission_overwrites = structuredClone(normalized);
+    }
   }
 }
 
@@ -248,10 +270,6 @@ export function assertReviewedShape(snapshot: LiveCleanupSnapshot): void {
     const channel = snapshot.channels.find((item) => item.id === id);
     if (!channel || channel.type === 4) throw new Error(`Reviewed legacy channel ${id} is missing or is a category.`);
     if (!channel.parent_id || !LEGACY_CATEGORY_IDS.includes(channel.parent_id as never)) throw new Error(`Reviewed legacy channel ${id} is not under a reviewed legacy category.`);
-    const parent = snapshot.channels.find((item) => item.id === channel.parent_id)!;
-    if (stable(normalizeOverwrites(channel.permission_overwrites ?? [])) !== stable(normalizeOverwrites(parent.permission_overwrites ?? []))) {
-      throw new Error(`Reviewed legacy channel ${id} is permission-unsynchronized from category ${parent.id}; category-only archive cannot prove it will inherit the deny.`);
-    }
   }
   const reviewedUntouchedShapes = new Map([
     ['1545924265868525588', { type: 4, parentId: null }],
@@ -289,19 +307,29 @@ export function assertHierarchy(snapshot: LiveCleanupSnapshot): void {
 export function planArchiveOperations(snapshot: LiveCleanupSnapshot): CleanupOperation[] {
   assertReviewedShape(snapshot);
   assertHierarchy(snapshot);
-  return [...LEGACY_CATEGORY_IDS].sort().map((objectId, index) => {
-    const category = snapshot.channels.find((channel) => channel.id === objectId)!;
-    const before = normalizeOverwrites(category.permission_overwrites ?? []);
-    const write = archiveEveryoneOverwrite(snapshot.guildId, before);
-    assertArchiveVisibility(snapshot, category, write);
-    const body = { phase: ARCHIVE_PHASE, objectId, expectedBefore: { permission_overwrites: before }, write: { permission_overwrites: write }, inverseWrite: { permission_overwrites: before } };
+  const channels = [...LEGACY_CHANNEL_IDS].sort().flatMap((objectId) => {
+    const channel = snapshot.channels.find((item) => item.id === objectId)!;
+    const parent = snapshot.channels.find((item) => item.id === channel.parent_id)!;
+    const synchronized = stable(normalizeOverwrites(channel.permission_overwrites ?? [])) === stable(normalizeOverwrites(parent.permission_overwrites ?? []));
+    return synchronized ? [] : [{ objectId, objectType: 'channel' as const }];
+  });
+  const categories = [...LEGACY_CATEGORY_IDS].sort().map((objectId) => ({ objectId, objectType: 'category' as const }));
+  const writes = [...channels, ...categories].map(({ objectId, objectType }) => {
+    const target = snapshot.channels.find((channel) => channel.id === objectId)!;
+    const before = normalizeOverwrites(target.permission_overwrites ?? []);
+    const write = archiveVisibilityOverwrites(snapshot, target, before);
+    return { objectId, objectType, before, write };
+  });
+  return writes.map(({ objectId, objectType, before, write }, index) => {
+    const kind = objectType === 'category' ? 'patch-category-overwrites' as const : 'patch-channel-overwrites' as const;
+    const body = { phase: ARCHIVE_PHASE, kind, objectType, objectId, expectedBefore: { permission_overwrites: before }, write: { permission_overwrites: write }, inverseWrite: { permission_overwrites: before } };
     return {
       version: 1,
       sequence: index + 1,
-      id: `archive-legacy:${String(index + 1).padStart(3, '0')}:${objectId}:${sha256(body).slice(0, 16)}`,
+      id: `archive-legacy:${String(index + 1).padStart(3, '0')}:${objectType}:${objectId}:${sha256(body).slice(0, 16)}`,
       phase: ARCHIVE_PHASE,
-      kind: 'patch-category-overwrites',
-      objectType: 'category',
+      kind,
+      objectType,
       objectId,
       expectedBefore: { permission_overwrites: before },
       write: { permission_overwrites: write },

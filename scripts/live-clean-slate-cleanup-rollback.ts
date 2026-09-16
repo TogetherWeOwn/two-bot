@@ -182,10 +182,24 @@ if (!botMember || !roles.some((role) => botMember.roles?.includes(role.id) && (B
 const preRollbackChannels = await mustGet<Channel[]>(`/guilds/${guildId}/channels`, 'Read rollback channel preflight');
 if (stable(preRollbackChannels.map((channel) => channel.id).sort()) !== stable(snapshot.channels.map((channel) => channel.id).sort())) die(1, 'Rollback preflight channel/category inventory drifted from the pre-snapshot.');
 const preRollbackById = new Map(preRollbackChannels.map((channel) => [channel.id, channel]));
-function operationState(operation: CleanupManifest['operations'][number], channels: Map<string, Channel>): 'applied' | 'inverse' | 'mixed' | 'drifted' {
-  const affected = [operation.objectId, ...snapshot.channels.filter((channel) => channel.parent_id === operation.objectId).map((channel) => channel.id)];
+function operationState(operation: CleanupManifest['operations'][number], channels: Map<string, Channel>): 'applied' | 'inverse' | 'parent_inverse' | 'mixed' | 'drifted' {
   const expectedApplied = stable(normalizeOverwrites(operation.write.permission_overwrites));
   const expectedInverse = stable(normalizeOverwrites(operation.inverseWrite.permission_overwrites));
+  if (operation.objectType === 'channel') {
+    const current = channels.get(operation.objectId);
+    if (!current) return 'drifted';
+    const overwrites = stable(normalizeOverwrites(current.permission_overwrites ?? []));
+    if (expectedApplied === expectedInverse && overwrites === expectedInverse) return 'inverse';
+    if (overwrites === expectedApplied) return 'applied';
+    if (overwrites === expectedInverse) return 'inverse';
+    const original = snapshot.channels.find((channel) => channel.id === operation.objectId)!;
+    const parentOperation = manifest.operations.find((item) => item.objectType === 'category' && item.objectId === original.parent_id);
+    if (parentOperation && overwrites === stable(normalizeOverwrites(parentOperation.inverseWrite.permission_overwrites))) return 'parent_inverse';
+    return 'drifted';
+  }
+  const affected = [operation.objectId, ...snapshot.channels
+    .filter((channel) => channel.parent_id === operation.objectId && stable(normalizeOverwrites(channel.permission_overwrites ?? [])) === expectedInverse)
+    .map((channel) => channel.id)];
   const states = affected.map((id) => {
     const current = channels.get(id);
     if (!current) return 'drifted';
@@ -195,6 +209,7 @@ function operationState(operation: CleanupManifest['operations'][number], channe
     return 'drifted';
   });
   if (states.includes('drifted')) return 'drifted';
+  if (expectedApplied === expectedInverse && states.every((state) => state === 'applied')) return 'inverse';
   if (states.every((state) => state === 'applied')) return 'applied';
   if (states.every((state) => state === 'inverse')) return 'inverse';
   return 'mixed';

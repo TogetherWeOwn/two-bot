@@ -14,6 +14,7 @@ import {
   type Channel,
   type CleanupManifest,
   type JsonObject,
+  normalizeOverwrites,
   operationSemanticHash,
   type Role,
   stable,
@@ -48,62 +49,43 @@ type Stub = {
   close(): Promise<void>;
 };
 type Run = { code: number; stdout: string; stderr: string };
+type PermissionDriftFixture = {
+  capturedAt: string;
+  guildId: string;
+  mismatchCount: number;
+  mismatches: Array<{
+    channelId: string;
+    parentId: string;
+    channelOverwrites: Channel['permission_overwrites'];
+    parentOverwrites: Channel['permission_overwrites'];
+  }>;
+};
+const PERMISSION_DRIFT = JSON.parse(readFileSync(fileURLToPath(new URL('./fixtures/live-cleanup-permission-drift.json', import.meta.url)), 'utf8')) as PermissionDriftFixture;
+const PRODUCTION_STATE = JSON.parse(readFileSync(fileURLToPath(new URL('./fixtures/live-cleanup-production-state.json', import.meta.url)), 'utf8')) as State;
+const EXPECTED_OPERATIONS = JSON.parse(readFileSync(fileURLToPath(new URL('./fixtures/live-cleanup-expected-operations.json', import.meta.url)), 'utf8')) as {
+  operationCount: number;
+  operationSemanticHash: string;
+  operations: Array<{ sequence: number; id: string; objectType: 'category' | 'channel'; objectId: string }>;
+};
 
 function fixtureState(): State {
-  const everyone = { id: LIVE_GUILD_ID, type: 0, allow: VIEW, deny: '0' };
-  const channels: Channel[] = [];
-  for (const [index, id] of ACTIVE_CATEGORY_IDS.entries()) channels.push({ id, name: `active-category-${index}`, type: 4, parent_id: null, position: index, permission_overwrites: [everyone] });
-  for (const [index, id] of ACTIVE_CHANNEL_IDS.entries()) channels.push({ id, name: `active-channel-${index}`, type: 0, parent_id: ACTIVE_CATEGORY_IDS[index % ACTIVE_CATEGORY_IDS.length]!, position: index, topic: `history-${id}`, permission_overwrites: [everyone] });
-  for (const [index, id] of LEGACY_CATEGORY_IDS.entries()) channels.push({
-    id,
-    name: `legacy-category-${index}`,
-    type: 4,
-    parent_id: null,
-    position: 100 + index,
-    permission_overwrites: [
-      everyone,
-      { id: ID(50), type: 0, allow: '0', deny: String((1n << 10n) | (1n << 11n)) },
-      { id: ID(51), type: 0, allow: VIEW, deny: '0' },
-    ],
+  const state = structuredClone(PRODUCTION_STATE);
+  assert.equal(state.guild.id, LIVE_GUILD_ID);
+  const mismatches = state.channels.filter((channel) => LEGACY_CHANNEL_IDS.includes(channel.id as never)).filter((channel) => {
+    const parent = state.channels.find((item) => item.id === channel.parent_id)!;
+    return stable(normalizeOverwrites(channel.permission_overwrites)) !== stable(normalizeOverwrites(parent.permission_overwrites));
   });
-  for (const [index, id] of LEGACY_CHANNEL_IDS.entries()) channels.push({
-    id,
-    name: `legacy-channel-${index}`,
-    type: index % 7 === 0 ? 2 : 0,
-    parent_id: LEGACY_CATEGORY_IDS[index % LEGACY_CATEGORY_IDS.length]!,
-    position: 200 + index,
-    topic: `preserved-history-${id}`,
-    permission_overwrites: [
-      everyone,
-      { id: ID(50), type: 0, allow: '0', deny: String((1n << 10n) | (1n << 11n)) },
-      { id: ID(51), type: 0, allow: VIEW, deny: '0' },
-    ],
-  });
-  channels.push({ id: '1545924265868525588', name: '💬 CHAT', type: 4, parent_id: null, permission_overwrites: [] });
-  channels.push({ id: '1545924268489973841', name: 'looking-to-play', type: 0, parent_id: '1545924265868525588', permission_overwrites: [] });
-  channels.push({ id: '1545924265247903884', name: '📌 START HERE', type: 4, parent_id: null, permission_overwrites: [] });
-  channels.push({ id: '1545924267453976696', name: '⚙️ SYSTEM', type: 4, parent_id: null, permission_overwrites: [] });
-  return {
-    guild: { id: LIVE_GUILD_ID, name: LIVE_GUILD_NAME, owner_id: ID(99), application_id: null, features: ['COMMUNITY'] },
-    roles: [
-      { id: LIVE_GUILD_ID, name: '@everyone', managed: false, permissions: '0', position: 0 },
-      { id: ID(1), name: 'Owen', managed: true, permissions: ADMIN, position: 200, tags: { bot_id: LIVE_BOT_APPLICATION_ID } },
-      { id: ID(50), name: 'Explicit deny', managed: false, permissions: '0', position: 10 },
-      { id: ID(51), name: 'Required integration', managed: true, permissions: '0', position: 20, tags: { integration_id: ID(52) } },
-    ],
-    channels,
-    integrations: [{ id: ID(52), name: 'kept integration', application: { id: ID(53) }, role_id: ID(51) }],
-    application: { id: LIVE_BOT_APPLICATION_ID, name: 'Owen' },
-    members: [
-      { user: { id: LIVE_BOT_APPLICATION_ID, username: 'Owen', bot: true }, roles: [ID(1)], premium_since: null, pending: false },
-      { user: { id: ID(60), username: 'holder', bot: false }, roles: [ID(50)], premium_since: null, pending: false },
-      { user: { id: ID(61), username: 'integration', bot: true }, roles: [ID(51)], premium_since: null, pending: false },
-    ],
-  };
+  assert.equal(mismatches.length, PERMISSION_DRIFT.mismatchCount);
+  assert.deepEqual(mismatches.map((channel) => channel.id).sort(), PERMISSION_DRIFT.mismatches.map((mismatch) => mismatch.channelId).sort());
+  return state;
 }
 
 async function stubDiscord(): Promise<Stub> {
   const state = fixtureState();
+  const syncedChildren = new Set(state.channels.filter((channel) => {
+    const parent = state.channels.find((item) => item.id === channel.parent_id);
+    return parent && stable(channel.permission_overwrites) === stable(parent.permission_overwrites);
+  }).map((channel) => channel.id));
   const writes: Stub['writes'] = [];
   const writeOrder: string[] = [];
   const rollbackOrder: string[] = [];
@@ -145,8 +127,13 @@ async function stubDiscord(): Promise<Stub> {
         channel.permission_overwrites = structuredClone(overwrites);
         if (channel.type === 4) {
           for (const child of state.channels.filter((item) => item.parent_id === channel.id)) {
-            child.permission_overwrites = structuredClone(overwrites);
+            if (syncedChildren.has(child.id)) child.permission_overwrites = structuredClone(overwrites);
+            if (stable(child.permission_overwrites) === stable(overwrites)) syncedChildren.add(child.id);
           }
+        } else if (channel.parent_id) {
+          const parent = state.channels.find((item) => item.id === channel.parent_id)!;
+          if (stable(channel.permission_overwrites) === stable(parent.permission_overwrites)) syncedChildren.add(channel.id);
+          else syncedChildren.delete(channel.id);
         }
         return send(200, channel);
       });
@@ -197,6 +184,19 @@ const cleanupArgs = (dir: string, apply = false) => ['--phase', 'archive-legacy'
 const manifestPath = (dir: string) => join(dir, 'phase-01', 'rollback.json');
 const planManifestPath = (dir: string) => join(dir, 'plan', 'rollback.json');
 
+function operationChangesState(operation: CleanupManifest['operations'][number]): boolean {
+  return stable(operation.write.permission_overwrites) !== stable(operation.inverseWrite.permission_overwrites);
+}
+
+function rollbackRequiresPatch(manifest: CleanupManifest, snapshotChannels: Channel[], operation: CleanupManifest['operations'][number]): boolean {
+  if (operationChangesState(operation)) return true;
+  if (operation.objectType !== 'channel') return false;
+  const original = snapshotChannels.find((channel) => channel.id === operation.objectId)!;
+  const parentOperation = manifest.operations.find((item) => item.objectType === 'category' && item.objectId === original.parent_id)!;
+  return operationChangesState(parentOperation)
+    && stable(operation.inverseWrite.permission_overwrites) === stable(parentOperation.write.permission_overwrites);
+}
+
 async function plan(stub: Stub, dir: string): Promise<Run> {
   return run(CLEANUP, cleanupArgs(dir), { MAIN_GUILD_API_BASE: stub.base });
 }
@@ -207,20 +207,42 @@ async function rollback(stub: Stub, dir: string): Promise<Run> {
   return run(ROLLBACK, ['--manifest', manifestPath(dir), '--confirm-main-guild', '--apply'], { MAIN_GUILD_API_BASE: stub.base });
 }
 
-test('production-shaped fixture pins 18 stable operations and dry-run writes nothing', async () => {
+test('production-shaped 51-channel drift fixture pins 69 stable operations and dry-run writes nothing', async () => {
   const stub = await stubDiscord();
   try {
+    const runtimeMismatches = stub.state.channels.filter((channel) => LEGACY_CHANNEL_IDS.includes(channel.id as never)).filter((channel) => {
+      const parent = stub.state.channels.find((item) => item.id === channel.parent_id)!;
+      return stable(normalizeOverwrites(channel.permission_overwrites)) !== stable(normalizeOverwrites(parent.permission_overwrites));
+    });
+    assert.equal(runtimeMismatches.length, PERMISSION_DRIFT.mismatchCount);
+    assert.deepEqual(runtimeMismatches.map((channel) => channel.id).sort(), PERMISSION_DRIFT.mismatches.map((mismatch) => mismatch.channelId).sort());
     const firstDir = mkdtempSync(join(tmpdir(), 'two-live-clean-plan-'));
     const first = await plan(stub, firstDir);
     assert.equal(first.code, 0, first.stderr);
     assert.equal(stub.writes.length, 0);
     const firstManifest = JSON.parse(readFileSync(planManifestPath(firstDir), 'utf8')) as CleanupManifest;
-    assert.equal(firstManifest.operationCount, 18);
+    assert.equal(firstManifest.operationCount, EXPECTED_OPERATIONS.operationCount);
     assert.equal(firstManifest.reviewedLegacyChannelIds.length, 112);
     assert.equal(firstManifest.reviewedLegacyCategoryIds.length, 18);
     assert.equal(firstManifest.operationSemanticHash, operationSemanticHash(firstManifest.operations));
-    assert.equal(new Set(firstManifest.operations.map((operation) => operation.id)).size, 18);
-    assert.ok(firstManifest.operations.every((operation, index) => operation.sequence === index + 1));
+    assert.equal(firstManifest.operationSemanticHash, EXPECTED_OPERATIONS.operationSemanticHash);
+    assert.equal(new Set(firstManifest.operations.map((operation) => operation.id)).size, EXPECTED_OPERATIONS.operationCount);
+    assert.equal(firstManifest.operations.filter((operation) => operation.objectType === 'category').length, 18);
+    const channelOperations = firstManifest.operations.filter((operation) => operation.objectType === 'channel');
+    assert.equal(channelOperations.length, 51);
+    assert.deepEqual(firstManifest.operations.map(({ sequence, id, objectType, objectId }) => ({ sequence, id, objectType, objectId })), EXPECTED_OPERATIONS.operations);
+    for (const operation of channelOperations) {
+      const mismatch = PERMISSION_DRIFT.mismatches.find((item) => item.channelId === operation.objectId)!;
+      assert.equal(stable(operation.expectedBefore.permission_overwrites), stable(mismatch.channelOverwrites));
+      assert.equal(stable(operation.inverseWrite.permission_overwrites), stable(mismatch.channelOverwrites));
+      for (const original of mismatch.channelOverwrites) {
+        const updated = operation.write.permission_overwrites.find((overwrite) => overwrite.id === original.id && overwrite.type === original.type)!;
+        assert.equal(BigInt(updated.allow) & ~BigInt(VIEW), BigInt(original.allow) & ~BigInt(VIEW));
+        assert.equal(BigInt(updated.deny) & ~BigInt(VIEW), BigInt(original.deny) & ~BigInt(VIEW));
+      }
+      const everyone = operation.write.permission_overwrites.find((overwrite) => overwrite.id === LIVE_GUILD_ID && overwrite.type === 0)!;
+      assert.notEqual(BigInt(everyone.deny) & BigInt(VIEW), 0n);
+    }
     for (const file of ['snapshot/pre.json', 'snapshot/holders.csv', 'snapshot/references.json', 'plan/operations.json', 'plan/rollback.json', 'plan.log']) {
       const path = join(firstDir, file);
       assert.ok(existsSync(path), file);
@@ -235,29 +257,48 @@ test('production-shaped fixture pins 18 stable operations and dry-run writes not
   } finally { await stub.close(); }
 });
 
-test('unmanaged role visibility allow is refused because @everyone deny would not keep legacy channels hidden', async () => {
+test('unmanaged role visibility is neutralized with an additive member deny', async () => {
   const stub = await stubDiscord();
   try {
+    const roleId = ID(50);
+    const memberId = ID(60);
+    stub.state.roles.push({ id: roleId, name: 'fixture-visible-role', managed: false, permissions: '0', position: 10 });
+    stub.state.members.push({ user: { id: memberId, username: 'fixture-holder', bot: false }, roles: [roleId], premium_since: null, pending: false });
     const category = stub.state.channels.find((channel) => channel.id === LEGACY_CATEGORY_IDS[0])!;
-    category.permission_overwrites.push({ id: ID(50), type: 0, allow: VIEW, deny: '0' });
+    category.permission_overwrites.push({ id: roleId, type: 0, allow: VIEW, deny: '0' });
     for (const child of stub.state.channels.filter((channel) => channel.parent_id === category.id)) {
       child.permission_overwrites = structuredClone(category.permission_overwrites);
     }
-    const result = await plan(stub, mkdtempSync(join(tmpdir(), 'two-live-clean-visible-role-')));
-    assert.equal(result.code, 1);
-    assert.match(result.stderr, /unmanaged role View Channel allow|remains visible/);
+    const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-visible-role-'));
+    const result = await plan(stub, dir);
+    assert.equal(result.code, 0, result.stderr);
     assert.equal(stub.writes.length, 0);
+    const manifest = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    const operation = manifest.operations.find((item) => item.objectId === category.id)!;
+    assert.ok(operation.write.permission_overwrites.some((overwrite) => overwrite.id === roleId && overwrite.type === 0 && overwrite.allow === VIEW));
+    const memberDeny = operation.write.permission_overwrites.find((overwrite) => overwrite.id === memberId && overwrite.type === 1)!;
+    assert.notEqual(BigInt(memberDeny.deny) & BigInt(VIEW), 0n);
   } finally { await stub.close(); }
 });
 
-test('permission-unsynchronized legacy child is refused because category archive would not prove it hidden', async () => {
+test('additional permission drift becomes a child PATCH that preserves explicit overwrites', async () => {
   const stub = await stubDiscord();
   try {
-    stub.state.channels.find((channel) => channel.id === LEGACY_CHANNEL_IDS[0])!.permission_overwrites = [{ id: ID(51), type: 0, allow: VIEW, deny: '0' }];
-    const result = await plan(stub, mkdtempSync(join(tmpdir(), 'two-live-clean-unsynchronized-')));
-    assert.equal(result.code, 1);
-    assert.match(result.stderr, /permission-unsynchronized/);
+    const reviewedDriftIds = new Set(PERMISSION_DRIFT.mismatches.map((mismatch) => mismatch.channelId));
+    const channelId = LEGACY_CHANNEL_IDS.find((id) => !reviewedDriftIds.has(id))!;
+    const channel = stub.state.channels.find((item) => item.id === channelId)!;
+    const explicit = [{ id: ID(51), type: 0, allow: VIEW, deny: '0' }];
+    channel.permission_overwrites = structuredClone(explicit);
+    const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-additional-drift-'));
+    const result = await plan(stub, dir);
+    assert.equal(result.code, 0, result.stderr);
     assert.equal(stub.writes.length, 0);
+    const manifest = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    assert.equal(manifest.operationCount, 70);
+    const operation = manifest.operations.find((item) => item.objectId === channelId)!;
+    assert.equal(operation.objectType, 'channel');
+    assert.equal(stable(operation.inverseWrite.permission_overwrites), stable(explicit));
+    assert.equal(stable(operation.write.permission_overwrites.filter((overwrite) => overwrite.id !== LIVE_GUILD_ID)), stable(explicit));
   } finally { await stub.close(); }
 });
 
@@ -269,10 +310,16 @@ test('reviewed untouched objects and legacy-category children must retain their 
     startHere.type = 0;
     startHere.parent_id = parent.id;
     startHere.permission_overwrites = [...parent.permission_overwrites, { id: ID(50), type: 0, allow: VIEW, deny: '0' }];
-    const result = await plan(movedStub, mkdtempSync(join(tmpdir(), 'two-live-clean-moved-untouched-')));
+    const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-moved-untouched-'));
+    const result = await plan(movedStub, dir);
     assert.equal(result.code, 1);
     assert.match(result.stderr, /pinned type and parent|unexpected child/);
     assert.equal(movedStub.writes.length, 0);
+    assert.ok(existsSync(join(dir, 'snapshot', 'pre.json')), 'planning refusal must preserve the fresh pre-snapshot');
+    assert.ok(existsSync(join(dir, 'snapshot', 'holders.csv')));
+    assert.ok(existsSync(join(dir, 'snapshot', 'references.json')));
+    assert.ok(existsSync(join(dir, 'plan.log')));
+    assert.ok(!existsSync(join(dir, 'plan', 'operations.json')));
   } finally { await movedStub.close(); }
 
   const extraChildStub = await stubDiscord();
@@ -378,7 +425,8 @@ test('stale snapshot, wrong application/guild token, and hierarchy refusal fail 
     const wrongGuild = await run(CLEANUP, cleanupArgs(mkdtempSync(join(tmpdir(), 'two-live-clean-wrong-guild-'))), { DISCORD_GUILD_ID: ID(997), MAIN_GUILD_API_BASE: 'http://127.0.0.1:1/api/v10' });
     assert.equal(wrongGuild.code, 2);
 
-    stub.state.roles.find((role) => role.name === 'Owen')!.permissions = '0';
+    const owen = stub.state.members.find((member) => member.user.id === LIVE_BOT_APPLICATION_ID)!;
+    stub.state.roles.find((role) => owen.roles.includes(role.id) && (BigInt(role.permissions) & BigInt(ADMIN)) !== 0n)!.permissions = '0';
     const hierarchy = await plan(stub, mkdtempSync(join(tmpdir(), 'two-live-clean-noadmin-')));
     assert.equal(hierarchy.code, 1);
     assert.match(hierarchy.stderr, /Administrator/);
@@ -408,7 +456,7 @@ test('429 and partial failure stop immediately with a recoverable manifest', asy
     assert.equal((await apply(resumeStub, resumeDir)).code, 1);
     const resumed = await apply(resumeStub, resumeDir);
     assert.equal(resumed.code, 0, resumed.stderr);
-    assert.equal(resumeStub.writeOrder.length, 18);
+    assert.equal(resumeStub.writeOrder.length, 68);
   } finally { await resumeStub.close(); }
 
   const partialStub = await stubDiscord();
@@ -436,26 +484,50 @@ test('interrupted apply resumes without replay, then rollback restores exact sem
     assert.equal(stub.writes.length, 3);
     const resumed = await apply(stub, dir);
     assert.equal(resumed.code, 0, resumed.stderr);
-    assert.equal(stub.writeOrder.length, 18);
-    assert.equal(new Set(stub.writeOrder).size, 18, 'retry must not replay completed writes');
+    assert.equal(stub.writeOrder.length, 69);
+    assert.equal(new Set(stub.writeOrder).size, 69, 'retry must not replay completed writes');
     assert.equal(stub.state.channels.length, before.length, 'channel IDs/history must be preserved');
     for (const original of before) assert.equal(stub.state.channels.find((channel) => channel.id === original.id)?.topic, original.topic);
 
     const manifest = JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest;
     assert.equal(manifest.status, 'applied');
     assert.ok(manifest.operations.every((operation) => operation.state === 'applied'));
-    const interruptedRollback = manifest.operations.at(-1)!;
+    const interruptedRollback = manifest.operations.findLast(operationChangesState)!;
     stub.state.channels.find((channel) => channel.id === interruptedRollback.objectId)!.permission_overwrites = structuredClone(interruptedRollback.inverseWrite.permission_overwrites);
     for (const child of stub.state.channels.filter((channel) => channel.parent_id === interruptedRollback.objectId)) {
       child.permission_overwrites = structuredClone(interruptedRollback.inverseWrite.permission_overwrites);
     }
+    const expectedRollbackOrder = manifest.operations
+      .filter((operation) => operation.id !== interruptedRollback.id && rollbackRequiresPatch(manifest, before, operation))
+      .reverse()
+      .map((operation) => operation.objectId);
+    const rollbackWritesBefore = stub.writes.length;
     const rolledBack = await rollback(stub, dir);
     assert.equal(rolledBack.code, 0, rolledBack.stderr);
-    assert.deepEqual(stub.rollbackOrder, [...stub.writeOrder].reverse().slice(1));
+    const rollbackRequestOrder = stub.writes.slice(rollbackWritesBefore).map((write) => /\/channels\/(\d+)$/.exec(write.path)![1]);
+    assert.deepEqual(rollbackRequestOrder, expectedRollbackOrder);
     assert.equal(stable(stub.state.channels), stable(before));
     const finalManifest = JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest;
     assert.equal(finalManifest.status, 'rolled_back');
     assert.ok(finalManifest.operations.every((operation) => operation.state === 'rolled_back'));
+  } finally { await stub.close(); }
+});
+
+test('rollback accepts pending no-op operations after an interrupted apply', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-interrupted-rollback-'));
+  const before = structuredClone(stub.state.channels);
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    const interrupted = await apply(stub, dir, { LIVE_CLEANUP_TEST_ABORT_AFTER_WRITES: '2' });
+    assert.equal(interrupted.code, 86);
+    const manifest = JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest;
+    assert.ok(manifest.operations.some((operation) => operation.state === 'pending' && stable(operation.write.permission_overwrites) === stable(operation.inverseWrite.permission_overwrites)));
+    const result = await rollback(stub, dir);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(stable(stub.state.channels), stable(before));
+    const finalManifest = JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest;
+    assert.equal(finalManifest.status, 'rolled_back');
   } finally { await stub.close(); }
 });
 
@@ -467,12 +539,15 @@ test('rollback repairs a mixed category/child state before checkpointing and rem
     assert.equal((await plan(stub, dir)).code, 0);
     assert.equal((await apply(stub, dir)).code, 0);
     const manifest = JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest;
-    const mixed = manifest.operations.at(-1)!;
+    const mixed = manifest.operations.findLast((operation) => operation.objectType === 'category'
+      && stable(operation.write.permission_overwrites) !== stable(operation.inverseWrite.permission_overwrites)
+      && before.some((channel) => channel.parent_id === operation.objectId && stable(channel.permission_overwrites) === stable(operation.inverseWrite.permission_overwrites)))!;
     stub.state.channels.find((channel) => channel.id === mixed.objectId)!.permission_overwrites = structuredClone(mixed.inverseWrite.permission_overwrites);
-    const rollbackWritesBefore = stub.rollbackOrder.length;
+    const expectedRollbackWrites = manifest.operations.filter((operation) => rollbackRequiresPatch(manifest, before, operation)).length;
+    const rollbackWritesBefore = stub.writes.length;
     const result = await rollback(stub, dir);
     assert.equal(result.code, 0, result.stderr);
-    assert.equal(stub.rollbackOrder.length - rollbackWritesBefore, 18, 'mixed state must PATCH the category rather than checkpoint it');
+    assert.equal(stub.writes.length - rollbackWritesBefore, expectedRollbackWrites, 'mixed state must PATCH the category rather than checkpoint it');
     assert.equal(stable(stub.state.channels), stable(before));
     const finalManifest = JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest;
     assert.equal(finalManifest.status, 'rolled_back');
