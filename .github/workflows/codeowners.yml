@@ -46,10 +46,17 @@ permissions:
 
 jobs:
   owners-resolve:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
+
+      - name: Install GitHub CLI
+        run: |
+          if ! command -v gh >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y gh
+          fi
 
       # The checker's own ability to fail, re-proved before it is trusted.
       # Offline, no credential: every case is a saved response. A check nobody
