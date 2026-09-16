@@ -1,0 +1,139 @@
+# Auto-Voice-Channels (AVC) — second Discord bot on the LIVE TWO guild. TOG-3052.
+#
+# This is a STOCK, UNMODIFIED deployment of GregZaal/Auto-Voice-Channels. We
+# configure it; we do not fork it. The upstream tree is AGPL-3.0-only, so the
+# load-bearing constraint on this whole directory is: CHANGE NO UPSTREAM SOURCE
+# FILE. This file is ours and builds *from* upstream by git context — it copies
+# nothing out of their tree, so `two-bot` stays proprietary and our AGPL §13
+# source offer is discharged by pointing at the exact pinned commit below.
+#
+# Why we do not just run upstream's own docker-compose.yml: it publishes
+# Postgres on host :5432 and the bot on host :8477. On this VPS 5432 is already
+# the owner's Postgres, and publishing a database with the password `postgres`
+# (upstream's self-host default) onto a public host is not acceptable. Fixing
+# that in their file would mean editing upstream. So we build their Dockerfile
+# and declare our own runtime here instead.
+#
+# Deployed as its own Coolify "Docker Compose" application, separate from the
+# two-bot app: its own container, its own Postgres, its own volume. See README.md
+# in this directory for the operator runbook and the rollback.
+
+services:
+  postgres:
+    # AVC keeps ALL of its state in Postgres — guild settings, the creator
+    # channel, templates, and every channel it is tracking. There is no config
+    # file; this volume IS the bot's configuration. Pinned by digest to match
+    # upstream's own compose (tag: postgres:16-alpine).
+    image: postgres:16-alpine@sha256:16bc17c64a573ef34162af9298258d1aec548232985b33ed7b1eac33ba35c229
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: avc
+      POSTGRES_DB: avc
+      # No default on purpose. Upstream's self-host default is `postgres`, which
+      # is fine for a laptop and not for this box. Mark it secret in Coolify.
+      POSTGRES_PASSWORD: ${AVC_POSTGRES_PASSWORD:?set AVC_POSTGRES_PASSWORD}
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U avc -d avc']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # No `ports:`. Upstream's compose publishes 5432 to the host; that would
+    # collide with the owner's existing Postgres and expose this one. The bot
+    # reaches it over the compose network by service name.
+    volumes:
+      - avc-pgdata:/var/lib/postgresql/data
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '5'
+
+  bot:
+    build:
+      # Pinned to an exact upstream commit, NOT a branch or a tag. `main` moves
+      # and v2.1.1 is already behind it (v2.1.1 = 48e0c3d0, main = 8fab5e8d).
+      # This string is also the AGPL §13 source pointer we publish.
+      #
+      # Overridable so the operator can build from a VPS-local bare mirror if
+      # the build host cannot reach github.com. Keep the `#<sha>` fragment
+      # whatever you point it at — an unpinned context makes the deploy
+      # unreproducible and silently moves the code under a running bot.
+      context: ${AVC_GIT_CONTEXT:-https://github.com/GregZaal/Auto-Voice-Channels.git#8fab5e8d78aa252195dcea1bcd3d313cb1ba0802}
+      dockerfile: Dockerfile
+      args:
+        # Upstream surfaces this on /health and /diagnostics. Without it the
+        # running container reports `dev` and we cannot prove what is deployed.
+        GIT_COMMIT: ${AVC_GIT_COMMIT:-8fab5e8d78aa252195dcea1bcd3d313cb1ba0802}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+    environment:
+      # --- Required. No defaults on purpose. -------------------------------
+      # The AVC bot token (Discord application 1549879082085515364, "Auto-Voice").
+      # Held as Paperclip secret `AVC_DISCORD_BOT_TOKEN`. Mark it secret in
+      # Coolify so it is write-only in the UI and masked in build logs.
+      # This is a DIFFERENT application from Owen — do not reuse Owen's token.
+      DISCORD_TOKEN: ${AVC_DISCORD_BOT_TOKEN:?set AVC_DISCORD_BOT_TOKEN}
+      # Discord application id. Public, not a secret.
+      CLIENT_ID: ${AVC_CLIENT_ID:?set AVC_CLIENT_ID}
+      # Inside the compose network Postgres answers to `postgres`, not localhost.
+      DATABASE_URL: postgres://avc:${AVC_POSTGRES_PASSWORD:?set AVC_POSTGRES_PASSWORD}@postgres:5432/avc
+
+      # --- Behaviour -------------------------------------------------------
+      # Container always serves on 8080; nothing is published to the host.
+      HTTP_PORT: '8080'
+      NODE_ENV: production
+      INSTANCE_ID: two-live
+      LOG_LEVEL: ${AVC_LOG_LEVEL:-info}
+      # A text channel id. Errors AVC could not handle are posted there; without
+      # it they only reach container logs, where nobody sees them. Strongly
+      # recommended before live activation — this is the only channel through
+      # which a permissions failure on Squad becomes visible to a human.
+      ADMIN_CHANNEL_ID: ${AVC_ADMIN_CHANNEL_ID:-}
+      # Heartbeat/push monitor URL (Uptime Kuma, healthchecks.io, ...). Upstream
+      # GETs it every minute while healthy and stops when it is running but not
+      # working, so a missed beat means "look at this", not just "process died".
+      # Must be a heartbeat/push check, NOT a chat webhook: a webhook answers a
+      # GET without posting, so you would watch a green monitor forever.
+      WATCHDOG_PING_URL: ${AVC_WATCHDOG_PING_URL:-}
+      # Guards GET /diagnostics, which exposes shard topology and every runtime
+      # flag. Nothing is published to the host so it is not reachable off-box,
+      # but set it anyway: `docker compose exec` is not the only way in.
+      DIAGNOSTICS_TOKEN: ${AVC_DIAGNOSTICS_TOKEN:-}
+
+    # No `ports:`. AVC makes outbound connections to Discord and Postgres and
+    # needs nothing inbound from the internet. Coolify reaches /health on the
+    # container network. Upstream's compose maps 8477->8080 for laptop use; on
+    # this host that is an unauthenticated endpoint we do not want published.
+    expose:
+      - '8080'
+
+    healthcheck:
+      # Upstream reports per subsystem here (database, shard leases, gateway),
+      # so a green check means the gateway is connected and Postgres answers —
+      # not merely that a process exists.
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 5s
+      # Cold start connects to the gateway and runs migrations before it can be
+      # healthy; being killed mid-connect is how a crash loop against Discord's
+      # identify budget begins.
+      start_period: 60s
+      retries: 3
+
+    logging:
+      driver: json-file
+      options:
+        max-size: '10m'
+        max-file: '5'
+
+volumes:
+  # THE durable artifact of this deployment. `docker compose down` keeps it;
+  # `docker compose down -v` destroys every setting and every tracked channel.
+  avc-pgdata:
