@@ -50,6 +50,11 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     minTests: 2,
     why: 'parallel Discord audit entries must serialize before destructive containment',
   },
+  {
+    file: 'test/unit.tempvoice.test.ts',
+    minTests: 50,
+    why: 'the "no persisted row, no delete" invariant, and the atomic per-user cap claim behind it',
+  },
 ];
 
 /**

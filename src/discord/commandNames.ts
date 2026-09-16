@@ -4,6 +4,7 @@ import { LEVELING_COMMANDS } from '../leveling/discord.ts';
 import { MODERATION_COMMAND_DATA } from '../moderation/commands.ts';
 import { COMMUNITY_ATTENDANCE_COMMAND } from '../analytics/communityAttendance.ts';
 import { announcementCommandData } from '../announcements/discord.ts';
+import { tempVoiceCommandData } from '../tempVoice/discord.ts';
 
 /** Commands that are always published when a guild is configured. */
 export const CORE_COMMAND_DATA: ApplicationCommandDataResolvable[] = [...LEVELING_COMMANDS];
@@ -17,13 +18,23 @@ export const ANNOUNCEMENT_COMMAND_DATA: ApplicationCommandDataResolvable[] = ann
 /** Staging-gated automation commands, reserved even while publication is off. */
 export const AUTOMATION_COMMAND_DATA: ApplicationCommandDataResolvable[] = automationCommandData();
 
+/** Staging-gated temporary-voice commands (TOG-3052). */
+export const TEMP_VOICE_COMMAND_DATA: ApplicationCommandDataResolvable[] = tempVoiceCommandData();
+
 /**
  * Every name Owen owns, including feature-gated commands. Deriving this set
  * from the command definitions prevents a new built-in from becoming
  * shadowable because somebody forgot to update a second handwritten list.
  */
 export const BUILTIN_COMMAND_NAMES: ReadonlySet<string> = new Set(
-  [...CORE_COMMAND_DATA, ...COMMUNITY_COMMAND_DATA, ...AUTOMATION_COMMAND_DATA, ...ANNOUNCEMENT_COMMAND_DATA, ...MODERATION_COMMAND_DATA].map(commandName),
+  [
+    ...CORE_COMMAND_DATA,
+    ...COMMUNITY_COMMAND_DATA,
+    ...AUTOMATION_COMMAND_DATA,
+    ...ANNOUNCEMENT_COMMAND_DATA,
+    ...TEMP_VOICE_COMMAND_DATA,
+    ...MODERATION_COMMAND_DATA,
+  ].map(commandName),
 );
 
 export function commandName(command: ApplicationCommandDataResolvable): string {
