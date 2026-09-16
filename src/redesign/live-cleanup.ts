@@ -122,6 +122,7 @@ export type CleanupManifest = {
   snapshotGeneratedAt: string;
   snapshotSemanticHash: string;
   planSignature: string;
+  journalSignature: string;
   operationSemanticHash: string;
   operationCount: number;
   reviewedLegacyChannelIds: string[];
@@ -132,9 +133,12 @@ export type CleanupManifest = {
   operations: RollbackEntry[];
 };
 
-// Discord caps a channel at 500 permission overwrites. Additive member denies must
-// never push a reviewed object past that, or the PATCH is rejected mid-phase.
-export const MAX_OVERWRITES_PER_CHANNEL = 500;
+// A project ceiling, deliberately below Discord's own documented limit (error 30060
+// permits 1,000 overwrites per channel). Additive member denies must never push a
+// reviewed object anywhere near that, or the PATCH is rejected mid-phase. The plan's
+// observed maximum is 19, so tripping this means the drift shape changed radically
+// and the phase should be re-reviewed rather than pushed through.
+export const OVERWRITE_CEILING_PER_CHANNEL = 500;
 
 export function stable(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
@@ -150,6 +154,84 @@ export function sha256(value: unknown): string {
 
 export function planSignature(token: string, snapshotGeneratedAt: string, snapshotSemanticHash: string, operationHash: string): string {
   return createHmac('sha256', token).update(stable({ snapshotGeneratedAt, snapshotSemanticHash, operationHash })).digest('hex');
+}
+
+/**
+ * Authenticates the *mutable* half of the manifest, which `planSignature` does not
+ * cover: the phase status and every operation's journal state and timestamps.
+ *
+ * This matters because recovery decisions are driven by journal state — rollback
+ * grants its in-flight exception to whichever operation reads `requesting`. Without
+ * this HMAC, anyone who can write the manifest file could relabel a long-applied
+ * operation `requesting` and have rollback overwrite unrelated live drift for them.
+ * The plan signature is folded into the input so a journal signature cannot be
+ * lifted from a different plan, and the token keys it so a manifest edited outside
+ * a run with the bot token cannot be re-signed.
+ *
+ * Every checkpoint must re-sign before it writes; see `checkpoint()` in the apply
+ * and rollback scripts, which is the only sanctioned way to persist a manifest.
+ */
+export function journalSignature(token: string, manifest: CleanupManifest): string {
+  return createHmac('sha256', token).update(stable({
+    planSignature: manifest.planSignature,
+    status: manifest.status,
+    operations: manifest.operations.map((operation) => ({
+      id: operation.id,
+      state: operation.state,
+      requestStartedAt: operation.requestStartedAt ?? null,
+      appliedAt: operation.appliedAt ?? null,
+      rolledBackAt: operation.rolledBackAt ?? null,
+    })),
+  })).digest('hex');
+}
+
+/**
+ * The children Discord's server-side sync would have carried along with a category
+ * PATCH: exactly those whose pre-snapshot overwrites match the category's, which is
+ * what "synchronized" means. A channel operation carries nothing but itself.
+ *
+ * Recovery reasoning has to be confined to this set. Every other child of the
+ * category is unsynchronized and our PATCH could not have touched it, so if one of
+ * those moved, a third party moved it.
+ */
+export function syncedChildIds(snapshot: Pick<LiveCleanupSnapshot, 'channels'>, operation: CleanupOperation): string[] {
+  if (operation.objectType !== 'category') return [];
+  const parentBefore = stable(normalizeOverwrites(operation.inverseWrite.permission_overwrites));
+  return snapshot.channels
+    .filter((channel) => channel.parent_id === operation.objectId && stable(normalizeOverwrites(channel.permission_overwrites ?? [])) === parentBefore)
+    .map((channel) => channel.id)
+    .sort();
+}
+
+/**
+ * Whether an interrupted operation's live state is one our own PATCH could have
+ * produced, and is therefore covered by the in-flight exception.
+ *
+ * The operation's own object may hold any value — not knowing whether the write
+ * landed is precisely what "in flight" means. Its synchronized children are a
+ * different matter. Our PATCH could only ever have left such a child in one of three
+ * places: still at the pre-write value (the write never reached it), at the
+ * post-write value (it did), or carried to whatever the category itself now holds
+ * (the sync followed a torn write down). A child sitting anywhere else was moved by
+ * a third party, and the exception must not be stretched to cover that — rollback
+ * would otherwise silently clobber someone else's write.
+ */
+export function inFlightDriftIsOurs(
+  snapshot: Pick<LiveCleanupSnapshot, 'channels'>,
+  operation: CleanupOperation,
+  liveOverwritesById: Map<string, Overwrite[]>,
+): boolean {
+  const liveTarget = liveOverwritesById.get(operation.objectId);
+  if (!liveTarget) return false;
+  const explicable = new Set([
+    stable(normalizeOverwrites(operation.expectedBefore.permission_overwrites)),
+    stable(normalizeOverwrites(operation.write.permission_overwrites)),
+    stable(normalizeOverwrites(liveTarget)),
+  ]);
+  return syncedChildIds(snapshot, operation).every((id) => {
+    const live = liveOverwritesById.get(id);
+    return live !== undefined && explicable.has(stable(normalizeOverwrites(live)));
+  });
 }
 
 export function normalizeOverwrites(overwrites: Overwrite[]): Overwrite[] {
@@ -251,8 +333,8 @@ function archiveVisibilityOverwrites(snapshot: LiveCleanupSnapshot, target: Chan
     };
     write = write.map((overwrite, itemIndex) => itemIndex === index ? memberDeny : overwrite);
   }
-  if (write.length > MAX_OVERWRITES_PER_CHANNEL) {
-    throw new Error(`Planned overwrites for ${target.id} (${write.length}) exceed the Discord per-channel limit of ${MAX_OVERWRITES_PER_CHANNEL}.`);
+  if (write.length > OVERWRITE_CEILING_PER_CHANNEL) {
+    throw new Error(`Planned overwrites for ${target.id} (${write.length}) exceed this phase's per-channel ceiling of ${OVERWRITE_CEILING_PER_CHANNEL}.`);
   }
   assertArchiveVisibility(snapshot, target, write);
   return write;
@@ -383,7 +465,7 @@ export function operationSemanticHash(operations: CleanupOperation[]): string {
 
 export function buildManifest(snapshot: LiveCleanupSnapshot, snapshotPath: string, operations: CleanupOperation[], token: string): CleanupManifest {
   const operationHash = operationSemanticHash(operations);
-  return {
+  const manifest: CleanupManifest = {
     version: 1,
     kind: 'live-clean-slate-cleanup',
     phase: ARCHIVE_PHASE,
@@ -395,6 +477,7 @@ export function buildManifest(snapshot: LiveCleanupSnapshot, snapshotPath: strin
     snapshotGeneratedAt: snapshot.generatedAt,
     snapshotSemanticHash: snapshot.semanticHash,
     planSignature: planSignature(token, snapshot.generatedAt, snapshot.semanticHash, operationHash),
+    journalSignature: '',
     operationSemanticHash: operationHash,
     operationCount: operations.length,
     reviewedLegacyChannelIds: [...LEGACY_CHANNEL_IDS],
@@ -404,4 +487,6 @@ export function buildManifest(snapshot: LiveCleanupSnapshot, snapshotPath: strin
     visibilityExemptions: archiveVisibilityExemptions(snapshot),
     operations: operations.map((operation) => ({ ...operation, state: 'pending' })),
   };
+  manifest.journalSignature = journalSignature(token, manifest);
+  return manifest;
 }
