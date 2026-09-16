@@ -12,7 +12,7 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { check, tally, parseResults, POSTGRES_SUITES } from '../scripts/require-suites.ts';
+import { check, tally, parseResults, annotations, POSTGRES_SUITES } from '../scripts/require-suites.ts';
 import type { ReportedTest } from '../scripts/test-report.ts';
 
 const ROOT = '/repo';
@@ -139,4 +139,34 @@ test('reporter output round trips through the parser', () => {
   const text = rows.map((r) => JSON.stringify(r)).join('\n') + '\n';
   assert.deepEqual(parseResults(text), rows);
   assert.deepEqual(parseResults(''), []);
+});
+
+test('a failing test is named in an annotation, because the job log is unreadable', () => {
+  // `actions:read` is withheld, so this line is the only place a red run says
+  // which test broke. A bare exit code is what this exists to replace.
+  const rows = [
+    point('test/e2e.backup.test.ts', { type: 'suite', nesting: 0, name: 'backup round trip', status: 'fail' }),
+    point('test/e2e.backup.test.ts', { name: 'restores an empty database', status: 'fail' }),
+    point('test/e2e.backup.test.ts', { name: 'passes' }),
+  ];
+
+  assert.deepEqual(annotations(rows, [], ROOT), [
+    '::error file=test/e2e.backup.test.ts,title=Failing test::' +
+      'test/e2e.backup.test.ts > restores an empty database',
+  ]);
+});
+
+test('annotations escape the characters that would truncate the command', () => {
+  const rows = [point('test/a.test.ts', { name: 'a\nb%c', status: 'fail' })];
+  const [line] = annotations(rows, ['one%problem'], ROOT);
+
+  assert.ok(line !== undefined && !line.includes('\n'), 'a literal newline would truncate the annotation');
+  assert.ok(line.endsWith('test/a.test.ts > a%0Ab%25c'));
+  assert.deepEqual(annotations([], ['one%problem'], ROOT), [
+    '::error title=Postgres suite requirement::one%25problem',
+  ]);
+});
+
+test('a green run produces no annotations at all', () => {
+  assert.deepEqual(annotations(goodRun(), [], ROOT), []);
 });

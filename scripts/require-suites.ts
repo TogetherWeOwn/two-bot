@@ -143,6 +143,37 @@ export function check(
   return problems;
 }
 
+/**
+ * GitHub Actions `::error` lines naming every failing test point.
+ *
+ * The broker profile withholds `actions:read` (TOG-247), so no agent can
+ * download this job's log to find out what failed. Annotations are the only
+ * channel that survives, and without this a red run reports exactly
+ * "Process completed with exit code 1" - which names neither the suite nor the
+ * test, and costs a whole CI round trip to narrow down.
+ *
+ * Suites are skipped: node:test marks a `describe` failed when a child test
+ * fails, so emitting both would double-report the same failure.
+ */
+export function annotations(
+  rows: ReportedTest[],
+  problems: ReadonlyArray<string> = [],
+  root: string = ROOT,
+): string[] {
+  // Annotation commands are newline-delimited, so any literal one truncates.
+  const esc = (s: string) => s.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+  const out: string[] = [];
+
+  for (const row of rows) {
+    if (row.status !== 'fail' || row.type === 'suite') continue;
+    const file = row.file.startsWith(`${root}/`) ? row.file.slice(root.length + 1) : row.file;
+    out.push(`::error file=${esc(file)},title=Failing test::${esc(`${file} > ${row.name}`)}`);
+  }
+  for (const p of problems) out.push(`::error title=Postgres suite requirement::${esc(p)}`);
+
+  return out;
+}
+
 export function parseResults(text: string): ReportedTest[] {
   return text
     .split('\n')
@@ -202,6 +233,13 @@ if (invokedDirectly) {
   if (temporary) rmSync(resultsPath, { force: true });
 
   const problems = check(rows);
+
+  // Emitted before the human-readable report, and whenever the run is red at
+  // all - a failing test exits non-zero through `exitCode` without necessarily
+  // producing a `problems` entry.
+  if (process.env.GITHUB_ACTIONS && (problems.length > 0 || exitCode !== 0)) {
+    for (const line of annotations(rows, problems)) console.log(line);
+  }
 
   console.log('');
   for (const suite of POSTGRES_SUITES) {
