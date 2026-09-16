@@ -48,7 +48,6 @@ interface Queryable {
 }
 
 class PgDb implements Db {
-  readonly kind = 'postgres' as const;
   private q: Queryable;
   private pool: pg.Pool | null;
 

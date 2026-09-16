@@ -57,12 +57,16 @@ import { DiscordRest, fetchAllMembers, type RawInvite } from '../src/discord/res
 
 const argv = process.argv.slice(2);
 const dryRun = argv.includes('--dry-run');
-const dbPath = process.env.TWO_DB_PATH ?? './data/two.db';
+const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
 
 const token = process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN;
 const guildId = process.env.DISCORD_GUILD_ID;
 if (!token || !guildId) {
   console.error('Missing DISCORD_BOT_TOKEN or DISCORD_GUILD_ID. See docs/SECRETS.md.');
+  process.exit(2);
+}
+if (!databaseUrl) {
+  console.error('Missing TWO_DATABASE_URL. See docs/SECRETS.md.');
   process.exit(2);
 }
 
@@ -75,12 +79,12 @@ if (!token || !guildId) {
 const capturedAt = new Date().toISOString();
 
 const rest = new DiscordRest({ token });
-const db = await openDb(dbPath);
+const db = await openDb(databaseUrl);
 const store = new EventStore(db);
 const tracker = new InviteTracker(db);
 
 console.log(`\nTWO capture${dryRun ? '  (DRY RUN - nothing will be written)' : ''}`);
-console.log(`  guild ${guildId}   db ${dbPath}\n`);
+console.log(`  guild ${guildId}\n`);
 
 // --- 1. where does the previous window end? ---------------------------------
 //

@@ -30,7 +30,7 @@ Warnings live in `moderation_warnings`. Every successful action has a row in `mo
 - **Tempban expiry is written before the ban.** A crash after Discord accepts the ban still leaves a pending unban job; the worst case is an unban of a re-appliable ban, never a permanent ban the moderator asked to be temporary. Re-tempbanning the same user moves the one pending job (partial unique index) instead of forking a second.
 - **Unban sweeps claim rows.** `runDueUnbans()` moves due rows `pending -> running` with one `UPDATE ... RETURNING`, so two overlapping sweeps cannot process the same job. A failed unban is requeued; a `running` claim older than 60 seconds is taken over by the next sweep (crash recovery).
 - **Lockdown preserves the @everyone overwrite.** Lock reads the current overwrite, stores the prior allow/deny masks in `moderation_lockdowns`, and writes back the prior bits plus a `SendMessages` deny. Unlock restores the recorded masks exactly. With no recorded state (a lock that predates this table), unlock clears only the `SendMessages` deny - the minimal change that cannot grant anything new.
-- **Backups and migration carry all of it.** `moderation_warnings`, `moderation_scheduled_unbans`, `moderation_audit`, `moderation_lockdowns`, and `moderation_idempotency` are in `DUMP_TABLES` (pg-backup/pg-restore round trip) and in `scripts/migrate-sqlite-to-postgres.ts` (a source file lacking them is skipped, not fatal).
+- **Backups carry all of it.** `moderation_warnings`, `moderation_scheduled_unbans`, `moderation_audit`, `moderation_lockdowns`, and `moderation_idempotency` are in `DUMP_TABLES` and covered by the pg-backup/pg-restore round trip.
 
 ## Configuration
 

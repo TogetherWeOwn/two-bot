@@ -43,15 +43,17 @@ if (!allTime && (!Number.isFinite(days!) || days! <= 0)) {
   process.exit(2);
 }
 
-// Same resolution the bot and the funnel report use, so this always reads the
-// bot's database and never a stale local file.
-const dbSpec = process.env.TWO_DATABASE_URL || process.env.TWO_DB_PATH || './data/two.db';
+const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
+if (!databaseUrl) {
+  console.error('attribution: TWO_DATABASE_URL is not set.');
+  process.exit(1);
+}
 const nowMs = Date.now();
 // Postgres rejects year 0000 (`date/time field value out of range`). The real
 // server has no pre-1970 joins, and this is only a lower bound, so 1970-01-01
-// is safe for both SQLite and Postgres and still reads as "the beginning".
+// still reads as "the beginning" without producing an invalid timestamp.
 const since = allTime ? '1970-01-01T00:00:00.000Z' : new Date(nowMs - days! * 86_400_000).toISOString();
-const db = await openDb(dbSpec);
+const db = await openDb(databaseUrl);
 
 // --- joins -------------------------------------------------------------------
 

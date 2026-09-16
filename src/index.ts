@@ -1,6 +1,6 @@
 import { loadConfig } from './core/config.ts';
 import { setLogLevel, log } from './core/log.ts';
-import { openDb, isPostgresSpec } from './store/db.ts';
+import { openDb } from './store/db.ts';
 import { applyWebContract } from './store/webContract.ts';
 import { EventStore } from './store/eventStore.ts';
 import { InviteTracker } from './core/inviteTracker.ts';
@@ -88,13 +88,9 @@ const processStartedAt = new Date().toISOString();
 const announcementsCfg = loadAnnouncementsConfig();
 setLogLevel(cfg.logLevel);
 
-const db = await openDb(cfg.dbPath, { poolMax: cfg.dbPoolMax });
-log.info('datastore_open', {
-  driver: db.kind,
-  // Never log the URL itself - it carries the password. See docs/SECRETS.md.
-  target: isPostgresSpec(cfg.dbPath) ? 'postgres' : cfg.dbPath,
-  poolMax: db.kind === 'postgres' ? cfg.dbPoolMax : undefined,
-});
+const db = await openDb(cfg.databaseUrl, { poolMax: cfg.dbPoolMax });
+// Never log the URL itself - it carries the password. See docs/SECRETS.md.
+log.info('datastore_open', { poolMax: cfg.dbPoolMax });
 
 // Keep the website's read-only views (docs/WEBSITE_CONTRACT.md) in step with
 // the code that owns them. Idempotent, so this is a no-op on a normal boot.
@@ -105,19 +101,17 @@ log.info('datastore_open', {
 // reads would be the wrong trade. This is loud instead, and it has a detection
 // path that does not rely on anyone reading a log: `npm run web:views -- --status`
 // reports missing views, and `npm run verify:web-role` fails CI.
-if (db.kind === 'postgres') {
-  try {
-    const applied = await applyWebContract(db);
-    log.info('web_contract_ready', { ...applied });
-  } catch (err) {
-    log.error('web_contract_failed', {
-      err: String(err),
-      // CREATE OR REPLACE VIEW cannot rename, reorder or retype a column, so
-      // this is usually not a typo: it is a change that needs a web_v2 schema
-      // rather than an edit. See docs/WEBSITE_CONTRACT.md §1.
-      hint: 'run `npm run web:views` for the full error',
-    });
-  }
+try {
+  const applied = await applyWebContract(db);
+  log.info('web_contract_ready', { ...applied });
+} catch (err) {
+  log.error('web_contract_failed', {
+    err: String(err),
+    // CREATE OR REPLACE VIEW cannot rename, reorder or retype a column, so
+    // this is usually not a typo: it is a change that needs a web_v2 schema
+    // rather than an edit. See docs/WEBSITE_CONTRACT.md §1.
+    hint: 'run `npm run web:views` for the full error',
+  });
 }
 
 const store = new EventStore(db);
@@ -521,17 +515,14 @@ if (internalCfg) {
 // it collects is reachable from the website - the table is in the bot schema,
 // which the website's role is REVOKEd from, and no `web_v1` view reads it.
 //
-// Needs a guild to ask about and a Postgres to write to; the table arrives in
-// migration 0004 and the SQLite bootstrap does not have it. Missing either is
-// a logged skip, never a crash - this is an instrument for an internal
-// question and it does not get to stop the funnel from recording joins.
+// Needs a guild to ask about. A missing guild is a logged skip, never a crash -
+// this is an instrument for an internal question and it does not get to stop
+// the funnel from recording joins.
 let presenceProbe: PresenceProbeHandle | null = null;
 if (!cfg.presenceProbe) {
   log.info('presence_probe_disabled', { reason: 'TWO_PRESENCE_PROBE=0' });
 } else if (!cfg.guildId) {
   log.info('presence_probe_disabled', { reason: 'DISCORD_GUILD_ID is unset' });
-} else if (db.kind !== 'postgres') {
-  log.info('presence_probe_disabled', { reason: 'needs Postgres (migration 0004)' });
 } else {
   presenceProbe = startPresenceProbe({
     db,
@@ -546,13 +537,10 @@ if (!cfg.presenceProbe) {
 // The published member/rank snapshots (TOG-73). A full member list is read in
 // one pass so bots and dynamically-derived raid accounts are excluded from the
 // counter, rank aggregates and public member projection by the same decision.
-// The collector is Postgres-only because migrations 0003 and 0005 own its
-// tables. A failed or ungrounded read writes nothing and ages out in web_v1.
+// A failed or ungrounded read writes nothing and ages out in web_v1.
 let communitySnapshots: CommunitySnapshotHandle | null = null;
 if (!cfg.guildId) {
   log.info('community_snapshots_disabled', { reason: 'DISCORD_GUILD_ID is unset' });
-} else if (db.kind !== 'postgres') {
-  log.info('community_snapshots_disabled', { reason: 'needs Postgres (migrations 0003 and 0005)' });
 } else {
   communitySnapshots = startCommunitySnapshots({
     db,
@@ -571,8 +559,6 @@ if (!cfg.guildId) {
 let scheduledEvents: ScheduledEventsHandle | null = null;
 if (!cfg.guildId) {
   log.info('scheduled_events_disabled', { reason: 'DISCORD_GUILD_ID is unset' });
-} else if (db.kind !== 'postgres') {
-  log.info('scheduled_events_disabled', { reason: 'needs Postgres (migration 0003)' });
 } else {
   scheduledEvents = startScheduledEventsPoller({
     db,

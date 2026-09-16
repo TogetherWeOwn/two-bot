@@ -27,8 +27,7 @@ import {
 const GUILD = '326474832151838730';
 const MEMBER = '900000000000009999';
 
-// Same tests, either driver. SQLite by default; Postgres when
-// TWO_TEST_DATABASE_URL is set. See test/helpers/testDb.ts.
+// The database-backed cases use the file's isolated Postgres schema.
 let harness: TestDb;
 before(async () => {
   harness = await openTestDb(import.meta.filename);

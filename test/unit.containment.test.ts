@@ -10,7 +10,7 @@ import {
 } from 'discord.js';
 import type { Db } from '../src/store/driver.ts';
 import { ActionError } from '../src/internal/errors.ts';
-import { openDb } from '../src/store/db.ts';
+import { openEphemeralTestDb as openDb } from './helpers/testDb.ts';
 import {
   DestructiveContainment,
   JoinRiskScorer,
@@ -71,7 +71,7 @@ describe('destructive-action containment', () => {
   let store: ContainmentStore;
 
   before(async () => {
-    db = await openDb(':memory:');
+    db = await openDb();
     store = new ContainmentStore(db, () => NOW);
   });
   after(async () => db.close());
@@ -110,7 +110,6 @@ describe('destructive-action containment', () => {
   });
 
   test('concurrent audit entries serialize into one threshold crossing', async () => {
-    if (db.kind !== 'postgres') return;
     let calls = 0;
     const containment = new DestructiveContainment({
       store,
@@ -342,7 +341,7 @@ describe('destructive-action containment', () => {
 
 describe('join risk is flag-only', () => {
   let db: Db;
-  before(async () => { db = await openDb(':memory:'); });
+  before(async () => { db = await openDb(); });
   after(async () => db.close());
   beforeEach(async () => db.exec('DELETE FROM join_risk_flags'));
 

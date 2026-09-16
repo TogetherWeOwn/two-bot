@@ -1,40 +1,14 @@
 /**
- * Run the test suite and fail unless the Postgres-only suites actually ran.
+ * Run the Postgres-backed test suite and fail unless its critical suites report
+ * their expected test floors with no skips.
  *
  *   TWO_TEST_DATABASE_URL=postgres://... node scripts/require-suites.ts
  *   node scripts/require-suites.ts --results FILE   # check a run, do not re-run it
  *
- * ## Why this exists
- *
- * The `postgres` CI job (TOG-465) gives the suite a real database. It does not
- * prove the Postgres-only suites *used* it. The argument that they did was:
- * the env var is set, the deploy sequence in the same job needs the same
- * database and passes, therefore the `skip:` guards in e2e.webcontract,
- * e2e.backup and e2e.concurrency must have been false. Sound reasoning - and
- * reasoning is not a check. Rename the env var, or grow a second skip
- * condition, and the job stays green while the suites go back to skipping.
- * That is the exact failure TOG-465 existed to kill (TOG-475).
- *
- * ## Why it does not read the summary
- *
- * The obvious implementation - run `npm test` and assert `skipped 0` - is
- * itself green by absence. A `describe` that skips itself reports:
- *
- *   ok 1 - backup round trip # SKIP needs TWO_TEST_DATABASE_URL
- *   # tests 0
- *   # skipped 0
- *
- * Measured on Node 24.19: three whole suites absent, `skipped 0`, exit 0. The
- * printed counters cannot see this. So the check reads the structured reporter
- * stream instead (scripts/test-report.ts), where the skip is still attached to
- * the test point, and asserts per file: reported at all, nothing skipped, and
- * at least as many passing tests as the last time anyone looked.
- *
- * ## Why it runs inside the job
- *
- * The broker profile withholds `actions:read` (TOG-247), so no agent can read a
- * job log from outside to check this after the fact. The assertion has to fail
- * the job itself, which is the right design regardless.
+ * The structured reporter catches whole suites that vanish or skip in a way the
+ * node:test summary cannot represent reliably. The test helper itself requires
+ * TWO_TEST_DATABASE_URL, so a missing database now fails before the suite can
+ * fall back to another engine.
  */
 import { spawn } from 'node:child_process';
 import { readFileSync, readdirSync, rmSync } from 'node:fs';
@@ -140,8 +114,8 @@ export function check(
     }
     if (t.skipped > 0) {
       problems.push(
-        `${suite.file}: ${t.skipped} test point(s) SKIPPED. The database is not reaching the suite - ` +
-          `check TWO_TEST_DATABASE_URL and the guard in the file (${suite.why}).`,
+        `${suite.file}: ${t.skipped} test point(s) SKIPPED. Nothing in the required ` +
+          `Postgres-backed suite may opt out (${suite.why}).`,
       );
     }
     if (t.tests < suite.minTests) {
@@ -153,7 +127,7 @@ export function check(
   }
 
   // The manifest is fail-closed for the three suites we know about. This catches
-  // the fourth: a Postgres-only suite added later that quietly skips here.
+  // the fourth: a required Postgres-backed suite added later that quietly skips here.
   for (const [file, t] of [...byFile].sort()) {
     if (t.skipped > 0 && !maySkip.includes(file) && !required.some((s) => s.file === file)) {
       problems.push(
@@ -167,6 +141,37 @@ export function check(
   if (byFile.size === 0) problems.push('the reporter recorded no test points at all: the run did not happen.');
 
   return problems;
+}
+
+/**
+ * GitHub Actions `::error` lines naming every failing test point.
+ *
+ * The broker profile withholds `actions:read` (TOG-247), so no agent can
+ * download this job's log to find out what failed. Annotations are the only
+ * channel that survives, and without this a red run reports exactly
+ * "Process completed with exit code 1" - which names neither the suite nor the
+ * test, and costs a whole CI round trip to narrow down.
+ *
+ * Suites are skipped: node:test marks a `describe` failed when a child test
+ * fails, so emitting both would double-report the same failure.
+ */
+export function annotations(
+  rows: ReportedTest[],
+  problems: ReadonlyArray<string> = [],
+  root: string = ROOT,
+): string[] {
+  // Annotation commands are newline-delimited, so any literal one truncates.
+  const esc = (s: string) => s.replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
+  const out: string[] = [];
+
+  for (const row of rows) {
+    if (row.status !== 'fail' || row.type === 'suite') continue;
+    const file = row.file.startsWith(`${root}/`) ? row.file.slice(root.length + 1) : row.file;
+    out.push(`::error file=${esc(file)},title=Failing test::${esc(`${file} > ${row.name}`)}`);
+  }
+  for (const p of problems) out.push(`::error title=Postgres suite requirement::${esc(p)}`);
+
+  return out;
 }
 
 export function parseResults(text: string): ReportedTest[] {
@@ -215,10 +220,8 @@ if (invokedDirectly) {
     resultsPath = existing;
   } else {
     if (!process.env.TWO_TEST_DATABASE_URL?.trim()) {
-      // Failing here rather than after a 25-second run: without the URL every
-      // suite in the manifest skips, and the report below would be a long way
-      // of saying the same thing.
-      console.error('require-suites: TWO_TEST_DATABASE_URL is not set. This runner is for the Postgres job.');
+      // Fail before spawning dozens of files that all require the same URL.
+      console.error('require-suites: TWO_TEST_DATABASE_URL is not set. This suite requires Postgres.');
       process.exit(1);
     }
     resultsPath = join(tmpdir(), `two-bot-results-${process.pid}.ndjson`);
@@ -231,6 +234,13 @@ if (invokedDirectly) {
 
   const problems = check(rows);
 
+  // Emitted before the human-readable report, and whenever the run is red at
+  // all - a failing test exits non-zero through `exitCode` without necessarily
+  // producing a `problems` entry.
+  if (process.env.GITHUB_ACTIONS && (problems.length > 0 || exitCode !== 0)) {
+    for (const line of annotations(rows, problems)) console.log(line);
+  }
+
   console.log('');
   for (const suite of POSTGRES_SUITES) {
     const t = tally(rows).get(suite.file);
@@ -240,12 +250,12 @@ if (invokedDirectly) {
   }
 
   if (problems.length > 0) {
-    console.error('\nrequire-suites: the Postgres-only suites did not run.\n');
+    console.error('\nrequire-suites: the required Postgres-backed suites did not run.\n');
     for (const p of problems) console.error(`  - ${p}`);
     console.error('\nA green run here would mean the database was present and unused. See scripts/require-suites.ts.');
     process.exit(1);
   }
 
-  console.log('require-suites: every Postgres-only suite ran, nothing skipped.');
+  console.log('require-suites: every required Postgres-backed suite ran, nothing skipped.');
   process.exit(exitCode);
 }

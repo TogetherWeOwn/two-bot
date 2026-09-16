@@ -49,27 +49,16 @@ Without it you get `could not read Username for 'https://github.com'`.
 `git push` — the clone it leaves behind has no credential helper configured, so
 setup-git is the step that actually matters. Do it first.
 
-Then:
+Then point the suite at an isolated Postgres database:
 
 ```bash
 npm ci --include=dev
-npm test            # unit + full end-to-end, no Discord token needed
-```
-
-Production runs on Postgres. `npm test` needs no database at all - it falls back
-to in-memory SQLite so you can clone and run it. To run the same suite against
-Postgres, which is what CI does and the only way the two-process concurrency
-tests execute:
-
-```bash
 TWO_TEST_DATABASE_URL=postgres://localhost:5432/two_bot_test npm test
 ```
 
-Beware that `npm test` cannot tell you whether the Postgres-only suites ran. When
-the URL is absent they skip themselves, and node:test reports a skipped suite as
-`# tests 0 # skipped 0`, exit 0 — the counters cannot see it. So CI runs this
-instead, which fails if `e2e.webcontract`, `e2e.backup` or `e2e.concurrency`
-reports a skip or comes back short:
+CI runs the stricter wrapper below. It executes the same full suite and fails if
+`e2e.webcontract`, `e2e.backup` or `e2e.concurrency` reports no tests, skips, or
+comes back short:
 
 ```bash
 TWO_TEST_DATABASE_URL=postgres://localhost:5432/two_bot_test npm run test:postgres

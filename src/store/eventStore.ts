@@ -165,12 +165,9 @@ export class EventStore {
 
     return this.db.transaction(async (tx) => {
       // Re-read inside the transaction and hold the row: between the record()
-      // above and here, the other process may have moved it. SQLite has no
-      // FOR UPDATE - it does not need one, its transaction already has the
-      // write lock.
-      const lock = tx.kind === 'postgres' ? ' FOR UPDATE' : '';
+      // above and here, the other process may have moved it.
       const existing = await tx
-        .prepare(`SELECT id, occurred_at FROM events WHERE idempotency_key = ?${lock}`)
+        .prepare(`SELECT id, occurred_at FROM events WHERE idempotency_key = ? FOR UPDATE`)
         .get<{ id: number; occurred_at: string }>(key);
       if (!existing) return first;
       if (e.occurredAt >= existing.occurred_at) {

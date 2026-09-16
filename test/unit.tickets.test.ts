@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { openDb } from '../src/store/db.ts';
+import { openEphemeralTestDb as openDb } from './helpers/testDb.ts';
 import { INTENTS } from '../src/discord/client.ts';
 import { GatewayIntentBits } from 'discord.js';
 import {
@@ -50,8 +50,8 @@ test('Discord Unknown Channel is the only cleanup error treated as already delet
   assert.equal(ticketTestHelpers.isUnknownChannel(new Error('Unknown Channel')), false);
 });
 
-test('SQLite ticket store reserves one active ticket and supports cleanup recovery', async () => {
-  const db = await openDb(':memory:');
+test('Postgres ticket store reserves one active ticket and supports cleanup recovery', async () => {
+  const db = await openDb();
   try {
     const store = new TicketStore(db);
     const reserved = await store.reserve('guild', 'member', '2026-09-08T12:00:00.000Z');
@@ -109,7 +109,7 @@ test('SQLite ticket store reserves one active ticket and supports cleanup recove
 });
 
 test('interrupted ticket creation remains recoverable after its cutoff', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   try {
     const store = new TicketStore(db);
     const reservation = await store.reserve('guild', 'member', '2026-09-08T12:00:00.000Z');
@@ -125,7 +125,7 @@ test('interrupted ticket creation remains recoverable after its cutoff', async (
 });
 
 test('ticket transcript purge and member erasure delete sensitive rows', async () => {
-  const db = await openDb(':memory:');
+  const db = await openDb();
   try {
     const store = new TicketStore(db);
     const reserved = (await store.reserve('guild', 'member', '2026-09-08T12:00:00.000Z'))!;

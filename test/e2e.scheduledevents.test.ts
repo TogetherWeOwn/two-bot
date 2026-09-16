@@ -4,11 +4,9 @@ import { DiscordRest } from '../src/discord/rest.ts';
 import { runScheduledEventsCycle } from '../src/jobs/scheduledEvents.ts';
 import { applyWebContract } from '../src/store/webContract.ts';
 import { startMockDiscord, type MockDiscord } from '../tools/mock-discord/server.ts';
-import { openTestDb, type TestDb, usingPostgres } from './helpers/testDb.ts';
+import { openTestDb, type TestDb } from './helpers/testDb.ts';
 
-const suite = usingPostgres ? describe : describe.skip;
-
-suite('scheduled events mock lifecycle', () => {
+describe('scheduled events mock lifecycle', () => {
   let fixture: TestDb;
   let mock: MockDiscord;
 
