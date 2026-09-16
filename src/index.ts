@@ -8,7 +8,10 @@ import { ExpectedJoins } from './core/expectedJoins.ts';
 import { FunnelHandlers } from './core/handlers.ts';
 import { createClient, registerHandlers } from './discord/client.ts';
 import { registerOnboarding, registerGameSelect } from './discord/onboarding.ts';
+import { registerSessionWelcome } from './discord/sessionWelcome.ts';
 import { registerSelfRoles } from './discord/selfRoles.ts';
+import { SessionRecorder, buildSessionPicks } from './onboarding/session.ts';
+import { actionsForOnboardingMode, levelRoleWritesForOnboardingMode } from './onboarding/mode.ts';
 import { registerAnchorWelcome } from './discord/anchorWelcome.ts';
 import { occurrencesFrom } from './onboarding/anchorEvent.ts';
 import { RaidWatch } from './analytics/raidWatch.ts';
@@ -86,7 +89,42 @@ const cfg = loadConfig();
 const automationCfg = loadAutomationConfig();
 const processStartedAt = new Date().toISOString();
 const announcementsCfg = loadAnnouncementsConfig();
+const selfRolePanels = loadSelfRolePanels();
+// Read here, not at its point of use further down, so the session-mode guard
+// below refuses the process before the database is opened or the gateway is
+// touched. It is a pure read of process.env.
+const containmentCfg = loadContainmentConfig();
 setLogLevel(cfg.logLevel);
+
+if (cfg.onboardingMode === 'session' && selfRolePanels.length) {
+  throw new Error(
+    'TWO_ONBOARDING_MODE=session forbids TWO_SELF_ROLE_PANELS because session mode guarantees zero role writes.',
+  );
+}
+
+// Anti-nuke containment quarantines an executor by DELETEing their dangerous
+// roles (src/moderation/containmentDiscord.ts), which is a member-role write -
+// so it is not exempt from the zero-role-write guarantee just because it is a
+// moderation path rather than an onboarding one. Dry run stops short of
+// `quarantine()` (src/moderation/containment.ts), so that combination is still
+// allowed; an armed one is refused at boot rather than at the first incident,
+// when the write would already be the response to a live raid.
+if (cfg.onboardingMode === 'session' && containmentCfg.enabled && !containmentCfg.dryRun) {
+  throw new Error(
+    'TWO_ONBOARDING_MODE=session forbids armed anti-nuke containment because quarantine removes member roles. ' +
+      'Set TWO_ANTI_NUKE_DRY_RUN=1 (alerts only) or TWO_ANTI_NUKE=0.',
+  );
+}
+
+if (
+  cfg.onboardingMode === 'session' &&
+  (!cfg.guildId || !cfg.sessionLookingToPlayChannelId || !cfg.sessionLobbyVoiceChannelId)
+) {
+  throw new Error(
+    'TWO_ONBOARDING_MODE=session requires DISCORD_GUILD_ID, ' +
+      'DISCORD_SESSION_LOOKING_TO_PLAY_CHANNEL_ID and DISCORD_SESSION_LOBBY_VOICE_CHANNEL_ID.',
+  );
+}
 
 const db = await openDb(cfg.databaseUrl, { poolMax: cfg.dbPoolMax });
 // Never log the URL itself - it carries the password. See docs/SECRETS.md.
@@ -210,7 +248,6 @@ log.info('raid_watch_enabled', {
   alertTarget: cfg.staffAlertChannelId ?? 'log only (DISCORD_STAFF_ALERT_CHANNEL_ID unset)',
 });
 
-const containmentCfg = loadContainmentConfig();
 const containmentStore = new ContainmentStore(db);
 const joinRisk = containmentCfg.enabled
   ? new JoinRiskScorer({
@@ -232,6 +269,7 @@ registerHandlers(client, {
   raid,
   expectedJoins,
   leveling,
+  levelRoleWrites: levelRoleWritesForOnboardingMode(cfg.onboardingMode),
   automod: automodService && cfg.guildId ? { service: automodService, guildId: cfg.guildId } : undefined,
   joinRisk,
   audit,
@@ -404,7 +442,29 @@ const onboardingDeps = {
   dryRun: cfg.onboardingDryRun,
 };
 
-if (cfg.anchorWelcomeChannelId) {
+// Session mode (TOG-1654): the roleless flow owns the gate-clear moment
+// instead, and no other onboarding handler may be registered alongside it -
+// see the starvation note above. The legacy picker code stays in the tree,
+// unregistered, selected back by unsetting TWO_ONBOARDING_MODE.
+if (cfg.onboardingMode === 'session') {
+  registerSessionWelcome(client, {
+    recorder: new SessionRecorder(store),
+    guildId: cfg.guildId!,
+    store,
+    landingChannelIds: cfg.landingChannelIds,
+    goodbyeChannelIds: cfg.goodbyeChannelIds,
+    picks: buildSessionPicks({
+      lookingToPlay: cfg.sessionLookingToPlayChannelId!,
+      lobbyVoice: cfg.sessionLobbyVoiceChannelId!,
+    }),
+    dryRun: cfg.onboardingDryRun,
+  });
+  log.info('session_onboarding_enabled', {
+    landingChannelIds: cfg.landingChannelIds,
+    goodbyeChannelIds: cfg.goodbyeChannelIds,
+    dryRun: cfg.onboardingDryRun,
+  });
+} else if (cfg.anchorWelcomeChannelId) {
   registerAnchorWelcome(client, {
     recorder: onboardingDeps.recorder,
     channelId: cfg.anchorWelcomeChannelId,
@@ -431,7 +491,6 @@ if (cfg.anchorWelcomeChannelId) {
 // Hardened self-role panels (TOG-1646). The panel catalogue is deployment data:
 // ids are never guessed from the live guild, and an empty catalogue is a clean
 // disable rather than an implicit panel with production ids.
-const selfRolePanels = loadSelfRolePanels();
 if (selfRolePanels.length) {
   if (!cfg.guildId) {
     throw new Error('TWO_SELF_ROLE_PANELS requires DISCORD_GUILD_ID - every panel belongs to one guild.');
@@ -481,6 +540,7 @@ if (selfRolePanels.length) {
 // no port. When it is on, a bad bind address or a missing key is a startup
 // crash rather than a quietly-exposed remote control for the server.
 const internalCfg = loadInternalActionsConfig();
+if (internalCfg) internalCfg.enabled = actionsForOnboardingMode(cfg.onboardingMode, internalCfg.enabled);
 let internal: InternalServer | null = null;
 if (internalCfg) {
   if (!cfg.guildId) {

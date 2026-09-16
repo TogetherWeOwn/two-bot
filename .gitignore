@@ -16,3 +16,9 @@ backups/
 .env.*
 !.env.example
 *.log
+# TOG-1644 staging demo artifacts. They default to a private runtime directory
+# outside the checkout now, but TWO_SESSION_DEMO_* can still point at one and an
+# older revision's defaults landed here. Neither the guild's member->role map nor
+# a live invite should ever be one `git add -A` away from the remote.
+.staging-session-demo-snapshot.json
+.staging-session-demo-invite.txt
