@@ -14,6 +14,7 @@ import {
   applyOperationOverwrites,
   basePermissions,
   isAutoVoiceEphemeralChild,
+  inFlightExceptionIsAvailable,
   journalWitnessPath,
   LEGACY_CATEGORY_IDS,
   LEGACY_CHANNEL_IDS,
@@ -21,6 +22,7 @@ import {
   type CleanupManifest,
   type JsonObject,
   journalSignature,
+  manifestInFlightId,
   type LiveCleanupSnapshot,
   type Member as SnapshotMember,
   normalizeOverwrites,
@@ -2498,4 +2500,78 @@ test('a checkpoint abandoned while that operation was in flight still recovers i
     assert.match(recovered.stdout, new RegExp(`RECOVERING in-flight ${operation.id}`));
     assert.equal(stable(stub.state.channels), stable(before), 'the guild must be returned to the pre-snapshot state');
   } finally { await stub.close(); }
+});
+
+/**
+ * TOG-3009 — the exception must be *granted* by the witness, not merely unopposed by it.
+ *
+ * `inFlightExceptionIsAvailable` decides on the records above the manifest's checkpoint,
+ * and a zero-byte witness supplies none (TOG-2975 made that a readable empty log rather
+ * than an error). An empty `every` is vacuously true, so the predicate handed back the
+ * one permission that lets recovery write `inverseWrite` over an object holding an
+ * arbitrary live value — on the strength of a log recording nothing.
+ *
+ * Both call sites happen to run `assertLatestCheckpoint` first, which refuses an empty
+ * log, so this was never reachable through the scripts. That is the reason to close it
+ * here rather than rely on it: the fail-open was inside the exported predicate and the
+ * thing closing it was in its callers, so the next caller that reaches for this helper
+ * without that ordering gets the overwrite. Asserted against the predicate directly,
+ * because the call sites are exactly what must stop being load-bearing.
+ */
+test('a witness that records no checkpoint denies the in-flight recovery exception', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-inflight-empty-witness-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    assert.equal((await apply(stub, dir, { LIVE_CLEANUP_TEST_ABORT_AFTER_WRITES: '5' })).code, 86);
+    const path = manifestPath(dir);
+    const witnessFile = journalWitnessPath(path);
+    const crashed = JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest;
+
+    // A real crashed manifest, so the predicate reaches the witness read at all rather
+    // than short-circuiting on a manifest with nothing in flight.
+    const inFlightId = manifestInFlightId(crashed);
+    assert.notEqual(inFlightId, null);
+    assert.equal(inFlightExceptionIsAvailable(TOKEN, crashed, path), true, 'the untouched log grants it');
+
+    // The torn file creation of `appendJournalWitness`: the file exists and holds no
+    // records. It cannot deny the exception, and it must not grant it either.
+    writeFileSync(witnessFile, '', { mode: 0o600 });
+    assert.equal(statSync(witnessFile).size, 0);
+    assert.equal(readJournalWitness(TOKEN, witnessFile).length, 0);
+    assert.equal(inFlightExceptionIsAvailable(TOKEN, crashed, path), false);
+
+    // The guard denies an empty log, not the predicate: an abandoned checkpoint naming
+    // this operation still earns the exception, and one naming a different operation
+    // still denies it.
+    appendJournalWitness(TOKEN, witnessFile, 1, 'intent', 'checkpoint-1', null);
+    appendJournalWitness(TOKEN, witnessFile, 1, 'commit', 'checkpoint-1', null);
+    const above = { ...crashed, journalSequence: 1 };
+    appendJournalWitness(TOKEN, witnessFile, 2, 'intent', 'checkpoint-2', inFlightId);
+    assert.equal(inFlightExceptionIsAvailable(TOKEN, above, path), true);
+    appendJournalWitness(TOKEN, witnessFile, 2, 'abort', 'checkpoint-2', inFlightId);
+    appendJournalWitness(TOKEN, witnessFile, 2, 'intent', 'checkpoint-2', null);
+    assert.equal(inFlightExceptionIsAvailable(TOKEN, above, path), false);
+  } finally { await stub.close(); }
+});
+
+/**
+ * TOG-3009 — the same fail-open from the other side. `openSync(path, 'a', 0o600)` sets
+ * the mode only when it creates the file, so a witness restored, copied, or created by
+ * anything else keeps its own mode. A readable-and-writable witness is not a disclosure
+ * problem — the records are chained under the bot token — but it is a truncation
+ * problem, and a truncated witness is indistinguishable from an interrupted checkpoint.
+ * Every append therefore narrows it, on the fd rather than the path.
+ */
+test('appending to the checkpoint witness narrows a widened file back to 0600', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-witness-mode-'));
+  const witnessFile = journalWitnessPath(join(dir, 'rollback.json'));
+
+  writeFileSync(witnessFile, '', { mode: 0o644 });
+  chmodSync(witnessFile, 0o644);
+  assert.equal(statSync(witnessFile).mode & 0o777, 0o644);
+
+  appendJournalWitness(TOKEN, witnessFile, 1, 'intent', 'checkpoint-1', null);
+  assert.equal(statSync(witnessFile).mode & 0o777, 0o600);
+  assert.equal(readJournalWitness(TOKEN, witnessFile).length, 1, 'narrowing must not cost the append');
 });
