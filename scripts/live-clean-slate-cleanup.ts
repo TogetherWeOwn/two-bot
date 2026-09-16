@@ -18,6 +18,7 @@ import {
   ADMINISTRATOR,
   applyOperationOverwrites,
   ARCHIVE_PHASE,
+  archiveVisibilityExemptions,
   buildManifest,
   type Channel,
   type CleanupManifest,
@@ -279,6 +280,7 @@ function assertManifest(manifest: CleanupManifest, snapshot: LiveCleanupSnapshot
   if (stable(manifest.reviewedLegacyChannelIds) !== stable([...LEGACY_CHANNEL_IDS])) throw new Error('Reviewed 112-channel allowlist differs.');
   if (stable(manifest.reviewedLegacyCategoryIds) !== stable([...LEGACY_CATEGORY_IDS])) throw new Error('Reviewed 18-category allowlist differs.');
   if (stable(manifest.activeChannelIds) !== stable([...ACTIVE_CHANNEL_IDS]) || stable(manifest.activeCategoryIds) !== stable([...ACTIVE_CATEGORY_IDS])) throw new Error('Active-tree allowlist differs.');
+  if (stable(manifest.visibilityExemptions ?? []) !== stable(archiveVisibilityExemptions(snapshot))) throw new Error('Reviewed visibility-exemption set differs from the fresh snapshot.');
   const expectedIds = operations.map((operation) => operation.id);
   if (stable(manifest.operations.map((operation) => operation.id)) !== stable(expectedIds)) throw new Error('Generated operation IDs differ from the reviewed dry-run manifest.');
 }
@@ -318,6 +320,13 @@ async function dryRun(): Promise<void> {
   log(`Dry-run complete: ${operations.length} deterministic overwrite operations (${operations.length - channelOperationCount} category PATCHes, ${channelOperationCount} direct channel PATCHes).`);
   log(`Snapshot semantic hash: ${snapshot.semanticHash}`);
   log(`Operation semantic hash: ${manifest.operationSemanticHash}`);
+  // Everyone else — human or bot — is denied View and asserted hidden by the planner.
+  // Administrator holders cannot be denied by any channel overwrite, so the operator
+  // must read this list and accept it before applying.
+  log(`Principals that still see the archived objects after this plan: ${manifest.visibilityExemptions.length}`);
+  for (const exemption of manifest.visibilityExemptions) {
+    log(`  RETAINS-VIEW ${exemption.reason} ${exemption.bot ? 'bot' : 'member'} ${exemption.memberId}`);
+  }
   log('Applied 0 Discord write(s).');
   finalizeLog();
 }
@@ -357,7 +366,34 @@ async function apply(): Promise<void> {
     const { semanticHash: _acceptableHash, ...acceptableInput } = acceptable;
     acceptableHashes.add(withSemanticHash({ ...acceptableInput, generatedAt: fresh.generatedAt }).semanticHash);
   }
-  if (!acceptableHashes.has(fresh.semanticHash)) die(1, `Live state drifted since dry-run/resume: got ${fresh.semanticHash}.`);
+  if (!acceptableHashes.has(fresh.semanticHash)) {
+    // A persisted `requesting` operation whose live object matches neither its
+    // expected-before nor its full write is a partial in-flight write. Apply
+    // deliberately refuses to push forward over an ambiguous write; rollback is
+    // the recovery path and accepts exactly this state (see the rollback script's
+    // in-flight branch). Name it, so the operator is not left guessing.
+    const inFlight = requesting[0];
+    if (inFlight) {
+      const subtree = new Set([inFlight.objectId, ...(inFlight.objectType === 'category'
+        ? snapshot.channels.filter((channel) => channel.parent_id === inFlight.objectId).map((channel) => channel.id)
+        : [])]);
+      const confined = structuredClone(snapshot);
+      for (const operation of phaseManifest.operations) {
+        if (operation.state !== 'applied') continue;
+        applyOperationOverwrites(confined, operation, operation.write.permission_overwrites);
+      }
+      for (const id of subtree) {
+        const live = fresh.channels.find((channel) => channel.id === id);
+        const target = confined.channels.find((channel) => channel.id === id);
+        if (live && target) target.permission_overwrites = normalizeOverwrites(live.permission_overwrites ?? []);
+      }
+      const { semanticHash: _confinedHash, ...confinedInput } = confined;
+      if (withSemanticHash({ ...confinedInput, generatedAt: fresh.generatedAt }).semanticHash === fresh.semanticHash) {
+        die(1, `Interrupted operation ${inFlight.id} left a partial write on ${inFlight.objectId}; apply will not push forward over it. Recover with: DISCORD_GUILD_ID=${LIVE_GUILD_ID} node scripts/live-clean-slate-cleanup-rollback.ts --manifest ${JSON.stringify(phaseRollbackPath)} --confirm-main-guild --apply`);
+      }
+    }
+    die(1, `Live state drifted since dry-run/resume: got ${fresh.semanticHash}.`);
+  }
   phaseManifest.status = 'applying';
   atomicJson(phaseRollbackPath, phaseManifest);
   logPath = phaseLogPath;

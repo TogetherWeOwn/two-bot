@@ -108,6 +108,8 @@ export type CleanupOperation = {
 };
 export type OperationState = 'pending' | 'requesting' | 'applied' | 'rolled_back';
 export type RollbackEntry = CleanupOperation & { state: OperationState; requestStartedAt?: string; appliedAt?: string; rolledBackAt?: string };
+export type ArchiveExemptionReason = 'owner' | 'owen' | 'administrator';
+export type ArchiveVisibilityExemption = { memberId: string; bot: boolean; reason: ArchiveExemptionReason };
 export type CleanupManifest = {
   version: 1;
   kind: 'live-clean-slate-cleanup';
@@ -126,8 +128,13 @@ export type CleanupManifest = {
   reviewedLegacyCategoryIds: string[];
   activeChannelIds: string[];
   activeCategoryIds: string[];
+  visibilityExemptions: ArchiveVisibilityExemption[];
   operations: RollbackEntry[];
 };
+
+// Discord caps a channel at 500 permission overwrites. Additive member denies must
+// never push a reviewed object past that, or the PATCH is rejected mid-phase.
+export const MAX_OVERWRITES_PER_CHANNEL = 500;
 
 export function stable(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
@@ -163,9 +170,44 @@ export function archiveEveryoneOverwrite(guildId: string, overwrites: Overwrite[
   return normalized.map((overwrite, itemIndex) => itemIndex === index ? updated : overwrite);
 }
 
+export function basePermissions(member: Member, snapshot: LiveCleanupSnapshot): bigint {
+  return snapshot.roles
+    .filter((role) => role.id === snapshot.guildId || member.roles.includes(role.id))
+    .reduce((value, role) => value | BigInt(role.permissions), 0n);
+}
+
+/**
+ * The only principals this phase may leave able to see an archived object.
+ *
+ * `owner` and `owen` are deliberate — the guild Owner and Owen itself must keep
+ * archive access to operate and to roll back. `administrator` is not a choice:
+ * Discord ignores every channel overwrite for a principal holding Administrator,
+ * so no PATCH this phase can emit would hide the object from them. Bots are NOT
+ * exempt: a non-Owen bot without Administrator is denied and asserted like any
+ * human member.
+ *
+ * Administrator holders are returned rather than silently skipped so
+ * `buildManifest` can pin them onto the manifest for operator review.
+ */
+export function archiveExemption(member: Member, snapshot: LiveCleanupSnapshot): ArchiveExemptionReason | null {
+  const ownerId = typeof snapshot.guild.owner_id === 'string' ? snapshot.guild.owner_id : null;
+  if (ownerId !== null && member.id === ownerId) return 'owner';
+  if (member.id === LIVE_BOT_APPLICATION_ID) return 'owen';
+  if ((basePermissions(member, snapshot) & ADMINISTRATOR) !== 0n) return 'administrator';
+  return null;
+}
+
+export function archiveVisibilityExemptions(snapshot: LiveCleanupSnapshot): ArchiveVisibilityExemption[] {
+  return snapshot.members
+    .flatMap((member) => {
+      const reason = archiveExemption(member, snapshot);
+      return reason === null ? [] : [{ memberId: member.id, bot: member.bot, reason }];
+    })
+    .sort((a, b) => a.memberId.localeCompare(b.memberId));
+}
+
 function memberCanView(member: Member, snapshot: LiveCleanupSnapshot, overwrites: Overwrite[]): boolean {
-  const roles = snapshot.roles.filter((role) => role.id === snapshot.guildId || member.roles.includes(role.id));
-  let permissions = roles.reduce((value, role) => value | BigInt(role.permissions), 0n);
+  let permissions = basePermissions(member, snapshot);
   if ((permissions & ADMINISTRATOR) !== 0n) return true;
   const everyone = overwrites.find((overwrite) => overwrite.type === 0 && overwrite.id === snapshot.guildId);
   if (everyone) permissions = (permissions & ~BigInt(everyone.deny)) | BigInt(everyone.allow);
@@ -183,24 +225,18 @@ function memberCanView(member: Member, snapshot: LiveCleanupSnapshot, overwrites
 }
 
 function assertArchiveVisibility(snapshot: LiveCleanupSnapshot, target: Channel, overwrites: Overwrite[]): void {
-  const ownerId = typeof snapshot.guild.owner_id === 'string' ? snapshot.guild.owner_id : null;
   for (const member of snapshot.members) {
-    if (member.bot || member.id === ownerId) continue;
-    const memberRoles = snapshot.roles.filter((role) => member.roles.includes(role.id));
-    if (memberRoles.some((role) => (BigInt(role.permissions) & ADMINISTRATOR) !== 0n)) continue;
+    if (archiveExemption(member, snapshot) !== null) continue;
     if (memberCanView(member, snapshot, overwrites)) {
-      throw new Error(`Legacy object ${target.id} remains visible to non-administrator member ${member.id} after the planned archive deny.`);
+      throw new Error(`Legacy object ${target.id} remains visible to ${member.bot ? 'bot' : 'member'} ${member.id} after the planned archive deny.`);
     }
   }
 }
 
 function archiveVisibilityOverwrites(snapshot: LiveCleanupSnapshot, target: Channel, overwrites: Overwrite[]): Overwrite[] {
   let write = archiveEveryoneOverwrite(snapshot.guildId, overwrites);
-  const ownerId = typeof snapshot.guild.owner_id === 'string' ? snapshot.guild.owner_id : null;
   for (const member of snapshot.members) {
-    if (member.bot || member.id === ownerId) continue;
-    const memberRoles = snapshot.roles.filter((role) => member.roles.includes(role.id));
-    if (memberRoles.some((role) => (BigInt(role.permissions) & ADMINISTRATOR) !== 0n)) continue;
+    if (archiveExemption(member, snapshot) !== null) continue;
     if (!memberCanView(member, snapshot, write)) continue;
     const index = write.findIndex((overwrite) => overwrite.id === member.id && overwrite.type === 1);
     if (index === -1) {
@@ -214,6 +250,9 @@ function archiveVisibilityOverwrites(snapshot: LiveCleanupSnapshot, target: Chan
       deny: String(BigInt(current.deny) | VIEW_CHANNEL),
     };
     write = write.map((overwrite, itemIndex) => itemIndex === index ? memberDeny : overwrite);
+  }
+  if (write.length > MAX_OVERWRITES_PER_CHANNEL) {
+    throw new Error(`Planned overwrites for ${target.id} (${write.length}) exceed the Discord per-channel limit of ${MAX_OVERWRITES_PER_CHANNEL}.`);
   }
   assertArchiveVisibility(snapshot, target, write);
   return write;
@@ -362,6 +401,7 @@ export function buildManifest(snapshot: LiveCleanupSnapshot, snapshotPath: strin
     reviewedLegacyCategoryIds: [...LEGACY_CATEGORY_IDS],
     activeChannelIds: [...ACTIVE_CHANNEL_IDS],
     activeCategoryIds: [...ACTIVE_CATEGORY_IDS],
+    visibilityExemptions: archiveVisibilityExemptions(snapshot),
     operations: operations.map((operation) => ({ ...operation, state: 'pending' })),
   };
 }

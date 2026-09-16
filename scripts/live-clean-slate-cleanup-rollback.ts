@@ -214,12 +214,22 @@ function operationState(operation: CleanupManifest['operations'][number], channe
   if (states.every((state) => state === 'inverse')) return 'inverse';
   return 'mixed';
 }
+// Apply journals `requesting` before it issues the PATCH and never leaves more than
+// one, so at most one operation can be in flight. That operation — and only that
+// one — is allowed to be in an arbitrary live state: a partial or unconfirmed write
+// on it is exactly the case rollback exists to undo. `inverseWrite` is a complete
+// replacement of the object's overwrites, so writing it restores the pre-snapshot
+// state from any starting point, and the post-rollback semantic-hash equality check
+// still has to pass before this run is called rolled back.
+const inFlight = manifest.operations.filter((operation) => operation.state === 'requesting');
+if (inFlight.length > 1) die(1, `Rollback manifest has ${inFlight.length} in-flight operations; at most one is recoverable.`);
+const inFlightId = inFlight[0]?.id ?? null;
 for (const operation of manifest.operations) {
   const state = operationState(operation, preRollbackById);
   if ((operation.state === 'pending' || operation.state === 'rolled_back') && state !== 'inverse') {
     die(1, `Rollback preflight operation ${operation.id} must be coherently inverse while ${operation.state}.`);
   }
-  if (operation.state !== 'pending' && operation.state !== 'rolled_back' && state === 'drifted') {
+  if (operation.state !== 'pending' && operation.state !== 'rolled_back' && state === 'drifted' && operation.id !== inFlightId) {
     die(1, `Rollback preflight operation ${operation.id} drifted from both applied and inverse state.`);
   }
 }
@@ -245,11 +255,12 @@ for (const operation of [...manifest.operations].reverse()) {
     atomicJson(manifestPath, manifest);
     continue;
   }
-  if (currentState === 'drifted') {
+  if (currentState === 'drifted' && operation.id !== inFlightId) {
     manifest.status = 'rollback_failed';
     atomicJson(manifestPath, manifest);
     die(1, `Rollback target ${operation.objectId} drifted from both applied and inverse state.`);
   }
+  if (currentState === 'drifted') console.log(`RECOVERING in-flight ${operation.id} from a partial write on ${operation.objectId}`);
   const result = await api<Channel>('PATCH', `/channels/${operation.objectId}`, operation.inverseWrite);
   if (result.status === 429 || result.status >= 300 || !result.body) {
     manifest.status = 'rollback_failed';

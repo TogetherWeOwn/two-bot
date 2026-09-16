@@ -9,13 +9,18 @@ import { test } from 'node:test';
 import {
   ACTIVE_CATEGORY_IDS,
   ACTIVE_CHANNEL_IDS,
+  applyOperationOverwrites,
+  basePermissions,
   LEGACY_CATEGORY_IDS,
   LEGACY_CHANNEL_IDS,
   type Channel,
   type CleanupManifest,
   type JsonObject,
+  type LiveCleanupSnapshot,
+  type Member as SnapshotMember,
   normalizeOverwrites,
   operationSemanticHash,
+  type Overwrite,
   type Role,
   stable,
 } from '../src/redesign/live-cleanup.ts';
@@ -184,6 +189,30 @@ const cleanupArgs = (dir: string, apply = false) => ['--phase', 'archive-legacy'
 const manifestPath = (dir: string) => join(dir, 'phase-01', 'rollback.json');
 const planManifestPath = (dir: string) => join(dir, 'plan', 'rollback.json');
 
+/**
+ * Discord's channel permission stack, written independently of the planner's own
+ * assertion so the visibility test is not the planner agreeing with itself:
+ * base role permissions -> @everyone overwrite -> union of role overwrites ->
+ * member overwrite. Administrator short-circuits, which is why it cannot be denied.
+ */
+function canView(member: SnapshotMember, snapshot: LiveCleanupSnapshot, overwrites: Overwrite[]): boolean {
+  let permissions = basePermissions(member, snapshot);
+  if ((permissions & BigInt(ADMIN)) !== 0n) return true;
+  const everyone = overwrites.find((overwrite) => overwrite.type === 0 && overwrite.id === snapshot.guildId);
+  if (everyone) permissions = (permissions & ~BigInt(everyone.deny)) | BigInt(everyone.allow);
+  let allow = 0n;
+  let deny = 0n;
+  for (const overwrite of overwrites) {
+    if (overwrite.type !== 0 || overwrite.id === snapshot.guildId || !member.roles.includes(overwrite.id)) continue;
+    allow |= BigInt(overwrite.allow);
+    deny |= BigInt(overwrite.deny);
+  }
+  permissions = (permissions & ~deny) | allow;
+  const mine = overwrites.find((overwrite) => overwrite.type === 1 && overwrite.id === member.id);
+  if (mine) permissions = (permissions & ~BigInt(mine.deny)) | BigInt(mine.allow);
+  return (permissions & BigInt(VIEW)) !== 0n;
+}
+
 function operationChangesState(operation: CleanupManifest['operations'][number]): boolean {
   return stable(operation.write.permission_overwrites) !== stable(operation.inverseWrite.permission_overwrites);
 }
@@ -278,6 +307,73 @@ test('unmanaged role visibility is neutralized with an additive member deny', as
     assert.ok(operation.write.permission_overwrites.some((overwrite) => overwrite.id === roleId && overwrite.type === 0 && overwrite.allow === VIEW));
     const memberDeny = operation.write.permission_overwrites.find((overwrite) => overwrite.id === memberId && overwrite.type === 1)!;
     assert.notEqual(BigInt(memberDeny.deny) & BigInt(VIEW), 0n);
+  } finally { await stub.close(); }
+});
+
+test('only Owner, Owen and Administrator holders keep visibility; every other bot is denied and recorded', async () => {
+  const stub = await stubDiscord();
+  try {
+    const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-bot-visibility-'));
+    const result = await plan(stub, dir);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(stub.writes.length, 0);
+    const manifest = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    const snapshot = JSON.parse(readFileSync(join(dir, 'snapshot', 'pre.json'), 'utf8')) as LiveCleanupSnapshot;
+
+    // TOG-2920 finding: this non-Owen bot held ViewChannel on this reviewed legacy
+    // channel through a role allow that operation 17 preserves. The role allow must
+    // survive; the bot must not.
+    const REVIEWED_BOT = '235148962103951360';
+    const ALLOWING_ROLE = '1060912046012633148';
+    const DRIFTED_CHANNEL = '1087200619418357810';
+    const operation = manifest.operations.find((item) => item.objectId === DRIFTED_CHANNEL)!;
+    const roleBefore = operation.expectedBefore.permission_overwrites.find((item) => item.id === ALLOWING_ROLE && item.type === 0)!;
+    const roleAfter = operation.write.permission_overwrites.find((item) => item.id === ALLOWING_ROLE && item.type === 0)!;
+    assert.equal(BigInt(roleAfter.allow) & ~BigInt(VIEW), BigInt(roleBefore.allow) & ~BigInt(VIEW), 'unrelated role bits must survive');
+    assert.equal(roleAfter.allow, roleBefore.allow, 'the explicit role allow must be preserved, not stripped');
+    const botDeny = operation.write.permission_overwrites.find((item) => item.id === REVIEWED_BOT && item.type === 1);
+    assert.ok(botDeny, 'the non-Administrator bot must receive an additive member deny');
+    assert.notEqual(BigInt(botDeny.deny) & BigInt(VIEW), 0n);
+
+    // Nobody outside the recorded exemption set may see any of the 112 after the plan.
+    const after = structuredClone(snapshot);
+    for (const item of manifest.operations) applyOperationOverwrites(after, item, item.write.permission_overwrites);
+    const exempt = new Map(manifest.visibilityExemptions.map((item) => [item.memberId, item.reason]));
+    const stillVisible = snapshot.members.filter((member) => LEGACY_CHANNEL_IDS.some((id) => {
+      const channel = after.channels.find((item) => item.id === id)!;
+      return canView(member, snapshot, normalizeOverwrites(channel.permission_overwrites ?? []));
+    }));
+    assert.deepEqual(stillVisible.map((member) => member.id).sort(), [...exempt.keys()].sort());
+    assert.ok(stillVisible.some((member) => member.bot && member.id === LIVE_BOT_APPLICATION_ID), 'Owen must retain access');
+    assert.ok(stillVisible.some((member) => member.id === String(snapshot.guild.owner_id)), 'the guild Owner must retain access');
+    assert.ok(!stillVisible.some((member) => member.id === REVIEWED_BOT));
+    for (const member of stillVisible) {
+      const reason = exempt.get(member.id)!;
+      if (reason === 'administrator') {
+        assert.notEqual(basePermissions(member, snapshot) & BigInt(ADMIN), 0n, `${member.id} is recorded as Administrator but does not hold it`);
+      } else {
+        assert.ok(reason === 'owner' || reason === 'owen');
+      }
+    }
+    assert.match(result.stdout, /Principals that still see the archived objects after this plan: \d+/);
+    for (const item of manifest.visibilityExemptions) assert.match(result.stdout, new RegExp(`RETAINS-VIEW ${item.reason} \\w+ ${item.memberId}`));
+  } finally { await stub.close(); }
+});
+
+test('a tampered visibility-exemption set refuses apply before writes', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-exemption-tamper-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    const path = planManifestPath(dir);
+    const manifest = JSON.parse(readFileSync(path, 'utf8')) as CleanupManifest;
+    manifest.visibilityExemptions = [...manifest.visibilityExemptions, { memberId: ID(77), bot: true, reason: 'administrator' }];
+    writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
+    chmodSync(path, 0o600);
+    const result = await apply(stub, dir);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /visibility-exemption set/);
+    assert.equal(stub.writes.length, 0);
   } finally { await stub.close(); }
 });
 
@@ -471,6 +567,67 @@ test('429 and partial failure stop immediately with a recoverable manifest', asy
     const manifest = JSON.parse(readFileSync(manifestPath(partialDir), 'utf8')) as CleanupManifest;
     assert.equal(manifest.status, 'apply_failed');
   } finally { await partialStub.close(); }
+});
+
+test('a partial write leaves one in-flight operation that resume names and rollback recovers exactly', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-partial-recover-'));
+  const before = structuredClone(stub.state.channels);
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    stub.partialNextWrite();
+    const partial = await apply(stub, dir);
+    assert.equal(partial.code, 1);
+    assert.match(partial.stderr, /partial\/unexpected state/);
+
+    // The interrupted operation is journalled `requesting`, and the live object now
+    // matches neither its expected-before nor its full write. That is the state
+    // TOG-2920 showed was unrecoverable: resume refused and rollback refused.
+    const manifest = JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest;
+    const requesting = manifest.operations.filter((operation) => operation.state === 'requesting');
+    assert.equal(requesting.length, 1);
+    const inFlight = requesting[0]!;
+    const live = stub.state.channels.find((channel) => channel.id === inFlight.objectId)!;
+    const liveShape = stable(normalizeOverwrites(live.permission_overwrites));
+    assert.notEqual(liveShape, stable(inFlight.write.permission_overwrites), 'the live object must be a genuine partial, not the full write');
+    assert.notEqual(liveShape, stable(inFlight.expectedBefore.permission_overwrites), 'the live object must be a genuine partial, not the untouched before-state');
+
+    // Resume still refuses to push forward over an ambiguous write, but must now
+    // name the operation and hand the operator the rollback command.
+    const writesBeforeResume = stub.writes.length;
+    const resumed = await apply(stub, dir);
+    assert.equal(resumed.code, 1);
+    assert.match(resumed.stderr, new RegExp(`Interrupted operation ${inFlight.id} left a partial write`));
+    assert.match(resumed.stderr, /live-clean-slate-cleanup-rollback\.ts/);
+    assert.equal(stub.writes.length, writesBeforeResume, 'a refused resume must not write');
+
+    const rolledBack = await rollback(stub, dir);
+    assert.equal(rolledBack.code, 0, rolledBack.stderr);
+    assert.match(rolledBack.stdout, new RegExp(`RECOVERING in-flight ${inFlight.id}`));
+    assert.equal(stable(stub.state.channels), stable(before), 'rollback must reach the exact pre-snapshot state');
+    const finalManifest = JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest;
+    assert.equal(finalManifest.status, 'rolled_back');
+    assert.ok(finalManifest.operations.every((operation) => operation.state === 'rolled_back' || operation.state === 'pending'));
+  } finally { await stub.close(); }
+});
+
+test('rollback still refuses third-party drift on an operation that is not in flight', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-applied-drift-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    assert.equal((await apply(stub, dir)).code, 0);
+    const manifest = JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest;
+    assert.equal(manifest.operations.filter((operation) => operation.state === 'requesting').length, 0);
+    const applied = manifest.operations.findLast((operation) => operation.objectType === 'channel' && operationChangesState(operation))!;
+    const target = stub.state.channels.find((channel) => channel.id === applied.objectId)!;
+    target.permission_overwrites = [...target.permission_overwrites, { id: ID(88), type: 0, allow: VIEW, deny: '0' }];
+    const writesBefore = stub.writes.length;
+    const result = await rollback(stub, dir);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /drifted from both applied and inverse state/);
+    assert.equal(stub.writes.length, writesBefore, 'a refused rollback must not write');
+  } finally { await stub.close(); }
 });
 
 test('interrupted apply resumes without replay, then rollback restores exact semantic state in reverse order', async () => {
