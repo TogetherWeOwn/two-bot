@@ -261,6 +261,31 @@ test('permission-unsynchronized legacy child is refused because category archive
   } finally { await stub.close(); }
 });
 
+test('reviewed untouched objects and legacy-category children must retain their pinned topology', async () => {
+  const movedStub = await stubDiscord();
+  try {
+    const startHere = movedStub.state.channels.find((channel) => channel.id === '1545924265247903884')!;
+    const parent = movedStub.state.channels.find((channel) => channel.id === LEGACY_CATEGORY_IDS[0])!;
+    startHere.type = 0;
+    startHere.parent_id = parent.id;
+    startHere.permission_overwrites = [...parent.permission_overwrites, { id: ID(50), type: 0, allow: VIEW, deny: '0' }];
+    const result = await plan(movedStub, mkdtempSync(join(tmpdir(), 'two-live-clean-moved-untouched-')));
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /pinned type and parent|unexpected child/);
+    assert.equal(movedStub.writes.length, 0);
+  } finally { await movedStub.close(); }
+
+  const extraChildStub = await stubDiscord();
+  try {
+    const parent = extraChildStub.state.channels.find((channel) => channel.id === LEGACY_CATEGORY_IDS[0])!;
+    extraChildStub.state.channels.push({ id: ID(999), name: 'unreviewed legacy child', type: 0, parent_id: parent.id, permission_overwrites: structuredClone(parent.permission_overwrites) });
+    const result = await plan(extraChildStub, mkdtempSync(join(tmpdir(), 'two-live-clean-extra-child-')));
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, /unexpected child IDs/);
+    assert.equal(extraChildStub.writes.length, 0);
+  } finally { await extraChildStub.close(); }
+});
+
 test('tampered plan and phase operation bodies refuse apply and rollback before writes', async () => {
   const planStub = await stubDiscord();
   const planDir = mkdtempSync(join(tmpdir(), 'two-live-clean-plan-tamper-'));
@@ -427,6 +452,27 @@ test('interrupted apply resumes without replay, then rollback restores exact sem
     const rolledBack = await rollback(stub, dir);
     assert.equal(rolledBack.code, 0, rolledBack.stderr);
     assert.deepEqual(stub.rollbackOrder, [...stub.writeOrder].reverse().slice(1));
+    assert.equal(stable(stub.state.channels), stable(before));
+    const finalManifest = JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest;
+    assert.equal(finalManifest.status, 'rolled_back');
+    assert.ok(finalManifest.operations.every((operation) => operation.state === 'rolled_back'));
+  } finally { await stub.close(); }
+});
+
+test('rollback repairs a mixed category/child state before checkpointing and remains retryable', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-mixed-rollback-'));
+  const before = structuredClone(stub.state.channels);
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    assert.equal((await apply(stub, dir)).code, 0);
+    const manifest = JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest;
+    const mixed = manifest.operations.at(-1)!;
+    stub.state.channels.find((channel) => channel.id === mixed.objectId)!.permission_overwrites = structuredClone(mixed.inverseWrite.permission_overwrites);
+    const rollbackWritesBefore = stub.rollbackOrder.length;
+    const result = await rollback(stub, dir);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(stub.rollbackOrder.length - rollbackWritesBefore, 18, 'mixed state must PATCH the category rather than checkpoint it');
     assert.equal(stable(stub.state.channels), stable(before));
     const finalManifest = JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest;
     assert.equal(finalManifest.status, 'rolled_back');

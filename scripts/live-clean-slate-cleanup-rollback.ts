@@ -181,15 +181,40 @@ const botMember = currentMembers.find((member) => member.user?.id === LIVE_BOT_A
 if (!botMember || !roles.some((role) => botMember.roles?.includes(role.id) && (BigInt(role.permissions) & ADMINISTRATOR) !== 0n)) die(1, 'Rollback preflight: Owen does not have Administrator.');
 const preRollbackChannels = await mustGet<Channel[]>(`/guilds/${guildId}/channels`, 'Read rollback channel preflight');
 if (stable(preRollbackChannels.map((channel) => channel.id).sort()) !== stable(snapshot.channels.map((channel) => channel.id).sort())) die(1, 'Rollback preflight channel/category inventory drifted from the pre-snapshot.');
-for (const current of preRollbackChannels) {
-  const original = snapshot.channels.find((channel) => channel.id === current.id)!;
-  const operation = manifest.operations.find((item) => (item.objectId === current.id || item.objectId === current.parent_id) && item.state !== 'pending' && item.state !== 'rolled_back');
-  const currentShape = { ...current, permission_overwrites: normalizeOverwrites(current.permission_overwrites ?? []) };
-  const expectedAppliedShape = { ...original, permission_overwrites: normalizeOverwrites(operation?.write.permission_overwrites ?? original.permission_overwrites) };
-  const expectedInverseShape = { ...original, permission_overwrites: normalizeOverwrites(operation?.inverseWrite.permission_overwrites ?? original.permission_overwrites) };
-  if (stable(currentShape) !== stable(expectedAppliedShape) && stable(currentShape) !== stable(expectedInverseShape)) {
-    die(1, `Rollback preflight channel ${current.id} drifted from both applied and inverse state.`);
+const preRollbackById = new Map(preRollbackChannels.map((channel) => [channel.id, channel]));
+function operationState(operation: CleanupManifest['operations'][number], channels: Map<string, Channel>): 'applied' | 'inverse' | 'mixed' | 'drifted' {
+  const affected = [operation.objectId, ...snapshot.channels.filter((channel) => channel.parent_id === operation.objectId).map((channel) => channel.id)];
+  const expectedApplied = stable(normalizeOverwrites(operation.write.permission_overwrites));
+  const expectedInverse = stable(normalizeOverwrites(operation.inverseWrite.permission_overwrites));
+  const states = affected.map((id) => {
+    const current = channels.get(id);
+    if (!current) return 'drifted';
+    const overwrites = stable(normalizeOverwrites(current.permission_overwrites ?? []));
+    if (overwrites === expectedApplied) return 'applied';
+    if (overwrites === expectedInverse) return 'inverse';
+    return 'drifted';
+  });
+  if (states.includes('drifted')) return 'drifted';
+  if (states.every((state) => state === 'applied')) return 'applied';
+  if (states.every((state) => state === 'inverse')) return 'inverse';
+  return 'mixed';
+}
+for (const operation of manifest.operations) {
+  const state = operationState(operation, preRollbackById);
+  if ((operation.state === 'pending' || operation.state === 'rolled_back') && state !== 'inverse') {
+    die(1, `Rollback preflight operation ${operation.id} must be coherently inverse while ${operation.state}.`);
   }
+  if (operation.state !== 'pending' && operation.state !== 'rolled_back' && state === 'drifted') {
+    die(1, `Rollback preflight operation ${operation.id} drifted from both applied and inverse state.`);
+  }
+}
+for (const current of preRollbackChannels) {
+  const operation = manifest.operations.find((item) => item.objectId === current.id || item.objectId === current.parent_id);
+  if (operation) continue;
+  const original = snapshot.channels.find((channel) => channel.id === current.id)!;
+  const currentShape = { ...current, permission_overwrites: normalizeOverwrites(current.permission_overwrites ?? []) };
+  const originalShape = { ...original, permission_overwrites: normalizeOverwrites(original.permission_overwrites ?? []) };
+  if (stable(currentShape) !== stable(originalShape)) die(1, `Rollback preflight untouched channel ${current.id} drifted from the pre-snapshot.`);
 }
 manifest.status = 'rolling_back';
 atomicJson(manifestPath, manifest);
@@ -197,15 +222,15 @@ const rollbackOrder: string[] = [];
 
 for (const operation of [...manifest.operations].reverse()) {
   if (operation.state === 'rolled_back' || operation.state === 'pending') continue;
-  const category = await mustGet<Channel>(`/channels/${operation.objectId}`, `Read rollback category ${operation.objectId}`);
-  const current = normalizeOverwrites(category.permission_overwrites ?? []);
-  if (stable(current) === stable(operation.inverseWrite.permission_overwrites)) {
+  const currentChannels = await mustGet<Channel[]>(`/guilds/${guildId}/channels`, `Read rollback operation ${operation.objectId}`);
+  const currentState = operationState(operation, new Map(currentChannels.map((channel) => [channel.id, channel])));
+  if (currentState === 'inverse') {
     operation.state = 'rolled_back';
     operation.rolledBackAt = new Date().toISOString();
     atomicJson(manifestPath, manifest);
     continue;
   }
-  if (stable(current) !== stable(operation.write.permission_overwrites)) {
+  if (currentState === 'drifted') {
     manifest.status = 'rollback_failed';
     atomicJson(manifestPath, manifest);
     die(1, `Rollback target ${operation.objectId} drifted from both applied and inverse state.`);

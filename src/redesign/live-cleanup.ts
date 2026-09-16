@@ -253,10 +253,25 @@ export function assertReviewedShape(snapshot: LiveCleanupSnapshot): void {
       throw new Error(`Reviewed legacy channel ${id} is permission-unsynchronized from category ${parent.id}; category-only archive cannot prove it will inherit the deny.`);
     }
   }
-  const reviewed = new Set([...ACTIVE_CATEGORY_IDS, ...ACTIVE_CHANNEL_IDS, ...LEGACY_CATEGORY_IDS, ...LEGACY_CHANNEL_IDS]);
-  const duplicateMergeIds = new Set(['1545924265868525588', '1545924268489973841']);
-  const ignoredEmptyIds = new Set(['1545924265247903884', '1545924267453976696']);
-  const unknown = snapshot.channels.filter((channel) => !reviewed.has(channel.id as never) && !duplicateMergeIds.has(channel.id) && !ignoredEmptyIds.has(channel.id));
+  const reviewedUntouchedShapes = new Map([
+    ['1545924265868525588', { type: 4, parentId: null }],
+    ['1545924268489973841', { type: 0, parentId: '1545924265868525588' }],
+    ['1545924265247903884', { type: 4, parentId: null }],
+    ['1545924267453976696', { type: 4, parentId: null }],
+  ]);
+  for (const [id, expected] of reviewedUntouchedShapes) {
+    const channel = snapshot.channels.find((item) => item.id === id);
+    if (!channel || channel.type !== expected.type || channel.parent_id !== expected.parentId) {
+      throw new Error(`Reviewed untouched object ${id} does not match its pinned type and parent.`);
+    }
+  }
+  const reviewedLegacyChannels = new Set<string>(LEGACY_CHANNEL_IDS);
+  const unexpectedLegacyChildren = snapshot.channels.filter((channel) => channel.parent_id && LEGACY_CATEGORY_IDS.includes(channel.parent_id as never) && !reviewedLegacyChannels.has(channel.id));
+  if (unexpectedLegacyChildren.length > 0) {
+    throw new Error(`Reviewed legacy categories contain unexpected child IDs: ${unexpectedLegacyChildren.map((channel) => channel.id).join(', ')}.`);
+  }
+  const reviewed = new Set<string>([...ACTIVE_CATEGORY_IDS, ...ACTIVE_CHANNEL_IDS, ...LEGACY_CATEGORY_IDS, ...LEGACY_CHANNEL_IDS, ...reviewedUntouchedShapes.keys()]);
+  const unknown = snapshot.channels.filter((channel) => !reviewed.has(channel.id));
   if (unknown.length > 0) throw new Error(`Fresh snapshot contains unreviewed channel/category IDs: ${unknown.map((channel) => channel.id).join(', ')}.`);
   if (snapshot.semanticHash !== sha256(semanticSnapshot(snapshot))) throw new Error('Snapshot semantic hash does not match its content.');
 }
