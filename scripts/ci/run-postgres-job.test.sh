@@ -27,8 +27,12 @@ actual="$(cat "$TRACE")"
 
 : > "$TRACE"
 export FAIL_ON='run web:views'
-if "$SCRIPT"; then
-  echo 'workflow script ignored a failed step' >&2
+set +e
+failure_output="$("$SCRIPT" 2>&1)"
+rc=$?
+set -e
+if [[ "$rc" -ne 23 ]]; then
+  printf 'workflow script returned %s instead of the failing command status\n' "$rc" >&2
   exit 1
 fi
 actual="$(cat "$TRACE")"
@@ -36,5 +40,9 @@ actual="$(cat "$TRACE")"
   printf 'commands continued after failure:\n%s\n' "$actual" >&2
   exit 1
 }
+[[ "$failure_output" == *'::error title=Postgres workflow command failed::npm run web:views exited 23'* ]] || {
+  printf 'failure annotation did not name the failed command:\n%s\n' "$failure_output" >&2
+  exit 1
+}
 
-printf 'run-postgres-job: sequence and fail-fast behavior verified\n'
+printf 'run-postgres-job: sequence, fail-fast behavior and annotation verified\n'
