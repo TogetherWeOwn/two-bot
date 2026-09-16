@@ -299,21 +299,21 @@ const INDEX_CITATIONS: ReadonlyArray<{
   what: string;
 }> = [
   {
-    printed: 'src/index.ts:509-544',
-    start: 509,
-    end: 544,
+    printed: 'src/index.ts:514-549',
+    start: 514,
+    end: 549,
     contains: /registerSessionWelcome\(client, \{/,
     what: 'exclusive session registration',
   },
   {
-    printed: 'src/index.ts:603 and :289',
-    start: 603,
-    end: 603,
+    printed: 'src/index.ts:608 and :289',
+    start: 608,
+    end: 608,
     contains: /actionsForOnboardingMode\(/,
     what: 'the internal role.assign call site',
   },
   {
-    printed: 'src/index.ts:603 and :289',
+    printed: 'src/index.ts:608 and :289',
     start: 289,
     end: 289,
     contains: /levelRoleWritesForOnboardingMode\(/,
