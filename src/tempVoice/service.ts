@@ -24,8 +24,27 @@ import type { TempVoiceRow, TempVoiceStore } from './store.ts';
 export const CATEGORY_FULL_CODE = 50035;
 /** Discord: Unknown Channel. A 404 on delete is success, not an error. */
 export const UNKNOWN_CHANNEL_CODE = 10003;
+/** Discord: Missing Permissions. Always a server-setup fault, never transient. */
+export const MISSING_PERMISSIONS_CODE = 50013;
 
 export type OverwriteFlag = 'ViewChannel' | 'Connect' | 'Speak' | 'ManageChannels' | 'MoveMembers';
+
+/**
+ * Every permission `overwritesFor` hands out, which is the same thing as every
+ * permission the bot must itself hold.
+ *
+ * Discord refuses with 50013 when a bot creates an overwrite granting a
+ * permission it does not hold, so a single missing flag here turns every join
+ * of the generator into a failed create. A test asserts this list is exactly
+ * the union of the flags `overwritesFor` allows, so the two cannot drift.
+ */
+export const TEMP_VOICE_REQUIRED_PERMISSIONS: readonly OverwriteFlag[] = [
+  'ViewChannel',
+  'Connect',
+  'Speak',
+  'ManageChannels',
+  'MoveMembers',
+];
 
 /**
  * A PARTIAL overwrite edit: flags named in `allow`/`deny` are set, every other
@@ -73,6 +92,8 @@ export interface TempVoiceGateway {
   canMove(guildId: string, userId: string): Promise<boolean>;
   /** The guild's bitrate ceiling, which depends on its boost tier. */
   maxBitrate(guildId: string): Promise<number>;
+  /** Which of `flags` the bot does NOT hold inside `categoryId`. */
+  missingPermissions(guildId: string, categoryId: string, flags: readonly OverwriteFlag[]): Promise<OverwriteFlag[]>;
   botUserId(): string;
 }
 
@@ -110,6 +131,20 @@ export interface ReconcileReport {
 }
 
 const MIN_BITRATE = 8000;
+
+/**
+ * Module-level so a test can assert its granted flags are exactly
+ * TEMP_VOICE_REQUIRED_PERMISSIONS without reaching into a private method.
+ */
+export function tempVoiceOverwrites(guildId: string, botId: string, ownerId: string): OverwriteSpec[] {
+  return [
+    // Public by default. `lock` denies Connect for @everyone; `hide` denies
+    // ViewChannel. Both are per-channel edits of this same overwrite.
+    { id: guildId, type: 'role', allow: ['ViewChannel', 'Connect', 'Speak'] },
+    { id: botId, type: 'member', allow: ['ViewChannel', 'Connect', 'ManageChannels', 'MoveMembers'] },
+    { id: ownerId, type: 'member', allow: ['ViewChannel', 'Connect', 'Speak', 'ManageChannels', 'MoveMembers'] },
+  ];
+}
 
 export class TempVoiceService {
   private store: TempVoiceStore;
@@ -274,6 +309,27 @@ export class TempVoiceService {
           reason: 'The voice category is full (Discord allows 50 channels per category). Ask a moderator to make room.',
         };
       }
+      if (code === MISSING_PERMISSIONS_CODE) {
+        // Retrying cannot fix this, so the message must not ask for a retry.
+        // The overwrite names permissions the bot has to hold itself, and the
+        // usual cause is exactly one of them missing on the category.
+        await this.store.audit(
+          { guildId: input.guildId, actorId: input.userId, channelId: null, action: 'create', outcome: 'refused', reason: 'missing_permissions' },
+          this.iso(),
+        );
+        log.error('temp_voice_missing_permissions', {
+          guildId: input.guildId,
+          categoryId: this.config.categoryId,
+          required: TEMP_VOICE_REQUIRED_PERMISSIONS,
+          err: String(err),
+        });
+        return {
+          status: 'refused',
+          reason:
+            'I am not allowed to create a channel here, so retrying will not help. ' +
+            `Ask a server admin to give me these permissions on the voice category: ${TEMP_VOICE_REQUIRED_PERMISSIONS.join(', ')}.`,
+        };
+      }
       await this.store.audit(
         { guildId: input.guildId, actorId: input.userId, channelId: null, action: 'create', outcome: 'failed', reason: String(err).slice(0, 300) },
         this.iso(),
@@ -281,6 +337,35 @@ export class TempVoiceService {
       log.error('temp_voice_create_failed', { guildId: input.guildId, userId: input.userId, err: String(err) });
       return { status: 'refused', reason: 'Could not create your voice channel. Please try again.' };
     }
+  }
+
+  /**
+   * Boot-time permission check.
+   *
+   * Without it the first symptom of a missing grant is a member joining the
+   * generator, waiting, and getting a DM - and the operator finding out from
+   * them. This says which permission is missing, by name, at startup, while
+   * still letting the process run: the rest of the bot is unaffected and a
+   * refusal to boot would be a worse failure than a loud log line.
+   */
+  async preflight(guildId: string): Promise<{ ok: boolean; missing: OverwriteFlag[] }> {
+    if (!this.config.enabled) return { ok: true, missing: [] };
+    const missing = await this.gateway.missingPermissions(
+      guildId,
+      this.config.categoryId,
+      TEMP_VOICE_REQUIRED_PERMISSIONS,
+    );
+    if (missing.length) {
+      log.error('temp_voice_preflight_failed', {
+        guildId,
+        categoryId: this.config.categoryId,
+        missing,
+        hint: 'grant these to the bot on the category, not guild-wide',
+      });
+    } else {
+      log.info('temp_voice_preflight_ok', { guildId, categoryId: this.config.categoryId });
+    }
+    return { ok: missing.length === 0, missing };
   }
 
   /**
@@ -292,13 +377,7 @@ export class TempVoiceService {
    * does that the research says to refuse.
    */
   private overwritesFor(guildId: string, ownerId: string): OverwriteSpec[] {
-    return [
-      // Public by default. `lock` denies Connect for @everyone; `hide` denies
-      // ViewChannel. Both are per-channel edits of this same overwrite.
-      { id: guildId, type: 'role', allow: ['ViewChannel', 'Connect', 'Speak'] },
-      { id: this.gateway.botUserId(), type: 'member', allow: ['ViewChannel', 'Connect', 'ManageChannels', 'MoveMembers'] },
-      { id: ownerId, type: 'member', allow: ['ViewChannel', 'Connect', 'Speak', 'ManageChannels', 'MoveMembers'] },
-    ];
+    return tempVoiceOverwrites(guildId, this.gateway.botUserId(), ownerId);
   }
 
   // ------------------------------------------------------------ voice states

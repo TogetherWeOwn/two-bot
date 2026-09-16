@@ -664,6 +664,11 @@ if (cfg.guildId && tempVoiceCfg.enabled) {
   const guildId = cfg.guildId;
   client.once('ready', () => {
     void (async () => {
+      // Name the missing permission at boot rather than letting every join of
+      // the generator fail with a 50013 nobody sees.
+      await tempVoiceService.preflight(guildId).catch((err: unknown) => {
+        log.error('temp_voice_preflight_errored', { guildId, err: String(err) });
+      });
       // Reconcile before the sweeper starts: boot is the only moment we can
       // tell a channel that survived a restart from one that leaked.
       try {
