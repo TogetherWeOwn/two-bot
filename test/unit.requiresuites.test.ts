@@ -45,10 +45,9 @@ test('a run where every Postgres suite ran is accepted', () => {
 });
 
 test('a suite that skipped itself is caught, though the summary counts it as nothing', () => {
-  // This is exactly what node:test emits for
-  //   describe('backup round trip', { skip: !usingPostgres && '...' }, ...)
-  // with the database absent: one passing suite point carrying a skip, and not
-  // one test point underneath it. `# tests 0 # skipped 0`, exit 0.
+  // This is what node:test emits for a conditionally skipped describe: one
+  // passing suite point carrying a skip, and not one test point underneath it.
+  // `# tests 0 # skipped 0`, exit 0.
   const rows = goodRun().filter((r) => !r.file.endsWith('e2e.backup.test.ts'));
   rows.push(
     point('test/e2e.backup.test.ts', {

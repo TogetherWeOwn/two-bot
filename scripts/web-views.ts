@@ -31,7 +31,7 @@ if (!url) {
   process.exit(1);
 }
 if (!isPostgresSpec(url)) {
-  console.error(`web-views: TWO_DATABASE_URL is not a Postgres URL (${url.split(':')[0]}:...).`);
+  console.error('web-views: TWO_DATABASE_URL must use postgres:// or postgresql://.');
   process.exit(1);
 }
 

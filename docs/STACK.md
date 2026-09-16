@@ -135,10 +135,10 @@ Worth knowing before you write code:
    synchronous, so `EventStore.record()` cannot be sync. This is the one
    visible consequence of the move at call sites; names, arguments and return
    values are unchanged.
-5. **SQL is written once, in SQLite's `?` style.** The Postgres driver rewrites
-   `?` to `$1..$n`. Until the SQLite path is deleted, every statement has to be
-   valid in both dialects — in practice that means sticking to
-   `ON CONFLICT ... DO NOTHING` and `RETURNING`, which both engines share.
+5. **Internal SQL deliberately uses `?` placeholders.** The Postgres driver
+   rewrites them to `$1..$n` before sending a query. This is an internal SQL
+   convention, not a compatibility path for another database; keep using it so
+   prepared statements remain uniform across the codebase.
 6. **Migrations are immutable once applied.** The runner records a checksum and
    refuses to start if a file it has already applied has changed underneath it.
    Add a new migration instead.
@@ -181,8 +181,3 @@ That was right on both counts, and it cost about a day to unwind because the
 constraint was written down in advance and all writes already went through
 `EventStore`. The lesson worth carrying: name the trigger when you make the
 cheap choice, so that later the decision is a lookup rather than an argument.
-
-The SQLite driver still exists behind config (`TWO_DB_PATH`, used only when
-`TWO_DATABASE_URL` is empty) so a rollback does not need a deploy. It is
-deleted once Postgres has held up in staging for a week — tracked on TOG-45.
-Do not build anything new on it.

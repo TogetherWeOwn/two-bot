@@ -97,7 +97,7 @@ if (dryRun) {
   // operator the real restore will have migrations to apply first.
   const before: Record<string, string> = {};
   if (haveUrl) {
-    console.log(`restore: target ${url!.replace(/\/\/[^@]*@/, '//***@')}`);
+    console.log('restore: checking configured target');
     const probe = await openDb(url!, { skipMigrations: true, applicationName: 'two-bot-restore' });
     try {
       for (const t of DUMP_TABLES) {

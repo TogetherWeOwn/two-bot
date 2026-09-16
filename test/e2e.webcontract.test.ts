@@ -17,13 +17,12 @@
  *     profile page just because someone started emitting it.
  *   - the website's role can read the views and NOTHING else.
  *
- * Postgres only: views are Postgres, and the SQLite path is on its way out.
- *   TWO_TEST_DATABASE_URL=postgres://... npm test
+ * Run with TWO_TEST_DATABASE_URL pointing at an isolated Postgres database.
  */
 import { test, describe, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import pg from 'pg';
-import { openTestDb, usingPostgres, TEST_PG_URL, type TestDb } from './helpers/testDb.ts';
+import { openTestDb, TEST_PG_URL, type TestDb } from './helpers/testDb.ts';
 import type { Db } from '../src/store/db.ts';
 import {
   applyWebContract,
@@ -38,7 +37,7 @@ const ISO = (d: Date) => d.toISOString();
 const agoMinutes = (n: number) => ISO(new Date(Date.now() - n * 60_000));
 const inMinutes = (n: number) => ISO(new Date(Date.now() + n * 60_000));
 
-describe('web_v1 contract', { skip: !usingPostgres && 'needs TWO_TEST_DATABASE_URL' }, () => {
+describe('web_v1 contract', () => {
   let t: TestDb;
   let db: Db;
   let web: string;

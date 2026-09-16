@@ -54,7 +54,6 @@ test('briefly shipped migration rewrites remain rollback-compatible while additi
   ]);
   const applied: string[] = [];
   const db: Db = {
-    kind: 'postgres',
     prepare(sql: string): Statement {
       return {
         async get<T>(): Promise<T | undefined> {

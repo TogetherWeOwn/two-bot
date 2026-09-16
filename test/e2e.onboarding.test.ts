@@ -18,17 +18,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import {
   startMockDiscord,
   type Lighting,
   type MockDiscord,
 } from '../tools/mock-discord/server.ts';
 import { pickByKey, GAME_HUB_CHANNEL_ID } from '../src/onboarding/catalog.ts';
-import { openDb, type Db } from '../src/store/db.ts';
-import { openTestDb, usingPostgres, type TestDb } from './helpers/testDb.ts';
+import type { Db } from '../src/store/db.ts';
+import { openTestDb, TEST_PG_URL } from './helpers/testDb.ts';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const NEWBIE = '900000000000007777';
@@ -72,28 +70,17 @@ async function startHarness(
   opts: { lighting?: Lighting } = {},
 ): Promise<Harness> {
   const mock = await startMockDiscord(opts);
-  const dir = mkdtempSync(join(tmpdir(), 'two-onb-'));
-  const dbPath = join(dir, 'two.db');
   const botLog: string[] = [];
 
-  // Each harness gets its own datastore. On Postgres that is a private schema
-  // per harness, so the several bots this file starts never see each other.
-  let harness: TestDb | null = null;
-  let reader: Db;
-  let botDbEnv: Record<string, string>;
-  if (usingPostgres) {
-    harnessSeq++;
-    harness = await openTestDb(`${import.meta.filename}_${harnessSeq}`);
-    const schema = (await harness.db.prepare(`SELECT current_schema() AS s`).get<{ s: string }>())!.s;
-    reader = harness.db;
-    botDbEnv = {
-      TWO_DATABASE_URL: process.env.TWO_TEST_DATABASE_URL!,
-      PGOPTIONS: `-c search_path=${schema}`,
-    };
-  } else {
-    reader = await openDb(dbPath);
-    botDbEnv = { TWO_DB_PATH: dbPath };
-  }
+  // Each harness gets a private schema so the several bots this file starts
+  // never see each other.
+  harnessSeq++;
+  const harness = await openTestDb(`${import.meta.filename}_${harnessSeq}`);
+  const reader = harness.db;
+  const botDbEnv = {
+    TWO_DATABASE_URL: TEST_PG_URL,
+    PGOPTIONS: `-c search_path=${harness.schema}`,
+  };
 
   const bot = spawn(process.execPath, ['src/index.ts'], {
     cwd: ROOT,
@@ -115,9 +102,7 @@ async function startHarness(
   t.after(async () => {
     bot.kill('SIGKILL');
     await mock.close();
-    if (harness) await harness.cleanup();
-    else await reader.close();
-    rmSync(dir, { recursive: true, force: true });
+    await harness.cleanup();
   });
 
   try {

@@ -17,8 +17,35 @@ jobs:
   check:
     runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 10
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: two
+          POSTGRES_PASSWORD: two
+          POSTGRES_DB: two_test
+        ports:
+          - 5432
+        options: >-
+          --health-cmd "pg_isready -U two"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - uses: actions/checkout@v5
+
+      # Five runners share one host, so Docker assigns an unused host port
+      # instead of every job fighting over 5432. Set the database URLs at
+      # runtime so every later step reads the mapped port.
+      - name: Configure Postgres connection
+        env:
+          PGPORT: ${{ job.services.postgres.ports['5432'] }}
+        run: |
+          echo "PGPORT=$PGPORT" >> "$GITHUB_ENV"
+          echo "TWO_TEST_DATABASE_URL=postgres://two:two@127.0.0.1:$PGPORT/two_test" >> "$GITHUB_ENV"
+          echo "TWO_DATABASE_URL=postgres://two:two@127.0.0.1:$PGPORT/two_test" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -32,7 +59,8 @@ jobs:
       # errors reach production perfectly happily.
       - run: npm run typecheck
 
-      - run: npm test
+      # The required `check` context runs the complete Postgres-backed suite.
+      - run: npm run test:postgres
 
       # The TOG-64 grant check ships its own six cases and needs neither a token
       # nor the network, so there is no reason for it to rot untested. It is the
@@ -40,13 +68,10 @@ jobs:
       # breaks, the de-escalation silently stops being verifiable.
       - run: npm run verify:grant:selftest
 
-  # The same suite against a real Postgres, plus the website's grants.
-  #
-  # This job exists because the `check` job above cannot see any of it. Every
-  # Postgres-only test skips itself when TWO_TEST_DATABASE_URL is unset - which
-  # is every run of `check` - so the backup round trip, the concurrent-writer
-  # test and the whole web_v1 contract were green by absence, not by passing.
+  # Exercise the website views and least-privilege grants end to end after the
+  # required check has proved the full Postgres-backed suite.
   postgres:
+    needs: check
     runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 10
 
@@ -88,6 +113,8 @@ jobs:
           node-version: '24'
           cache: npm
 
+      # --include=dev matters: some environments set NODE_ENV=production,
+      # which makes npm silently skip devDependencies and typecheck disappears.
       - run: npm ci --include=dev
 
       # `npm test`, plus an assertion that the Postgres-only suites actually ran.

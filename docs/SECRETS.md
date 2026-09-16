@@ -61,8 +61,8 @@ still there, silently.
 | Variable | Required | What it is |
 |---|---|---|
 | `DISCORD_TOKEN` | yes | Bot token from the Discord developer application. Credential `discord_token` in production. |
+| `TWO_DATABASE_URL` | yes | Postgres connection URL. Credential `database_url` in production. |
 | `DISCORD_GUILD_ID` | no | Restrict to one server. |
-| `TWO_DB_PATH` | no | Defaults to `./data/two.db`. |
 | `TWO_INACTIVITY_DAYS` | no | Days of silence before flagging. Defaults to 14. |
 | `LOG_LEVEL` | no | `debug` / `info` / `error`. Defaults to `info`. |
 | `DISCORD_API_BASE` | no | **Testing only.** Points discord.js at the local mock. Must be unset in production. |

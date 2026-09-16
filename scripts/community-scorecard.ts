@@ -2,12 +2,13 @@ import { openDb } from '../src/store/db.ts';
 import { runPreviousClosedCommunityWeek } from '../src/analytics/communityScorecard.ts';
 import { CommunityClassifier, loadCommunityClassifierConfig } from '../src/analytics/communityClassifier.ts';
 
-const dbSpec = process.env.TWO_DATABASE_URL || process.env.TWO_DB_PATH || './data/two.db';
+const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
+if (!databaseUrl) throw new Error('TWO_DATABASE_URL is required.');
 const guildId = process.env.DISCORD_GUILD_ID;
 if (!guildId) throw new Error('DISCORD_GUILD_ID is required.');
 
 const classifier = new CommunityClassifier(loadCommunityClassifierConfig());
-const db = await openDb(dbSpec, { applicationName: 'two-bot-community-scorecard' });
+const db = await openDb(databaseUrl, { applicationName: 'two-bot-community-scorecard' });
 try {
   const result = await runPreviousClosedCommunityWeek(db, guildId, classifier.version, {
     recommendationsEnabled: process.env.TWO_COMMUNITY_RECOMMENDATIONS !== '0',

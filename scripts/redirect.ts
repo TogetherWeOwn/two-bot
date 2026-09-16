@@ -23,9 +23,10 @@ import { startRedirectServer } from '../src/redirect/server.ts';
 setLogLevel((process.env.LOG_LEVEL as 'debug' | 'info' | 'error') || 'info');
 
 const cfg = loadRedirectConfig();
-const dbSpec = process.env.TWO_DATABASE_URL || process.env.TWO_DB_PATH || './data/two.db';
+const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
+if (!databaseUrl) throw new Error('TWO_DATABASE_URL is required.');
 
-const db = await openDb(dbSpec, { applicationName: 'two-redirect', poolMax: 4 });
+const db = await openDb(databaseUrl, { applicationName: 'two-redirect', poolMax: 4 });
 const campaigns = new CampaignStore(db);
 const handlers = new FunnelHandlers(new EventStore(db));
 

@@ -35,15 +35,19 @@ const withCsv = argv.includes('--csv');
 const showAll = argv.includes('--all');
 const doMark = argv.includes('--mark');
 
-const dbSpec = process.env.TWO_DATABASE_URL || process.env.TWO_DB_PATH || './data/two.db';
+const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
 const guildId = process.env.DISCORD_GUILD_ID ?? '';
 
+if (!databaseUrl) {
+  console.error('TWO_DATABASE_URL is not set.');
+  process.exit(1);
+}
 if (!guildId) {
   console.error('DISCORD_GUILD_ID is not set - there is no server to report on.');
   process.exit(1);
 }
 
-const db = await openDb(dbSpec);
+const db = await openDb(databaseUrl);
 const list = await buildList(db, guildId);
 
 /** How the list is meant to be read, in the order the team should work it. */

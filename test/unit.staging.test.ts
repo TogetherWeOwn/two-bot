@@ -1,18 +1,9 @@
-/**
- * The staging fixtures, checked without Postgres, Discord, or a token.
- *
- * These run against in-memory SQLite because the fixtures go through
- * EventStore, which is driver-agnostic. That is deliberate: QA needs to trust
- * the fixture SHAPE, and the shape is a property of the seed data, not of the
- * engine underneath it. The Postgres path is exercised by staging-reset.ts
- * itself, which re-checks every count after seeding and exits non-zero on a
- * mismatch.
- */
+/** The staging fixtures, checked against isolated Postgres schemas. */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { test } from 'node:test';
+import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { openDb } from '../src/store/db.ts';
+import { openTestDb, type TestDb } from './helpers/testDb.ts';
 import { EventStore } from '../src/store/eventStore.ts';
 import { flagInactive, joinedNeverPosted } from '../src/jobs/inactivity.ts';
 import {
@@ -45,10 +36,20 @@ import type { EventType } from '../src/core/events.ts';
 
 const G = '999000111222333444'; // a stand-in staging guild id
 
+let harness: TestDb;
+before(async () => {
+  harness = await openTestDb(import.meta.filename);
+});
+after(async () => {
+  await harness.cleanup();
+});
+beforeEach(async () => {
+  await harness.reset();
+});
+
 async function seeded(now = TEST_NOW) {
-  const db = await openDb(':memory:');
-  const r = await seedFixtures(db, { guildId: G, now });
-  return { db, store: new EventStore(db), r };
+  const r = await seedFixtures(harness.db, { guildId: G, now });
+  return { db: harness.db, store: new EventStore(harness.db), r };
 }
 
 test('the seeded funnel matches the documented expectations', async () => {
@@ -88,7 +89,7 @@ test('seeding twice changes nothing - QA can re-run without drift', async () => 
  * anchor a seed used now comes back in the result so a caller can reuse it.
  */
 test('reseeding with the anchor a previous seed reported inserts nothing', async () => {
-  const db = await openDb(':memory:');
+  const db = harness.db;
   const first = await seedFixtures(db, { guildId: G }); // real clock, unpinned
   assert.ok(first.now, 'seedFixtures must report the anchor it used');
 
@@ -106,7 +107,7 @@ test('reseeding with the anchor a previous seed reported inserts nothing', async
 });
 
 test('two resets at different moments both land on the known state', async () => {
-  const db = await openDb(':memory:');
+  const db = harness.db;
   await resetStagingData(db, { guildId: G, now: '2026-08-19T12:00:00.000Z' });
   await resetStagingData(db, { guildId: G, now: '2026-08-19T12:00:05.000Z' });
   const store = new EventStore(db);
@@ -122,7 +123,7 @@ test('a second guild in the same database does not double the counts', async () 
   // both sets were correct - but `staging-reset.ts` verified with an unscoped
   // count, reported every funnel row as exactly doubled, and exited 1 on a
   // database that was fine. QA would have read that as fixture corruption.
-  const db = await openDb(':memory:');
+  const db = harness.db;
   const OTHER = '999999999999999001';
   await seedFixtures(db, { guildId: G, now: TEST_NOW });
   await seedFixtures(db, { guildId: OTHER, now: TEST_NOW });

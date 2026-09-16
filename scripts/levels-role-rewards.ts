@@ -36,8 +36,9 @@ if (guildId === LIVE_GUILD_ID && !process.argv.includes('--allow-live-guild')) {
   process.exit(2);
 }
 const set = arg('--set');
-const dbSpec = process.env.TWO_DATABASE_URL?.trim() || process.env.TWO_DB_PATH || './data/two.db';
-const db = await openDb(dbSpec, { poolMax: Number(process.env.TWO_DB_POOL_MAX ?? 5) });
+const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
+if (!databaseUrl) throw new Error('TWO_DATABASE_URL is required.');
+const db = await openDb(databaseUrl, { poolMax: Number(process.env.TWO_DB_POOL_MAX ?? 5) });
 try {
   const service = new LevelingService(db);
   if (set !== null) await service.replaceRoleRewards(guildId, parseRewards(set));
