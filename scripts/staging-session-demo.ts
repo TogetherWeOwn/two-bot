@@ -53,14 +53,32 @@
  * supported:
  *
  *   THE GUARANTEE IS IN THE CODE, NOT IN THE GUILD. Session mode cannot write a
- *   role because no code path reaches a role write. `actionsForOnboardingMode`
- *   removes `role.assign` from the enabled internal actions, and
- *   `levelRoleWritesForOnboardingMode` suppresses leveling reward roles (both
- *   in src/onboarding/mode.ts); nothing in src/discord/sessionWelcome.ts calls
- *   `roles.add`/`roles.remove`. Those are total over the code, deterministic,
- *   and asserted by test/unit.onboardingmode.test.ts. No observation of one
- *   walk in one guild can be more complete than that - it can only agree with
- *   it or contradict it.
+ *   role because no registered code path reaches a role write, and the paths
+ *   that could are refused at boot. TOG-2972 P1: that is four things, not one,
+ *   so all four are named here rather than resting on the two pure helpers:
+ *
+ *     1. src/onboarding/mode.ts. `actionsForOnboardingMode` removes
+ *        `role.assign` from the enabled internal actions;
+ *        `levelRoleWritesForOnboardingMode` suppresses leveling reward roles.
+ *        Both are pure and total over their input, and are asserted directly by
+ *        test/unit.onboardingmode.test.ts.
+ *     2. Their call sites, which are what make those two functions bind the
+ *        running bot rather than only themselves: src/index.ts:543 (internal
+ *        actions) and src/index.ts:272 (leveling).
+ *     3. src/index.ts:449-484. Session mode registers ONLY the roleless
+ *        `registerSessionWelcome`; the legacy picker and anchor-welcome
+ *        handlers are left unregistered, and nothing in
+ *        src/discord/sessionWelcome.ts calls `roles.add`/`roles.remove`.
+ *     4. src/index.ts:99-103 and :112-117. Self-role panels and armed anti-nuke
+ *        containment each write member roles, so session mode refuses to boot
+ *        alongside either - at startup, not at the first incident.
+ *
+ *   test/e2e.session.test.ts is the evidence for (2), (3) and (4) together: it
+ *   runs the bot against a mock gateway and asserts zero role-write requests
+ *   across a full join -> gate -> pick -> goodbye walk, a withheld leveling
+ *   reward role with the XP still awarded, and a refusal from each boot guard.
+ *   That is a claim about this source tree, and no observation of one walk in
+ *   one guild can be more complete than it - it can only agree or contradict.
  *
  * What the live walk contributes is therefore a FALSIFIER, whose job is to
  * catch a deployed build that does not behave like the tested one:
@@ -110,6 +128,7 @@ import {
   statSync,
   writeSync,
 } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve } from 'node:path';
 import { buildSessionMenu } from '../src/discord/sessionWelcome.ts';
@@ -151,6 +170,20 @@ const AUDIT_PAGE_SIZE = 100;
 const INVITE_GONE_STATUSES = new Set([200, 204, 404]);
 
 /**
+ * The invite artifact is two lines: a `run <id>` header naming the baseline run
+ * that owns it, then one payload line. Splitting it this way keeps the bearer
+ * URL alone on its own line for the operator to copy, and gives every state the
+ * file can be in an owner.
+ *
+ *   run <id>\npending                              staged, before the POST
+ *   run <id>\nhttps://discord.gg/<code>            a live invite
+ *   run <id>\nrevoked <code> HTTP <n> at <iso>     a revocation receipt
+ */
+const ARTIFACT_RE = /^run ([0-9a-f-]{36})\n(.+)\n?$/;
+const PENDING_PAYLOAD = 'pending';
+const INVITE_URL_RE = /^https:\/\/discord\.gg\/([A-Za-z0-9-]+)$/;
+
+/**
  * The one line a confirmed revocation is allowed to leave behind, and the only
  * shape `--verify` will accept as one on a later run.
  *
@@ -158,11 +191,11 @@ const INVITE_GONE_STATUSES = new Set([200, 204, 404]);
  * any three digits, anywhere in the file, multiline. So a hand-edited
  * `revoked invite-code HTTP 500 ...` certified a LIVE invite as already gone
  * and made zero DELETE requests. The receipt is evidence, so it has to be the
- * exact text this script writes: whole file, one line, a real invite code, and
- * a status that actually means gone (checked against INVITE_GONE_STATUSES
- * below, not by the pattern).
+ * exact text this script writes: one payload line, a real invite code, and a
+ * status that actually means gone (checked against INVITE_GONE_STATUSES below,
+ * not by the pattern).
  */
-const RECEIPT_RE = /^revoked ([A-Za-z0-9-]+) HTTP (\d{3}) at (\d{4}-\d{2}-\d{2}T[\d:.]+Z)\n?$/;
+const RECEIPT_RE = /^revoked ([A-Za-z0-9-]+) HTTP (\d{3}) at (\d{4}-\d{2}-\d{2}T[\d:.]+Z)$/;
 
 interface MemberRoles {
   [memberId: string]: string[];
@@ -171,9 +204,21 @@ interface MemberRoles {
 interface Baseline {
   guildId: string;
   takenAt: string;
+  /**
+   * Identifies this baseline run, and through it the invite that run created.
+   * TOG-2971 P1: a receipt only speaks for the invite of the run that wrote it,
+   * so the shortcut that skips the DELETE has to check which run that was.
+   */
+  demoRunId: string;
   /** Newest audit log entry id at baseline time; '0' when the log was empty. */
   auditCursor: string;
   members: MemberRoles;
+}
+
+/** The invite artifact, split into the run that owns it and its one payload line. */
+function parseArtifact(contents: string): { runId: string; payload: string } | null {
+  const m = ARTIFACT_RE.exec(contents);
+  return m ? { runId: m[1], payload: m[2] } : null;
 }
 
 interface AuditEntry {
@@ -535,9 +580,14 @@ async function main(): Promise<void> {
       `/guilds/${guildId}/audit-logs?limit=${AUDIT_PAGE_SIZE}` + (after === null ? '' : `&after=${after}`),
     );
     if (page.status !== 200 || !Array.isArray(page.body?.audit_log_entries)) {
+      // TOG-2971 P2 / TOG-2972 P2: this used to say the claim "cannot be proven
+      // without it", which implies the log could prove it given the chance. It
+      // cannot - that is the whole retraction above. The reason to fail here is
+      // narrower and true: a falsifier that cannot read its evidence has not run.
       throw new Error(
         `Could not read the audit log for guild ${guildId}: HTTP ${page.status}. ` +
-          'The zero-role-write claim cannot be proven without it.',
+          'This check is a falsifier and it could not read its evidence, so it has not run; ' +
+          'a check that has not run must not report a pass.',
       );
     }
     return page.body.audit_log_entries;
@@ -608,10 +658,24 @@ async function main(): Promise<void> {
    * retry. Only a confirmed deletion (200/204) or an already-gone invite (404)
    * is terminal. Anything else keeps the file and fails the run.
    *
+   * TOG-2971 P1: the receipt shortcut is the one path that skips the DELETE, so
+   * it is the one path that has to know WHICH invite it is talking about. It
+   * used to accept any well-formed receipt with a terminal status - so a
+   * receipt left by an older demo run, or one hand-written naming a code that
+   * was never ours, certified this run's invite as gone and sent nothing. The
+   * reviewer reproduced it with a canonical `revoked foreign-code HTTP 200`.
+   * The shortcut now requires the artifact's `run` header to match the current
+   * baseline's `demoRunId`; anything else is unconfirmed. Attempting a DELETE
+   * is always safe, so an unbound artifact that still carries a code is retried
+   * anyway - it just cannot report success for an invite it cannot identify.
+   *
+   * `baselineRunId` is null when the baseline is unreadable, which is exactly
+   * when nothing can be bound and nothing may be believed.
+   *
    * Never throws: it runs on the failure path, where it must not mask the
    * proof's own error.
    */
-  async function revokeInvite(): Promise<{ ok: boolean; message: string }> {
+  async function revokeInvite(baselineRunId: string | null): Promise<{ ok: boolean; message: string }> {
     let contents: string;
     try {
       contents = readPrivate(INVITE_PATH);
@@ -630,26 +694,61 @@ async function main(): Promise<void> {
       };
     }
 
+    const artifact = parseArtifact(contents);
+    if (!artifact) {
+      return {
+        ok: false,
+        message:
+          `${INVITE_PATH} does not hold a usable invite handle or a revocation receipt, so revocation is ` +
+          'unconfirmed. Check the guild\'s invite list in Discord and delete any demo invite by hand.',
+      };
+    }
+    /** Does this artifact describe the invite the CURRENT baseline run created? */
+    const bound = baselineRunId !== null && artifact.runId === baselineRunId;
+
+    // The baseline stages this marker before it asks Discord for an invite, so
+    // seeing it means the POST may have succeeded while the write of its code
+    // did not. That is the one case where a live invite exists and its code was
+    // never recorded anywhere - it has to be loud, not silent.
+    if (artifact.payload === PENDING_PAYLOAD) {
+      return {
+        ok: false,
+        message:
+          `${INVITE_PATH} was staged by baseline run ${artifact.runId} but never recorded an invite code, ` +
+          'so an invite that run created may be live with no handle to revoke it by. Check the guild\'s ' +
+          'invite list in Discord and delete any demo invite by hand, then re-baseline before walking again.',
+      };
+    }
+
     // A confirmed revocation leaves a receipt rather than removing the file, so
     // that a second --verify can tell "already revoked, and here is the status
     // Discord actually returned" apart from "the handle is missing".
     //
     // TOG-2964 P2: the receipt must be the exact line this script writes AND
-    // carry a status that means gone. A file reading `revoked <code> HTTP 500`
-    // used to short-circuit revocation entirely - it certified a live invite
-    // and sent no DELETE. Anything that is not a valid receipt falls through to
-    // the invite-URL path below, and if it is not that either, revocation is
-    // reported unconfirmed rather than assumed.
-    const receipt = RECEIPT_RE.exec(contents);
+    // carry a status that means gone. TOG-2971 P1: it must ALSO belong to this
+    // baseline's run, or it is a statement about some other invite.
+    const receipt = RECEIPT_RE.exec(artifact.payload);
     if (receipt && INVITE_GONE_STATUSES.has(Number(receipt[2]))) {
-      return { ok: true, message: `demo invite already revoked (HTTP ${receipt[2]}); receipt in ${INVITE_PATH}` };
+      if (bound) {
+        return {
+          ok: true,
+          message: `demo invite already revoked (HTTP ${receipt[2]}); receipt in ${INVITE_PATH}`,
+        };
+      }
+      return {
+        ok: false,
+        message:
+          `${INVITE_PATH} holds a revocation receipt for baseline run ${artifact.runId}, but this walk's ` +
+          `baseline is ${baselineRunId ?? 'unreadable'}. That receipt says nothing about the invite this ` +
+          'baseline created, so revocation is unconfirmed: check the guild\'s invite list in Discord and ' +
+          'delete any demo invite by hand, then re-baseline before walking again.',
+      };
     }
     // A receipt-shaped line whose status does not mean gone is not a receipt at
     // all - it is a record of a revocation that FAILED, and the code in it is
     // still live. So take the code from it and try the DELETE again rather than
     // trusting it or merely refusing.
-    const code =
-      receipt?.[1] ?? /^https:\/\/discord\.gg\/([A-Za-z0-9-]+)$/.exec(contents.trim())?.[1] ?? '';
+    const code = receipt?.[1] ?? INVITE_URL_RE.exec(artifact.payload)?.[1] ?? '';
     if (!code) {
       return {
         ok: false,
@@ -680,15 +779,34 @@ async function main(): Promise<void> {
     }
     // The bearer URL is overwritten in place by the receipt, so the credential
     // stops existing on disk at the same moment it stops existing in Discord,
-    // and the file that remains is evidence rather than a secret.
+    // and the file that remains is evidence rather than a secret. The receipt
+    // keeps the artifact's own run header: it is evidence about the invite that
+    // run created, and re-stamping it with a different run would manufacture
+    // exactly the binding this check exists to test.
     try {
-      writePrivate(INVITE_PATH, `revoked ${code} HTTP ${status} at ${new Date().toISOString()}\n`);
+      writePrivate(
+        INVITE_PATH,
+        `run ${artifact.runId}\nrevoked ${code} HTTP ${status} at ${new Date().toISOString()}\n`,
+      );
     } catch (err) {
       return {
         ok: false,
         message:
           `The demo invite was revoked (HTTP ${status}) but the receipt could not be written to ${INVITE_PATH}: ` +
           `${err instanceof Error ? err.message : String(err)}. Remove that file by hand.`,
+      };
+    }
+    // A DELETE that succeeded against a code we cannot tie to this baseline did
+    // remove *something*, and saying so is useful - but it is not confirmation
+    // that this walk's invite is gone, so it must not exit 0 as if it were.
+    if (!bound) {
+      return {
+        ok: false,
+        message:
+          `Revoked invite ${code} (HTTP ${status}) from ${INVITE_PATH}, but that handle belongs to baseline ` +
+          `run ${artifact.runId} and this walk's baseline is ${baselineRunId ?? 'unreadable'}. An invite ` +
+          'created by the current baseline may still be live: check the guild\'s invite list in Discord, ' +
+          'then re-baseline before walking again.',
       };
     }
     return {
@@ -721,10 +839,16 @@ async function main(): Promise<void> {
           `No baseline at ${SNAPSHOT_PATH}. Run this script without --verify before the member walk.`,
         );
       }
-      if (baseline.guildId !== guildId || typeof baseline.auditCursor !== 'string' || !baseline.members) {
+      if (
+        baseline.guildId !== guildId ||
+        typeof baseline.auditCursor !== 'string' ||
+        typeof baseline.demoRunId !== 'string' ||
+        !baseline.demoRunId ||
+        !baseline.members
+      ) {
         throw new Error(
-          `Baseline at ${SNAPSHOT_PATH} is for guild ${baseline.guildId ?? 'unknown'} or predates the audit-log ` +
-            `proof; it cannot cover this walk. Re-baseline against ${guildId} and walk again.`,
+          `Baseline at ${SNAPSHOT_PATH} is for guild ${baseline.guildId ?? 'unknown'} or predates the current ` +
+            `artifact format; it cannot cover this walk. Re-baseline against ${guildId} and walk again.`,
         );
       }
 
@@ -763,11 +887,16 @@ async function main(): Promise<void> {
           'snapshot. A clean run here is consistent with zero role writes; it does not demonstrate them.',
       );
       console.log(
-        'The zero-role-write guarantee is in the code, not in this run: actionsForOnboardingMode ' +
-          'drops role.assign and levelRoleWritesForOnboardingMode suppresses level reward roles ' +
-          '(src/onboarding/mode.ts), and sessionWelcome.ts contains no role write. Those hold over ' +
-          'every walk; see test/unit.onboardingmode.test.ts. This run only checks the deployed build ' +
-          'against them.',
+        'The zero-role-write guarantee is in the code, not in this run: session mode registers only ' +
+          'the roleless welcome (src/index.ts:449-484), drops role.assign and leveling role writes ' +
+          '(src/onboarding/mode.ts, wired at src/index.ts:543 and :272), and refuses to boot beside ' +
+          'self-role panels or armed containment (src/index.ts:99-103, :112-117). The two helpers are ' +
+          'asserted by test/unit.onboardingmode.test.ts and the wiring, the boot guards and a full ' +
+          'zero-role-write walk by test/e2e.session.test.ts.',
+      );
+      console.log(
+        'This run does not identify which build the staging bot is serving - it reads a guild, not a ' +
+          'deployment - so it can contradict that claim but never add to it.',
       );
     } catch (err) {
       proofError = err;
@@ -775,7 +904,20 @@ async function main(): Promise<void> {
 
     // Always, whatever the proof did: a failed verification is exactly when a
     // live bearer invite is most likely to be forgotten.
-    const revocation = await revokeInvite();
+    //
+    // The run id is re-read here rather than taken from the block above, and
+    // read in a way that cannot throw, because revocation has to run even when
+    // the baseline is unreadable (TOG-2950). An unreadable baseline yields null,
+    // which binds nothing - that is the honest answer, not a reason to skip the
+    // DELETE.
+    let baselineRunId: string | null = null;
+    try {
+      const parsed = JSON.parse(readPrivate(SNAPSHOT_PATH)) as Partial<Baseline>;
+      if (typeof parsed.demoRunId === 'string' && parsed.demoRunId) baselineRunId = parsed.demoRunId;
+    } catch {
+      baselineRunId = null;
+    }
+    const revocation = await revokeInvite(baselineRunId);
     console.log('--- invite ---');
     console.log(revocation.message);
     if (proofError) {
@@ -791,6 +933,7 @@ async function main(): Promise<void> {
   const baseline: Baseline = {
     guildId,
     takenAt: new Date().toISOString(),
+    demoRunId: randomUUID(),
     auditCursor: await newestAuditId(),
     members: await memberRoles(),
   };
@@ -823,6 +966,14 @@ async function main(): Promise<void> {
   console.log('--- demo panel ---');
   console.log(`posted message ${posted.body.id} in #${EXPECTED_CHANNEL.name}`);
 
+  // TOG-2971 P1: stage the artifact BEFORE asking Discord for an invite. This
+  // is what stops a receipt from an earlier run outliving the invite it was
+  // about. Without it, a POST that succeeds and a handle write that then fails
+  // leaves the previous run's `revoked ... HTTP 200` in place, and --verify
+  // reads a terminal receipt over a live invite. Writing the marker first makes
+  // that same failure land on `pending`, which fails closed and says so.
+  writePrivate(INVITE_PATH, `run ${baseline.demoRunId}\n${PENDING_PAYLOAD}\n`);
+
   // One use, one hour: the walk needs exactly one fresh member, and --verify
   // revokes whatever is left. A wider invite is a standing way into the guild.
   const invite = await api<{ code: string }>('POST', `/channels/${EXPECTED_CHANNEL.id}/invites`, {
@@ -836,7 +987,7 @@ async function main(): Promise<void> {
   // The invite is a bearer credential: anyone holding the URL can join the
   // guild until it expires. Operator and CI transcripts are retained, so it
   // goes to an owner-only file and only the path is printed.
-  writePrivate(INVITE_PATH, `https://discord.gg/${invite.body.code}\n`);
+  writePrivate(INVITE_PATH, `run ${baseline.demoRunId}\nhttps://discord.gg/${invite.body.code}\n`);
   console.log('--- invite for the fresh test member ---');
   console.log(`written to ${INVITE_PATH} (max_age 3600s, max_uses 1) - not printed here`);
 

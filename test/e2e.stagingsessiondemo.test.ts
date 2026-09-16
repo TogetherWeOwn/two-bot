@@ -237,6 +237,39 @@ function inviteReceipt(dir: string): string {
   return readFileSync(join(dir, 'invite.txt'), 'utf8');
 }
 
+/** The run id the baseline minted, which is what binds the invite artifact to it. */
+function baselineRunId(dir: string): string {
+  const snapshot = JSON.parse(readFileSync(join(dir, 'snapshot.json'), 'utf8')) as { demoRunId?: string };
+  assert.match(String(snapshot.demoRunId), /^[0-9a-f-]{36}$/, 'the baseline must mint a run id');
+  return snapshot.demoRunId!;
+}
+
+/**
+ * Write an invite artifact by hand. `runId` defaults to the current baseline's,
+ * so a test that only wants to vary the payload does not have to think about
+ * the header; pass a foreign one to exercise the binding itself.
+ */
+function writeArtifact(dir: string, payload: string, runId = baselineRunId(dir)): void {
+  writeFileSync(join(dir, 'invite.txt'), `run ${runId}\n${payload}\n`);
+}
+
+/**
+ * TOG-2971 P2 / TOG-2972 P2: the retraction is only real if the script never
+ * words a result as a proof - on ANY stream. The earlier guard read stdout
+ * only, so the proof language that actually survived was the kind that lives on
+ * error paths and prints to stderr. Every assertion here is about affirmative
+ * claims: "NOT PROVEN" is the wording we want and must keep passing.
+ */
+function assertNoProofLanguage(text: string, context: string): void {
+  assert.doesNotMatch(
+    text,
+    /(?<!NOT )\bproven\b/i,
+    `${context}: a check that cannot establish absence must not word its result as if it had`,
+  );
+  assert.doesNotMatch(text, /\bproof\b|\bprove[sd]?\b/i, `${context}: no revived proof wording`);
+  assert.doesNotMatch(text, /NONE across|window closed/i, `${context}: no revived closed-window wording`);
+}
+
 interface RunOptions {
   token?: string;
   args?: string[];
@@ -330,14 +363,21 @@ test('failed member read aborts before any write', async () => {
  * Fail closed. Without the audit log the script cannot see a role write to a
  * member who has since left, so it must refuse rather than fall back to the
  * snapshot alone and print a pass it has not earned.
+ *
+ * TOG-2971 P2: the reason it gives has to survive the retraction too. The old
+ * message said the claim "cannot be proven without it", which tells an operator
+ * the log WOULD prove it - the exact belief the header now spends forty lines
+ * withdrawing. The honest reason is narrower: a falsifier that cannot read its
+ * evidence has not run.
  */
-test('an unreadable audit log aborts instead of proving nothing', async () => {
+test('an unreadable audit log aborts, and does not imply the log could have proven it', async () => {
   const stub = await stubDiscord({ auditStatus: 403 });
   try {
     const result = await runScript(stub);
     assert.notEqual(result.code, 0);
     assert.match(result.stderr, /Could not read the audit log/);
-    assert.match(result.stderr, /cannot be proven/);
+    assert.match(result.stderr, /falsifier and it could not read its evidence, so it has not run/);
+    assertNoProofLanguage(result.stdout + result.stderr, 'the unreadable-audit-log path');
     assert.deepEqual(stub.writes, []);
   } finally {
     await stub.close();
@@ -459,7 +499,7 @@ test('the demo invite is never printed, lands owner-only, and is revoked on veri
     assert.deepEqual(inviteDeletes(stub), ['/api/v10/invites/invite-code'], 'verify must revoke the invite');
     // The bearer URL is replaced by a receipt, not deleted: a missing file is
     // indistinguishable from one an operator removed, and that state now fails.
-    assert.match(inviteReceipt(dir), /^revoked invite-code HTTP 200 at /);
+    assert.match(inviteReceipt(dir), /^revoked invite-code HTTP 200 at /m);
     assert.doesNotMatch(inviteReceipt(dir), /discord\.gg/, 'the receipt must not keep the bearer URL');
     assert.equal(statSync(invitePath).mode & 0o077, 0, 'the receipt stays owner-only');
   } finally {
@@ -529,27 +569,29 @@ test('a role write published after the scan is not claimed to have been ruled ou
     // The entry really did get published, and the run really did not see it.
     assert.ok(stub.audit.includes(late), 'the late entry must actually have been published');
     assert.equal(verify.code, 0, verify.stderr);
-    // "NOT PROVEN" is the wording we want, so the guard is against an
-    // AFFIRMATIVE claim: `proven` not preceded by `NOT `, the old `NONE across`
-    // line, and any talk of a proof or a closed window.
-    assert.doesNotMatch(
-      verify.stdout,
-      /(?<!NOT )\bproven\b/i,
-      'a scan that cannot establish absence must not word its result as if it had',
-    );
-    assert.doesNotMatch(verify.stdout, /NONE across|\bproof\b|window closed/i, 'no revived proof wording');
+    assertNoProofLanguage(verify.stdout + verify.stderr, 'a clean run that stepped over a late entry');
     assert.match(verify.stdout, /OBSERVED, NOT PROVEN/);
     assert.match(verify.stdout, /NONE OBSERVED across MEMBER_ROLE_UPDATE/);
     assert.match(
       verify.stdout,
       /no publication-completeness guarantee/,
-      'the output must say why a clean scan is not a proof',
+      'the output must say why a clean scan does not establish absence',
     );
     assert.match(
       verify.stdout,
       /guarantee is in the code/,
       'and must point at what does carry the guarantee',
     );
+    // TOG-2972 P1: the guarantee it points at is an application property, so the
+    // citation has to reach the wiring and the boot guards, not stop at the two
+    // pure helpers whose unit test cannot see either.
+    assert.match(verify.stdout, /src\/index\.ts:449-484/, 'cites exclusive session registration');
+    assert.match(verify.stdout, /src\/index\.ts:543 and :272/, 'cites the two call sites');
+    assert.match(verify.stdout, /src\/index\.ts:99-103, :112-117/, 'cites the boot guards');
+    assert.match(verify.stdout, /test\/e2e\.session\.test\.ts/, 'cites the test that covers them');
+    // TOG-2972 P2: and must not imply it identified the running build.
+    assert.match(verify.stdout, /does not identify which build the staging bot is serving/);
+    assert.doesNotMatch(verify.stdout, /checks the deployed build/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
     await stub.close();
@@ -568,7 +610,7 @@ test('a receipt whose status does not mean gone is retried, not believed', async
   const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
   try {
     assert.equal((await runScript(stub, { dir })).code, 0);
-    writeFileSync(join(dir, 'invite.txt'), 'revoked invite-code HTTP 500 at 2026-09-16T00:00:00.000Z\n');
+    writeArtifact(dir, 'revoked invite-code HTTP 500 at 2026-09-16T00:00:00.000Z');
 
     const verify = await runScript(stub, { dir, args: ['--verify'] });
     assert.deepEqual(
@@ -578,7 +620,67 @@ test('a receipt whose status does not mean gone is retried, not believed', async
     );
     assert.equal(verify.code, 0, verify.stderr);
     assert.doesNotMatch(verify.stdout, /already revoked \(HTTP 500\)/);
-    assert.match(inviteReceipt(dir), /^revoked invite-code HTTP 200 at /, 'and leaves a real receipt');
+    assert.match(inviteReceipt(dir), /^revoked invite-code HTTP 200 at /m, 'and leaves a real receipt');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/**
+ * TOG-2971 P1, the reviewer's own repro. This receipt is CANONICAL - the exact
+ * text the script writes, a real code, HTTP 200 - and it is still not evidence
+ * about this walk, because it names a different baseline run. The old code
+ * checked only shape and status, so it reported "already revoked" and sent zero
+ * DELETEs while the invite this baseline created was live.
+ *
+ * This is reachable without anyone hand-editing a file: run the demo twice and
+ * let the second baseline's handle write fail after its POST succeeds, and the
+ * first run's terminal receipt is what --verify finds.
+ */
+test('a canonical HTTP 200 receipt from another run does not suppress revocation', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
+  try {
+    assert.equal((await runScript(stub, { dir })).code, 0);
+    const foreignRun = '00000000-0000-4000-8000-000000000000';
+    assert.notEqual(foreignRun, baselineRunId(dir), 'precondition: the receipt is from another run');
+    writeArtifact(dir, 'revoked foreign-code HTTP 200 at 2026-09-16T00:00:00.000Z', foreignRun);
+
+    const verify = await runScript(stub, { dir, args: ['--verify'] });
+    assert.notEqual(verify.code, 0, 'a receipt for another run must not read as a clean revocation');
+    assert.doesNotMatch(verify.stdout, /already revoked/, 'and must not claim it did');
+    assert.match(verify.stderr, /says nothing about the invite this baseline created/);
+    assert.match(verify.stderr, new RegExp(foreignRun));
+    // It cannot DELETE the live code either - that code is in no file. Being
+    // loud about it is the whole remedy; silently exiting 0 was the defect.
+    assert.deepEqual(inviteDeletes(stub), [], 'there is no live code it could have learned from this file');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/**
+ * The other half of TOG-2971 P1: the staged marker is what stops the state
+ * above from arising by accident. The baseline writes it BEFORE asking Discord
+ * for an invite, so a POST that succeeds while the handle write fails leaves
+ * `pending` rather than the previous run's terminal receipt.
+ */
+test('the baseline stages the invite file before the invite exists', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
+  try {
+    assert.equal((await runScript(stub, { dir })).code, 0);
+    const runId = baselineRunId(dir);
+    // Exactly the file the interrupted baseline would have left behind.
+    writeArtifact(dir, 'pending', runId);
+
+    const verify = await runScript(stub, { dir, args: ['--verify'] });
+    assert.notEqual(verify.code, 0, 'a staged-but-unrecorded invite must fail closed');
+    assert.match(verify.stderr, /never recorded an invite code/);
+    assert.match(verify.stderr, new RegExp(runId));
+    assert.deepEqual(inviteDeletes(stub), [], 'there is no code to DELETE');
   } finally {
     rmSync(dir, { recursive: true, force: true });
     await stub.close();
@@ -618,10 +720,15 @@ test('one audit scan is a single request across every action type', async () => 
     stub.auditRequests = 0;
     const verify = await runScript(stub, { dir, args: ['--verify'] });
     assert.equal(verify.code, 0, verify.stderr);
-    // Two scans of one request each. Four action types per scan would be 8.
-    assert.ok(
-      stub.auditRequests <= 4,
-      `a scan must not fan out per action type; saw ${stub.auditRequests} requests for two scans`,
+    // TOG-2971 P3: this was `<= 4`, which is not a regression test for per-type
+    // fan-out - it is satisfied by two, three or four requests, so a scan that
+    // fanned out across two of the four action types would still have passed.
+    // On this fixture the audit log is one short page, so --verify makes exactly
+    // one scan of exactly one request. Assert that number.
+    assert.equal(
+      stub.auditRequests,
+      1,
+      `--verify must make exactly one audit request on a single-page log; saw ${stub.auditRequests}`,
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -668,7 +775,7 @@ test('an already-gone invite counts as revoked', async () => {
     const verify = await runScript(stub, { dir, args: ['--verify'] });
     assert.equal(verify.code, 0, verify.stderr);
     assert.match(verify.stdout, /already gone \(HTTP 404\)/);
-    assert.match(inviteReceipt(dir), /^revoked invite-code HTTP 404 at /);
+    assert.match(inviteReceipt(dir), /^revoked invite-code HTTP 404 at /m);
   } finally {
     rmSync(dir, { recursive: true, force: true });
     await stub.close();
@@ -738,7 +845,7 @@ test('a corrupted baseline still revokes the invite', async () => {
       ['/api/v10/invites/invite-code'],
       'a failed baseline parse must not leave a live bearer invite behind',
     );
-    assert.match(inviteReceipt(dir), /^revoked invite-code HTTP 200 at /);
+    assert.match(inviteReceipt(dir), /^revoked invite-code HTTP 200 at /m);
   } finally {
     rmSync(dir, { recursive: true, force: true });
     await stub.close();
@@ -787,7 +894,7 @@ test('a proof that cannot read the audit log still revokes the invite', async ()
       ['/api/v10/invites/invite-code'],
       'a failed proof must not leave a live bearer invite behind',
     );
-    assert.match(inviteReceipt(dir), /^revoked invite-code HTTP 200 at /);
+    assert.match(inviteReceipt(dir), /^revoked invite-code HTTP 200 at /m);
   } finally {
     rmSync(dir, { recursive: true, force: true });
     await stub.close();
