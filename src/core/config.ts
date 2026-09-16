@@ -44,6 +44,8 @@ export interface Config {
   anchorWelcomeChannelId: string | null;
   /** Onboarding observes and logs but changes nothing. */
   onboardingDryRun: boolean;
+  /** Self-role panels observe and audit but change no roles. */
+  selfRoleDryRun: boolean;
   /**
    * TOG-1654 / TOG-1644. `session` = the roleless flow: welcome with a
    * "what do you want to do" picker routing to #looking-to-play or the Lobby,
@@ -65,6 +67,15 @@ export interface Config {
   /** Joins inside `raidWindowSeconds` that raise an alert. */
   raidJoinThreshold: number;
   raidWindowSeconds: number;
+  /** Metadata-only Discord event mirrors. Null means durable/process audit only. */
+  auditLogChannelId: string | null;
+  voiceLogChannelId: string | null;
+  moderationLogChannelId: string | null;
+  /** Ticket support is enabled only when all three Discord ids are configured. */
+  ticketCategoryId: string | null;
+  ticketStaffRoleId: string | null;
+  ticketPanelChannelId: string | null;
+  ticketCooldownSeconds: number;
   /**
    * The internal presence instrument (TOG-469). On by default, because a
    * trend instrument that nobody remembered to switch on collects nothing and
@@ -75,6 +86,11 @@ export interface Config {
    * collects is ever rendered - see migrations/0004_presence_probe.sql.
    */
   presenceProbe: boolean;
+  communityScorecard: boolean;
+  communityRecommendations: boolean;
+  communityCorrectionCycles: number;
+  communityHumanChannelIds: string[];
+  communityWelcomeChannelIds: string[];
 }
 
 /**
@@ -123,6 +139,7 @@ export function loadConfig(): Config {
       .filter(Boolean),
     anchorWelcomeChannelId: process.env.DISCORD_ANCHOR_WELCOME_CHANNEL_ID || null,
     onboardingDryRun: process.env.TWO_ONBOARDING_DRY_RUN === '1',
+    selfRoleDryRun: process.env.TWO_SELF_ROLE_DRY_RUN === '1',
     onboardingMode: process.env.TWO_ONBOARDING_MODE === 'session' ? 'session' : 'legacy',
     goodbyeChannelIds: (process.env.DISCORD_GOODBYE_CHANNEL_IDS || '')
       .split(',')
@@ -133,7 +150,25 @@ export function loadConfig(): Config {
     staffAlertChannelId: process.env.DISCORD_STAFF_ALERT_CHANNEL_ID || null,
     raidJoinThreshold: Number(process.env.TWO_RAID_JOIN_THRESHOLD ?? 5),
     raidWindowSeconds: Number(process.env.TWO_RAID_WINDOW_SECONDS ?? 60),
+    auditLogChannelId: process.env.DISCORD_AUDIT_LOG_CHANNEL_ID || null,
+    voiceLogChannelId: process.env.DISCORD_VOICE_LOG_CHANNEL_ID || null,
+    moderationLogChannelId: process.env.DISCORD_MODERATION_LOG_CHANNEL_ID || null,
+    ticketCategoryId: process.env.DISCORD_TICKET_CATEGORY_ID || null,
+    ticketStaffRoleId: process.env.DISCORD_TICKET_STAFF_ROLE_ID || null,
+    ticketPanelChannelId: process.env.DISCORD_TICKET_PANEL_CHANNEL_ID || null,
+    ticketCooldownSeconds: Number(process.env.TWO_TICKET_COOLDOWN_SECONDS ?? 300),
     presenceProbe: process.env.TWO_PRESENCE_PROBE !== '0',
+    communityScorecard: process.env.TWO_COMMUNITY_SCORECARD === '1',
+    communityRecommendations: process.env.TWO_COMMUNITY_RECOMMENDATIONS !== '0',
+    communityCorrectionCycles: Number(process.env.TWO_COMMUNITY_CORRECTION_CYCLES ?? 0),
+    communityHumanChannelIds: (process.env.TWO_COMMUNITY_HUMAN_CHANNEL_IDS || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+    communityWelcomeChannelIds: (process.env.TWO_COMMUNITY_WELCOME_CHANNEL_IDS || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
     dbPath: resolveDbSpec(),
     dbPoolMax: Number(process.env.TWO_DB_POOL_MAX ?? 5),
     inactivityDays: Number(process.env.TWO_INACTIVITY_DAYS ?? 14),

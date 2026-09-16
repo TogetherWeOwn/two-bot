@@ -15,14 +15,23 @@
 import { ActionError } from './errors.ts';
 import type { ActionDiscord, ScheduledEventInput } from './discordActions.ts';
 import type { InternalActionStore } from './store.ts';
+import type { ModerationResolver } from '../moderation/resolver.ts';
+import type { ModerationService } from '../moderation/service.ts';
+import { runModerationAction } from '../moderation/actions.ts';
 import { WEB_ONE_CLICK_SOURCE, type ExpectedJoins } from '../core/expectedJoins.ts';
 import { ALL_PICKS } from '../onboarding/catalog.ts';
+import { MODERATION_ACTIONS } from '../moderation/types.ts';
+import { MAX_CUSTOM_COMMANDS } from '../discord/commandNames.ts';
+import { CommandCapacityError } from '../automations/errors.ts';
 
 export const IMPLEMENTED_ACTIONS = [
   'role.assign',
   'guild.add_member',
   'announcement.post',
   'event.upsert',
+  'automations.import',
+  'automations.export',
+  ...MODERATION_ACTIONS,
 ] as const;
 export type ActionName = (typeof IMPLEMENTED_ACTIONS)[number];
 
@@ -36,6 +45,8 @@ export type ActionName = (typeof IMPLEMENTED_ACTIONS)[number];
 export const NEEDS_IDEMPOTENCY_KEY: ReadonlySet<string> = new Set([
   'announcement.post',
   'event.upsert',
+  'automations.import',
+  ...MODERATION_ACTIONS,
 ]);
 
 /** Discord's own ceilings. Rejecting here beats a bare 400 from Discord. */
@@ -65,6 +76,24 @@ export interface ActionContext {
   enabled: Set<string>;
   /** Durable state. Required by every action in NEEDS_IDEMPOTENCY_KEY. */
   store: InternalActionStore | null;
+  /** Automations import/export service; absent means those verbs fail closed. */
+  automations?: {
+    importMee6(
+      guildId: string,
+      body: unknown,
+      actorId: string,
+      options?: { overwrite?: boolean; maxCommands?: number },
+    ): Promise<{ imported: number; skipped: number; conflicts?: string[] }>;
+    exportCommands(guildId: string): Promise<unknown[]>;
+  } | null;
+  /** Moderation lookups and execution. Present only when moderation actions are enabled. */
+  moderation?: { resolver: ModerationResolver; service: ModerationService } | null;
+  /** Destructive imports need a stronger, separately configured capability. */
+  allowAutomationOverwrite?: boolean;
+  /** Publish changed custom slash commands after a successful import. */
+  syncCommands?: (() => Promise<number>) | null;
+  /** The signed caller's idempotency key, supplied by server.ts. */
+  idempotencyKey?: string | null;
   /**
    * Join attribution for guild.add_member (§7). The same instance the gateway
    * guildMemberAdd handler reads, which is why it is passed in rather than
@@ -78,6 +107,8 @@ export interface ActionOutcome {
   result: Record<string, unknown>;
   /** For the log line. Never any part of the request body. */
   outcome: string;
+  /** Inner moderation row supplied the stored result during outer recovery. */
+  innerReplayed?: boolean;
 }
 
 /**
@@ -165,6 +196,30 @@ export async function runAction(
       return announcementPost(body, ctx);
     case 'event.upsert':
       return eventUpsert(body, ctx);
+    case 'automations.import':
+      return automationsImport(body, ctx);
+    case 'automations.export':
+      return automationsExport(ctx);
+    case 'moderation.ban':
+    case 'moderation.tempban':
+    case 'moderation.kick':
+    case 'moderation.timeout':
+    case 'moderation.warn':
+    case 'moderation.purge':
+    case 'moderation.slowmode':
+    case 'moderation.lockdown':
+    case 'moderation.unlock':
+      if (!ctx.moderation || !ctx.idempotencyKey) {
+        throw new ActionError('action_not_allowed', 'Moderation actions are not configured', {
+          logReason: 'moderation_not_configured',
+        });
+      }
+      return runModerationAction(action, body, {
+        guildId: ctx.guildId,
+        resolver: ctx.moderation.resolver,
+        service: ctx.moderation.service,
+        idempotencyKey: ctx.idempotencyKey,
+      });
   }
 }
 
@@ -375,4 +430,95 @@ function requireTimestamp(body: Record<string, unknown>, field: string): string 
     });
   }
   return new Date(ms).toISOString();
+}
+
+/**
+ * `automations.import` (TOG-1648): translate an MEE6 custom-command export
+ * into Owen command definitions. It requires the shared durable
+ * Idempotency-Key path: a retry must replay one stored result, while a caller
+ * deliberately importing changed content uses a fresh key.
+ *
+ * The request body holds admin-authored templates only. It is the one
+ * internal-action body where storing a hash is slightly awkward (the useful
+ * diff is the content), and the answer is the same as everywhere else: we
+ * hash it, we do not keep it.
+ */
+async function automationsImport(
+  body: Record<string, unknown>,
+  ctx: ActionContext,
+): Promise<ActionOutcome> {
+  if (!ctx.automations) {
+    throw new ActionError('action_not_allowed', '"automations.import" is not wired on this bot', {
+      logReason: 'automations_not_wired',
+    });
+  }
+  if (!ctx.syncCommands) {
+    throw new ActionError('action_not_allowed', 'Automation command sync is not wired on this bot', {
+      logReason: 'automations_sync_not_wired',
+    });
+  }
+  const commands = body.commands;
+  if (!Array.isArray(commands)) {
+    throw new ActionError('malformed', '"commands" must be an array of MEE6 command objects', {
+      logReason: 'missing_commands',
+    });
+  }
+  if (commands.length > MAX_CUSTOM_COMMANDS) {
+    throw new ActionError('malformed', `"commands" may contain at most ${MAX_CUSTOM_COMMANDS} entries`, {
+      logReason: 'too_many_commands',
+    });
+  }
+  const overwrite = body.overwrite === true;
+  if (body.overwrite !== undefined && typeof body.overwrite !== 'boolean') {
+    throw new ActionError('malformed', '"overwrite" must be a boolean', {
+      logReason: 'bad_overwrite',
+    });
+  }
+  if (overwrite && !ctx.allowAutomationOverwrite) {
+    throw new ActionError('action_not_allowed', 'Destructive automation imports are not enabled on this bot', {
+      logReason: 'automations_overwrite_disabled',
+    });
+  }
+  let result: Awaited<ReturnType<NonNullable<ActionContext['automations']>['importMee6']>>;
+  try {
+    result = await ctx.automations.importMee6(
+      ctx.guildId,
+      commands,
+      'internal:automations.import',
+      { overwrite, maxCommands: MAX_CUSTOM_COMMANDS },
+    );
+  } catch (error) {
+    if (error instanceof CommandCapacityError) {
+      throw new ActionError('malformed', error.message, { logReason: 'command_capacity_exceeded' });
+    }
+    throw error;
+  }
+  let published: number | null = null;
+  if (result.imported > 0) published = await ctx.syncCommands();
+  return {
+    result: {
+      imported: result.imported,
+      skipped: result.skipped,
+      conflicts: result.conflicts ?? [],
+      published,
+    },
+    outcome: `imported ${result.imported}, skipped ${result.skipped}, published ${published ?? 0}`,
+  };
+}
+
+/**
+ * `automations.export` (TOG-1648): the reverse - every command definition as
+ * an MEE6-shaped array, so a migration off MEE6 is reversible and auditable.
+ */
+async function automationsExport(ctx: ActionContext): Promise<ActionOutcome> {
+  if (!ctx.automations) {
+    throw new ActionError('action_not_allowed', '"automations.export" is not wired on this bot', {
+      logReason: 'automations_not_wired',
+    });
+  }
+  const commands = await ctx.automations.exportCommands(ctx.guildId);
+  return {
+    result: { commands },
+    outcome: `exported ${commands.length}`,
+  };
 }

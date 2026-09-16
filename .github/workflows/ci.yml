@@ -5,9 +5,18 @@ on:
     branches: [main]
   pull_request:
 
+# A second push to the same PR cancels the first in-flight run. Mirrors
+# two-web/two-design's ci.yml — never cancel main, since nothing downstream
+# keys off an in-progress main run here, but there is no reason to burn two
+# full `check`+`postgres` runs on a PR that got pushed to twice in a minute.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v4
@@ -39,6 +48,7 @@ jobs:
   # test and the whole web_v1 contract were green by absence, not by passing.
   postgres:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     services:
       postgres:

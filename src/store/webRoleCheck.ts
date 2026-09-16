@@ -61,6 +61,43 @@ export const BOT_TABLES = [
   'internal_idempotency',
   'internal_action_log',
   'internal_discord_events',
+  // 0011 — Discord operational metadata. Staff-only and never exposed through
+  // web_v1, even though message bodies and names are deliberately absent.
+  'operational_audit_log',
+  // 0010 — private moderation history and scheduled tempban expiry.
+  'moderation_warnings',
+  'moderation_scheduled_unbans',
+  'moderation_audit',
+  'moderation_lockdowns',
+  'moderation_idempotency',
+  'automod_violations',
+  'automod_processed_messages',
+  // 0015–0017 — private automation definitions, delivery state and audit.
+  'automation_commands',
+  'scheduled_messages',
+  'sticky_messages',
+  'automation_audit_log',
+  // 0015 — destructive-action evidence and private member risk flags.
+  'containment_events',
+  'containment_incidents',
+  'join_risk_flags',
+  // 0013/0014 — private support tickets and transcript bodies.
+  'tickets',
+  'ticket_transcripts',
+  // 0010 — member-level XP and staff-configured role rewards.
+  'member_levels',
+  'xp_cooldowns',
+  'xp_awards',
+  'level_role_rewards',
+  'level_import_runs',
+  // 0018+ — private self-role mutation and recovery evidence.
+  'self_role_audit',
+  'self_role_panel_claims',
+  // 0018 — private community classification inputs, heartbeat state and alerts.
+  'community_facts',
+  'community_stream_heartbeats',
+  'community_scorecard_runs',
+  'community_scorecard_alerts',
   // 0003 — the tables behind this contract. The website reads the views over
   // them, never these.
   'web_contract_meta',
@@ -78,6 +115,16 @@ export const BOT_TABLES = [
   // member-level, but it names every place we advertise the server, which is
   // marketing posture rather than anything a visitor's browser should see.
   'invite_campaigns',
+  // 0024/0025 — announcements, LFG sign-ups, and feed relays (TOG-1649).
+  // RSVP state and raid rosters are member activity, and the audit log plus
+  // delivery claims are operational internals; none of it is public.
+  'event_rsvps',
+  'lfg_posts',
+  'lfg_roles',
+  'lfg_signups',
+  'feed_relays',
+  'feed_deliveries',
+  'announcements_audit_log',
 ];
 
 function ident(schema: string, name: string): string {

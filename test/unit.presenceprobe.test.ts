@@ -18,10 +18,11 @@
  */
 import { test, describe, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { GatewayIntentBits, Partials } from 'discord.js';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb, type Db } from '../src/store/db.ts';
-import { INTENTS } from '../src/discord/client.ts';
+import { createClient, INTENTS, PARTIALS, intents } from '../src/discord/client.ts';
 import { WEB_CONTRACT_VIEWS } from '../src/store/webContract.ts';
 import {
   runProbeCycle,
@@ -83,9 +84,24 @@ describe('presence probe containment', () => {
         'If this instrument seems to need it, the issue has been misread.',
     );
 
-    // And the value check: still exactly the five documented intents, so
-    // adding a sixth of any kind is a conversation rather than a diff.
-    assert.equal(INTENTS.length, 5, 'the intent list changed - see client.ts:22-28');
+    // Ticket transcripts and automod reuse MessageContent; self roles add
+    // reaction metadata, but none of these features adds GuildPresences.
+    assert.equal(intents(false).length, 8, 'the default intent list changed - see client.ts');
+    assert.equal(intents(true).length, 8, 'automod must reuse the existing MessageContent intent');
+    assert.deepEqual(INTENTS, [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildModeration,
+      GatewayIntentBits.GuildMembers,
+      GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.MessageContent,
+      GatewayIntentBits.GuildMessageReactions,
+      GatewayIntentBits.GuildVoiceStates,
+      GatewayIntentBits.GuildInvites,
+    ]);
+    assert.deepEqual(PARTIALS, [Partials.Message, Partials.Reaction, Partials.User]);
+    const client = createClient(false);
+    assert.deepEqual(client.options.partials, PARTIALS);
+    client.destroy();
   });
 
   test('the table is not readable through the web_v1 contract', () => {
@@ -125,8 +141,10 @@ describe('presence probe containment', () => {
       join('test', 'unit.presenceprobe.test.ts'),
       join('test', 'helpers', 'testDb.ts'),
       // The role verifier names every bot-owned table so a specific denial is
-      // proven in addition to the relation census. It has no rendering path.
+      // proven in addition to the relation census. Its inventory test parses
+      // migrations to catch named-check drift; neither file has a rendering path.
       join('src', 'store', 'webRoleCheck.ts'),
+      join('test', 'unit.webroletables.test.ts'),
     ]);
     // The BARE identifier only. `\b` on both sides deliberately does not match
     // `presence_probe_enabled` (a log event name) or `0004_presence_probe.sql`

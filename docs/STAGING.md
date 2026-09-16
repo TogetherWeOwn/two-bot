@@ -539,6 +539,45 @@ top itself up.
 
 ---
 
+## Guild configuration backup and restore drill
+
+Guild configuration is separate from the Postgres backup. The nightly snapshot
+captures guild settings, roles, channels, permission overwrites and emoji, then
+writes a drift report against `src/redesign/clean-slate.ts` and sends both files
+to the same off-box backup store as database dumps. A missing upload command is
+a hard failure; a local-only snapshot must not turn the timer green.
+
+```bash
+npm run backup:guild-config
+```
+
+The systemd path is `two-bot-guild-config-backup.timer`. The bootstrap provisions
+`/etc/two-bot/credentials/discord_staging_token` for the Owen QA Test token and
+enables the timer only when that file is non-empty and
+`/etc/two-bot/two-bot.env` sets
+`DISCORD_STAGING_GUILD_ID=1545644954272137297`. It also requires either
+`TWO_GUILD_CONFIG_UPLOAD_CMD` or the existing `TWO_BACKUP_UPLOAD_CMD` in
+`/etc/two-bot/backup.env`; otherwise the snapshot fails rather than remaining
+local-only.
+
+Restore is staging-only, dry-run by default, and requires two explicit write
+flags. It never accepts the live guild id or a snapshot made by a different
+application.
+
+```bash
+npm run restore:guild-config -- --snapshot /path/to/two-staging-guild-config-....json
+npm run restore:guild-config -- \
+  --snapshot /path/to/two-staging-guild-config-....json \
+  --confirm-staging-guild --apply \
+  --evidence /path/to/restore-drill-evidence.json
+```
+
+The evidence file records before/source/after counts and SHA-256 hashes plus the
+number of role, channel, overwrite, setting and emoji operations. A successful
+run finishes with `remaining=0`; re-running the same restore must report zero
+Discord writes. The command is intentionally non-destructive: it creates or
+patches snapshot objects, but does not delete extra current objects.
+
 ## Running the bot against staging
 
 **Needs the staging token.**

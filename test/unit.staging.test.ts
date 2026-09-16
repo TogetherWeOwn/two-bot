@@ -8,6 +8,8 @@
  * itself, which re-checks every count after seeding and exits non-zero on a
  * mismatch.
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openDb } from '../src/store/db.ts';
@@ -31,10 +33,12 @@ import {
   LIVE_GUILD_ID,
   STAGING_BOT_APPLICATION_ID,
   STAGING_INVITE_PERMISSIONS,
+  TWO_STAGING_GUILD_ID,
   STAGING_PERMISSIONS,
   applicationIdFromToken,
   checkStagingToken,
   describePermissions,
+  stagingGuildId,
   stagingInviteUrl,
 } from '../src/staging/spec.ts';
 import type { EventType } from '../src/core/events.ts';
@@ -284,11 +288,35 @@ test('the superseded test-two token is refused, not waved through as unknown', (
   assert.match(r.message, new RegExp(STAGING_BOT_APPLICATION_ID));
 });
 
-test('an unrecognised or unparseable token is refused before Discord is contacted', () => {
-  // A token reset changes the secret but never the application id, so the real
-  // staging token still passes above. Every other identity is a wrong token.
-  assert.equal(checkStagingToken(tokenFor('123456789012345678')).ok, false);
-  assert.equal(checkStagingToken('garbage').ok, false);
+test('an unrecognised or unparseable token is refused before Discord', () => {
+  // A token reset changes the secret but never the application id, so a reset
+  // staging token still passes above. A different application is a policy
+  // change, not something staging tooling may discover by making a request.
+  const unknown = checkStagingToken(tokenFor('123456789012345678'));
+  assert.equal(unknown.ok, false);
+  assert.match(unknown.message, /Nothing was contacted/);
+
+  const unparseable = checkStagingToken('garbage');
+  assert.equal(unparseable.ok, false);
+  assert.match(unparseable.message, /unparseable application id/);
+  assert.match(unparseable.message, /Nothing was contacted/);
+});
+
+test('staging guild selection accepts only the exact TWO Staging guild', () => {
+  const previous = process.env.DISCORD_STAGING_GUILD_ID;
+  try {
+    process.env.DISCORD_STAGING_GUILD_ID = TWO_STAGING_GUILD_ID;
+    assert.equal(stagingGuildId(), TWO_STAGING_GUILD_ID);
+
+    process.env.DISCORD_STAGING_GUILD_ID = '1555555555555555555';
+    assert.throws(() => stagingGuildId(), /must be the TWO Staging guild/);
+
+    process.env.DISCORD_STAGING_GUILD_ID = LIVE_GUILD_ID;
+    assert.throws(() => stagingGuildId(), /the LIVE TWO server/);
+  } finally {
+    if (previous === undefined) delete process.env.DISCORD_STAGING_GUILD_ID;
+    else process.env.DISCORD_STAGING_GUILD_ID = previous;
+  }
 });
 
 /**
@@ -313,6 +341,7 @@ test('the invite carries every permission the internal actions need', () => {
     { action: 'announcement.post', name: 'View Channel', bit: 1n << 10n },
     { action: 'announcement.post', name: 'Send Messages', bit: 1n << 11n },
     { action: 'event.upsert', name: 'Manage Events', bit: 1n << 33n },
+    { action: 'automod.timeout', name: 'Moderate Members', bit: 1n << 40n },
   ];
   const missing = REQUIRED.filter((p) => !(STAGING_INVITE_PERMISSIONS & p.bit)).map(
     (p) => `${p.action} needs ${p.name}`,
@@ -330,6 +359,7 @@ test('the events bits survive the 32-bit shift trap', () => {
   // permission integer that grants Kick Members instead of Manage Events.
   assert.equal(1 << 33, 2, 'if this ever changes, the guard below can be simplified');
   assert.equal(STAGING_INVITE_PERMISSIONS & (1n << 33n), 1n << 33n, 'Manage Events');
+  assert.equal(STAGING_INVITE_PERMISSIONS & (1n << 40n), 1n << 40n, 'Moderate Members');
   assert.equal(STAGING_INVITE_PERMISSIONS & (1n << 44n), 1n << 44n, 'Create Events');
   // What the buggy number-arithmetic version would produce: the shifts wrap to
   // bits 1 and 12, so you get Kick Members and Send TTS Messages instead.
@@ -352,15 +382,46 @@ test('the invite never asks for Administrator', () => {
   assert.equal(STAGING_INVITE_PERMISSIONS & (1n << 5n), 0n, 'Manage Server');
 });
 
-test('the invite is the onboarding set plus exactly the two events bits', () => {
+test('staging verification fails when the bot holds Administrator', () => {
+  const verifier = readFileSync(join(import.meta.dirname, '..', 'scripts', 'staging-verify.ts'), 'utf8');
+  const adminBranch = verifier.slice(verifier.indexOf('if (mask & ADMIN)'), verifier.indexOf('} else if (missing.length)'));
+  assert.match(adminBranch, /fail\(\s*'Administrator permission is held'/);
+});
+
+test('the bot runtime schedules persisted audit retries and clears the timer on shutdown', () => {
+  const index = readFileSync(join(import.meta.dirname, '..', 'src', 'index.ts'), 'utf8');
+  assert.match(index, /client\.once\('ready', auditRetry\)/);
+  assert.match(index, /setInterval\(auditRetry, 30_000\)/);
+  assert.match(index, /clearInterval\(auditSweep\)/);
+  assert.match(index, /operational_audit_retry_failed/);
+});
+
+test('staging provisioning prints all audit channel ids for runtime configuration', () => {
+  const provision = readFileSync(join(import.meta.dirname, '..', 'scripts', 'staging-provision.ts'), 'utf8');
+  assert.match(provision, /auditChannelExports\(channelsAfter\)/);
+  assert.match(provision, /DISCORD_STAGING_GUILD_ID/);
+});
+
+test('staging marker verification requires the leading audit identity field', () => {
+  const verifier = readFileSync(join(import.meta.dirname, '..', 'scripts', 'staging-verify.ts'), 'utf8');
+  const markerScanner = verifier.slice(
+    verifier.indexOf('async function discordMarkerMessageIds'),
+    verifier.indexOf('// 7. Reconcile'),
+  );
+  assert.match(markerScanner, /hasAuditEventIdentity\(message\.content, entryId\)/);
+  assert.doesNotMatch(markerScanner, /message\.content\.includes\(/);
+});
+
+test('the invite is the low-bit set plus events and timeout permissions', () => {
   // Pins the relationship rather than the number, so widening the invite is a
-  // deliberate edit here and not a silently larger grant.
+  // deliberate edit here and not a silently larger grant. Manage Messages and
+  // View Audit Log are low-bit; timeout needs the high Moderate Members bit.
   assert.equal(
     STAGING_INVITE_PERMISSIONS,
-    BigInt(STAGING_PERMISSIONS) | (1n << 33n) | (1n << 44n),
+    BigInt(STAGING_PERMISSIONS) | (1n << 33n) | (1n << 40n) | (1n << 44n),
   );
-  assert.equal(STAGING_PERMISSIONS, 268520512, 'the onboarding set is unchanged');
-  assert.equal(STAGING_INVITE_PERMISSIONS, 17601044499520n);
+  assert.equal(STAGING_PERMISSIONS, 268528832, 'the low-bit set adds Manage Messages and View Audit Log');
+  assert.equal(STAGING_INVITE_PERMISSIONS, 18700556135616n);
 });
 
 test('the invite url carries the wider set, not the onboarding one', () => {
@@ -383,11 +444,12 @@ test('describePermissions reports the events bits as missing when they are', () 
   // configuration we had already measured as broken.
   const onboardingOnly = BigInt(STAGING_PERMISSIONS);
   const { missing } = describePermissions(onboardingOnly);
-  assert.deepEqual(missing, ['Manage Events', 'Create Events']);
+  assert.deepEqual(missing, ['Manage Events', 'Moderate Members', 'Create Events']);
 
   const everything = describePermissions(STAGING_INVITE_PERMISSIONS);
   assert.deepEqual(everything.missing, []);
   assert.ok(everything.held.includes('Manage Events'));
+  assert.ok(everything.held.includes('Moderate Members'));
 });
 
 test('the real 2026-09-05 failing mask is diagnosed, not waved through', () => {

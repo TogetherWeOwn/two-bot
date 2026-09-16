@@ -46,20 +46,29 @@
     "staging:check": "node scripts/staging-reset.ts --check",
     "staging:verify": "node scripts/staging-verify.ts",
     "staging:provision": "node scripts/staging-provision.ts",
+    "self-role:panel": "node scripts/self-role-panel.ts",
     "hooks:install": "bash scripts/install-hooks.sh",
     "prepare": "bash scripts/install-hooks.sh >/dev/null 2>&1 || true",
     "migrate": "node scripts/migrate.ts",
     "migrate:data": "node scripts/migrate-sqlite-to-postgres.ts",
     "backup:pg": "node scripts/pg-backup.ts",
+    "backup:guild-config": "node scripts/guild-config-snapshot.ts",
     "restore:pg": "node scripts/pg-restore.ts",
+    "restore:guild-config": "node scripts/guild-config-restore.ts",
     "web:views": "node scripts/web-views.ts",
     "web:role": "node scripts/provision-web-role.ts",
     "verify:web-role": "node scripts/verify-web-role.ts",
-    "presence:trend": "node scripts/presence-trend.ts"
+    "presence:trend": "node scripts/presence-trend.ts",
+    "levels:import:mee6": "node scripts/levels-import-mee6.ts",
+    "levels:roles": "node scripts/levels-role-rewards.ts",
+    "automod:export": "node scripts/automod-export.ts",
+    "community:scorecard": "node scripts/community-scorecard.ts"
   },
   "dependencies": {
     "discord.js": "^14.27.0",
-    "pg": "^8.23.0"
+    "fast-xml-parser": "^5.11.1",
+    "pg": "^8.23.0",
+    "undici": "^6.28.1"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
