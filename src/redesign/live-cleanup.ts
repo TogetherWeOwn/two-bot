@@ -193,10 +193,20 @@ export function journalSignature(token: string, manifest: CleanupManifest): stri
 }
 
 export type JournalWitnessPhase = 'intent' | 'commit' | 'abort';
-export type JournalWitnessRecord = { sequence: number; phase: JournalWitnessPhase; journalSignature: string; chain: string };
+export type JournalWitnessRecord = { sequence: number; phase: JournalWitnessPhase; journalSignature: string; inFlightId: string | null; chain: string };
 
 export function journalWitnessPath(manifestPath: string): string {
   return `${manifestPath}.witness`;
+}
+
+/**
+ * The one operation a manifest declares in flight, which is the only operation allowed
+ * to hold an arbitrary live value during recovery. Apply never journals more than one;
+ * callers that find more treat the manifest as unrecoverable rather than pick.
+ */
+export function manifestInFlightId(manifest: Pick<CleanupManifest, 'operations'>): string | null {
+  const requesting = manifest.operations.filter((operation) => operation.state === 'requesting');
+  return requesting.length === 1 ? requesting[0]!.id : null;
 }
 
 function witnessChain(token: string, previous: string, record: Omit<JournalWitnessRecord, 'chain'>): string {
@@ -229,6 +239,13 @@ function expectedWitnessRecords(last: JournalWitnessRecord | undefined): Array<{
  * alternation is checked too, so a record cannot be dropped from the middle of the
  * log; only trailing truncation survives, and that is what an interrupted checkpoint
  * looks like anyway.
+ *
+ * A witness holding no records reads as an empty list rather than an error. TOG-2975:
+ * `appendJournalWitness` creates the file and then writes it, so a process killed in
+ * that window leaves a zero-byte witness — which carries exactly as much history as no
+ * witness at all. Callers decide what that means; `reconcileJournalWitness` treats it
+ * as absent and `assertLatestCheckpoint` refuses it, because a manifest cannot be shown
+ * to be the latest checkpoint by a log that records none.
  */
 export function readJournalWitness(token: string, path: string): JournalWitnessRecord[] {
   const records: JournalWitnessRecord[] = [];
@@ -247,11 +264,10 @@ export function readJournalWitness(token: string, path: string): JournalWitnessR
     records.push(record);
     previousChain = chain;
   }
-  if (records.length === 0) throw new Error('Journal witness is empty.');
   return records;
 }
 
-export function appendJournalWitness(token: string, path: string, sequence: number, phase: JournalWitnessPhase, signature: string): void {
+export function appendJournalWitness(token: string, path: string, sequence: number, phase: JournalWitnessPhase, signature: string, inFlightId: string | null): void {
   let previousChain = '';
   let last: JournalWitnessRecord | undefined;
   if (existsSync(path)) {
@@ -268,7 +284,7 @@ export function appendJournalWitness(token: string, path: string, sequence: numb
   if (!expected.some((item) => item.sequence === sequence && item.phase === phase)) {
     throw new Error(`Refusing to append checkpoint ${sequence}/${phase} after ${last === undefined ? 'an empty log' : `${last.sequence}/${last.phase}`}; the witness would become unreadable. Reconcile the log first.`);
   }
-  const body = { sequence, phase, journalSignature: signature };
+  const body = { sequence, phase, journalSignature: signature, inFlightId };
   const record: JournalWitnessRecord = { ...body, chain: witnessChain(token, previousChain, body) };
   const fd = openSync(path, 'a', 0o600);
   try {
@@ -308,16 +324,42 @@ export type JournalWitnessReconciliation =
  * under the bot token, so reaching any of these states still requires writing the
  * witness — the manifest+witness rollback boundary documented on
  * `assertLatestCheckpoint`, not a manifest-only replay.
+ *
+ * Closing an intent is itself an append, so it must not be done on the strength of a
+ * manifest the run is about to reject. TOG-2975: `journalSequence` and
+ * `journalSignature` are plaintext in the tip record, so copying that pair into an
+ * otherwise corrupt manifest was enough to buy a `commit` — and once the log commits a
+ * checkpoint whose manifest fails validation, the intent can never be aborted instead
+ * and the run is stranded with no way back. `validateManifest` is therefore run first
+ * and a failure raises before any record is written, leaving the intent open and the
+ * run recoverable once a valid manifest is restored.
  */
-export function reconcileJournalWitness(token: string, manifestPath: string): JournalWitnessReconciliation {
+export function reconcileJournalWitness(
+  token: string,
+  manifestPath: string,
+  validateManifest?: (manifest: CleanupManifest) => void,
+): JournalWitnessReconciliation {
   const path = journalWitnessPath(manifestPath);
   if (!existsSync(path)) return { outcome: 'absent' };
   const records = readJournalWitness(token, path);
+  // A zero-byte witness is a torn file creation, not a checkpoint: it records no more
+  // history than a missing one, so there is nothing to reconcile.
+  if (records.length === 0) return { outcome: 'absent' };
   const tip = records.at(-1)!;
   if (tip.phase !== 'intent') return { outcome: 'clean' };
-  const manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, 'utf8')) as CleanupManifest : null;
+  let manifest: CleanupManifest | null = null;
+  if (existsSync(manifestPath)) {
+    try {
+      manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as CleanupManifest;
+      if (!Array.isArray(manifest?.operations)) throw new Error('manifest has no operations array');
+      if (manifest.journalSignature !== journalSignature(token, manifest)) throw new Error('its journal signature does not cover this file');
+      validateManifest?.(manifest);
+    } catch (error) {
+      throw new Error(`Journal witness tip is an uncommitted checkpoint ${tip.sequence}, but the manifest beside it is not valid (${error instanceof Error ? error.message : String(error)}). Refusing to close the open checkpoint over it; restore a valid manifest and reconcile again.`);
+    }
+  }
   if (manifest !== null && manifest.journalSequence === tip.sequence && manifest.journalSignature === tip.journalSignature) {
-    appendJournalWitness(token, path, tip.sequence, 'commit', tip.journalSignature);
+    appendJournalWitness(token, path, tip.sequence, 'commit', tip.journalSignature, tip.inFlightId);
     return { outcome: 'committed', sequence: tip.sequence };
   }
   const durable = records.filter((record) => record.phase === 'commit').at(-1);
@@ -325,7 +367,7 @@ export function reconcileJournalWitness(token: string, manifestPath: string): Jo
     ? manifest === null
     : manifest !== null && manifest.journalSequence === durable.sequence && manifest.journalSignature === durable.journalSignature;
   if (manifestIsLastDurable) {
-    appendJournalWitness(token, path, tip.sequence, 'abort', tip.journalSignature);
+    appendJournalWitness(token, path, tip.sequence, 'abort', tip.journalSignature, tip.inFlightId);
     return { outcome: 'aborted', sequence: tip.sequence };
   }
   throw new Error(`Journal witness tip is an uncommitted checkpoint ${tip.sequence}, but the manifest is neither that checkpoint nor the last committed one. This is not an interrupted checkpoint; refusing to reconcile it.`);
@@ -357,11 +399,49 @@ export function assertLatestCheckpoint(token: string, manifest: CleanupManifest,
   const path = journalWitnessPath(manifestPath);
   if (!existsSync(path)) throw new Error(`Journal witness ${path} is missing; this manifest cannot be shown to be the run's latest checkpoint.`);
   const records = readJournalWitness(token, path);
+  if (records.length === 0) throw new Error(`Journal witness ${path} records no checkpoint; this manifest cannot be shown to be the run's latest checkpoint.`);
   const tip = records.at(-1)!;
   if (tip.phase === 'intent' && tip.sequence === manifest.journalSequence && tip.journalSignature === manifest.journalSignature) return;
   const durable = records.filter((record) => record.phase === 'commit').at(-1);
   if (durable !== undefined && durable.sequence === manifest.journalSequence && durable.journalSignature === manifest.journalSignature) return;
   throw new Error(`Manifest is checkpoint ${manifest.journalSequence} but this run's witness log has reached ${tip.sequence}; refusing to act on a superseded checkpoint.`);
+}
+
+/**
+ * Whether a manifest's `requesting` operation may still be treated as genuinely in
+ * flight — the exception that lets rollback write `inverseWrite` over an object holding
+ * *any* live value, and so the one place a stale journal state can clobber a third
+ * party's write.
+ *
+ * `assertLatestCheckpoint` proves the manifest is the run's latest durable checkpoint,
+ * but TOG-2975 showed that is not sufficient. A checkpoint abandoned above it — an
+ * `intent` that reconciliation closed as `abort` — is still evidence about what the
+ * crashed write was going to record, and it is chained under the bot token, so unlike
+ * the manifest it cannot be substituted. Two crashes leave a `requesting` operation
+ * under an abandoned checkpoint, and they are not equally recoverable:
+ *
+ * - the abandoned checkpoint *also* held it in flight (apply journalling
+ *   `apply_failed` after a write that failed or tore) -> the live object may hold
+ *   anything, which is exactly what the exception is for.
+ * - the abandoned checkpoint held *nothing* in flight, or a different operation -> the
+ *   crashed write was the one clearing this operation to `applied`, and apply only
+ *   reaches that after Discord has returned and been verified equal to `write`. The
+ *   live object is therefore at `write`, not at an arbitrary value, and a manifest
+ *   claiming otherwise is a rewind rather than an interruption.
+ *
+ * Denying the exception in the second case does not brick the resume: apply's own
+ * `requesting` branch still recognises a live object sitting at `write` and marks it
+ * applied. It removes only the right to overwrite live drift on the strength of a
+ * `requesting` label the witness contradicts.
+ */
+export function inFlightExceptionIsAvailable(token: string, manifest: CleanupManifest, manifestPath: string): boolean {
+  const inFlightId = manifestInFlightId(manifest);
+  if (inFlightId === null) return false;
+  const path = journalWitnessPath(manifestPath);
+  if (!existsSync(path)) return false;
+  return readJournalWitness(token, path)
+    .filter((record) => record.phase === 'intent' && record.sequence > manifest.journalSequence)
+    .every((record) => record.inFlightId === inFlightId);
 }
 
 /**

@@ -26,10 +26,12 @@ import {
   type CleanupManifest,
   type JsonObject,
   inFlightDriftIsOurs,
+  inFlightExceptionIsAvailable,
   journalSignature,
   journalWitnessPath,
   LEGACY_CATEGORY_IDS,
   LEGACY_CHANNEL_IDS,
+  manifestInFlightId,
   normalizeOverwrites,
   operationSemanticHash,
   planSignature,
@@ -135,9 +137,16 @@ function checkpoint(path: string, manifest: CleanupManifest): void {
   manifest.journalSequence += 1;
   manifest.journalSignature = journalSignature(token!, manifest);
   const witness = journalWitnessPath(path);
-  appendJournalWitness(token!, witness, manifest.journalSequence, 'intent', manifest.journalSignature);
+  // The in-flight id travels in the record because it is the one fact about a crashed
+  // checkpoint that the manifest cannot be trusted for; see `inFlightExceptionIsAvailable`.
+  const inFlightId = manifestInFlightId(manifest);
+  appendJournalWitness(token!, witness, manifest.journalSequence, 'intent', manifest.journalSignature, inFlightId);
+  // Test-only: the descriptor above is only load-bearing for a checkpoint that never
+  // committed, and no amount of killing between operations produces one — the window is
+  // these three lines. Exits before the manifest write, which is the harder half.
+  if (Number(process.env.LIVE_CLEANUP_TEST_ABORT_IN_CHECKPOINT ?? '0') === manifest.journalSequence) process.exit(86);
   atomicJson(path, manifest);
-  appendJournalWitness(token!, witness, manifest.journalSequence, 'commit', manifest.journalSignature);
+  appendJournalWitness(token!, witness, manifest.journalSequence, 'commit', manifest.journalSignature, inFlightId);
 }
 
 function createImmutable(path: string, body: string): void {
@@ -378,7 +387,11 @@ async function apply(): Promise<void> {
   // unreadable, stranding a run that had only been interrupted (TOG-2960).
   let reconciled: ReturnType<typeof reconcileJournalWitness>;
   try {
-    reconciled = reconcileJournalWitness(token!, phaseRollbackPath);
+    // Closing an open checkpoint is an append, so the manifest it is closed against has
+    // to clear the same bar the resume itself applies. Otherwise a manifest carrying
+    // nothing but the tip's plaintext sequence/signature pair buys a `commit` that
+    // `assertManifest` then rejects for good, with the abort path already gone.
+    reconciled = reconcileJournalWitness(token!, phaseRollbackPath, (candidate) => assertManifest(candidate, snapshot));
   } catch (error) {
     die(2, error instanceof Error ? error.message : String(error));
   }
@@ -435,7 +448,10 @@ async function apply(): Promise<void> {
     // misread as our own partial write — and rollback would then clobber it.
     const inFlight = requesting[0];
     const liveOverwrites = new Map(fresh.channels.map((channel) => [channel.id, normalizeOverwrites(channel.permission_overwrites ?? [])]));
-    if (inFlight && inFlightDriftIsOurs(snapshot, inFlight, liveOverwrites)) {
+    // An abandoned checkpoint above this manifest that held nothing in flight proves the
+    // write this operation is still labelled `requesting` for had already been verified,
+    // so the ambiguity the rollback hint offers to resolve does not exist (TOG-2975).
+    if (inFlight && inFlightExceptionIsAvailable(token!, phaseManifest, phaseRollbackPath) && inFlightDriftIsOurs(snapshot, inFlight, liveOverwrites)) {
       const subtree = new Set([inFlight.objectId, ...syncedChildIds(snapshot, inFlight)]);
       const confined = structuredClone(snapshot);
       for (const operation of phaseManifest.operations) {
