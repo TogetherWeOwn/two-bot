@@ -8,12 +8,30 @@
  * platform is provable now. The full member walk (join -> gate -> pick ->
  * goodbye) is then driven by the owner with the invite this script prints.
  *
- * It also snapshots guild roles before and after, which is the zero-role-
- * delta evidence: identical snapshots + no member role writes in the bot log
- * = the parity guarantee held on the real platform.
+ * It also produces the zero-role-delta evidence, in two halves. An earlier
+ * revision compared `GET /guilds/{id}/roles` before and after, and that proved
+ * nothing twice over (TOG-2871 / TOG-2872):
+ *
+ *   1. Wrong object. That endpoint returns role *definitions*. Granting a member
+ *      an existing role changes `member.roles`, never the definition list, so
+ *      the two snapshots matched even after a real role write.
+ *   2. Wrong window. Both snapshots were taken seconds apart, before the owner
+ *      had even used the invite - so they could not span the member walk that is
+ *      the thing under test.
+ *
+ * So the proof now snapshots every member's role IDs, and is split across the
+ * walk:
  *
  *   DISCORD_STAGING_BOT_TOKEN=... node scripts/staging-session-demo.ts
+ *     -> posts the panel, writes the invite and the baseline snapshot to files
+ *   ...owner walks a fresh member: join -> gate -> pick -> goodbye...
+ *   DISCORD_STAGING_BOT_TOKEN=... node scripts/staging-session-demo.ts --verify
+ *     -> re-reads member roles and exits non-zero on any delta
+ *
+ * Reading members needs the GUILD_MEMBERS privileged intent, which this app
+ * already holds.
  */
+import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
 import { buildSessionMenu } from '../src/discord/sessionWelcome.ts';
 import { buildSessionPicks, sessionWelcomeText } from '../src/onboarding/session.ts';
 import {
@@ -25,8 +43,29 @@ import {
 
 const API = process.env.DISCORD_API_BASE ?? 'https://discord.com/api/v10';
 const EXPECTED_CHANNEL = { id: '1546451669284552726', name: 'welcome', type: 0 } as const;
+const SNAPSHOT_PATH =
+  process.env.TWO_SESSION_DEMO_SNAPSHOT ?? '.staging-session-demo-snapshot.json';
+const INVITE_PATH = process.env.TWO_SESSION_DEMO_INVITE ?? '.staging-session-demo-invite.txt';
+
+interface MemberRoles {
+  [memberId: string]: string[];
+}
+
+/** Members whose role set differs between two snapshots, in either direction. */
+function roleDeltas(before: MemberRoles, after: MemberRoles): string[] {
+  const deltas: string[] = [];
+  for (const id of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    const b = (before[id] ?? []).slice().sort();
+    const a = (after[id] ?? []).slice().sort();
+    if (b.join(',') !== a.join(',')) {
+      deltas.push(`${id}: [${b.join(', ')}] -> [${a.join(', ')}]`);
+    }
+  }
+  return deltas.sort();
+}
 
 async function main(): Promise<void> {
+  const verifyOnly = process.argv.includes('--verify');
   const token = process.env.DISCORD_STAGING_BOT_TOKEN;
   if (!token) throw new Error('Missing DISCORD_STAGING_BOT_TOKEN.');
   const tokenCheck = checkStagingToken(token);
@@ -77,12 +116,56 @@ async function main(): Promise<void> {
   if (roles.status !== 200 || !Array.isArray(roles.body)) {
     throw new Error(`Could not read roles for guild ${guildId}: HTTP ${roles.status}.`);
   }
-  const before = roles.body
-    .map((r) => `${r.id}:${r.name}`)
-    .sort()
-    .join('\n');
-  console.log('--- role snapshot BEFORE ---');
-  console.log(before);
+
+  /**
+   * Every member's role IDs. This - not the guild role list - is the object a
+   * role grant actually changes, so it is the only snapshot that can falsify
+   * the zero-role-write claim. Paginated because `limit` caps at 1000 and a
+   * short read would silently look like "no members changed".
+   */
+  async function memberRoles(): Promise<MemberRoles> {
+    const out: MemberRoles = {};
+    let after = '0';
+    for (;;) {
+      const page = await api<Array<{ user?: { id: string }; roles?: string[] }>>(
+        'GET',
+        `/guilds/${guildId}/members?limit=1000&after=${after}`,
+      );
+      if (page.status !== 200 || !Array.isArray(page.body)) {
+        throw new Error(`Could not read members for guild ${guildId}: HTTP ${page.status}.`);
+      }
+      if (!page.body.length) return out;
+      for (const m of page.body) {
+        if (m.user?.id) out[m.user.id] = m.roles ?? [];
+      }
+      const last = page.body[page.body.length - 1]?.user?.id;
+      if (!last || page.body.length < 1000) return out;
+      after = last;
+    }
+  }
+
+  if (verifyOnly) {
+    let baseline: MemberRoles;
+    try {
+      baseline = JSON.parse(readFileSync(SNAPSHOT_PATH, 'utf8')) as MemberRoles;
+    } catch {
+      throw new Error(
+        `No baseline at ${SNAPSHOT_PATH}. Run this script without --verify before the member walk.`,
+      );
+    }
+    const deltas = roleDeltas(baseline, await memberRoles());
+    console.log('--- member role delta since baseline ---');
+    if (deltas.length) {
+      throw new Error(`Member roles changed:\n${deltas.join('\n')}`);
+    }
+    console.log(`IDENTICAL - zero role delta across ${Object.keys(baseline).length} members`);
+    return;
+  }
+
+  const before = await memberRoles();
+  writeFileSync(SNAPSHOT_PATH, JSON.stringify(before, null, 2));
+  console.log('--- member role snapshot BEFORE ---');
+  console.log(`${Object.keys(before).length} members recorded to ${SNAPSHOT_PATH}`);
 
   // The demo panel: same text and menu the bot posts on gate clear, addressed
   // to the guild rather than one member, so it is self-describing on the wall.
@@ -116,20 +199,17 @@ async function main(): Promise<void> {
   if (invite.status !== 200 || !invite.body?.code) {
     throw new Error(`Failed to create demo invite: HTTP ${invite.status} ${JSON.stringify(invite.body)}.`);
   }
+  // The invite is a bearer credential: anyone holding the URL can join the
+  // guild until it expires. Operator and CI transcripts are retained, so it
+  // goes to an owner-only file and only the path is printed.
+  writeFileSync(INVITE_PATH, `https://discord.gg/${invite.body.code}\n`, { mode: 0o600 });
+  chmodSync(INVITE_PATH, 0o600);
   console.log('--- invite for the fresh test member ---');
-  console.log(`https://discord.gg/${invite.body.code}`);
+  console.log(`written to ${INVITE_PATH} (max_age 86400s, max_uses 3) - not printed here`);
 
-  const rolesAfter = await api<Array<{ id: string; name: string }>>('GET', `/guilds/${guildId}/roles`);
-  if (rolesAfter.status !== 200 || !Array.isArray(rolesAfter.body)) {
-    throw new Error(`Could not re-read roles for guild ${guildId}: HTTP ${rolesAfter.status}.`);
-  }
-  const after = rolesAfter.body
-    .map((r) => `${r.id}:${r.name}`)
-    .sort()
-    .join('\n');
-  console.log('--- role snapshot AFTER (must equal BEFORE) ---');
-  if (after !== before) throw new Error(`Role snapshot changed:\n${after}`);
-  console.log('IDENTICAL - zero role delta');
+  console.log('--- next ---');
+  console.log('walk a fresh member through join -> gate -> pick -> goodbye, then run:');
+  console.log('  node scripts/staging-session-demo.ts --verify');
 }
 
 main().catch((err) => {

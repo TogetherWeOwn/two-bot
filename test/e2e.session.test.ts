@@ -146,10 +146,28 @@ function ephemeralReplies(mock: MockDiscord): string[] {
     .map((c) => (c.body as { content?: string })?.content ?? '');
 }
 
+/**
+ * Every shape a member-role write takes on the wire. There are two, and an
+ * earlier revision of this helper only matched the first - which is why the
+ * leveling reward path (TOG-2871/TOG-2872) reached `member.roles.add` with this
+ * assertion still passing:
+ *
+ *   1. single   PUT/DELETE /guilds/{g}/members/{m}/roles/{r}  - roles.add(one)
+ *   2. bulk     PATCH      /guilds/{g}/members/{m}   body.roles - roles.add([..])
+ *
+ * Shape 2 has no `/roles` in the path, so a URL-only regex never sees it. Match
+ * the body as well or this guarantee is decorative.
+ */
 function roleWrites(mock: MockDiscord) {
-  return mock.captured.filter(
-    (c) => /\/guilds\/\d+\/members\/\d+\/roles/.test(c.url) && c.method !== 'GET',
-  );
+  return mock.captured.filter((c) => {
+    if (c.method === 'GET') return false;
+    if (/\/guilds\/\d+\/members\/\d+\/roles/.test(c.url)) return true;
+    return (
+      c.method === 'PATCH' &&
+      /\/guilds\/\d+\/members\/\d+$/.test(c.url) &&
+      Array.isArray((c.body as { roles?: unknown })?.roles)
+    );
+  });
 }
 
 test(
@@ -352,6 +370,79 @@ test(
       db.prepare(`SELECT COUNT(*) AS n FROM events WHERE member_id=?`).get(NEWBIE),
     ) as { n: number } | null;
     assert.equal(Number(rows?.n ?? 0), 0, 'foreign-guild events must not be recorded');
+  },
+);
+
+/**
+ * TOG-2871 / TOG-2872. A configured leveling reward used to reach
+ * `member.roles.add` in session mode: the gateway always got the LevelingService,
+ * and a level-up called applyLevelRoles regardless of onboarding mode. That is a
+ * role write on ordinary member activity, which breaks the roleless-launch
+ * guarantee a live guild is relying on.
+ *
+ * Seeding is what makes this reachable in one event. MESSAGE_COOLDOWN_SECONDS is
+ * 60, so a member cannot chat their way to level 1 (100 XP at 15 XP/message)
+ * inside a test - instead we park them at 95 XP and let a single message carry
+ * them over the line.
+ *
+ * The XP assertion is not decoration: it is what distinguishes the real fix
+ * (suppress the role write) from the lazy one (stop passing `leveling` in), and
+ * it fails if someone "fixes" this by disabling leveling wholesale.
+ */
+test(
+  'session mode grants no leveling reward role, but still awards the XP',
+  { timeout: 90_000 },
+  async (t) => {
+    const LEVELER = '900000000000007777';
+    const REWARD_ROLE = '300000000000000003';
+    const { mock, reader, botLog } = await startHarness(t);
+
+    await waitFor(
+      () => (botLog.join('').includes('session_onboarding_enabled') ? true : undefined),
+      'session_onboarding_enabled boot line',
+    );
+
+    await queryDb(reader, (db) =>
+      db
+        .prepare(`INSERT INTO level_role_rewards (guild_id, level, role_id) VALUES (?, ?, ?)`)
+        .run(mock.guildId, 1, REWARD_ROLE),
+    );
+    // 95 + MESSAGE_XP(15) = 110, over totalXpForLevel(1) = 100.
+    await queryDb(reader, (db) =>
+      db
+        .prepare(
+          `INSERT INTO member_levels (guild_id, member_id, xp, message_xp, voice_xp, imported_xp, updated_at)
+           VALUES (?, ?, 95, 95, 0, 0, ?)`,
+        )
+        .run(mock.guildId, LEVELER, new Date().toISOString()),
+    );
+
+    mock.message(LEVELER);
+
+    // Poll for the award, not merely for the row - the seeded row is already
+    // there, so waiting on "a row exists" returns 95 instantly and never sees
+    // the level-up at all.
+    const levelled = await waitFor(async () => {
+      const row = (await queryDb(reader, (db) =>
+        db
+          .prepare(`SELECT xp FROM member_levels WHERE guild_id=? AND member_id=?`)
+          .get<{ xp: number }>(mock.guildId, LEVELER),
+      )) as { xp: number } | null;
+      return row && Number(row.xp) !== 95 ? row : undefined;
+    }, `the message XP award to land\n--- bot output ---\n${botLog.join('')}`);
+    assert.equal(
+      Number(levelled.xp),
+      110,
+      'session mode must keep awarding XP - only the role write is suppressed',
+    );
+
+    // Give any role write that was going to happen time to be attempted.
+    await sleep(800);
+    assert.equal(
+      roleWrites(mock).length,
+      0,
+      `a level-up with a configured reward must not write roles in session mode. Saw: ${JSON.stringify(roleWrites(mock))}`,
+    );
   },
 );
 

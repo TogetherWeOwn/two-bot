@@ -11,7 +11,7 @@ import { registerOnboarding, registerGameSelect } from './discord/onboarding.ts'
 import { registerSessionWelcome } from './discord/sessionWelcome.ts';
 import { registerSelfRoles } from './discord/selfRoles.ts';
 import { SessionRecorder, buildSessionPicks } from './onboarding/session.ts';
-import { actionsForOnboardingMode } from './onboarding/mode.ts';
+import { actionsForOnboardingMode, levelRoleWritesForOnboardingMode } from './onboarding/mode.ts';
 import { registerAnchorWelcome } from './discord/anchorWelcome.ts';
 import { occurrencesFrom } from './onboarding/anchorEvent.ts';
 import { RaidWatch } from './analytics/raidWatch.ts';
@@ -258,6 +258,7 @@ registerHandlers(client, {
   raid,
   expectedJoins,
   leveling,
+  levelRoleWrites: levelRoleWritesForOnboardingMode(cfg.onboardingMode),
   automod: automodService && cfg.guildId ? { service: automodService, guildId: cfg.guildId } : undefined,
   joinRisk,
   audit,
