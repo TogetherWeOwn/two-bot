@@ -29,6 +29,7 @@ import {
   type JsonObject,
   inFlightDriftIsOurs,
   inFlightExceptionIsAvailable,
+  isAutoVoiceEphemeralChild,
   journalSignature,
   journalWitnessPath,
   LEGACY_CATEGORY_IDS,
@@ -383,6 +384,15 @@ async function dryRun(): Promise<void> {
   for (const exclusion of manifest.onboardingExclusions) {
     const channel = snapshot.channels.find((item) => item.id === exclusion.channelId);
     log(`  STAYS-VISIBLE ${exclusion.channelId} ${channel?.name ?? '?'} — Discord refuses (400/350003) while referenced by ${exclusion.referencedBy.join(', ')}`);
+  }
+  // Same rule for the auto-voice tolerance (TOG-3140 F2): these IDs are the one class of
+  // object `assertReviewedShape` stops refusing on, and until now they appeared only in
+  // `pre.json`. An operator reading this log is entitled to see every object the plan
+  // decided not to reason about, not just the ones it decided not to hide.
+  const tolerated = snapshot.channels.filter((channel) => isAutoVoiceEphemeralChild(channel));
+  log(`Auto-voice ephemeral children tolerated and left untouched: ${tolerated.length}.`);
+  for (const channel of tolerated) {
+    log(`  TOLERATED ${channel.id} ${channel.name ?? '?'} — transient child of the active auto-voice category; never planned, never written`);
   }
   log(`Snapshot semantic hash: ${snapshot.semanticHash}`);
   log(`Operation semantic hash: ${manifest.operationSemanticHash}`);
