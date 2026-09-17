@@ -125,6 +125,14 @@ export const BOT_TABLES = [
   'feed_relays',
   'feed_deliveries',
   'announcements_audit_log',
+  // 0026 — the config store (TOG-3100). The most consequential write target on
+  // this list: a row here changes how the bot behaves at the next poll, so a
+  // website role that could write one would be configuring the bot rather than
+  // reading from it. The audit table is append-only even to the bot, and must
+  // not be reachable at all - otherwise the record of who changed what is
+  // editable by the party it exists to hold to account.
+  'guild_settings',
+  'guild_settings_audit',
 ];
 
 function ident(schema: string, name: string): string {
