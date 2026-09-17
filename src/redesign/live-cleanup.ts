@@ -1,5 +1,5 @@
 import { createHash, createHmac } from 'node:crypto';
-import { appendFileSync, closeSync, existsSync, fsyncSync, openSync, readFileSync, truncateSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, fchmodSync, fsyncSync, openSync, readFileSync, truncateSync } from 'node:fs';
 import { LIVE_BOT_APPLICATION_ID, LIVE_GUILD_ID, LIVE_GUILD_NAME } from '../staging/spec.ts';
 
 export const ARCHIVE_PHASE = 'archive-legacy';
@@ -389,6 +389,13 @@ export function appendJournalWitness(token: string, path: string, sequence: numb
   const record: JournalWitnessRecord = { ...body, chain: witnessChain(token, previousChain, body) };
   const fd = openSync(path, 'a', 0o600);
   try {
+    // `openSync`'s mode applies only when it creates the file, so a witness that already
+    // exists keeps whatever mode it has. The run dir is 0700, but the log is what proves
+    // a manifest is current and a truncation of it is indistinguishable from an
+    // interrupted checkpoint, so narrow it on every append the way `atomicFile` and the
+    // apply preflight do for the plan artifacts. On the fd, not the path, so this cannot
+    // be raced onto another file.
+    fchmodSync(fd, 0o600);
     appendFileSync(fd, `${JSON.stringify(record)}\n`);
     fsyncSync(fd);
   } finally {
@@ -540,7 +547,14 @@ export function inFlightExceptionIsAvailable(token: string, manifest: CleanupMan
   if (inFlightId === null) return false;
   const path = journalWitnessPath(manifestPath);
   if (!existsSync(path)) return false;
-  return readJournalWitness(token, path)
+  const records = readJournalWitness(token, path);
+  // TOG-3009: a zero-byte witness reads as no records, which would leave the filter
+  // below empty and `every` vacuously true — the exception granted by a log that
+  // records nothing. That is the same fail-open `assertLatestCheckpoint` refuses, and
+  // it has to be closed here too: this predicate is exported, and today the only
+  // thing stopping it is that both call sites happen to assert the checkpoint first.
+  if (records.length === 0) return false;
+  return records
     .filter((record) => record.phase === 'intent' && record.sequence > manifest.journalSequence)
     .every((record) => record.inFlightId === inFlightId);
 }
