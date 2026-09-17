@@ -156,22 +156,43 @@ test('the refusal is a prefix rule, so a gate invented tomorrow is covered', asy
   assert.deepEqual(settings.writes, []);
 });
 
-test('a lookalike key that is not in the namespace is still writable', async () => {
-  // The guard must be a namespace rule, not a keyword blocklist: refusing
-  // anything containing "INTERNAL" would quietly break real settings.
+test('a lookalike key is refused as unknown, not as environment-only', async () => {
+  // This test used to assert TWO_INTERNALISED_GREETING was *writable*, which was
+  // right while the rule was a namespace test: refusing anything containing
+  // "INTERNAL" would have broken real settings. Since TOG-3100 the rule is
+  // catalog membership and fail-closed, so a key nobody reads is refused - but
+  // the original point still needs defending, so it moves to the reason code.
+  // If the guard ever degrades into a substring blocklist this fails, because a
+  // lookalike would come back as env-only rather than as unknown.
+  const err = await expectActionError(() =>
+    runAction(
+      'settings.set',
+      { key: 'TWO_INTERNALISED_GREETING', value: 'hello', updated_by: ADMIN },
+      ctx(),
+    ),
+  );
+  assert.equal(err.logReason, 'settings_key_unknown');
+  assert.deepEqual(settings.writes, []);
+
+  // And the guard is not simply refusing everything: a real catalogued key of
+  // the same shape goes through. Without this the assertion above would pass
+  // just as well on a settings.set that had stopped working altogether.
   await runAction(
     'settings.set',
-    { key: 'TWO_INTERNALISED_GREETING', value: 'hello', updated_by: ADMIN },
+    { key: 'TWO_RAID_JOIN_THRESHOLD', value: '8', updated_by: ADMIN },
     ctx(),
   );
   assert.equal(settings.writes.length, 1);
-  assert.equal(settings.writes[0].key, 'TWO_INTERNALISED_GREETING');
 });
 
 test('settings.get answers from the store only, never from the environment', async () => {
   // The environment holds DISCORD_TOKEN, DATABASE_URL and TWO_INTERNAL_KEYS.
   // A read-through would make this action a credential exfiltration primitive.
-  const probe = 'TWO_SETTINGS_ENV_READTHROUGH_PROBE';
+  //
+  // The probe has to be a key the catalog actually allows. A synthetic name
+  // would be refused by the key guard before reaching the store, and this test
+  // would pass without ever exercising the read-through it exists to forbid.
+  const probe = 'TWO_RAID_JOIN_THRESHOLD';
   process.env[probe] = 'this-must-never-come-back';
   try {
     const outcome = await runAction('settings.get', { key: probe }, ctx());
@@ -185,46 +206,53 @@ test('settings.get answers from the store only, never from the environment', asy
 // --- ordinary behaviour ------------------------------------------------------
 
 test('settings.get returns a stored value and says where it came from', async () => {
-  settings.seed('TWO_AUTOMOD_INVITE_ACTION', 'delete');
-  const outcome = await runAction('settings.get', { key: 'TWO_AUTOMOD_INVITE_ACTION' }, ctx());
+  settings.seed('TWO_RAID_JOIN_THRESHOLD', '8');
+  const outcome = await runAction('settings.get', { key: 'TWO_RAID_JOIN_THRESHOLD' }, ctx());
 
   assert.deepEqual(outcome.result, {
-    key: 'TWO_AUTOMOD_INVITE_ACTION',
-    value: 'delete',
+    key: 'TWO_RAID_JOIN_THRESHOLD',
+    value: '8',
     source: 'store',
   });
-  assert.deepEqual(settings.reads, [{ guildId: GUILD, key: 'TWO_AUTOMOD_INVITE_ACTION' }]);
+  assert.deepEqual(settings.reads, [{ guildId: GUILD, key: 'TWO_RAID_JOIN_THRESHOLD' }]);
 });
 
 test('settings.set records the admin who saved it, verbatim and unguessed', async () => {
   const outcome = await runAction(
     'settings.set',
-    { key: 'TWO_AUTOMOD_ENABLED', value: true, updated_by: ADMIN },
+    { key: 'TWO_ONBOARDING_DRY_RUN', value: true, updated_by: ADMIN },
     ctx(),
   );
 
   assert.deepEqual(settings.writes, [
-    { guildId: GUILD, key: 'TWO_AUTOMOD_ENABLED', value: true, actor: ADMIN },
+    { guildId: GUILD, key: 'TWO_ONBOARDING_DRY_RUN', value: true, actor: ADMIN },
   ]);
-  assert.deepEqual(outcome.result, { key: 'TWO_AUTOMOD_ENABLED', outcome: 'saved' });
+  assert.deepEqual(outcome.result, { key: 'TWO_ONBOARDING_DRY_RUN', outcome: 'saved' });
 });
 
 test('settings.set with a null value unsets the key and hands it back to the environment', async () => {
-  settings.seed('TWO_AUTOMOD_ENABLED', true);
+  settings.seed('TWO_ONBOARDING_DRY_RUN', true);
   const outcome = await runAction(
     'settings.set',
-    { key: 'TWO_AUTOMOD_ENABLED', value: null, updated_by: ADMIN },
+    { key: 'TWO_ONBOARDING_DRY_RUN', value: null, updated_by: ADMIN },
     ctx(),
   );
 
   assert.equal(settings.writes[0].value, null);
-  assert.deepEqual(outcome.result, { key: 'TWO_AUTOMOD_ENABLED', outcome: 'unset' });
+  assert.deepEqual(outcome.result, { key: 'TWO_ONBOARDING_DRY_RUN', outcome: 'unset' });
 });
 
 test('neither result echoes the value back, because the result is what gets replayed', async () => {
+  // No catalogued key holds a credential - that is what the env_only class is
+  // for - so the value here is deliberately secret-shaped rather than realistic.
+  // The guarantee is about the result envelope, not about this key.
   const outcome = await runAction(
     'settings.set',
-    { key: 'TWO_ANNOUNCE_WEBHOOK', value: 'https://example.invalid/hook/secret', updated_by: ADMIN },
+    {
+      key: 'DISCORD_STAFF_ALERT_CHANNEL_ID',
+      value: 'https://example.invalid/hook/secret',
+      updated_by: ADMIN,
+    },
     ctx(),
   );
   assert.equal(JSON.stringify(outcome.result).includes('secret'), false);
@@ -235,7 +263,7 @@ test('neither result echoes the value back, because the result is what gets repl
 
 test('settings.set without updated_by is malformed, and writes nothing', async () => {
   const err = await expectActionError(() =>
-    runAction('settings.set', { key: 'TWO_AUTOMOD_ENABLED', value: true }, ctx()),
+    runAction('settings.set', { key: 'TWO_ONBOARDING_DRY_RUN', value: true }, ctx()),
   );
   assert.equal(err.code, 'malformed');
   assert.deepEqual(settings.writes, []);
@@ -245,7 +273,7 @@ test('updated_by must be a Discord id, not a name', async () => {
   const err = await expectActionError(() =>
     runAction(
       'settings.set',
-      { key: 'TWO_AUTOMOD_ENABLED', value: true, updated_by: 'owen' },
+      { key: 'TWO_ONBOARDING_DRY_RUN', value: true, updated_by: 'owen' },
       ctx(),
     ),
   );
@@ -256,7 +284,7 @@ test('updated_by must be a Discord id, not a name', async () => {
 
 test('an omitted value is malformed - null is how you unset, and the two differ', async () => {
   const err = await expectActionError(() =>
-    runAction('settings.set', { key: 'TWO_AUTOMOD_ENABLED', updated_by: ADMIN }, ctx()),
+    runAction('settings.set', { key: 'TWO_ONBOARDING_DRY_RUN', updated_by: ADMIN }, ctx()),
   );
   assert.equal(err.code, 'malformed');
   assert.equal(err.logReason, 'missing_value');
@@ -277,7 +305,9 @@ test('an oversized value is refused before it reaches the store', async () => {
   const err = await expectActionError(() =>
     runAction(
       'settings.set',
-      { key: 'TWO_BIG_SETTING', value: 'x'.repeat(9000), updated_by: ADMIN },
+      // A real catalogued key, so the size check is what refuses this and not
+      // the key guard running first.
+      { key: 'DISCORD_STAFF_ALERT_CHANNEL_ID', value: 'x'.repeat(9000), updated_by: ADMIN },
       ctx(),
     ),
   );

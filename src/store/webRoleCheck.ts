@@ -264,6 +264,27 @@ export async function runWebRoleChecks(
       `INSERT INTO ${ident(botSchema, 'guild_counters')} (guild_id) VALUES ('probe')`,
     ),
   );
+  // guild_settings gets its own named probe rather than riding on the
+  // guild_counters one above. TOG-3100 made this table the thing that decides
+  // how the bot behaves at the next 15s poll, so "the website role cannot write
+  // the bot's tables" stops being a tidiness claim and becomes the boundary
+  // between the dashboard asking the bot to change and the dashboard changing
+  // it directly. docs/WEBSITE_CONTRACT.md asserts 35/35 denials, but that is a
+  // document; this is the measurement, and it names the table it measured.
+  out.push(
+    await mustFail(
+      client,
+      'cannot write the config store',
+      `INSERT INTO ${ident(botSchema, 'guild_settings')} (guild_id, key, value, version, updated_by) VALUES ('probe', 'TWO_RAID_JOIN_THRESHOLD', '"1"'::jsonb, 1, 'probe')`,
+    ),
+  );
+  out.push(
+    await mustFail(
+      client,
+      'cannot write the config audit trail',
+      `INSERT INTO ${ident(botSchema, 'guild_settings_audit')} (guild_id, key, new_value, actor) VALUES ('probe', 'TWO_RAID_JOIN_THRESHOLD', '"1"'::jsonb, 'probe')`,
+    ),
+  );
   out.push(await mustFail(client, 'cannot create a table', `CREATE TABLE web_role_probe (id int)`));
   out.push(
     await mustFail(client, 'cannot create a table in the web schema', `CREATE TABLE ${ident(webSchema, 'probe')} (id int)`),

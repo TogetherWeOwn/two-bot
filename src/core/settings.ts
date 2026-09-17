@@ -23,24 +23,25 @@
  * The cost of the choice is that a save takes up to 15s to land, which is the
  * trigger to revisit it.
  *
- * What this file will NOT hold: anything matching `TWO_INTERNAL_*`. Those are
+ * What this file will NOT hold: any key `src/core/settingsCatalog.ts` classes
+ * as `env_only`. Those are the secrets, the boot inputs, the network binds and
  * the switches that decide what the website may make the bot do, so a settings
  * write that could set one is a privilege-escalation primitive - see the
- * `admin-config-adr` document on TOG-3093 §2.4, and the CHECK constraint in
- * migrations/0026_guild_settings.sql that says the same thing in the schema.
+ * `admin-config-adr` document on TOG-3093 §2.4, and the CHECK constraints in
+ * migrations/0026_guild_settings.sql and 0027_guild_settings_env_only.sql that
+ * say the same thing in the schema.
+ *
+ * That refusal was a bare `TWO_INTERNAL_*` prefix test when this file shipped
+ * on PR #125. The TOG-3183 security review showed the prefix is narrower than
+ * the set of keys that gate capability - `TWO_MODERATION` co-gates nine
+ * moderation verbs from outside the namespace - so the test now delegates to
+ * the catalog, which is fail-closed for names it has never heard of.
  */
 import type { Db } from '../store/driver.ts';
 import { log } from './log.ts';
+import { isEnvOnlyKey } from './settingsCatalog.ts';
 
-/**
- * Keys the store refuses to hold, as a prefix test.
- *
- * A prefix rather than a list of the six gates that exist today: the next
- * capability gate somebody adds is protected by this without their having to
- * remember it, which is the only version of this rule that survives contact
- * with a codebase that keeps growing.
- */
-export const ENV_ONLY_KEY_PREFIXES = ['TWO_INTERNAL_'] as const;
+export { ENV_ONLY_KEY_PREFIXES } from './settingsCatalog.ts';
 
 export class EnvOnlyKeyError extends Error {
   // Assigned in the body, not as a parameter property: tsconfig sets
@@ -52,18 +53,26 @@ export class EnvOnlyKeyError extends Error {
   constructor(key: string) {
     super(
       `${key} is environment-only and must never be stored in guild_settings. ` +
-        `TWO_INTERNAL_* keys gate what the website may make the bot do; a settings ` +
-        `write that could widen them is a privilege-escalation primitive ` +
-        `(docs/INTERNAL_ACTIONS.md, TOG-3093 ADR §2.4).`,
+        `Secrets, boot inputs, network binds and the keys that gate what the ` +
+        `website may make the bot do stay in the environment; a settings write ` +
+        `that could set one is a privilege-escalation primitive. A key that is ` +
+        `simply absent from src/core/settingsCatalog.ts is refused for the same ` +
+        `reason - classify it there first ` +
+        `(docs/INTERNAL_ACTIONS.md, TOG-3093 ADR §2.4, TOG-3183).`,
     );
     this.name = 'EnvOnlyKeyError';
     this.key = key;
   }
 }
 
-/** False for any key that must stay in the environment. */
+/**
+ * False for any key that must stay in the environment.
+ *
+ * Delegates to the catalog so there is exactly one answer to "may this be
+ * stored", shared by the write path, the env snapshot and the drift test.
+ */
 export function isStorableKey(key: string): boolean {
-  return !ENV_ONLY_KEY_PREFIXES.some((p) => key.startsWith(p));
+  return !isEnvOnlyKey(key);
 }
 
 /** Throws `EnvOnlyKeyError` rather than returning false. For write paths. */

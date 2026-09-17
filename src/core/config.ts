@@ -8,6 +8,10 @@
  * `src/core/credentials.ts` for why that matters on a shared box.
  */
 import { readSecret } from './credentials.ts';
+// From the catalog rather than from settings.ts: the catalog imports nothing,
+// so this cannot become an import cycle when settings.ts grows a dependency on
+// the database driver's config.
+import { isEnvOnlyKey } from './settingsCatalog.ts';
 
 export interface Config {
   discordToken: string;
@@ -136,50 +140,104 @@ function requiredDatabaseUrl(): string {
   return url;
 }
 
-export function loadConfig(): Config {
+/**
+ * Where `loadConfig()` reads a storable key from.
+ *
+ * One method, because that is the whole contract: the environment and the
+ * settings store both answer "what is this name set to, as a string".
+ */
+export interface ConfigSource {
+  get(name: string): string | undefined;
+}
+
+/** The only source before TOG-3100, and the permanent fallback after it. */
+export const envSource: ConfigSource = {
+  get: (name) => process.env[name],
+};
+
+/**
+ * Read `stored` first, fall back to the environment.
+ *
+ * This is the whole of the store-first behaviour, and it is deliberately
+ * additive: a key with no row behaves exactly as it did before the table
+ * existed, so the day this ships nothing changes and the Coolify environment
+ * can be emptied one key at a time. The undo path for the entire admin
+ * dashboard programme is "stop writing rows".
+ *
+ * `stored` is consulted only for keys the catalog says may be stored. The
+ * snapshot is already filtered on the way out of `SettingsStore.envSnapshot()`
+ * and the rows are refused on the way in by `assertStorableKey()` and two CHECK
+ * constraints, so this is the fourth of four layers. It is here because it is
+ * the one that protects a caller who builds a `ConfigSource` by hand - a test,
+ * a script, or whatever slice 3 turns out to need.
+ */
+export function storeFirst(
+  stored: ReadonlyMap<string, string>,
+  fallback: ConfigSource = envSource,
+): ConfigSource {
+  return {
+    get(name) {
+      if (!isEnvOnlyKey(name)) {
+        const v = stored.get(name);
+        if (v !== undefined) return v;
+      }
+      return fallback.get(name);
+    },
+  };
+}
+
+/**
+ * Build the config from `src`, with secrets and boot inputs always from the
+ * environment.
+ *
+ * Note which reads do *not* take `src`: the bot token, the database URL,
+ * `DISCORD_GUILD_ID`, `TWO_DB_POOL_MAX`, `DISCORD_API_BASE` and
+ * `TWO_ONBOARDING_MODE`. That is not an oversight and not a separate rule - it
+ * is exactly the `env_only` class in `src/core/settingsCatalog.ts`, which is
+ * why the catalog is a source file and not a table in a document. Three of them
+ * could not come from the store even if policy allowed it: you cannot read a
+ * guild-scoped row to discover which guild you are, and the pool that would run
+ * the query is sized by `TWO_DB_POOL_MAX` before it exists.
+ */
+export function loadConfig(src: ConfigSource = envSource): Config {
+  const str = (name: string): string | null => src.get(name) || null;
+  const list = (name: string): string[] =>
+    (src.get(name) || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+
   return {
     discordToken: requiredToken(),
     guildId: process.env.DISCORD_GUILD_ID || null,
-    landingChannelIds: (process.env.DISCORD_LANDING_CHANNEL_IDS || '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean),
-    anchorWelcomeChannelId: process.env.DISCORD_ANCHOR_WELCOME_CHANNEL_ID || null,
-    onboardingDryRun: process.env.TWO_ONBOARDING_DRY_RUN === '1',
-    selfRoleDryRun: process.env.TWO_SELF_ROLE_DRY_RUN === '1',
+    landingChannelIds: list('DISCORD_LANDING_CHANNEL_IDS'),
+    anchorWelcomeChannelId: str('DISCORD_ANCHOR_WELCOME_CHANNEL_ID'),
+    onboardingDryRun: src.get('TWO_ONBOARDING_DRY_RUN') === '1',
+    selfRoleDryRun: src.get('TWO_SELF_ROLE_DRY_RUN') === '1',
     onboardingMode: parseOnboardingMode(),
-    goodbyeChannelIds: (process.env.DISCORD_GOODBYE_CHANNEL_IDS || '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean),
-    sessionLookingToPlayChannelId: process.env.DISCORD_SESSION_LOOKING_TO_PLAY_CHANNEL_ID || null,
-    sessionLobbyVoiceChannelId: process.env.DISCORD_SESSION_LOBBY_VOICE_CHANNEL_ID || null,
-    staffAlertChannelId: process.env.DISCORD_STAFF_ALERT_CHANNEL_ID || null,
-    raidJoinThreshold: Number(process.env.TWO_RAID_JOIN_THRESHOLD ?? 5),
-    raidWindowSeconds: Number(process.env.TWO_RAID_WINDOW_SECONDS ?? 60),
-    auditLogChannelId: process.env.DISCORD_AUDIT_LOG_CHANNEL_ID || null,
-    voiceLogChannelId: process.env.DISCORD_VOICE_LOG_CHANNEL_ID || null,
-    moderationLogChannelId: process.env.DISCORD_MODERATION_LOG_CHANNEL_ID || null,
-    ticketCategoryId: process.env.DISCORD_TICKET_CATEGORY_ID || null,
-    ticketStaffRoleId: process.env.DISCORD_TICKET_STAFF_ROLE_ID || null,
-    ticketPanelChannelId: process.env.DISCORD_TICKET_PANEL_CHANNEL_ID || null,
-    ticketCooldownSeconds: Number(process.env.TWO_TICKET_COOLDOWN_SECONDS ?? 300),
-    presenceProbe: process.env.TWO_PRESENCE_PROBE !== '0',
-    communityScorecard: process.env.TWO_COMMUNITY_SCORECARD === '1',
-    communityRecommendations: process.env.TWO_COMMUNITY_RECOMMENDATIONS !== '0',
-    communityCorrectionCycles: Number(process.env.TWO_COMMUNITY_CORRECTION_CYCLES ?? 0),
-    communityHumanChannelIds: (process.env.TWO_COMMUNITY_HUMAN_CHANNEL_IDS || '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean),
-    communityWelcomeChannelIds: (process.env.TWO_COMMUNITY_WELCOME_CHANNEL_IDS || '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean),
+    goodbyeChannelIds: list('DISCORD_GOODBYE_CHANNEL_IDS'),
+    sessionLookingToPlayChannelId: str('DISCORD_SESSION_LOOKING_TO_PLAY_CHANNEL_ID'),
+    sessionLobbyVoiceChannelId: str('DISCORD_SESSION_LOBBY_VOICE_CHANNEL_ID'),
+    staffAlertChannelId: str('DISCORD_STAFF_ALERT_CHANNEL_ID'),
+    raidJoinThreshold: Number(src.get('TWO_RAID_JOIN_THRESHOLD') ?? 5),
+    raidWindowSeconds: Number(src.get('TWO_RAID_WINDOW_SECONDS') ?? 60),
+    auditLogChannelId: str('DISCORD_AUDIT_LOG_CHANNEL_ID'),
+    voiceLogChannelId: str('DISCORD_VOICE_LOG_CHANNEL_ID'),
+    moderationLogChannelId: str('DISCORD_MODERATION_LOG_CHANNEL_ID'),
+    ticketCategoryId: str('DISCORD_TICKET_CATEGORY_ID'),
+    ticketStaffRoleId: str('DISCORD_TICKET_STAFF_ROLE_ID'),
+    ticketPanelChannelId: str('DISCORD_TICKET_PANEL_CHANNEL_ID'),
+    ticketCooldownSeconds: Number(src.get('TWO_TICKET_COOLDOWN_SECONDS') ?? 300),
+    presenceProbe: src.get('TWO_PRESENCE_PROBE') !== '0',
+    communityScorecard: src.get('TWO_COMMUNITY_SCORECARD') === '1',
+    communityRecommendations: src.get('TWO_COMMUNITY_RECOMMENDATIONS') !== '0',
+    communityCorrectionCycles: Number(src.get('TWO_COMMUNITY_CORRECTION_CYCLES') ?? 0),
+    communityHumanChannelIds: list('TWO_COMMUNITY_HUMAN_CHANNEL_IDS'),
+    communityWelcomeChannelIds: list('TWO_COMMUNITY_WELCOME_CHANNEL_IDS'),
     databaseUrl: requiredDatabaseUrl(),
     dbPoolMax: Number(process.env.TWO_DB_POOL_MAX ?? 5),
-    inactivityDays: Number(process.env.TWO_INACTIVITY_DAYS ?? 14),
+    inactivityDays: Number(src.get('TWO_INACTIVITY_DAYS') ?? 14),
     apiBase: process.env.DISCORD_API_BASE || null,
-    logLevel: (process.env.LOG_LEVEL as Config['logLevel']) || 'info',
+    logLevel: (src.get('LOG_LEVEL') as Config['logLevel']) || 'info',
   };
 }
