@@ -15,6 +15,31 @@ export const ACTIVE_CATEGORY_IDS = [
 ] as const;
 
 /**
+ * The active `🔊 VOICE` category, which holds the `➕ Join to Create` generator
+ * (`ops/auto-voice`, TOG-3052).
+ */
+export const AUTO_VOICE_CATEGORY_ID = '1545924266590081115';
+
+/**
+ * The generator spawns one voice channel per occupied lobby directly under
+ * {@link AUTO_VOICE_CATEGORY_ID} and deletes it when it empties, so its IDs cannot be
+ * reviewed ahead of time. This is not hypothetical: `1549949487949283359` (`Hangout #1`,
+ * upstream's default name — `ops/auto-voice/README.md:175`) was created at
+ * 2026-09-17T01:05:54Z, between this phase's review snapshot and its first live dry-run,
+ * and `assertReviewedShape` refused the whole 65-operation plan over it.
+ *
+ * Tolerating them is safe *only* because this phase never touches the active tree: they
+ * are excluded from the unreviewed-ID refusal, and {@link planArchiveOperations} re-asserts
+ * afterwards that no planned operation names one. Everything else still fails closed — a
+ * non-voice child here, a voice channel under any other category, and any unexpected child
+ * of a legacy category all still refuse.
+ */
+export function isAutoVoiceEphemeralChild(channel: Pick<Channel, 'id' | 'type' | 'parent_id'>): boolean {
+  if (channel.type !== 2 || channel.parent_id !== AUTO_VOICE_CATEGORY_ID) return false;
+  return !([...ACTIVE_CHANNEL_IDS] as string[]).includes(channel.id);
+}
+
+/**
  * The active tree as it stands after the owner's reuse rule (TOG-2806, 2026-09-16 18:20Z):
  * "whenever we can reuse channels we reuse them when they already have content."
  *
@@ -839,15 +864,22 @@ export function assertReviewedShape(snapshot: LiveCleanupSnapshot): void {
     throw new Error(`Reviewed legacy categories contain unexpected child IDs: ${unexpectedLegacyChildren.map((channel) => channel.id).join(', ')}.`);
   }
   const reviewed = new Set<string>([...ACTIVE_CATEGORY_IDS, ...ACTIVE_CHANNEL_IDS, ...LEGACY_CATEGORY_IDS, ...LEGACY_CHANNEL_IDS, ...reviewedUntouchedShapes.keys()]);
-  const unknown = snapshot.channels.filter((channel) => !reviewed.has(channel.id));
+  const unknown = snapshot.channels.filter((channel) => !reviewed.has(channel.id) && !isAutoVoiceEphemeralChild(channel));
   if (unknown.length > 0) throw new Error(`Fresh snapshot contains unreviewed channel/category IDs: ${unknown.map((channel) => channel.id).join(', ')}.`);
-  // Every channel above is a reviewed one, and every reviewed one is planned over or
+  // Every channel below is a reviewed one, and every reviewed one is planned over or
   // reasoned about as a synchronized child — so this walk is the whole set, and it is
   // the last point at which an unreadable overwrite list is still distinguishable from
   // an empty one. `normalizedChannel` deliberately carried the absence this far instead
   // of refusing at capture, so that the pre-snapshot survives to show what Discord
   // actually returned; refusing to *plan* on it is this function's job.
+  //
+  // Auto-voice ephemeral children are the one exception, and they are skipped rather
+  // than refused: nothing signs their overwrites into an `expectedBefore` or an
+  // `inverseWrite`, and they are not a parent to any synchronized verdict, so an
+  // unanswered read on one cannot corrupt a write or a rollback. Refusing on them would
+  // instead hand a transient lobby occupant the power to stall the whole plan.
   for (const channel of snapshot.channels) {
+    if (isAutoVoiceEphemeralChild(channel)) continue;
     const unreadable = unreadableOverwrites(channel.permission_overwrites);
     if (unreadable !== null) {
       throw new Error(`Reviewed object ${channel.id} carried ${unreadable}, so its live permission overwrites are unknown. Planning refuses rather than treat an unanswered read as a channel with no overwrites — that list is signed into this operation's \`expectedBefore\` and \`inverseWrite\`, so an invented empty one would make rollback delete the overwrites it promises to restore, and would flip the synchronized verdict that decides whether a child is written at all. Re-run the dry-run from a snapshot whose channel read carries \`permission_overwrites\` as an array.`);
@@ -1140,6 +1172,14 @@ export function planArchiveOperations(snapshot: LiveCleanupSnapshot): CleanupOpe
     const write = archiveVisibilityOverwrites(snapshot, target, before);
     return { objectId, objectType, before, write };
   });
+  // `assertReviewedShape` stopped refusing on auto-voice ephemeral children, which is only
+  // sound while no operation can name one. That is currently true by construction — every
+  // write above comes from `LEGACY_CHANNEL_IDS` or `LEGACY_CATEGORY_IDS`, and the generator
+  // sits under an active category — but "by construction" is exactly the kind of invariant a
+  // later reclassification breaks silently. Re-assert it against the snapshot we just read.
+  const autoVoiceIds = new Set(snapshot.channels.filter((channel) => isAutoVoiceEphemeralChild(channel)).map((channel) => channel.id));
+  const planned = writes.filter(({ objectId }) => autoVoiceIds.has(objectId));
+  if (planned.length > 0) throw new Error(`Planned operations target auto-voice ephemeral channels ${planned.map(({ objectId }) => objectId).join(', ')}, which this phase must never write.`);
   return writes.map(({ objectId, objectType, before, write }, index) => {
     const kind = objectType === 'category' ? 'patch-category-overwrites' as const : 'patch-channel-overwrites' as const;
     const body = { phase: ARCHIVE_PHASE, kind, objectType, objectId, expectedBefore: { permission_overwrites: before }, write: { permission_overwrites: write }, inverseWrite: { permission_overwrites: before } };
