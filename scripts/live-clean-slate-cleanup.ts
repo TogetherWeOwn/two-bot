@@ -22,14 +22,16 @@ import {
   archiveOnboardingExclusions,
   archiveVisibilityExemptions,
   assertLatestCheckpoint,
+  AUTO_VOICE_CATEGORY_ID,
   buildManifest,
   type Channel,
   type CleanupManifest,
+  driftExcludedIds,
+  driftSemanticHash,
   guildReferenceBlock,
   type JsonObject,
   inFlightDriftIsOurs,
   inFlightExceptionIsAvailable,
-  isAutoVoiceEphemeralChild,
   journalSignature,
   journalWitnessPath,
   LEGACY_CATEGORY_IDS,
@@ -315,6 +317,18 @@ function holdersCsv(snapshot: LiveCleanupSnapshot): string {
   return `${rows.join('\n')}\n`;
 }
 
+/**
+ * One line per object this run tolerated without reviewing it. The repo's standard for a
+ * plan that quietly skips something is to name it in the artifact the operator compares
+ * against, not only in `pre.json` — see the STAYS-VISIBLE and RETAINS-VIEW lines below.
+ */
+function toleranceLines(snapshot: LiveCleanupSnapshot): string[] {
+  return driftExcludedIds(snapshot.channels).map((id) => {
+    const channel = snapshot.channels.find((item) => item.id === id);
+    return `  TOLERATED ${id} ${channel?.name ?? '?'} — auto-voice ephemeral child of ${AUTO_VOICE_CATEGORY_ID}, not planned over and excluded from the drift comparison`;
+  });
+}
+
 function assertManifest(manifest: CleanupManifest, snapshot: LiveCleanupSnapshot): void {
   const age = Date.now() - Date.parse(snapshot.generatedAt);
   if (!Number.isFinite(age) || age < -60_000 || age > SNAPSHOT_MAX_AGE_MS) throw new Error('Snapshot is not fresh enough for apply (maximum age: 24 hours).');
@@ -388,12 +402,12 @@ async function dryRun(): Promise<void> {
   // Same rule for the auto-voice tolerance (TOG-3140 F2): these IDs are the one class of
   // object `assertReviewedShape` stops refusing on, and until now they appeared only in
   // `pre.json`. An operator reading this log is entitled to see every object the plan
-  // decided not to reason about, not just the ones it decided not to hide.
-  const tolerated = snapshot.channels.filter((channel) => isAutoVoiceEphemeralChild(channel));
-  log(`Auto-voice ephemeral children tolerated and left untouched: ${tolerated.length}.`);
-  for (const channel of tolerated) {
-    log(`  TOLERATED ${channel.id} ${channel.name ?? '?'} — transient child of the active auto-voice category; never planned, never written`);
-  }
+  // decided not to reason about, not just the ones it decided not to hide. Sourced from
+  // `toleranceLines`, which is the same set apply and rollback drop from their drift
+  // comparisons, so this names exactly what those later gates will ignore (TOG-3141).
+  const tolerated = toleranceLines(snapshot);
+  log(`Unreviewed objects tolerated in this snapshot: ${tolerated.length}`);
+  for (const line of tolerated) log(line);
   log(`Snapshot semantic hash: ${snapshot.semanticHash}`);
   log(`Operation semantic hash: ${manifest.operationSemanticHash}`);
   // Everyone else — human or bot — is denied View and asserted hidden by the planner.
@@ -456,6 +470,17 @@ async function apply(): Promise<void> {
     checkpoint(phaseRollbackPath, phaseManifest);
   }
   const fresh = await captureSnapshot();
+  // Both sides of every comparison below run through `driftSemanticHash`, which drops
+  // auto-voice ephemeral children. They spawn and despawn continuously, so comparing the
+  // whole channel list across two live reads can never succeed while the generator runs;
+  // see `isDriftExcluded` for what that costs and why a reviewed ID can never be dropped.
+  // Name what was dropped — a tolerance nobody can see in the log is a tolerance nobody
+  // reviews. Printed here rather than logged, because `logLines` is reset for the phase
+  // log below and the refusal path never reaches it; the same lines are logged again once
+  // the gate has passed, so they also survive into `phase-01.log`.
+  const toleratedLines = toleranceLines(fresh);
+  for (const line of toleratedLines) console.log(line);
+  const freshDriftHash = driftSemanticHash(fresh);
   const acceptableHashes = new Set<string>();
   const requesting = phaseManifest.operations.filter((operation) => operation.state === 'requesting');
   if (requesting.length > 1) die(1, 'Resume manifest has more than one requesting operation.');
@@ -466,10 +491,9 @@ async function apply(): Promise<void> {
       if (operation.state !== 'applied' && !(requestingApplied && operation.state === 'requesting')) continue;
       applyOperationOverwrites(acceptable, operation, operation.write.permission_overwrites);
     }
-    const { semanticHash: _acceptableHash, ...acceptableInput } = acceptable;
-    acceptableHashes.add(withSemanticHash({ ...acceptableInput, generatedAt: fresh.generatedAt }).semanticHash);
+    acceptableHashes.add(driftSemanticHash(acceptable));
   }
-  if (!acceptableHashes.has(fresh.semanticHash)) {
+  if (!acceptableHashes.has(freshDriftHash)) {
     // A persisted `requesting` operation whose live object matches neither its
     // expected-before nor its full write is a partial in-flight write. Apply
     // deliberately refuses to push forward over an ambiguous write; rollback is
@@ -498,17 +522,17 @@ async function apply(): Promise<void> {
         const target = confined.channels.find((channel) => channel.id === id);
         if (live && target) target.permission_overwrites = normalizeOverwrites(live.permission_overwrites, `Live channel ${id}`);
       }
-      const { semanticHash: _confinedHash, ...confinedInput } = confined;
-      if (withSemanticHash({ ...confinedInput, generatedAt: fresh.generatedAt }).semanticHash === fresh.semanticHash) {
+      if (driftSemanticHash(confined) === freshDriftHash) {
         die(1, `Interrupted operation ${inFlight.id} left a partial write on ${inFlight.objectId}; apply will not push forward over it. Recover with: DISCORD_GUILD_ID=${LIVE_GUILD_ID} node scripts/live-clean-slate-cleanup-rollback.ts --manifest ${JSON.stringify(phaseRollbackPath)} --confirm-main-guild --apply`);
       }
     }
-    die(1, `Live state drifted since dry-run/resume: got ${fresh.semanticHash}.`);
+    die(1, `Live state drifted since dry-run/resume: got ${freshDriftHash}.`);
   }
   phaseManifest.status = 'applying';
   checkpoint(phaseRollbackPath, phaseManifest);
   logPath = phaseLogPath;
   logLines = [];
+  for (const line of toleratedLines) log(line);
   log(`Apply starting from reviewed operation hash ${phaseManifest.operationSemanticHash}.`);
   const abortAfter = Number(process.env.LIVE_CLEANUP_TEST_ABORT_AFTER_WRITES ?? '0');
   for (const operation of phaseManifest.operations) {
@@ -564,15 +588,19 @@ async function apply(): Promise<void> {
   for (const operation of phaseManifest.operations) {
     applyOperationOverwrites(expectedPostInput, operation, operation.write.permission_overwrites);
   }
-  const expectedPostHashed = withSemanticHash({ ...expectedPostInput, generatedAt: post.generatedAt });
-  if (post.semanticHash !== expectedPostHashed.semanticHash) {
+  // Same exclusion as the pre-apply gate, and it matters more here: this comparison is
+  // reached with every write already landed, so a lobby that filled up during the run used
+  // to mark the phase `apply_failed` over a channel the plan never touched (TOG-3141, M2).
+  const postDriftHash = driftSemanticHash(post);
+  const expectedPostDriftHash = driftSemanticHash(expectedPostInput);
+  if (postDriftHash !== expectedPostDriftHash) {
     phaseManifest.status = 'apply_failed';
     checkpoint(phaseRollbackPath, phaseManifest);
-    die(1, `Postflight semantic hash mismatch: expected ${expectedPostHashed.semanticHash}, got ${post.semanticHash}.`);
+    die(1, `Postflight semantic hash mismatch: expected ${expectedPostDriftHash}, got ${postDriftHash}.`);
   }
   if (existsSync(phasePostPath)) {
     const persistedPost = readJson<LiveCleanupSnapshot>(phasePostPath);
-    if (persistedPost.semanticHash !== post.semanticHash) die(1, 'Existing phase post-snapshot differs from the verified live post-state.');
+    if (driftSemanticHash(persistedPost) !== postDriftHash) die(1, 'Existing phase post-snapshot differs from the verified live post-state.');
   } else {
     createImmutableJson(phasePostPath, post);
   }
