@@ -104,7 +104,7 @@ services:
       DIAGNOSTICS_TOKEN: ${AVC_DIAGNOSTICS_TOKEN:-}
 
       # --- Discord status text (TOG-3143) ----------------------------------
-      # Read by the entrypoint below, NOT by upstream — upstream hardcodes its
+      # Read by ./status-patch.sh, NOT by upstream — upstream hardcodes its
       # status and offers no setting for it (verified at the pinned commit:
       # `bot/src/gateway/client.ts:17` is a module const with no env or DB read,
       # and it has exactly two references in the tree).
@@ -131,8 +131,17 @@ services:
     # honour that is to change the code — see README.md §1.1 for the licence
     # consequence, which is real and is NOT discharged by this file alone.
     #
-    # We rewrite the compiled constant in the container's writable layer on
-    # EVERY start, rather than patching at build time, because:
+    # The patch itself lives in ./status-patch.sh. It is deliberately NOT inlined
+    # here: running a modified AGPL work obliges us to offer its Corresponding
+    # Source, and that source is upstream@8fab5e8d plus our patch. Keeping the
+    # patch in its own file means the thing we have to publish is ~40 lines of
+    # self-contained shell — not this file, which also carries our Postgres
+    # topology, our secret variable names and our guild's operational detail.
+    # It is also why the tests execute status-patch.sh directly instead of
+    # digging a script back out of this YAML.
+    #
+    # It rewrites the compiled constant in the container's writable layer on
+    # EVERY start, rather than at build time, because:
     #   * the image we build stays byte-identical to stock upstream, so the
     #     pinned commit above remains the honest description of what we build;
     #   * it needs no Dockerfile of our own, so we never duplicate upstream's
@@ -140,40 +149,30 @@ services:
     #   * it is reversible by deleting this block, and it is idempotent, so a
     #     restart re-applies it and a redeploy cannot revert it. That last point
     #     is the entire reason this card exists.
-    #
-    # `exec node bot/dist/index.js` mirrors upstream's own `CMD` at the pinned
-    # commit (`Dockerfile:61`), relative to its `WORKDIR /app`. Setting
-    # `entrypoint:` clears the image's CMD, so it has to be restated here; the
-    # anchor check below is what catches an upstream move.
-    #
-    # NOTE: no dollar sign may appear in the script below. Compose interpolates
-    # dollar-variable syntax in compose values, so forwarding the image CMD the
-    # usual way (exec with the shell argument-list variable) would need it
-    # doubled, and would break silently under any runner that did not un-escape
-    # it. Hardcoding the command avoids that whole class of bug.
+    volumes:
+      # Read-only, and NOT baked into the image — baking it in would mean a
+      # Dockerfile of our own, which is exactly what we are avoiding.
+      #
+      # The host side is relative to the Compose *project directory*, which
+      # defaults to the directory holding this file. A runner that overrides that
+      # (`docker compose --project-directory <repo root>`) needs
+      # AVC_STATUS_PATCH_PATH=./ops/auto-voice/status-patch.sh. Getting it wrong
+      # fails loudly at start rather than silently skipping the patch — see
+      # README.md §8 for the exact error.
+      - ${AVC_STATUS_PATCH_PATH:-./status-patch.sh}:/opt/avc/status-patch.sh:ro
+
+    # Invoked through `/bin/sh <path>` rather than executed directly, so the
+    # file's exec bit is not load-bearing across checkouts and mount options.
     entrypoint:
       - /bin/sh
-      - -ec
-      - |
-        node -e '
-        const fs = require("node:fs");
-        const target = process.env.AVC_STATUS_TARGET || "/app/bot/dist/gateway/client.js";
-        const text = process.env.AVC_STATUS_TEXT || "";
-        const strict = (process.env.AVC_STATUS_ENFORCE || "strict") !== "warn";
-        const fail = (msg) => { console.error("[avc-status] " + msg); process.exit(strict ? 1 : 0); };
-        if (text === "") { console.error("[avc-status] AVC_STATUS_TEXT is empty - leaving upstream status in place"); process.exit(0); }
-        if (Array.from(text).length > 128) fail("AVC_STATUS_TEXT is longer than the 128-character Discord limit");
-        let src = "";
-        try { src = fs.readFileSync(target, "utf8"); } catch (err) { fail("cannot read " + target + ": " + err.message); }
-        const anchor = () => new RegExp("^const SETUP_STATUS = .*;", "gm");
-        const hits = src.match(anchor()) || [];
-        if (hits.length !== 1) fail("expected exactly 1 SETUP_STATUS declaration in " + target + ", found " + hits.length + " - the upstream pin has moved, re-derive this patch before deploying");
-        const line = "const SETUP_STATUS = " + JSON.stringify(text) + ";";
-        if (hits[0] === line) { console.log("[avc-status] already applied"); process.exit(0); }
-        fs.writeFileSync(target, src.replace(anchor(), () => line));
-        console.log("[avc-status] bot status set to " + JSON.stringify(text));
-        ' || exit 1
-        exec node bot/dist/index.js
+      - /opt/avc/status-patch.sh
+    # Setting `entrypoint:` clears the image's CMD, so upstream's own command has
+    # to be restated. This is upstream's `CMD` at the pinned commit
+    # (`Dockerfile:61`), relative to its `WORKDIR /app`; status-patch.sh execs it
+    # verbatim once the patch has applied. Re-check this line if you move the pin.
+    command:
+      - node
+      - bot/dist/index.js
 
     # No `ports:`. AVC makes outbound connections to Discord and Postgres and
     # needs nothing inbound from the internet. Coolify reaches /health on the

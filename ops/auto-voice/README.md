@@ -58,13 +58,18 @@ What that costs us, stated plainly:
   The commit pointer above is no longer a sufficient offer on its own, because
   the thing we run is no longer that commit.
 - **The fix is small and does not reach `two-bot`.** Corresponding Source here is
-  the pinned upstream commit (already public) plus *this directory*. It does not
-  extend to `two-bot`'s own source: Owen is a separate program in a separate
-  container under a separate Discord application, with no linking — so the
-  earlier worry that a patch "pulls a source-offer obligation onto `two-bot`"
-  overstates it. What it does create is an obligation to publish **this
-  directory**, which is currently private and contains no secrets (every
-  credential here is referenced by variable name only).
+  the pinned upstream commit (already public) plus
+  [`status-patch.sh`](./status-patch.sh) — and nothing else. It does not extend
+  to `two-bot`'s own source: Owen is a separate program in a separate container
+  under a separate Discord application, with no linking — so the earlier worry
+  that a patch "pulls a source-offer obligation onto `two-bot`" overstates it.
+- **One file, by construction.** The patch is kept out of `docker-compose.yml`
+  precisely so the artifact we must offer is ~40 lines of self-contained shell
+  rather than a deployment definition carrying our Postgres topology, our secret
+  variable names, our healthcheck and our guild ids. `status-patch.sh` is the
+  only file that modifies upstream's program, it references no credential and no
+  identifier of ours, and `test-status-patch.sh` asserts that (G10) so it stays
+  true. Offering the compose file is not required and should not be volunteered.
 
 > ⚠️ **Open item:** publishing this directory is a public-facing act and is not
 > an engineering call. It is raised on **TOG-3150** (Director of Engineering), not
@@ -120,12 +125,22 @@ real Postgres password, log caps, and a healthcheck on `/health`.
 
 Read §1.1 first for why this exists and what it costs.
 
-**Mechanism.** `services.bot.entrypoint` in `docker-compose.yml` rewrites the
-compiled constant in `/app/bot/dist/gateway/client.js` and then execs upstream's
-own `CMD`. It runs **on every container start**, in the container's writable
-layer. That is the whole point of the card: the operator's original hand-edit
-survived a restart but a Coolify redeploy recreates the container from the image
-and would have brought the advert back.
+**Mechanism.** [`status-patch.sh`](./status-patch.sh) rewrites the compiled
+constant in `/app/bot/dist/gateway/client.js` and then execs the command it was
+given. `docker-compose.yml` bind-mounts it read-only at
+`/opt/avc/status-patch.sh`, sets `entrypoint: [/bin/sh, /opt/avc/status-patch.sh]`,
+and restates upstream's own `CMD` as `command:` — necessary because setting
+`entrypoint:` clears the image's CMD. It runs **on every container start**, in
+the container's writable layer. That is the whole point of the card: the
+operator's original hand-edit survived a restart but a Coolify redeploy recreates
+the container from the image and would have brought the advert back.
+
+**Why a separate file and not an inline `entrypoint:` script.** Licence, not
+correctness — see §1.1. AGPL §13 makes us offer the patch as Corresponding
+Source; keeping it out of the compose file means what we offer is one
+self-contained script with no secrets and no topology in it. It is mounted rather
+than baked into the image because baking it in needs a Dockerfile of our own,
+which is the thing §3.1 exists to avoid.
 
 **Why start-time and not build-time.** A build-time patch needs a Dockerfile of
 our own, and the only way to inject a step into upstream's multi-stage build is
@@ -139,6 +154,7 @@ fork was the other option on the card and is strictly worse on both counts.
 |---|---|---|
 | `AVC_STATUS_TEXT` | `/setup` | The status. **Empty string disables the patch** and runs upstream verbatim. |
 | `AVC_STATUS_ENFORCE` | `strict` | `strict` = refuse to start if the anchor is missing. `warn` = log and boot with upstream's advert. |
+| `AVC_STATUS_PATCH_PATH` | `./status-patch.sh` | Host path of the script to mount. Only set it if your runner overrides the Compose project directory — see §8. |
 
 > `/setup` is a **placeholder**, chosen to strip the advert with the smallest
 > possible edit. The final text is one of the two surfaces the owner picks on
@@ -158,11 +174,17 @@ not a habit:
 ops/auto-voice/test-status-patch.sh
 ```
 
-It extracts the script out of `docker-compose.yml` and runs it, so it cannot
-drift from what ships. 28 assertions: replacement, idempotency across restarts,
-fail-closed on a moved pin (with a positive control), the `warn` hatch, duplicate
-anchors, injection safety for whatever text TOG-3142 picks, the 128-character
-Discord limit, and the disable switch. Point it at a real build with
+It runs the shipped `status-patch.sh` itself — no copy, no extraction — so it
+cannot drift from what deploys. 41 assertions: replacement, idempotency across
+restarts, fail-closed on a moved pin (with a positive control), the `warn` hatch,
+duplicate anchors, injection safety for whatever text TOG-3142 picks, the
+128-character Discord limit, the disable switch, the compose⇄script wiring (mount
+path, entrypoint, restated CMD — the seam the split created), that the script
+stays publishable under §1.1, that `set -u` tolerates an environment with no
+`AVC_*` variable at all, and that being handed no command fails loudly instead of
+exiting 0. Each of those last five groups was checked by mutating the file and
+confirming that one assertion, and only it, goes red. Point it at a real build
+with
 `AVC_REAL_DIST=/path/to/bot/dist/gateway/client.js`; it was last run green both
 ways against a `pnpm run build` of the pinned commit on 2026-09-17.
 
@@ -288,8 +310,10 @@ Nothing above touches Owen, `two-bot`'s database, or `Lobby`.
 **Rolling back just the status patch (TOG-3143)**, without touching anything
 else: set `AVC_STATUS_TEXT` to the empty string in Coolify and restart. Upstream
 runs verbatim, advert and all, and the §1 licence position is restored. Deleting
-the `entrypoint:` block from `docker-compose.yml` has the same effect
-permanently.
+the `volumes:`/`entrypoint:`/`command:` block from `docker-compose.yml` and
+`status-patch.sh` alongside it has the same effect permanently — remove all of
+them together, since without the `command:` line an image whose CMD is cleared
+has nothing left to start.
 
 ## 8. Verifying what is actually deployed
 
@@ -329,6 +353,30 @@ minute or two after a restart.
 If step 1 prints nothing, the container is running an image whose entrypoint was
 not overridden — check that Coolify redeployed from the branch that has this
 compose file, not a cached one.
+
+**If the container crash-loops at start with one of:**
+
+```
+/bin/sh: can't open /opt/avc/status-patch.sh: Is a directory
+/bin/sh: 0: Can't open /opt/avc/status-patch.sh
+```
+
+the bind mount resolved to the wrong host path. Compose resolves the host side of
+a relative mount against the **project directory**, which defaults to the
+directory holding the compose file; a runner that passes
+`--project-directory <repo root>` instead makes `./status-patch.sh` mean
+`<repo root>/status-patch.sh`, and Docker helpfully creates an empty directory
+there. Fix: set `AVC_STATUS_PATCH_PATH=./ops/auto-voice/status-patch.sh` in
+Coolify and redeploy. Confirm the mount before blaming anything else:
+
+```bash
+docker compose -f ops/auto-voice/docker-compose.yml exec bot \
+  head -1 /opt/avc/status-patch.sh
+#    expect: #!/bin/sh
+```
+
+This failure is loud by design. The alternative — a missing patch that lets the
+bot start with the advert intact — is the outcome this card exists to prevent.
 
 ## 9. The seven-day gate
 

@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# TOG-3143 — tests for the Discord-status patch embedded in docker-compose.yml.
+# TOG-3143 — tests for ./status-patch.sh, the Discord-status patch.
 #
-# The thing under test is the shell script inside `services.bot.entrypoint`. This
-# file EXTRACTS that script from the compose file and runs it, so the test can
-# never drift from what actually ships: edit the compose file and these tests
-# re-read it.
+# The thing under test is the shipped file itself: this runs `status-patch.sh`
+# directly, with no extraction and no copy, so the test cannot drift from what
+# deploys. Extraction WOULD be needed if the script still lived inside
+# `docker-compose.yml`; it does not, for the licence reason in README.md §1.1.
+#
+# Because the script and the compose file can now disagree with each other, G9
+# below asserts the wiring between them: the mount, the entrypoint path, and the
+# restated upstream CMD.
 #
 # The fixture reproduces upstream's emitted
 # `bot/dist/gateway/client.js` at the pinned commit
@@ -16,11 +20,15 @@
 # To run against a REAL build instead of the fixture:
 #   AVC_REAL_DIST=/path/to/Auto-Voice-Channels/bot/dist/gateway/client.js ./test-status-patch.sh
 #
-# Requires: bash, python3 (stdlib only), node.
+# Requires: bash, node.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE="$HERE/docker-compose.yml"
+SCRIPT="$HERE/status-patch.sh"
+# The path status-patch.sh is mounted at inside the container. G9 checks that the
+# compose file agrees with this on both the volume and the entrypoint.
+MOUNT="/opt/avc/status-patch.sh"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -29,35 +37,7 @@ ok()   { printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; printf '       %s\n' "$2"; fail=$((fail+1)); }
 check(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected [$3], got [$2]"; fi; }
 
-# --- extract the entrypoint script out of the compose file -------------------
-# Dependency-free on purpose: this test must run with nothing installed.
-SCRIPT="$WORK/entrypoint.sh"
-python3 - "$COMPOSE" > "$SCRIPT" <<'PY'
-import sys, re
-lines = open(sys.argv[1], encoding='utf-8').read().split('\n')
-out, i = [], 0
-while i < len(lines) and lines[i].strip() != 'entrypoint:':
-    i += 1
-if i == len(lines):
-    sys.exit('no entrypoint: key found in ' + sys.argv[1])
-# find the `- |` block scalar under it
-while i < len(lines) and lines[i].strip() != '- |':
-    i += 1
-if i == len(lines):
-    sys.exit('entrypoint has no `- |` block scalar')
-i += 1
-indent = len(lines[i]) - len(lines[i].lstrip())
-while i < len(lines):
-    ln = lines[i]
-    if ln.strip() and (len(ln) - len(ln.lstrip())) < indent:
-        break
-    out.append(ln[indent:] if len(ln) >= indent else ln)
-    i += 1
-sys.stdout.write('\n'.join(out).rstrip('\n') + '\n')
-PY
-[ -s "$SCRIPT" ] || { echo "FATAL: extracted an empty entrypoint script"; exit 1; }
-
-echo "== extracted entrypoint script =="; sed 's/^/  | /' "$SCRIPT"; echo
+[ -s "$SCRIPT" ] || { echo "FATAL: $SCRIPT is missing or empty"; exit 1; }
 
 # --- the fixture -------------------------------------------------------------
 ANCHOR="const SETUP_STATUS = 'auto-voice.io "$'\xc2\xb7'" /setup';"
@@ -84,8 +64,11 @@ make_root() { # $1=dest root, $2=client.js body override ("" = default fixture)
 
 run() { # $1=root  rest=env assignments; echoes output, returns rc
   local r="$1"; shift
+  # `/bin/sh <script> node bot/dist/index.js` is exactly how the compose file
+  # invokes it: entrypoint + the restated upstream CMD as arguments. G9 pins
+  # that correspondence.
   ( cd "$r" && env AVC_STATUS_TARGET="$r/bot/dist/gateway/client.js" "$@" \
-      /bin/sh -ec "$(cat "$SCRIPT")" 2>&1 )
+      /bin/sh "$SCRIPT" node bot/dist/index.js 2>&1 )
 }
 decl() { grep -c '^const SETUP_STATUS' "$1/bot/dist/gateway/client.js"; }
 line_of() { grep '^const SETUP_STATUS' "$1/bot/dist/gateway/client.js"; }
@@ -167,9 +150,58 @@ check "G8 rc=0 when disabled"         "$rc" "0"
 check "G8 starts the bot"             "$(echo "$out" | grep -c BOOTED)" "1"
 check "G8 leaves upstream untouched"  "$(grep -c 'auto-voice\.io' "$R/bot/dist/gateway/client.js")" "1"
 
-# G9 the compose script must contain no dollar sign: Compose interpolates those
-# in values, and a silent mis-expansion here boots the wrong command.
-check "G9 no dollar sign in script"   "$(grep -c '\$' "$SCRIPT")" "0"
+# G9 wiring. The script is now a separate file, so compose and script can drift
+# apart — which the old in-YAML version made impossible. These pin the seam.
+# Prints the `- ` list items under a 4-space-indented key in the bot service.
+block() {
+  awk -v key="$1" '
+    $0 == "    " key ":" { grab=1; next }
+    grab && /^      - / { sub(/^      - /, ""); print; next }
+    grab && (/^      #/ || /^[[:space:]]*$/) { next }
+    grab { grab=0 }
+  ' "$COMPOSE"
+}
+check "G9a compose mounts something read-only at the entrypoint path" \
+  "$(grep -cF -- ":$MOUNT:ro" "$COMPOSE")" "1"
+check "G9a2 and that something defaults to this script" \
+  "$(grep -cF -- '${AVC_STATUS_PATCH_PATH:-./status-patch.sh}:' "$COMPOSE")" "1"
+check "G9b entrypoint runs the mounted script" \
+  "$(block entrypoint | tr '\n' ' ')" "/bin/sh $MOUNT "
+check "G9c compose restates upstream's CMD" \
+  "$(block command | tr '\n' ' ')" "node bot/dist/index.js "
+check "G9d patch is no longer inlined in compose" \
+  "$(grep -c 'SETUP_STATUS' "$COMPOSE")" "0"
+check "G9d control: the script does carry the anchor" \
+  "$(grep -c 'SETUP_STATUS' "$SCRIPT" | awk '{print ($1>0)?"yes":"no"}')" "yes"
+check "G9e script is valid POSIX sh" \
+  "$(/bin/sh -n "$SCRIPT" >/dev/null 2>&1 && echo ok)" "ok"
+
+# G10 publishability. AGPL §13 obliges us to offer this file as Corresponding
+# Source (README.md §1.1), so it must carry nothing about our deployment. This
+# is the property that moving the patch out of docker-compose.yml bought, and it
+# is cheap to regress by "just adding one variable" later.
+check "G10 script names no deployment secret or topology" \
+  "$(grep -cE 'POSTGRES|DISCORD_TOKEN|DIAGNOSTICS|WATCHDOG|CLIENT_ID|ADMIN_CHANNEL|[0-9]{17,20}' "$SCRIPT" \
+     | awk '{print ($1==0)?"clean":"found "$1}')" "clean"
+check "G10 control: compose does carry that detail" \
+  "$(grep -cE 'POSTGRES|DISCORD_TOKEN|DIAGNOSTICS|WATCHDOG|CLIENT_ID|ADMIN_CHANNEL|[0-9]{17,20}' "$COMPOSE" \
+     | awk '{print ($1>0)?"yes":"no"}')" "yes"
+
+# G11 `set -u` guard. Extracting this into a real script added `set -eu`, which
+# aborts on an unset variable — so a run with NO AVC_* variable at all has to be
+# proven safe rather than assumed. Env is scrubbed here, not merely overridden.
+R="$WORK/g11"; make_root "$R" ""
+out="$(cd "$R" && env -u AVC_STATUS_TARGET -u AVC_STATUS_TEXT -u AVC_STATUS_ENFORCE \
+        /bin/sh "$SCRIPT" node bot/dist/index.js 2>&1)"; rc=$?
+check "G11 rc=0 with no AVC_ variable set" "$rc" "0"
+check "G11 starts the bot"                 "$(echo "$out" | grep -c BOOTED)" "1"
+check "G11 reports the patch disabled"     "$(echo "$out" | grep -c 'leaving upstream status in place')" "1"
+
+# G12 the no-command guard: compose clears the image CMD, so a missing `command:`
+# must be a loud failure and not a container that exits 0 looking successful.
+out="$(/bin/sh "$SCRIPT" 2>&1)"; rc=$?
+check "G12 rc=1 with no command to exec"   "$rc" "1"
+check "G12 says what is missing"           "$(echo "$out" | grep -c 'no command given')" "1"
 
 echo
 echo "fixture: ${AVC_REAL_DIST:-synthetic (set AVC_REAL_DIST to use a real build)}"
