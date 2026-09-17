@@ -72,7 +72,7 @@ test('the explicit live rollout override works only when supplied', async (t) =>
   };
   const imported = await runScript(
     IMPORT_SCRIPT,
-    ['--guild', LIVE_GUILD_ID, '--file', exportPath, '--allow-live-guild'],
+    ['--guild', LIVE_GUILD_ID, '--file', exportPath, '--allow-live-guild', '--apply'],
     dbEnv,
   );
   const rewards = await runScript(
@@ -106,7 +106,7 @@ test('staging remains accepted without the live rollout override', async (t) => 
   const schema = (await harness.db.prepare(`SELECT current_schema() AS s`).get<{ s: string }>())!.s;
   const result = await runScript(
     IMPORT_SCRIPT,
-    ['--guild', STAGING_GUILD_ID, '--file', exportPath],
+    ['--guild', STAGING_GUILD_ID, '--file', exportPath, '--apply'],
     {
       TWO_DATABASE_URL: process.env.TWO_TEST_DATABASE_URL!,
       PGOPTIONS: `-c search_path=${schema}`,
@@ -115,4 +115,40 @@ test('staging remains accepted without the live rollout override', async (t) => 
 
   assert.equal(result.code, 0, result.output);
   assert.match(result.output, /"inserted": 1/);
+});
+
+test('the import writes nothing without --apply, and inventory reads the live guild', async (t) => {
+  const { exportPath } = fixture();
+  const harness = await openTestDb(`${import.meta.filename}_dryrun`);
+  t.after(() => harness.cleanup());
+  const schema = (await harness.db.prepare(`SELECT current_schema() AS s`).get<{ s: string }>())!.s;
+  const dbEnv = {
+    TWO_DATABASE_URL: process.env.TWO_TEST_DATABASE_URL!,
+    PGOPTIONS: `-c search_path=${schema}`,
+  };
+
+  const dry = await runScript(
+    IMPORT_SCRIPT,
+    ['--guild', STAGING_GUILD_ID, '--file', exportPath],
+    dbEnv,
+  );
+  assert.equal(dry.code, 0, dry.output);
+  const manifest = JSON.parse(dry.output.slice(dry.output.indexOf('{')));
+  assert.equal(manifest.mode, 'dry-run');
+  assert.equal(manifest.rowsWritten, 1);
+  assert.equal(manifest.totalXpAfterProjected, 100);
+  assert.equal(manifest.totalXpAfterMeasured, null);
+  assert.equal(
+    Number(
+      (await harness.db.prepare(`SELECT COUNT(*) AS c FROM member_levels`).get<{ c: number }>())?.c,
+    ),
+    0,
+    'dry run must not write',
+  );
+
+  // Read-only inventory is exempt from the live fence: taking stock of live
+  // member_levels before an import is what it exists for.
+  const live = await runScript(IMPORT_SCRIPT, ['inventory', '--guild', LIVE_GUILD_ID], dbEnv);
+  assert.equal(live.code, 0, live.output);
+  assert.match(live.output, /"memberRows": 0/);
 });
