@@ -95,6 +95,11 @@ const TABLES = [
   'automod_processed_messages',
   'self_role_audit',
   'self_role_panel_claims',
+  // TOG-3101 config store. guild_settings_audit is append-only by trigger, but
+  // TRUNCATE does not fire row triggers, which is why the reset still works and
+  // a stray UPDATE/DELETE still does not.
+  'guild_settings',
+  'guild_settings_audit',
 ];
 
 export interface TestDb {
