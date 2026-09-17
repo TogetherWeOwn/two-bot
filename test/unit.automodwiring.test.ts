@@ -92,10 +92,21 @@ function failingAutomod(failure: 'claim' | 'release'): AutomodService {
   } as unknown as ModerationDiscordClient;
   return new AutomodService(
     discord,
-    {} as ModerationService,
+    // Resolves to an ordinary member so the delete below is what fails, which
+    // is what this fixture is for - since TOG-3092 a throwing resolver would
+    // short-circuit ahead of it and test nothing.
+    { targetProtection: () => undefined } as unknown as ModerationService,
     moderationStore,
     {} as AutomodStore,
-    { target: async () => { throw new Error('not reached'); } },
+    {
+      target: async (_guild: string, userId: string) => ({
+        userId,
+        roleIds: [],
+        highestRolePosition: 1,
+        isBot: false,
+        isGuildOwner: false,
+      }),
+    },
     {
       dryRun: false,
       owenUserId: '1469137636663758888',
@@ -183,7 +194,9 @@ test('protected-target refusal stays matched and produces one gateway audit', as
     await listener(message('protected-1', 'blocked'));
   }));
   assert.equal(d.recorded(), 0, 'refused sanction remains a matched automod event');
-  assert.deepEqual(calls, ['delete:protected-1']);
+  // TOG-3092: the protected target's message is left alone. This asserted
+  // ['delete:protected-1'] until the guard was moved ahead of the delete.
+  assert.deepEqual(calls, [], 'a protected target takes no Discord mutation at all');
   const audit = await testDb.db.prepare(
     `SELECT outcome, metadata_json FROM moderation_audit WHERE action = 'automod.bad_words'`,
   ).get<{ outcome: string; metadata_json: string }>();
@@ -194,7 +207,7 @@ test('protected-target refusal stays matched and produces one gateway audit', as
     await listener(message('protected-1', 'blocked'));
   }));
   assert.equal(d.recorded(), 0);
-  assert.deepEqual(calls, ['delete:protected-1'], 'gateway replay did not repeat deletion or sanction');
+  assert.deepEqual(calls, [], 'gateway replay did not repeat deletion or sanction');
   assert.equal((await testDb.db.prepare(
     `SELECT COUNT(*) AS n FROM moderation_audit WHERE action = 'automod.bad_words'`,
   ).get<{ n: number }>())?.n, 1);
