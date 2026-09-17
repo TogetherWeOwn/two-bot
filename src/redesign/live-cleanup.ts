@@ -14,6 +14,20 @@ export const ACTIVE_CATEGORY_IDS = [
   '1546777860046454784',
 ] as const;
 
+/**
+ * The active tree as it stands after the owner's reuse rule (TOG-2806, 2026-09-16 18:20Z):
+ * "whenever we can reuse channels we reuse them when they already have content."
+ *
+ * Six channels that this phase originally reviewed as legacy were moved into the active
+ * categories with their history intact, and the empty twins created for them were renamed
+ * `*-unused` and hidden. So the twins stay here — not because they are live, but because
+ * they still sit under an active category, and `assertReviewedShape` requires every legacy
+ * channel to sit under a legacy category. Classifying a hidden twin as legacy would refuse
+ * the whole plan. They are already denied to `@everyone`; nothing here re-reveals them.
+ *
+ * The first ten are the originally-provisioned tree; the last six are the reused channels,
+ * each annotated with the legacy name it carried before the move.
+ */
 export const ACTIVE_CHANNEL_IDS = [
   '1546777861199896589',
   '1546777862952976455',
@@ -25,6 +39,12 @@ export const ACTIVE_CHANNEL_IDS = [
   '1546777870511116368',
   '1546777871811346432',
   '1546777873313046598',
+  '327082608611557377', // announcements, was 📢〢announcements under TWO | INFO
+  '1045943373007171674', // general, was 💬〢general under TWO | LOBBY
+  '1058572809607073832', // moderation-log, was 📜〢mod-logs under TWO | LEADERSHIP
+  '1104836077761593354', // audit-log, was ❗〢audit-log under TWO | LEADERSHIP
+  '1138590808715571300', // discord-updates, was 🔧〢updates-and-changes under TWO | LEADERSHIP
+  '1139711709980925962', // voice-log, was voice-log under logs
 ] as const;
 
 export const LEGACY_CATEGORY_IDS = [
@@ -36,43 +56,48 @@ export const LEGACY_CATEGORY_IDS = [
   '1112742773829926983', '1139711707443368079', '1140914034686836766',
 ] as const;
 
+/**
+ * 106, not the 112 this phase first reviewed. Six of the original 112 were reused into the
+ * active tree by owner rule and now appear in `ACTIVE_CHANNEL_IDS` instead; see the note
+ * there. The count is deliberately not a round number — it is whatever survives the move,
+ * and `assertReviewedShape` re-proves the partition against a fresh snapshot on every run,
+ * so a wrong count here refuses rather than plans.
+ */
 export const LEGACY_CHANNEL_IDS = [
   '1146611215511081012', '1087198966346690570', '1132448261253369939',
-  '327082608611557377', '1118994739799281664', '1087199860802986095',
-  '1078104807132373032', '1112873080293970002', '1087200619418357810',
-  '1092823790695751810', '1087200082505510972', '1092929576491036672',
-  '1132475979282006137', '1176294550294233169', '1431746979540631622',
-  '1431742191620853791', '1055500237831151716', '1055494371019071570',
-  '1056439011088007261', '1175150463298060370', '1063256513172484149',
-  '1119296196373139587', '1175150257278025771', '1047562772407398500',
-  '1086368551729905694', '1266840224835833920', '1266840693637255363',
-  '1175127344072118405', '1269750661722148954', '1269753028404056076',
-  '1269753534346432644', '1269753860193521816', '1269754268265480242',
-  '1269754877303721985', '1045950023663370260', '1465060666972049439',
-  '1045943373007171674', '1087199619546632232', '1056447465286541333',
-  '1092312335529541632', '1087199559719067748', '1087199767718809650',
-  '1154904611799437404', '1078083546054397982', '1057456170320801802',
-  '1113979181391429672', '1117480270044594186', '1175151272438026280',
-  '1176386295384260648', '1276964524150358138', '1178937094035492884',
-  '1118994447036850369', '1179217198930202735', '1134893653832245428',
-  '1087199956600897557', '1087910390802960414', '1138590687311446049',
-  '1138590808715571300', '1138591034163593336', '1225192754020225176',
-  '1138591122927648908', '1138593758443737140', '1104836077761593354',
-  '1058572809607073832', '1139710398585651220', '1079390933159788714',
-  '1059534713695502337', '1058572808826933319', '1113457081329139763',
-  '1113457217706922035', '1128819815298125854', '1087201627980714044',
-  '1119073453291610123', '1114833990315159622', '1127785339486994473',
-  '1178791853861113887', '1499430425045766326', '1045892418362417192',
-  '1063303397639454781', '1063269593914818600', '1078864674046627960',
-  '1080624480382107728', '1090639980705099776', '1090640059524468797',
-  '1090640094194565180', '1090640131200913589', '1090640168412786688',
-  '1090640199475802202', '1090640261375340554', '1090640290882261092',
-  '1090640324600266902', '1090640356627976263', '1090640385027616861',
-  '1090640414568091700', '1090640441948512326', '1090640472449486908',
-  '1090640510227582986', '1090642310846480445', '1090642341041291364',
-  '1090642374226612404', '1090642415339192351', '1090642448579043388',
-  '1090642477624590376', '1105881919062806588', '1112742775578964099',
-  '1112743065665413120', '1139711709980925962', '1139711711851593848',
+  '1118994739799281664', '1087199860802986095', '1078104807132373032',
+  '1112873080293970002', '1087200619418357810', '1092823790695751810',
+  '1087200082505510972', '1092929576491036672', '1132475979282006137',
+  '1176294550294233169', '1431746979540631622', '1431742191620853791',
+  '1055500237831151716', '1055494371019071570', '1056439011088007261',
+  '1175150463298060370', '1063256513172484149', '1119296196373139587',
+  '1175150257278025771', '1047562772407398500', '1086368551729905694',
+  '1266840224835833920', '1266840693637255363', '1175127344072118405',
+  '1269750661722148954', '1269753028404056076', '1269753534346432644',
+  '1269753860193521816', '1269754268265480242', '1269754877303721985',
+  '1045950023663370260', '1465060666972049439', '1087199619546632232',
+  '1056447465286541333', '1092312335529541632', '1087199559719067748',
+  '1087199767718809650', '1154904611799437404', '1078083546054397982',
+  '1057456170320801802', '1113979181391429672', '1117480270044594186',
+  '1175151272438026280', '1176386295384260648', '1276964524150358138',
+  '1178937094035492884', '1118994447036850369', '1179217198930202735',
+  '1134893653832245428', '1087199956600897557', '1087910390802960414',
+  '1138590687311446049', '1138591034163593336', '1225192754020225176',
+  '1138591122927648908', '1138593758443737140', '1139710398585651220',
+  '1079390933159788714', '1059534713695502337', '1058572808826933319',
+  '1113457081329139763', '1113457217706922035', '1128819815298125854',
+  '1087201627980714044', '1119073453291610123', '1114833990315159622',
+  '1127785339486994473', '1178791853861113887', '1499430425045766326',
+  '1045892418362417192', '1063303397639454781', '1063269593914818600',
+  '1078864674046627960', '1080624480382107728', '1090639980705099776',
+  '1090640059524468797', '1090640094194565180', '1090640131200913589',
+  '1090640168412786688', '1090640199475802202', '1090640261375340554',
+  '1090640290882261092', '1090640324600266902', '1090640356627976263',
+  '1090640385027616861', '1090640414568091700', '1090640441948512326',
+  '1090640472449486908', '1090640510227582986', '1090642310846480445',
+  '1090642341041291364', '1090642374226612404', '1090642415339192351',
+  '1090642448579043388', '1090642477624590376', '1105881919062806588',
+  '1112742775578964099', '1112743065665413120', '1139711711851593848',
   '1139711713525108896', '1139711716129783950', '1139711719065784414',
   '1140914163934302289',
 ] as const;
@@ -762,7 +787,7 @@ export function semanticSnapshot(input: Omit<LiveCleanupSnapshot, 'semanticHash'
     guild: normalizeGuild(input.guild),
     roles: [...input.roles].sort((a, b) => a.id.localeCompare(b.id)),
     channels: [...input.channels].map(normalizedChannel).sort((a, b) => a.id.localeCompare(b.id)),
-    members: [...input.members].map((member) => ({ ...member, roles: [...member.roles].sort() })).sort((a, b) => a.id.localeCompare(b.id)),
+    members: [...input.members].map((member) => ({ ...member, roles: normalizedMemberRoles(member.roles) })).sort((a, b) => a.id.localeCompare(b.id)),
     integrations: [...input.integrations].sort((a, b) => a.id.localeCompare(b.id)),
     // `references` is load-bearing here, not just recorded. `onboardingReferencedChannels`
     // plans off it, and a token-holder who forges `references.onboarding` onto `pre.json`
@@ -848,6 +873,37 @@ export function assertReviewedShape(snapshot: LiveCleanupSnapshot): void {
  *
  * All 191 roles on all five TOG-2907 live pre-snapshots carry all three.
  */
+/**
+ * The same collapse class as `unreadableOverwrites`, one field to the left, on the read
+ * that decides *who can still see an archived object*.
+ *
+ * `[...(member.roles ?? [])]` read a member whose role list did not answer as a member
+ * holding no roles. That is fail-closed for `assertHierarchy` — Owen with no roles has no
+ * Administrator and refuses — but it is fail-**open** for `archiveVisibilityExemptions`,
+ * which is where it matters: a collapsed read drops the member's Administrator-bearing
+ * roles, so `archiveExemption` returns null, the principal is left off the RETAINS-VIEW
+ * list, and the operator signs off on a manifest that under-reports who keeps access.
+ * Discord ignores every overwrite this phase emits for an Administrator, so that
+ * under-report cannot be corrected by any later PATCH.
+ */
+export function unreadableMemberRoles(value: unknown): string | null {
+  if (!Array.isArray(value)) return value === undefined ? 'no `roles` key at all' : `a \`roles\` that is not an array (${value === null ? 'null' : typeof value})`;
+  const index = value.findIndex((entry) => typeof entry !== 'string');
+  return index === -1 ? null : `a \`roles[${index}]\` that is not a role id string`;
+}
+
+/**
+ * A member's role list canonicalized for hashing, copying an unreadable one through
+ * **verbatim** rather than refusing — the `normalizedChannel` contract, for the same
+ * reason: capture and `semanticSnapshot` run before `pre.json` reaches disk, so throwing
+ * here would throw away the evidence of what Discord actually returned. Absence survives
+ * into the semantic hash, where it stays distinguishable from `[]`, and `assertHierarchy`
+ * is what refuses to plan on it.
+ */
+export function normalizedMemberRoles(roles: unknown): string[] {
+  return unreadableMemberRoles(roles) === null ? [...(roles as string[])].sort() : (roles as string[]);
+}
+
 export function unreadableRole(role: Role): string | null {
   const missing = ([['position', 'number'], ['managed', 'boolean'], ['permissions', 'string']] as const)
     .filter(([key, expected]) => typeof role[key] !== expected)
@@ -865,6 +921,15 @@ export function assertHierarchy(snapshot: LiveCleanupSnapshot): void {
     const unreadable = unreadableRole(role);
     if (unreadable !== null) {
       throw new Error(`Role ${role.id} carried ${unreadable}, so this snapshot cannot show Owen outranks every managed role. Planning refuses rather than read an unanswered role field as a role at the bottom of the list, or as one that is not managed at all. Re-run the dry-run from a snapshot whose role read carries \`position\`, \`managed\` and \`permissions\` on every role.`);
+    }
+  }
+  // And before any member's roles are read — by this check, by `basePermissions`, or by
+  // `archiveVisibilityExemptions`. A member whose role list did not answer is not a member
+  // holding no roles; see `unreadableMemberRoles`.
+  for (const member of snapshot.members) {
+    const unreadable = unreadableMemberRoles(member.roles);
+    if (unreadable !== null) {
+      throw new Error(`Member ${member.id} carried ${unreadable}, so this snapshot cannot show which roles that principal holds. Planning refuses rather than read an unanswered role list as a principal holding none — that principal may hold Administrator, which no PATCH this phase emits can hide an archived object from, and it would be left off the recorded visibility-exemption set. Re-run the dry-run from a snapshot whose member read carries \`roles\` on every member.`);
     }
   }
   const owenRoles = snapshot.roles.filter((role) => owenMember.roles.includes(role.id));
