@@ -10,17 +10,37 @@
  * gate: one tick per day, one JSON object per tick, and the exit code is the
  * verdict.
  *
- * Read-only. It opens a gateway session, reads the guild's own channel list and
- * voice states out of GUILD_CREATE, and closes. It sends no REST writes and
- * joins no voice channel, so it cannot itself create the rooms it is counting.
+ * A tick is two halves, in this order:
+ *
+ *   1. Observation - absence of harm. A gateway session reads the guild's own
+ *      channel list and voice states out of GUILD_CREATE and closes. No REST
+ *      writes, no voice join, so it cannot manufacture the rooms it counts, and
+ *      it measures the guild before we have touched it.
+ *   2. Exercise (`exercise.ts`) - presence of the feature. A second session
+ *      joins the generator, and AVC must create a room, move us into it, and
+ *      reclaim it when we leave.
+ *
+ * Half 2 exists because half 1 passes with AVC dead (TOG-3126): a Discord
+ * channel object outlives the process watching it, so "generator present, Lobby
+ * untouched, no ghosts" is equally true of a container that died on day 1, and
+ * `no_ghost_rooms` is vacuous on any day nobody used the generator. Seven days
+ * of nothing-bad-is-visible is not seven days of AVC running clean.
  *
  * Exit codes are three, not two, because a tick that could not observe must not
  * be readable as either a pass or a breach:
  *
- *   0  PASS          - observed, every condition held
+ *   0  PASS          - observed and exercised, every condition held
  *   1  FAIL          - observed, a condition was breached
- *   2  INCONCLUSIVE  - could not observe (no token, gateway refused, timeout)
+ *   2  INCONCLUSIVE  - could not observe or could not exercise (no token,
+ *                      gateway refused, timeout)
  */
+import {
+  DEFAULT_WINDOWS,
+  ExerciseUnavailable,
+  describeExercise,
+  exercise,
+  type ExerciseEvidence,
+} from './exercise.ts';
 
 /** Discord channel type 2. The only type this tick reasons about. */
 const GUILD_VOICE = 2;
@@ -56,6 +76,12 @@ export type TickInput = {
    * a finding, and the safe direction for this check to fail is loudly.
    */
   ignoreChannelIds?: string[];
+  /**
+   * What the liveness exercise witnessed. Optional in the type and fatal in the
+   * verdict: a tick with no exercise evidence FAILs `avc_alive`, because the
+   * whole defect this closes is a tick that passes by looking at nothing.
+   */
+  exercise?: ExerciseEvidence;
 };
 
 export type TickCheck = { name: string; ok: boolean; detail: string };
@@ -67,6 +93,8 @@ export type TickResult = {
   ghosts: Array<{ id: string; name: string }>;
   /** Generated rooms with somebody in them. Healthy; reported for context. */
   occupied: Array<{ id: string; name: string; members: number }>;
+  /** The create/destroy cycle this tick drove, echoed into the ledger verbatim. */
+  exercise: ExerciseEvidence | null;
 };
 
 /**
@@ -144,11 +172,19 @@ export function evaluate(input: TickInput): TickResult {
         : `empty generated room(s): ${ghosts.map((g) => `${g.id} ${JSON.stringify(g.name)}`).join(', ')}`,
   });
 
+  // The positive half. Everything above this line is satisfied by a guild that
+  // AVC stopped touching days ago; these two are the only checks that require a
+  // process to have been running during this tick.
+  const ex = describeExercise(input.exercise, input.categoryId);
+  checks.push({ name: 'avc_alive', ok: ex.alive, detail: ex.aliveDetail });
+  checks.push({ name: 'room_reclaimed', ok: ex.reclaimed, detail: ex.reclaimedDetail });
+
   return {
     verdict: checks.every((c) => c.ok) ? 'PASS' : 'FAIL',
     checks,
     ghosts,
     occupied,
+    exercise: input.exercise ?? null,
   };
 }
 
@@ -234,7 +270,23 @@ const baseChannels: GuildChannel[] = [
   { id: GEN, type: GUILD_VOICE, name: '➕ Join to Create', parent_id: CAT, position: 13 },
 ];
 
-const base = { categoryId: CAT, generatorId: GEN, lobbyId: LOBBY, channels: baseChannels, voiceStates: [] };
+/** A complete, healthy create/destroy cycle: AVC made a room, put us in it, took it back. */
+const healthyExercise: ExerciseEvidence = {
+  createdRoom: { id: '900', name: 'Squad #1', parentId: CAT },
+  createMs: 366,
+  movedMs: 392,
+  deleteMs: 152,
+  residualRoomId: null,
+};
+
+const base = {
+  categoryId: CAT,
+  generatorId: GEN,
+  lobbyId: LOBBY,
+  channels: baseChannels,
+  voiceStates: [],
+  exercise: healthyExercise,
+};
 
 /**
  * Each case names the real-world event it stands for. A tick that cannot tell
@@ -299,6 +351,44 @@ export const FIXTURES: ReadonlyArray<{ name: string; input: TickInput; expect: '
     input: { ...base, channels: [baseChannels[0]!, baseChannels[1]!] },
     expect: 'FAIL',
   },
+
+  // TOG-3126. Every case above this line is a state the *guild* can be in, and
+  // every one of them is reachable with the AVC container switched off. These
+  // are the cases that tell a live bot from a dead one.
+  {
+    name: 'AVC is dead: the guild looks perfect and joining the generator does nothing',
+    input: {
+      ...base,
+      exercise: { createdRoom: null, createMs: null, movedMs: null, deleteMs: null, residualRoomId: null },
+    },
+    expect: 'FAIL',
+  },
+  {
+    name: 'the tick did not exercise the generator at all',
+    input: { ...base, exercise: undefined },
+    expect: 'FAIL',
+  },
+  {
+    name: 'AVC created the room somewhere other than the 🔊 VOICE category',
+    input: {
+      ...base,
+      exercise: { ...healthyExercise, createdRoom: { id: '900', name: 'Squad #1', parentId: '777' } },
+    },
+    expect: 'FAIL',
+  },
+  {
+    name: 'AVC created the room but never moved anybody into it',
+    input: { ...base, exercise: { ...healthyExercise, movedMs: null } },
+    expect: 'FAIL',
+  },
+  {
+    name: 'AVC created the room and never reclaimed it - a ghost we caused',
+    input: {
+      ...base,
+      exercise: { ...healthyExercise, deleteMs: null, residualRoomId: '900' },
+    },
+    expect: 'FAIL',
+  },
 ];
 
 /* ----------------------------------------------------------------------- cli */
@@ -318,7 +408,7 @@ function selftest(): number {
 async function main(): Promise<number> {
   if (process.argv.includes('--selftest')) return selftest();
 
-  const token = process.env.AVC_OBSERVE_TOKEN ?? process.env.DISCORD_BOT_TOKEN;
+  const token = process.env.AVC_OBSERVE_TOKEN ?? process.env.AVC_DISCORD_BOT_TOKEN ?? process.env.DISCORD_BOT_TOKEN;
   const guildId = process.env.AVC_OBSERVE_GUILD_ID ?? process.env.DISCORD_GUILD_ID;
   const categoryId = process.env.AVC_OBSERVE_CATEGORY_ID ?? '1545924266590081115';
   const generatorId = process.env.AVC_OBSERVE_GENERATOR_ID ?? '1546777867978018887';
@@ -333,6 +423,8 @@ async function main(): Promise<number> {
     return 2;
   }
 
+  // Observe first, on a guild we have not touched, so our own exercise room can
+  // never be counted among the ghosts this tick is looking for.
   let observed;
   try {
     observed = await snapshot(token, guildId);
@@ -340,12 +432,38 @@ async function main(): Promise<number> {
     console.error(`INCONCLUSIVE: ${(err as Error).message}`);
     return 2;
   }
+  const observedAt = new Date().toISOString();
 
-  const result = evaluate({ categoryId, generatorId, lobbyId, ignoreChannelIds, ...observed });
+  const exerciseToken = process.env.AVC_EXERCISE_TOKEN ?? token;
+  let evidence: ExerciseEvidence;
+  try {
+    evidence = await exercise({
+      token: exerciseToken,
+      guildId,
+      generatorId,
+      categoryId,
+      knownChannelIds: observed.channels.map((c) => c.id),
+      windows: {
+        createMs: Number(process.env.AVC_EXERCISE_CREATE_MS ?? DEFAULT_WINDOWS.createMs),
+        deleteMs: Number(process.env.AVC_EXERCISE_DELETE_MS ?? DEFAULT_WINDOWS.deleteMs),
+      },
+    });
+  } catch (err) {
+    // Could not drive the generator at all. That is not a clean day and it is
+    // not a breach either - it is a tick that learned nothing.
+    if (err instanceof ExerciseUnavailable) {
+      console.error(`INCONCLUSIVE: ${err.message}`);
+      return 2;
+    }
+    throw err;
+  }
+
+  const result = evaluate({ categoryId, generatorId, lobbyId, ignoreChannelIds, ...observed, exercise: evidence });
   const tick = {
-    card: 'TOG-3052',
+    card: 'TOG-3126',
     guildId,
-    observedAt: new Date().toISOString(),
+    observedAt,
+    exercisedAt: new Date().toISOString(),
     ...result,
   };
   console.log(JSON.stringify(tick, null, 2));
