@@ -32,7 +32,20 @@ export const AUTO_VOICE_CATEGORY_ID = '1545924266590081115';
  * are excluded from the unreviewed-ID refusal, and {@link planArchiveOperations} re-asserts
  * afterwards that no planned operation names one. Everything else still fails closed — a
  * non-voice child here, a voice channel under any other category, and any unexpected child
- * of a legacy category all still refuse.
+ * of a legacy category all still refuse. The tolerance is scoped to *identity*, not to
+ * readability: a tolerated child whose overwrite read did not answer is still refused by
+ * {@link assertReviewedShape}, because the rollback preflight reads it regardless.
+ *
+ * Two limits worth stating rather than discovering (TOG-3139):
+ *
+ * - The last clause is not decoration. `Lobby` and the `➕ Join to Create` generator are
+ *   themselves type-2 channels directly under {@link AUTO_VOICE_CATEGORY_ID}; without it
+ *   the predicate would swallow two reviewed active-tree objects.
+ * - It assumes active categories stay type 4. `ACTIVE_CATEGORY_IDS` is the one reviewed
+ *   set `assertReviewedShape` pins by presence alone, so a category that somehow reported
+ *   as type 2 would classify as ephemeral here. Discord does not permit that, and this
+ *   phase never writes a category outside `LEGACY_CATEGORY_IDS`, so it costs nothing —
+ *   but a later phase reusing this predicate should pin the type.
  */
 export function isAutoVoiceEphemeralChild(channel: Pick<Channel, 'id' | 'type' | 'parent_id'>): boolean {
   if (channel.type !== 2 || channel.parent_id !== AUTO_VOICE_CATEGORY_ID) return false;
@@ -873,16 +886,25 @@ export function assertReviewedShape(snapshot: LiveCleanupSnapshot): void {
   // of refusing at capture, so that the pre-snapshot survives to show what Discord
   // actually returned; refusing to *plan* on it is this function's job.
   //
-  // Auto-voice ephemeral children are the one exception, and they are skipped rather
-  // than refused: nothing signs their overwrites into an `expectedBefore` or an
-  // `inverseWrite`, and they are not a parent to any synchronized verdict, so an
-  // unanswered read on one cannot corrupt a write or a rollback. Refusing on them would
-  // instead hand a transient lobby occupant the power to stall the whole plan.
+  // Auto-voice ephemeral children are tolerated by the refusal above but deliberately
+  // NOT skipped here, and the distinction is load-bearing (TOG-3139 finding 1). Skipping
+  // them is sound for *this* function's writes — nothing signs their overwrites into an
+  // `expectedBefore` or an `inverseWrite`, and they are never a synchronized child — but
+  // it is not sound for the phase, because the rollback preflight walks every
+  // pre-snapshot channel no operation names and calls `normalizeOverwrites` on it
+  // (`scripts/live-clean-slate-cleanup-rollback.ts:335`). Letting an unreadable one
+  // through therefore bought a plan and an apply whose rollback then died on an uncaught
+  // exception with 65 writes already landed. Measured, not argued: plan 0 -> apply 0
+  // (65 writes) -> rollback stack trace.
+  //
+  // So this walk is the whole set, with no exception: every channel in a signed
+  // pre-snapshot has a readable overwrite list. An unanswered read is a momentary
+  // Discord failure that a re-run clears, not something a lobby occupant can cause, so
+  // refusing here costs none of the plan reachability the tolerance above exists to buy.
   for (const channel of snapshot.channels) {
-    if (isAutoVoiceEphemeralChild(channel)) continue;
     const unreadable = unreadableOverwrites(channel.permission_overwrites);
     if (unreadable !== null) {
-      throw new Error(`Reviewed object ${channel.id} carried ${unreadable}, so its live permission overwrites are unknown. Planning refuses rather than treat an unanswered read as a channel with no overwrites — that list is signed into this operation's \`expectedBefore\` and \`inverseWrite\`, so an invented empty one would make rollback delete the overwrites it promises to restore, and would flip the synchronized verdict that decides whether a child is written at all. Re-run the dry-run from a snapshot whose channel read carries \`permission_overwrites\` as an array.`);
+      throw new Error(`Reviewed object ${channel.id} carried ${unreadable}, so its live permission overwrites are unknown. Planning refuses rather than treat an unanswered read as a channel with no overwrites — that list is signed into this operation's \`expectedBefore\` and \`inverseWrite\`, so an invented empty one would make rollback delete the overwrites it promises to restore, and would flip the synchronized verdict that decides whether a child is written at all. An auto-voice ephemeral child reaches this refusal too even though it is never written, because the rollback preflight reads every pre-snapshot channel and would die on it there instead. Re-run the dry-run from a snapshot whose channel read carries \`permission_overwrites\` as an array.`);
     }
   }
   if (snapshot.semanticHash !== sha256(semanticSnapshot(snapshot))) throw new Error('Snapshot semantic hash does not match its content.');
@@ -1175,8 +1197,12 @@ export function planArchiveOperations(snapshot: LiveCleanupSnapshot): CleanupOpe
   // `assertReviewedShape` stopped refusing on auto-voice ephemeral children, which is only
   // sound while no operation can name one. That is currently true by construction — every
   // write above comes from `LEGACY_CHANNEL_IDS` or `LEGACY_CATEGORY_IDS`, and the generator
-  // sits under an active category — but "by construction" is exactly the kind of invariant a
-  // later reclassification breaks silently. Re-assert it against the snapshot we just read.
+  // sits under an active category — so this re-assertion is unreachable today, and a
+  // mutation that neuters it survives the suite. Keep it anyway, but for the accurate
+  // reason (TOG-3139): reclassifying a legacy channel under the auto-voice category cannot
+  // reach here, because the legacy-parent assertion above refuses first. What this defends
+  // is someone *deleting or reordering that assertion* — it is the one check that sees the
+  // finished plan, so it is the backstop that survives the loops above being rewritten.
   const autoVoiceIds = new Set(snapshot.channels.filter((channel) => isAutoVoiceEphemeralChild(channel)).map((channel) => channel.id));
   const planned = writes.filter(({ objectId }) => autoVoiceIds.has(objectId));
   if (planned.length > 0) throw new Error(`Planned operations target auto-voice ephemeral channels ${planned.map(({ objectId }) => objectId).join(', ')}, which this phase must never write.`);
