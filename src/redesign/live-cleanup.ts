@@ -1129,15 +1129,22 @@ export const PINNED_GUILD_REFERENCES = [
 /**
  * The `references.guildReferences` block, built from a raw `GET /guilds/{id}` body.
  *
- * An absent key is copied as absent rather than collapsed to `null`. Discord sends all
- * three on every guild read — `null` when the guild pins nothing — so absence means the
- * read did not answer the question, and `null` means it answered "nothing". Collapsing
- * the first into the second here would destroy the distinction *before* the semantic
- * hash is taken, after which no downstream check can recover it: dry-run and apply read
- * the same collapsed field and agree on the wrong answer. That is the round-9 defect
- * (TOG-3074) one source to the left, and on the live guild it is the source that matters
- * — every TOG-2907 pre-snapshot has `onboarding.enabled === false`, so the Server Guide
- * contributes 0 exclusions and both real ones come from this block.
+ * Only the three `PINNED_GUILD_REFERENCES` fields get the absence-preserving treatment
+ * below: an absent key is copied as absent rather than collapsed to `null`. Discord
+ * sends all three on every guild read — `null` when the guild pins nothing — so absence
+ * means the read did not answer the question, and `null` means it answered "nothing".
+ * Collapsing the first into the second here would destroy the distinction *before* the
+ * semantic hash is taken, after which no downstream check can recover it: dry-run and
+ * apply read the same collapsed field and agree on the wrong answer. That is the
+ * round-9 defect (TOG-3074) one source to the left, and on the live guild it is the
+ * source that matters — every TOG-2907 pre-snapshot has `onboarding.enabled === false`,
+ * so the Server Guide contributes 0 exclusions and both real ones come from this block.
+ *
+ * `applicationId` and `systemChannelId` stay outside that treatment deliberately, the
+ * same way `onboarding.enabled` stays outside the Server Guide readability gate below
+ * (see `onboardingReferencedChannels`): neither feeds `unreadableGuildReferences` or
+ * decides an exclusion, so collapsing their absence with `??` costs this phase nothing
+ * — there is no distinction here for a downstream check to lose.
  */
 export function guildReferenceBlock(guild: JsonObject): JsonObject {
   const block: JsonObject = {
