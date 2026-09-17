@@ -95,7 +95,29 @@ permissions:
   contents: read
 
 jobs:
+  # See ci.yml for the full argument. This workflow's pull_request trigger is
+  # path-filtered, which makes it easy to forget that it is still a fork's code
+  # on our persistent runners — scripts/ci/check-fork-gate-coverage.mjs is what
+  # remembered it (TOG-3103). The gate checks out the base commit, so the fork
+  # is not the one supplying the guard.
+  #
+  # The "reports only on a PR" rule above is about the plan changing, which is
+  # nobody's fault. Coming from a fork is a different thing and does fail.
+  fork-gate:
+    runs-on: [self-hosted, two-selfhosted]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
+      - name: Refuse fork pull requests
+        env:
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: ./scripts/ci/refuse-fork-pr.sh
+
   protection-available:
+    needs: fork-gate
     runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 5
     steps:

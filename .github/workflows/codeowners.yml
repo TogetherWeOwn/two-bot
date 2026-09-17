@@ -45,7 +45,25 @@ permissions:
   contents: read
 
 jobs:
+  # See ci.yml for the full argument. Short version: these runners are
+  # self-hosted and persistent, so a fork's pull request must not reach them,
+  # and the gate checks out the base commit rather than the pull request so the
+  # fork is not the one supplying the guard (TOG-3103).
+  fork-gate:
+    runs-on: [self-hosted, two-selfhosted]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
+      - name: Refuse fork pull requests
+        env:
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: ./scripts/ci/refuse-fork-pr.sh
+
   owners-resolve:
+    needs: fork-gate
     runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 5
     steps:

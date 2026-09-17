@@ -14,7 +14,38 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # An outside contributor's pull request must not execute on our hardware.
+  # Every runner here is self-hosted and persistent — five share one host — so
+  # a fork's code would run next to whatever the last job left behind
+  # (TOG-3103). This is the only job a fork ever reaches, and everything else
+  # in this workflow waits on it.
+  #
+  # It checks out the BASE commit, not the pull request. Running the pull
+  # request's copy would mean asking the fork to supply the script that decides
+  # whether to trust the fork.
+  #
+  # Delete this job, and the `needs:` lines below, in the commit that moves
+  # this workflow to hosted runners. On a hosted runner there is no host of
+  # ours to protect and this would only turn away contributions.
+  fork-gate:
+    runs-on: [self-hosted, two-selfhosted]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
+      - name: Refuse fork pull requests
+        env:
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: ./scripts/ci/refuse-fork-pr.sh
+
+      # The gate is worth a job only while it still refuses things.
+      - name: Verify the fork gate
+        run: ./scripts/ci/refuse-fork-pr.test.sh
+
   check:
+    needs: fork-gate
     runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 10
 
@@ -71,7 +102,7 @@ jobs:
   # Exercise the website views and least-privilege grants end to end after the
   # required check has proved the full Postgres-backed suite.
   postgres:
-    needs: check
+    needs: [fork-gate, check]
     runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 10
 
