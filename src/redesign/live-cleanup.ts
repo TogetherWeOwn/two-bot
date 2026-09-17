@@ -908,13 +908,50 @@ export function driftExcludedIds(channels: readonly Pick<Channel, 'id' | 'type' 
 }
 
 /**
+ * Channel fields Discord derives from message traffic, dropped from the live-vs-live
+ * comparisons for the same reason {@link normalizeGuild} sorts `features`: they move on
+ * their own, so leaving them in makes those gates unsatisfiable rather than strict.
+ *
+ * `last_message_id` is measured, not assumed. Across seven real captures of the live guild
+ * it is the *only* channel field that ever moved without an administrator acting: two
+ * captures 2h19m apart differ on exactly three channels — `audit-log`, `voice-log` and
+ * `server-log`, all of them channels Owen itself posts to — and stripping this one field
+ * makes those two captures byte-identical under `driftSemanticHash`. Every other observed
+ * difference (`name`, `parent_id`, `position`, `permission_overwrites`, `flags`) came from
+ * the operator's real reorganization and must keep refusing. Note in particular that
+ * `position` did *not* move when an auto-voice child spawned, so the ephemeral exclusion
+ * does not need a positional companion.
+ *
+ * `last_pin_timestamp` is here because it is the same field class reached by the same
+ * mechanism — any member pinning a message moves it — and there is no way to measure it
+ * without causing the pin. Both are alike in the two properties that make dropping them
+ * free: this phase never writes either one, and neither appears in an `expectedBefore`, an
+ * `inverseWrite`, or anything `planArchiveOperations` reads.
+ *
+ * This matters more than it looks. The pre-apply gate refuses before any write, but the
+ * postflight hash and rollback's post-rollback hash are both reached with every write
+ * already landed — so an ordinary message posted during the run used to strand the phase
+ * `apply_failed`, or leave the manifest `rolling_back` with the guild actually restored
+ * (TOG-3141, round 16; the mechanism `pre.json`-based stub fixtures cannot see, because the
+ * fixture never posts a message).
+ */
+const DRIFT_VOLATILE_CHANNEL_FIELDS = ['last_message_id', 'last_pin_timestamp'] as const;
+
+/** One channel as a drift comparison sees it. Apply to both reads or to neither. */
+export function driftComparableChannel<T extends object>(channel: T): T {
+  const comparable = { ...channel } as T & Partial<Record<(typeof DRIFT_VOLATILE_CHANNEL_FIELDS)[number], unknown>>;
+  for (const field of DRIFT_VOLATILE_CHANNEL_FIELDS) delete comparable[field];
+  return comparable;
+}
+
+/**
  * `semanticHash` over the drift-comparable channel list. Never use this as an object's
  * stored hash: `pre.json` carries the real {@link withSemanticHash} value, which is what the
  * plan signature covers and what the artifact has to prove it read. This is only for the
  * moment two live reads are compared to each other.
  */
 export function driftSemanticHash(input: Omit<LiveCleanupSnapshot, 'semanticHash'>): string {
-  return sha256(semanticSnapshot({ ...input, channels: driftComparableChannels(input.channels) }));
+  return sha256(semanticSnapshot({ ...input, channels: driftComparableChannels(input.channels).map(driftComparableChannel) }));
 }
 
 export function assertReviewedShape(snapshot: LiveCleanupSnapshot): void {

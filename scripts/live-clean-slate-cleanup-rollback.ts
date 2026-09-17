@@ -15,6 +15,7 @@ import {
   assertLatestCheckpoint,
   type Channel,
   type CleanupManifest,
+  driftComparableChannel,
   driftComparableChannels,
   driftExcludedIds,
   driftSemanticHash,
@@ -349,8 +350,13 @@ for (const current of comparablePreRollback) {
   // this loop walks — an unfiltered walk here would dereference `undefined` for a channel
   // the filter had let through on only one side.
   const original = snapshot.channels.find((channel) => channel.id === current.id)!;
-  const currentShape = { ...current, permission_overwrites: normalizeOverwrites(current.permission_overwrites, `Live read of untouched channel ${current.id}`) };
-  const originalShape = { ...original, permission_overwrites: normalizeOverwrites(original.permission_overwrites, `Pre-snapshot channel ${original.id}`) };
+  // The eighth live-vs-live comparison, and the only one that does not run through
+  // `driftSemanticHash` — it compares whole channel bodies one at a time, so it needs the same
+  // volatile-field exclusion applied to both sides. Without it a message landing in any
+  // untouched channel between apply and rollback shuts the recovery path for a torn apply,
+  // which is the one run that has to work after something has already gone wrong.
+  const currentShape = driftComparableChannel({ ...current, permission_overwrites: normalizeOverwrites(current.permission_overwrites, `Live read of untouched channel ${current.id}`) });
+  const originalShape = driftComparableChannel({ ...original, permission_overwrites: normalizeOverwrites(original.permission_overwrites, `Pre-snapshot channel ${original.id}`) });
   if (stable(currentShape) !== stable(originalShape)) die(1, `Rollback preflight untouched channel ${current.id} drifted from the pre-snapshot.`);
 }
 manifest.status = 'rolling_back';

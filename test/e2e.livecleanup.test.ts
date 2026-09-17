@@ -84,6 +84,23 @@ type Stub = {
   /** The despawn half of {@link spawnAfterWrites}: a room empties mid-apply or mid-rollback. */
   despawnAfterWrites(writeCount: number, channelId: string): void;
   /**
+   * Land a message in a channel, which moves its `last_message_id`. This fixture was
+   * captured without that field, which is exactly why the stub suite could not see the
+   * failure it causes: on the live guild the three channels Owen itself logs to move it
+   * continuously, and every live-vs-live hash comparison used to break on it (TOG-3141,
+   * round 16). Nothing else about the channel changes — that is the point.
+   */
+  postMessage(channelId: string): void;
+  /** The {@link spawnAfterWrites} landing for a message: traffic arriving mid-apply or mid-rollback. */
+  postMessageAfterWrites(writeCount: number, channelId: string): void;
+  /**
+   * Pin a message, which moves `last_pin_timestamp`. The same field class as
+   * {@link postMessage} reached by a different action, and the one the live captures could not
+   * measure — nobody pinned anything during the window, and causing a pin on the live guild to
+   * prove it is not a read.
+   */
+  pinMessage(channelId: string): void;
+  /**
    * Move a child the way a third party would, out from under the phase. Because sync
    * is decided by value, this also drops the child out of the synchronized set.
    */
@@ -157,6 +174,14 @@ async function stubDiscord(): Promise<Stub> {
   let onboardingRaw: { contentType: string; payload: string | null; status: number } | null = null;
   let pendingSpawn: { after: number; channel: Channel } | null = null;
   let pendingDespawn: { after: number; channelId: string } | null = null;
+  let pendingMessage: { after: number; channelId: string } | null = null;
+  // Snowflakes, so the field moves monotonically the way Discord's does.
+  let lastMessageId = 1550000000000000000n;
+  const landMessage = (channelId: string) => {
+    const target = state.channels.find((item) => item.id === channelId);
+    assert.ok(target, `stub: no channel ${channelId} to land a message in`);
+    (target as unknown as JsonObject).last_message_id = String(++lastMessageId);
+  };
   const hiddenOverwriteReads = new Set<string>();
   const server: Server = createServer((req, res) => {
     const method = req.method ?? 'GET';
@@ -215,6 +240,10 @@ async function stubDiscord(): Promise<Stub> {
         if (pendingDespawn && writes.length >= pendingDespawn.after) {
           state.channels = state.channels.filter((item) => item.id !== pendingDespawn!.channelId);
           pendingDespawn = null;
+        }
+        if (pendingMessage && writes.length >= pendingMessage.after) {
+          landMessage(pendingMessage.channelId);
+          pendingMessage = null;
         }
         return send(200, channel);
       });
@@ -283,6 +312,14 @@ async function stubDiscord(): Promise<Stub> {
     spawnAfterWrites(writeCount: number, channel: Channel) { pendingSpawn = { after: writeCount, channel }; },
     despawn(channelId: string) { state.channels = state.channels.filter((item) => item.id !== channelId); },
     despawnAfterWrites(writeCount: number, channelId: string) { pendingDespawn = { after: writeCount, channelId }; },
+    postMessage(channelId: string) { landMessage(channelId); },
+    postMessageAfterWrites(writeCount: number, channelId: string) { pendingMessage = { after: writeCount, channelId }; },
+    pinMessage(channelId: string) {
+      const target = state.channels.find((item) => item.id === channelId);
+      assert.ok(target, `stub: no channel ${channelId} to pin in`);
+      lastMessageId += 1n;
+      (target as unknown as JsonObject).last_pin_timestamp = new Date(Number(lastMessageId % 1000000000n)).toISOString();
+    },
     desyncChild(childId: string, overwrites: Channel['permission_overwrites']) {
       state.channels.find((item) => item.id === childId)!.permission_overwrites = structuredClone(overwrites);
     },
@@ -1312,6 +1349,140 @@ test('auto-voice churn at every apply and rollback gate no longer refuses or str
         assert.ok(live, `${landing}: ${channel.id} missing after rollback`);
         assert.equal(stable(normalizeOverwrites(live.permission_overwrites)), stable(normalizeOverwrites(channel.permission_overwrites)), `${landing}: ${channel.id}`);
       }
+    } finally { await stub.close(); }
+  }
+});
+
+/**
+ * Excluding the churning *objects* was only half of it. The remaining half is a churning
+ * *field*: `semanticSnapshot` spreads raw channel bodies, so `last_message_id` is inside every
+ * hash, and it moves whenever anyone says anything.
+ *
+ * Measured on real captures rather than argued (TOG-3141, round 16). Across seven live
+ * snapshots of the TOG guild, `last_message_id` is the only channel field that ever moved
+ * without an administrator acting; two captures 2h19m apart differ on exactly three channels —
+ * `audit-log`, `voice-log` and `server-log`, all written by Owen itself — and are byte-identical
+ * under `driftSemanticHash` once it is dropped. All three are permanently inside
+ * `REVIEWED_OBJECT_IDS`, so the auto-voice exclusion can never reach them by design.
+ *
+ * The price of missing this is not a refusal. Two of the four landings below are past the point
+ * of no return: postflight runs with all 65 writes applied, and rollback's hash runs after every
+ * reverting write, one line before `status = 'rolled_back'`. So a single log line landing at the
+ * wrong moment used to mark a correct phase `apply_failed`, or leave the manifest `rolling_back`
+ * over a guild that had in fact been fully restored.
+ *
+ * The production fixture was captured without the field at all, which is precisely why the stub
+ * suite could not see any of this — the stub now has to land the message itself.
+ */
+/**
+ * The live evidence is a channel Owen logs to — active tree, never written by this phase — but
+ * the phase's own targets take messages too, so both are exercised: the exclusion is scoped to
+ * two fields, not to a set of objects.
+ */
+const chattyChannelId = (): string => {
+  const chatty = fixtureState().channels.find((channel) => channel.type === 0 && (ACTIVE_CHANNEL_IDS as readonly string[]).includes(channel.id));
+  assert.ok(chatty, 'the fixture must carry an active text channel to stand in for audit-log');
+  return chatty.id;
+};
+
+// Split one landing per test rather than looped inside one, because these gates are reached at
+// four different prices and each one has to be shown to be the gate that was actually fixed. A
+// single compound test fails at the first landing when the fix is reverted and says nothing
+// about the other three.
+test('a message landing between dry-run and apply is not live drift', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-message-after-plan-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    stub.postMessage(chattyChannelId());
+    stub.postMessage(LEGACY_CHANNEL_IDS[0]!);
+    const applied = await apply(stub, dir);
+    assert.equal(applied.code, 0, applied.stderr);
+    assert.doesNotMatch(applied.stderr, /Live state drifted/);
+    assert.equal(stub.writes.length, EXPECTED_OPERATIONS.operationCount);
+    assert.equal((JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest).status, 'applied');
+  } finally { await stub.close(); }
+});
+
+// The second entry in the excluded list, so that dropping it is a mutation a test kills rather
+// than an untested precaution. It is reached by a pin, not a post, and it is not measurable on
+// the live guild without causing the pin.
+test('a pin between dry-run and apply is not live drift either', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-pin-after-plan-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    stub.pinMessage(chattyChannelId());
+    const applied = await apply(stub, dir);
+    assert.equal(applied.code, 0, applied.stderr);
+    assert.doesNotMatch(applied.stderr, /Live state drifted/);
+    assert.equal(stub.writes.length, EXPECTED_OPERATIONS.operationCount);
+  } finally { await stub.close(); }
+});
+
+test('a message landing mid-apply does not fail the postflight with all 65 writes already applied', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-message-mid-apply-'));
+  const chatty = chattyChannelId();
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    stub.postMessageAfterWrites(5, chatty);
+    const applied = await apply(stub, dir);
+    assert.equal(applied.code, 0, applied.stderr);
+    assert.doesNotMatch(applied.stderr, /Postflight semantic hash mismatch/);
+    assert.equal((JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest).status, 'applied');
+    // Excluded from the *comparison* only. `post.json` still records what was live and still
+    // carries the true whole-guild hash the artifact is read on — a filtered stored hash would
+    // be a quieter and much worse bug than the one being fixed.
+    const post = JSON.parse(readFileSync(join(dir, 'phase-01', 'post.json'), 'utf8')) as LiveCleanupSnapshot;
+    const { semanticHash: _stored, ...postInput } = post;
+    assert.equal(post.semanticHash, withSemanticHash(postInput).semanticHash);
+    const recorded = post.channels.find((channel) => channel.id === chatty) as unknown as JsonObject;
+    assert.equal(typeof recorded.last_message_id, 'string', 'post.json must keep the field it stopped comparing');
+  } finally { await stub.close(); }
+});
+
+// Two gates, not one: the untouched-channel walk compares whole channel bodies one at a time
+// and does not run through `driftSemanticHash`, so it needed the exclusion applied separately.
+// It refuses before any rollback write; the post-rollback hash refuses after all of them, one
+// line before `status = 'rolled_back'`.
+for (const landing of ['before-rollback', 'mid-rollback'] as const) {
+  test(`a message landing ${landing} does not strand the recovery path`, async () => {
+    const stub = await stubDiscord();
+    const dir = mkdtempSync(join(tmpdir(), `two-live-clean-message-${landing}-`));
+    try {
+      assert.equal((await plan(stub, dir)).code, 0);
+      assert.equal((await apply(stub, dir)).code, 0);
+      if (landing === 'before-rollback') stub.postMessage(chattyChannelId());
+      else stub.postMessageAfterWrites(stub.writes.length + 5, chattyChannelId());
+      const restored = await rollback(stub, dir);
+      assert.equal(restored.code, 0, restored.stderr);
+      assert.doesNotMatch(restored.stderr, /semantic hash mismatch|inventory drifted|inventory differs|untouched channel/);
+      assert.equal((JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest).status, 'rolled_back');
+    } finally { await stub.close(); }
+  });
+}
+
+/**
+ * The companion to the test above, and the reason the excluded field list is two entries and
+ * not "whatever is noisy". Every field normalized away is drift the gate stops seeing, so the
+ * neighbouring channel properties a third party can actually edit must still refuse — including
+ * on the very channel whose `last_message_id` moved in the same window.
+ */
+test('a field the exclusion does not name is still live drift, on the same channel in the same window', async () => {
+  const chatty = { id: chattyChannelId() };
+  for (const edit of ['topic', 'name', 'position'] as const) {
+    const stub = await stubDiscord();
+    const dir = mkdtempSync(join(tmpdir(), `two-live-clean-message-control-${edit}-`));
+    try {
+      assert.equal((await plan(stub, dir)).code, 0);
+      stub.postMessage(chatty.id);
+      const live = stub.state.channels.find((channel) => channel.id === chatty.id)! as unknown as JsonObject;
+      live[edit] = edit === 'position' ? Number(live.position ?? 0) + 1 : `${String(live[edit] ?? '')} edited by a third party`;
+      const applied = await apply(stub, dir);
+      assert.equal(applied.code, 1, `${edit}: a real edit must still refuse`);
+      assert.match(applied.stderr, /Live state drifted/);
+      assert.equal(stub.writes.length, 0, `${edit}: refusal must land before any write`);
     } finally { await stub.close(); }
   }
 });
