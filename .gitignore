@@ -1,4 +1,8 @@
-node_modules/
+# No trailing slash, on purpose. `node_modules/` matches only a *directory*, so
+# for six months a `node_modules` SYMLINK sat tracked in this repo (blob 8bf33bf,
+# pointing at one agent sandbox's absolute path) because the ignore rule never
+# looked at it. test/unit.repohygiene.test.ts holds the line.
+node_modules
 data/*
 # the audit snapshots are the whole point of the audit - they are the rollback
 # source for the server migration and the diff base for the next audit
