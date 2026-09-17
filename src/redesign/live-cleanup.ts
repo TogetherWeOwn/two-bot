@@ -79,7 +79,11 @@ export const LEGACY_CHANNEL_IDS = [
 
 export type JsonObject = Record<string, unknown>;
 export type Overwrite = { id: string; type: number; allow: string; deny: string };
-export type Role = { id: string; name: string; managed: boolean; permissions: string; position?: number; tags?: JsonObject };
+// `position` is required because `assertHierarchy` sorts on it and an optional one
+// invited the `?? -1` that read an unanswered rank as the bottom of the list. These
+// types describe a `JSON.parse` of a Discord body, so they are a claim rather than a
+// guarantee — `unreadableRole` and `unreadableOverwrites` are what enforce them.
+export type Role = { id: string; name: string; managed: boolean; permissions: string; position: number; tags?: JsonObject };
 export type Channel = { id: string; name: string; type: number; parent_id: string | null; position?: number; topic?: string | null; permission_overwrites: Overwrite[] };
 export type Member = { id: string; bot: boolean; username: string | null; roles: string[]; premiumSince: string | null; pending: boolean };
 export type LiveCleanupSnapshot = {
@@ -111,6 +115,8 @@ export type OperationState = 'pending' | 'requesting' | 'applied' | 'rolled_back
 export type RollbackEntry = CleanupOperation & { state: OperationState; requestStartedAt?: string; appliedAt?: string; rolledBackAt?: string };
 export type ArchiveExemptionReason = 'owner' | 'owen' | 'administrator';
 export type ArchiveVisibilityExemption = { memberId: string; bot: boolean; reason: ArchiveExemptionReason };
+/** A reviewed legacy channel Discord refuses to hide, and every guild reference that pins it. */
+export type ArchiveOnboardingExclusion = { channelId: string; referencedBy: string[] };
 export type CleanupManifest = {
   version: 1;
   kind: 'live-clean-slate-cleanup';
@@ -132,6 +138,7 @@ export type CleanupManifest = {
   activeChannelIds: string[];
   activeCategoryIds: string[];
   visibilityExemptions: ArchiveVisibilityExemption[];
+  onboardingExclusions: ArchiveOnboardingExclusion[];
   operations: RollbackEntry[];
 };
 
@@ -488,7 +495,7 @@ export function syncedChildIds(snapshot: Pick<LiveCleanupSnapshot, 'channels'>, 
   if (operation.objectType !== 'category') return [];
   const parentBefore = stable(normalizeOverwrites(operation.inverseWrite.permission_overwrites));
   return snapshot.channels
-    .filter((channel) => channel.parent_id === operation.objectId && stable(normalizeOverwrites(channel.permission_overwrites ?? [])) === parentBefore)
+    .filter((channel) => channel.parent_id === operation.objectId && stable(normalizeOverwrites(channel.permission_overwrites, `Snapshot channel ${channel.id}`)) === parentBefore)
     .map((channel) => channel.id)
     .sort();
 }
@@ -524,9 +531,90 @@ export function inFlightDriftIsOurs(
   });
 }
 
-export function normalizeOverwrites(overwrites: Overwrite[]): Overwrite[] {
+/**
+ * Why this permission overwrite list is unreadable, or `null` when it answered the
+ * question.
+ *
+ * Readable means: an array, and every entry an object carrying `id`/`allow`/`deny` as
+ * strings and `type` as a number. Anything else — an absent key, `undefined`, an object,
+ * a number where a bitfield string belongs — is a read that did not answer, and this
+ * phase has no honest way to act on it.
+ *
+ * Absence is the case that matters. `permission_overwrites ?? []` read an unanswered
+ * read as "this channel has no overwrites", and that is not a value this phase may
+ * invent: it is the whole rollback body. Measured on the live 2026-09-16T12:20:52Z
+ * pre-snapshot, deleting the key from reviewed legacy channel 1047562772407398500 left
+ * the operation count unchanged at 67 and shipped a **signed** `inverseWrite` of zero
+ * overwrites against the two real ones — a rollback that would not fail to restore the
+ * channel, it would delete them. The apply's own independent before-state check
+ * (`GET /channels/{id}`) laundered the same absence the same way, so
+ * `stable(liveBefore) !== stable(expectedBefore)` compared `[]` against `[]` and passed.
+ *
+ * Same rule and same reason as `unreadableGuildReferences` one source to the left
+ * (TOG-3084): collapsing absence into a value before the semantic hash destroys the
+ * distinction permanently, because dry-run and apply then read the same collapsed field
+ * and agree on the wrong answer.
+ *
+ * Strictness costs a real read nothing: all five TOG-2907 live pre-snapshots carry
+ * `permission_overwrites` as an array on all 148 channels, with all four fields present
+ * and correctly typed on every entry.
+ */
+export function unreadableOverwrites(value: unknown): string | null {
+  if (!Array.isArray(value)) return value === undefined ? 'no `permission_overwrites` key at all' : `a \`permission_overwrites\` that is not an array (${value === null ? 'null' : typeof value})`;
+  for (const [index, entry] of value.entries()) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return `a \`permission_overwrites[${index}]\` that is not an object`;
+    const overwrite = entry as JsonObject;
+    const missing = ([['id', 'string'], ['allow', 'string'], ['deny', 'string'], ['type', 'number']] as const)
+      .filter(([key, expected]) => typeof overwrite[key] !== expected)
+      .map(([key]) => `\`${key}\``);
+    if (missing.length > 0) return `a \`permission_overwrites[${index}]\` with no readable ${missing.join(', ')}`;
+  }
+  return null;
+}
+
+/**
+ * Sorts and canonicalizes an overwrite list, refusing one that did not answer.
+ *
+ * The refusal lives here rather than only at the call sites because the same list
+ * arrives from three different places — a live Discord body, the pre-snapshot on disk,
+ * and a manifest's `expectedBefore`/`write`/`inverseWrite` — and only the first two are
+ * channel objects a caller can name. `source` labels the object when the caller knows
+ * it, so the operator is told *which* read did not answer.
+ *
+ * Refusing an entry with an absent `allow`/`deny` is the plan-time half of the same
+ * defect: `String(undefined)` produced the literal string `"undefined"`, which compared
+ * equal to itself at plan time and only failed as a 400 from Discord on operation N,
+ * mid-phase, with writes already applied.
+ */
+export function normalizeOverwrites(overwrites: Overwrite[], source = 'A permission overwrite list'): Overwrite[] {
+  const unreadable = unreadableOverwrites(overwrites);
+  if (unreadable !== null) {
+    throw new Error(`${source} carried ${unreadable}, so its permission overwrites are unknown. Refusing rather than read an unanswered permission overwrite list as an empty one — this phase signs that list as the rollback body, and an empty one deletes the overwrites it promises to restore.`);
+  }
   return overwrites.map((overwrite) => ({ ...overwrite, allow: String(overwrite.allow), deny: String(overwrite.deny) }))
     .sort((a, b) => `${a.type}:${a.id}`.localeCompare(`${b.type}:${b.id}`));
+}
+
+/**
+ * A channel with its overwrites canonicalized for hashing, copying an unreadable list
+ * through **verbatim** rather than refusing.
+ *
+ * Every snapshot-shaped read builds channels through here, and they must agree: capture,
+ * `semanticSnapshot`, the rollback script's two re-derivations, the independent audit and
+ * the pin deriver. One of them collapsing an absence the others preserve is a semantic
+ * hash mismatch, which reads as live drift that never happened.
+ *
+ * Preserving rather than refusing is deliberate and is the `guildReferenceBlock`
+ * precedent: capture runs before the pre-snapshot is written to disk, and the dry-run is
+ * built to keep that snapshot when *planning* refuses (`dryRun()`'s catch). Throwing here
+ * would throw the evidence away with it. So absence survives into the hash — where it is
+ * distinguishable from `[]`, which is the property `?? []` destroyed — and
+ * `assertReviewedShape` is what refuses to plan on it.
+ */
+export function normalizedChannel(channel: Channel): Channel {
+  return unreadableOverwrites(channel.permission_overwrites) === null
+    ? { ...channel, permission_overwrites: normalizeOverwrites(channel.permission_overwrites) }
+    : channel;
 }
 
 export function archiveEveryoneOverwrite(guildId: string, overwrites: Overwrite[]): Overwrite[] {
@@ -637,15 +725,33 @@ export function applyOperationOverwrites(
 ): void {
   const target = snapshot.channels.find((channel) => channel.id === operation.objectId);
   if (!target) throw new Error(`${operation.objectType === 'category' ? 'Category' : 'Channel'} ${operation.objectId} is missing from snapshot.`);
-  const before = normalizeOverwrites(target.permission_overwrites ?? []);
+  const before = normalizeOverwrites(target.permission_overwrites, `Snapshot ${operation.objectType} ${operation.objectId}`);
   const normalized = normalizeOverwrites(overwrites);
   target.permission_overwrites = normalized;
   if (operation.objectType !== 'category') return;
   for (const channel of snapshot.channels) {
-    if (channel.parent_id === operation.objectId && stable(normalizeOverwrites(channel.permission_overwrites ?? [])) === stable(before)) {
+    if (channel.parent_id === operation.objectId && stable(normalizeOverwrites(channel.permission_overwrites, `Snapshot channel ${channel.id}`)) === stable(before)) {
       channel.permission_overwrites = structuredClone(normalized);
     }
   }
+}
+
+/**
+ * `GET /guilds/{id}` returns `features` in a different order on essentially every
+ * request. Two live reads three minutes apart were set-equal and hash-different,
+ * so `--apply`'s "live state drifted" check could never be satisfied on this guild
+ * — it refused 15 consecutive attempts before the operator patched it out by hand
+ * (TOG-2806, operator run 2026-09-16T16:35Z).
+ *
+ * Feature order carries no meaning in Discord's model, so canonicalize it here
+ * rather than weakening the drift check, which is the only thing standing between
+ * a stale plan and the live guild. Nothing else in the guild payload has been
+ * observed to reorder; add a field to this function only with a live measurement
+ * behind it, because every field normalized away is drift the check stops seeing.
+ */
+function normalizeGuild(guild: JsonObject): JsonObject {
+  if (!Array.isArray(guild.features)) return guild;
+  return { ...guild, features: [...guild.features].map(String).sort() };
 }
 
 export function semanticSnapshot(input: Omit<LiveCleanupSnapshot, 'semanticHash'>): JsonObject {
@@ -653,11 +759,19 @@ export function semanticSnapshot(input: Omit<LiveCleanupSnapshot, 'semanticHash'
     version: input.version,
     applicationId: input.applicationId,
     guildId: input.guildId,
-    guild: input.guild,
+    guild: normalizeGuild(input.guild),
     roles: [...input.roles].sort((a, b) => a.id.localeCompare(b.id)),
-    channels: [...input.channels].map((channel) => ({ ...channel, permission_overwrites: normalizeOverwrites(channel.permission_overwrites ?? []) })).sort((a, b) => a.id.localeCompare(b.id)),
+    channels: [...input.channels].map(normalizedChannel).sort((a, b) => a.id.localeCompare(b.id)),
     members: [...input.members].map((member) => ({ ...member, roles: [...member.roles].sort() })).sort((a, b) => a.id.localeCompare(b.id)),
     integrations: [...input.integrations].sort((a, b) => a.id.localeCompare(b.id)),
+    // `references` is load-bearing here, not just recorded. `onboardingReferencedChannels`
+    // plans off it, and a token-holder who forges `references.onboarding` onto `pre.json`
+    // and re-signs everything is stopped by exactly one control: this field sits inside
+    // the semantic hash, and apply re-captures the guild live and compares. Measured on
+    // TOG-3060 — body only, body + rehash, and body + rehash + full valid re-sign all
+    // refuse, the last one on `Live state drifted since dry-run/resume`, zero writes.
+    // Moving `references` out of this object to quiet drift noise makes that forgery
+    // reachable. Do not.
     references: input.references,
   };
 }
@@ -702,32 +816,262 @@ export function assertReviewedShape(snapshot: LiveCleanupSnapshot): void {
   const reviewed = new Set<string>([...ACTIVE_CATEGORY_IDS, ...ACTIVE_CHANNEL_IDS, ...LEGACY_CATEGORY_IDS, ...LEGACY_CHANNEL_IDS, ...reviewedUntouchedShapes.keys()]);
   const unknown = snapshot.channels.filter((channel) => !reviewed.has(channel.id));
   if (unknown.length > 0) throw new Error(`Fresh snapshot contains unreviewed channel/category IDs: ${unknown.map((channel) => channel.id).join(', ')}.`);
+  // Every channel above is a reviewed one, and every reviewed one is planned over or
+  // reasoned about as a synchronized child — so this walk is the whole set, and it is
+  // the last point at which an unreadable overwrite list is still distinguishable from
+  // an empty one. `normalizedChannel` deliberately carried the absence this far instead
+  // of refusing at capture, so that the pre-snapshot survives to show what Discord
+  // actually returned; refusing to *plan* on it is this function's job.
+  for (const channel of snapshot.channels) {
+    const unreadable = unreadableOverwrites(channel.permission_overwrites);
+    if (unreadable !== null) {
+      throw new Error(`Reviewed object ${channel.id} carried ${unreadable}, so its live permission overwrites are unknown. Planning refuses rather than treat an unanswered read as a channel with no overwrites — that list is signed into this operation's \`expectedBefore\` and \`inverseWrite\`, so an invented empty one would make rollback delete the overwrites it promises to restore, and would flip the synchronized verdict that decides whether a child is written at all. Re-run the dry-run from a snapshot whose channel read carries \`permission_overwrites\` as an array.`);
+    }
+  }
   if (snapshot.semanticHash !== sha256(semanticSnapshot(snapshot))) throw new Error('Snapshot semantic hash does not match its content.');
+}
+
+/**
+ * Why this role is unreadable, or `null` when it answered the question.
+ *
+ * `assertHierarchy` is the check that proves Owen outranks every managed role it is
+ * about to write beneath, and both of the fields it decides on used to fail *open*
+ * on absence: `role.position ?? -1` read an unanswered position as the bottom of the
+ * list, and a falsy `managed` dropped the role out of the target set entirely. Measured
+ * against the live pre-snapshot with a control first — a managed role genuinely lifted
+ * to Owen's highest position + 5 is refused; the same role with `position` absent passes,
+ * and with `managed` absent passes.
+ *
+ * `permissions` is here too because it is read as `BigInt(role.permissions)`, which on
+ * an absent value throws a bare `TypeError` from deep inside the Administrator check
+ * rather than naming the role whose read did not answer.
+ *
+ * All 191 roles on all five TOG-2907 live pre-snapshots carry all three.
+ */
+export function unreadableRole(role: Role): string | null {
+  const missing = ([['position', 'number'], ['managed', 'boolean'], ['permissions', 'string']] as const)
+    .filter(([key, expected]) => typeof role[key] !== expected)
+    .map(([key]) => `\`${key}\``);
+  if (missing.length > 0) return `no readable ${missing.join(', ')}`;
+  return Number.isFinite(role.position) ? null : 'a `position` that is not a finite number';
 }
 
 export function assertHierarchy(snapshot: LiveCleanupSnapshot): void {
   const owenMember = snapshot.members.find((member) => member.id === LIVE_BOT_APPLICATION_ID && member.bot);
   if (!owenMember) throw new Error('Owen is missing from the member inventory.');
+  // Before anything is compared. A role missing the field this check sorts on is not a
+  // role that is safely below Owen, it is a role whose rank was never read.
+  for (const role of snapshot.roles) {
+    const unreadable = unreadableRole(role);
+    if (unreadable !== null) {
+      throw new Error(`Role ${role.id} carried ${unreadable}, so this snapshot cannot show Owen outranks every managed role. Planning refuses rather than read an unanswered role field as a role at the bottom of the list, or as one that is not managed at all. Re-run the dry-run from a snapshot whose role read carries \`position\`, \`managed\` and \`permissions\` on every role.`);
+    }
+  }
   const owenRoles = snapshot.roles.filter((role) => owenMember.roles.includes(role.id));
   if (!owenRoles.some((role) => (BigInt(role.permissions) & ADMINISTRATOR) !== 0n)) throw new Error('Owen does not have Administrator.');
-  const highestOwen = Math.max(...owenRoles.map((role) => role.position ?? -1));
+  const highestOwen = Math.max(...owenRoles.map((role) => role.position));
   const managedTargets = snapshot.roles.filter((role) => role.managed && role.id !== LIVE_GUILD_ID && !owenMember.roles.includes(role.id));
-  if (managedTargets.some((role) => (role.position ?? -1) >= highestOwen)) throw new Error('Owen is not above every managed target role.');
+  if (managedTargets.some((role) => role.position >= highestOwen)) throw new Error('Owen is not above every managed target role.');
+}
+
+function referencedId(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+function jsonArray(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function jsonObject(value: unknown): JsonObject | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as JsonObject : undefined;
+}
+
+/**
+ * The three guild-level channel references of the 350003 class, paired with the key
+ * Discord answers them under and the source label the exclusion list reports.
+ *
+ * Kept in one place because three call sites build this block — `captureSnapshot`, and
+ * both of the rollback script's re-derivations — and all three feed the same semantic
+ * hash. A field added to one and not the others is a hash mismatch at rollback time; a
+ * field dropped from one is the derivation reading "unknown" as "pins nothing".
+ */
+export const PINNED_GUILD_REFERENCES = [
+  { field: 'rulesChannelId', discordKey: 'rules_channel_id', source: 'guild.rules_channel_id' },
+  { field: 'publicUpdatesChannelId', discordKey: 'public_updates_channel_id', source: 'guild.public_updates_channel_id' },
+  { field: 'safetyAlertsChannelId', discordKey: 'safety_alerts_channel_id', source: 'guild.safety_alerts_channel_id' },
+] as const;
+
+/**
+ * The `references.guildReferences` block, built from a raw `GET /guilds/{id}` body.
+ *
+ * An absent key is copied as absent rather than collapsed to `null`. Discord sends all
+ * three on every guild read — `null` when the guild pins nothing — so absence means the
+ * read did not answer the question, and `null` means it answered "nothing". Collapsing
+ * the first into the second here would destroy the distinction *before* the semantic
+ * hash is taken, after which no downstream check can recover it: dry-run and apply read
+ * the same collapsed field and agree on the wrong answer. That is the round-9 defect
+ * (TOG-3074) one source to the left, and on the live guild it is the source that matters
+ * — every TOG-2907 pre-snapshot has `onboarding.enabled === false`, so the Server Guide
+ * contributes 0 exclusions and both real ones come from this block.
+ */
+export function guildReferenceBlock(guild: JsonObject): JsonObject {
+  const block: JsonObject = {
+    applicationId: guild.application_id ?? null,
+    systemChannelId: guild.system_channel_id ?? null,
+  };
+  for (const { field, discordKey } of PINNED_GUILD_REFERENCES) {
+    if (!(discordKey in guild)) continue;
+    block[field] = guild[discordKey];
+  }
+  return block;
+}
+
+/**
+ * Why this block is unreadable, or `null` when it answered the question.
+ *
+ * Readable means: the block is an object, and each of the three fields is present and is
+ * either a channel id string or `null`. Anything else — an absent key, `undefined`, a
+ * number, a nested object — is a read that did not answer, and `note()` would silently
+ * no-op on it.
+ */
+export function unreadableGuildReferences(references: JsonObject): string | null {
+  const block = jsonObject(references.guildReferences);
+  if (block === undefined) return 'no `guildReferences` block at all';
+  const unreadable = PINNED_GUILD_REFERENCES
+    .filter(({ field }) => !(field in block) || !(block[field] === null || typeof block[field] === 'string'))
+    .map(({ discordKey }) => `\`${discordKey}\``);
+  return unreadable.length === 0 ? null : `no readable ${unreadable.join(', ')}`;
+}
+
+/**
+ * Channel IDs the live guild pins as publicly readable, read out of the references
+ * block `captureSnapshot` already stores beside the snapshot.
+ *
+ * Discord rejects any channel PATCH that would deny `@everyone` View on one of these
+ * with **400 code 350003 `Onboarding channels must be readable by everyone`**, and a
+ * bot cannot clear the reference itself: `PUT /guilds/{id}/onboarding` answers
+ * 403 code 20001 `Bots cannot use this endpoint`. Measured live on TOG-2806, where
+ * apply stopped on operation 31 and five reviewed legacy channels stayed visible.
+ *
+ * Sources, all of the 350003 class observed live in that run:
+ *   - `rules_channel_id`, `public_updates_channel_id`, `safety_alerts_channel_id`
+ *   - the Server Guide's default channels and every prompt option's channels
+ *
+ * The welcome screen is deliberately *not* a source: its channels were not observed
+ * to refuse, and excluding a channel Discord would have accepted leaves it visible
+ * for no reason, which is the exact failure this phase exists to fix.
+ */
+export function onboardingReferencedChannels(snapshot: Pick<LiveCleanupSnapshot, 'references'>): ArchiveOnboardingExclusion[] {
+  const sources = new Map<string, Set<string>>();
+  const note = (value: unknown, source: string): void => {
+    const channelId = referencedId(value);
+    if (!channelId) return;
+    const existing = sources.get(channelId) ?? new Set<string>();
+    existing.add(source);
+    sources.set(channelId, existing);
+  };
+  const references = snapshot.references ?? {};
+  // Same argument as the Server Guide gate below, on the source that actually pins
+  // channels on this guild. `guild` is a `mustGet`, so a transport failure cannot reach
+  // here — what can is field-level absence inside a 200, which a status code does not
+  // rule out. Unguarded, `jsonObject()` returns `undefined` and all three `note()` calls
+  // no-op, which reads identically to a guild that pins nothing: measured on the live
+  // 2026-09-16T12:20:52Z pre-snapshot, 67 operations excluding 1132448261253369939 and
+  // 1138590808715571300, against 69 with both of them PATCHed — and those two PATCHes
+  // are the 400/350003 that stopped the TOG-2806 apply on operation 31.
+  const unreadable = unreadableGuildReferences(references);
+  if (unreadable !== null) {
+    throw new Error(`Guild references (GET /guilds/{id}) carried ${unreadable}, so the set of channels Discord pins publicly readable is unknown. Planning refuses rather than treat an unreadable guild reference block as one that pins nothing. Re-run the dry-run from a snapshot whose guild read carries \`rules_channel_id\`, \`public_updates_channel_id\` and \`safety_alerts_channel_id\`, each a channel id or null.`);
+  }
+  const guildReferences = jsonObject(references.guildReferences)!;
+  for (const { field, source } of PINNED_GUILD_REFERENCES) note(guildReferences[field], source);
+  // `captureSnapshot` reads onboarding with best-effort `api()`, not `mustGet()`, because
+  // losing the pre-snapshot to a transient 429 costs more than it buys. That is fine while
+  // the read is only evidence. It is not fine here, where it decides which channels this
+  // phase must leave alone: a body that is not a Server Guide payload carries no
+  // `default_channel_ids`/`prompts`, so it is indistinguishable from a Server Guide that
+  // pins nothing. Measured on the production fixture with one legacy channel pinned:
+  // a real 200 -> 1 exclusion, 68 operations; anything unreadable -> 0 exclusions, 69
+  // operations with that channel PATCHed. Nothing downstream catches it — `assertManifest`
+  // and the snapshot hash compare dry-run against apply, and both read the same failing
+  // endpoint, so they agree on the wrong answer; the independent audit derives its
+  // exclusions from this same field and corroborates it.
+  //
+  // So the gate is on *readability*, not just the status code. Gating the status alone
+  // was round 7's bug one field to the left (TOG-3060): `api()` records
+  // `body: await response.json().catch(() => null)`, so an HTML interstitial, an empty
+  // body, `null`, `[]`, and a `{message, code, retry_after}` error object all arrive as
+  // `status: 200` with nothing in them, and 5/5 planned clean. An OR over these two
+  // fields has the same shape again — the derivation reads both, so a payload missing
+  // either one is a half-answer read as "pins nothing" for that half. Both are required.
+  // Measured live across five TOG-2907 pre-snapshots: `GET /guilds/{id}/onboarding`
+  // returns `guild_id`, `prompts`, `default_channel_ids`, `enabled` and `mode` on every
+  // 200, so requiring both arrays costs a real Server Guide nothing.
+  const onboardingRead = jsonObject(references.onboarding);
+  const onboardingStatus = typeof onboardingRead?.status === 'number' ? onboardingRead.status : null;
+  const onboarding = jsonObject(onboardingRead?.body);
+  const readable = onboarding !== undefined && Array.isArray(onboarding.default_channel_ids) && Array.isArray(onboarding.prompts);
+  if (onboardingStatus !== 200 || !readable) {
+    const answered = onboardingStatus === null ? 'no recorded status' : `HTTP ${onboardingStatus}`;
+    const detail = onboardingStatus === 200
+      ? 'a 200 whose body carries neither `default_channel_ids` nor `prompts` as arrays, so it is not a Server Guide payload'
+      : answered;
+    throw new Error(`Server Guide (GET /guilds/{id}/onboarding) answered ${detail}, so the set of channels Discord pins publicly readable is unknown. Planning refuses rather than treat an unreadable Server Guide as one that pins nothing. Re-run the dry-run once that read returns a 200 carrying \`default_channel_ids\` and \`prompts\`.`);
+  }
+  // A disabled Server Guide pins nothing, and treating it as if it did would leave
+  // its channels visible forever. Absent `enabled` is read as enabled: the guild
+  // reference is the claim, and an unreadable claim must fail towards refusing. That
+  // stays outside the readability gate deliberately — a payload carrying both arrays
+  // has answered the question this derivation asks, and failing towards excluding is
+  // already the safe direction for the one field left.
+  if (onboarding.enabled !== false) {
+    for (const id of jsonArray(onboarding.default_channel_ids)) note(id, 'onboarding.default_channel_ids');
+    for (const prompt of jsonArray(onboarding.prompts)) {
+      const promptId = referencedId(jsonObject(prompt)?.id) ?? 'unknown';
+      for (const option of jsonArray(jsonObject(prompt)?.options)) {
+        for (const id of jsonArray(jsonObject(option)?.channel_ids)) note(id, `onboarding.prompt:${promptId}`);
+      }
+    }
+  }
+  return [...sources]
+    .map(([channelId, referencedBy]) => ({ channelId, referencedBy: [...referencedBy].sort() }))
+    .sort((a, b) => a.channelId.localeCompare(b.channelId));
+}
+
+/** The subset of `onboardingReferencedChannels` that this phase would otherwise have hidden. */
+export function archiveOnboardingExclusions(snapshot: LiveCleanupSnapshot): ArchiveOnboardingExclusion[] {
+  const reviewed = new Set<string>(LEGACY_CHANNEL_IDS);
+  return onboardingReferencedChannels(snapshot).filter((exclusion) => reviewed.has(exclusion.channelId));
 }
 
 export function planArchiveOperations(snapshot: LiveCleanupSnapshot): CleanupOperation[] {
   assertReviewedShape(snapshot);
   assertHierarchy(snapshot);
+  const excluded = new Map(archiveOnboardingExclusions(snapshot).map((exclusion) => [exclusion.channelId, exclusion]));
   const channels = [...LEGACY_CHANNEL_IDS].sort().flatMap((objectId) => {
     const channel = snapshot.channels.find((item) => item.id === objectId)!;
     const parent = snapshot.channels.find((item) => item.id === channel.parent_id)!;
-    const synchronized = stable(normalizeOverwrites(channel.permission_overwrites ?? [])) === stable(normalizeOverwrites(parent.permission_overwrites ?? []));
+    const synchronized = stable(normalizeOverwrites(channel.permission_overwrites, `Reviewed legacy channel ${channel.id}`)) === stable(normalizeOverwrites(parent.permission_overwrites, `Reviewed legacy category ${parent.id}`));
+    const exclusion = excluded.get(objectId);
+    if (exclusion) {
+      // Skipping the channel PATCH is only half of it. A synchronized child inherits
+      // whatever the category is set to, so the category deny would hide this channel
+      // anyway — through a write Discord never gets to refuse, silently breaking the
+      // reference that protects it. There is no partial plan that is honest here, so
+      // refuse and name the reference the operator has to move first.
+      if (synchronized) {
+        throw new Error(`Reviewed legacy channel ${objectId} is pinned publicly readable by ${exclusion.referencedBy.join(', ')}, and Discord refuses to hide it (400 code 350003) — but it is permission-synchronized with category ${parent.id}, so the category deny would hide it by inheritance. Repoint that reference to an active channel before planning.`);
+      }
+      return [];
+    }
     return synchronized ? [] : [{ objectId, objectType: 'channel' as const }];
   });
   const categories = [...LEGACY_CATEGORY_IDS].sort().map((objectId) => ({ objectId, objectType: 'category' as const }));
   const writes = [...channels, ...categories].map(({ objectId, objectType }) => {
     const target = snapshot.channels.find((channel) => channel.id === objectId)!;
-    const before = normalizeOverwrites(target.permission_overwrites ?? []);
+    // This `before` is the operation's signed `expectedBefore` *and* its signed
+    // `inverseWrite` — the two fields the whole rollback guarantee rests on.
+    const before = normalizeOverwrites(target.permission_overwrites, `Reviewed ${objectType} ${objectId}`);
     const write = archiveVisibilityOverwrites(snapshot, target, before);
     return { objectId, objectType, before, write };
   });
@@ -776,6 +1120,7 @@ export function buildManifest(snapshot: LiveCleanupSnapshot, snapshotPath: strin
     activeChannelIds: [...ACTIVE_CHANNEL_IDS],
     activeCategoryIds: [...ACTIVE_CATEGORY_IDS],
     visibilityExemptions: archiveVisibilityExemptions(snapshot),
+    onboardingExclusions: archiveOnboardingExclusions(snapshot),
     operations: operations.map((operation) => ({ ...operation, state: 'pending' })),
   };
   manifest.journalSignature = journalSignature(token, manifest);

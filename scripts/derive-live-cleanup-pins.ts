@@ -17,7 +17,7 @@ import {
   type Channel,
   type JsonObject,
   type LiveCleanupSnapshot,
-  normalizeOverwrites,
+  normalizedChannel,
   operationSemanticHash,
   planArchiveOperations,
   type Role,
@@ -48,7 +48,7 @@ const snapshot: LiveCleanupSnapshot = withSemanticHash({
   guildId: String(state.guild.id),
   guild: state.guild,
   roles: state.roles,
-  channels: state.channels.map((channel) => ({ ...channel, permission_overwrites: normalizeOverwrites(channel.permission_overwrites ?? []) })),
+  channels: state.channels.map(normalizedChannel),
   members: state.members.map((member) => ({
     id: member.user.id,
     bot: Boolean(member.user.bot),
@@ -58,7 +58,16 @@ const snapshot: LiveCleanupSnapshot = withSemanticHash({
     pending: Boolean(member.pending),
   })).sort((a, b) => a.id.localeCompare(b.id)),
   integrations: [],
-  references: {},
+  // A readable Server Guide that pins nothing, and a readable guild reference block that
+  // pins nothing, both in the shapes `captureSnapshot` records. `planArchiveOperations`
+  // refuses an unreadable one of either, so `references: {}` made this throw and the
+  // operator's pin unregenerable (TOG-3059/TOG-3060); omitting `guildReferences` alone
+  // would do it again. Declaring both readable-and-empty keeps the output a pure function
+  // of the channel/category fixture.
+  references: {
+    onboarding: { status: 200, body: { enabled: false, default_channel_ids: [], prompts: [] } },
+    guildReferences: { applicationId: null, systemChannelId: null, rulesChannelId: null, publicUpdatesChannelId: null, safetyAlertsChannelId: null },
+  },
 });
 
 const operations = planArchiveOperations(snapshot);
