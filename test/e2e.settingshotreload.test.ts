@@ -210,3 +210,123 @@ test('a key the schema allows but the catalog has never heard of is still droppe
   assert.equal(store.envSnapshot(GUILD).get('TWO_RAID_JOIN_THRESHOLD'), '3');
   assert.equal(storeFirst(store.envSnapshot(GUILD)).get('TWO_RAID_JOIN_THRESHOLD'), '3');
 });
+
+/**
+ * The review of `f538689` (TOG-3217 finding #5) left one claim untested for want
+ * of a database: the refusal above was only ever exercised on INSERT. Every test
+ * before this one reaches the constraint by creating a row, so a constraint that
+ * somehow applied to INSERT alone would pass all of them.
+ *
+ * That matters because the row an attacker would use already exists and is
+ * already legal. `TWO_RAID_JOIN_THRESHOLD` is settable by design from the admin
+ * UI in slice 3; renaming that row is a strictly easier move than inserting a
+ * fresh one, and it is the shape `settings.set()` actually emits - an upsert,
+ * whose `DO UPDATE` arm never goes through the INSERT path at all.
+ */
+async function refusal(run: () => Promise<unknown>): Promise<{ code?: string; constraint?: string }> {
+  try {
+    await run();
+  } catch (err) {
+    return err as { code?: string; constraint?: string };
+  }
+  return {};
+}
+
+test('an UPDATE cannot rename a legal row into an env-only key', async () => {
+  // The control: the row exists and is legal, so a refusal below is the
+  // constraint rejecting the new key and not the statement matching no rows.
+  await rawInsert('TWO_RAID_JOIN_THRESHOLD', '5');
+  const rename = (to: string) =>
+    testDb.db
+      .prepare(`UPDATE guild_settings SET key = ? WHERE guild_id = ? AND key = 'TWO_RAID_JOIN_THRESHOLD'`)
+      .run(to, GUILD);
+
+  for (const [key, constraint] of [
+    ['TWO_INTERNAL_ALLOW_MODERATION', 'guild_settings_no_internal_keys'],
+    ['TWO_MODERATION', 'guild_settings_env_only_keys'],
+    ['DISCORD_TOKEN', 'guild_settings_env_only_keys'],
+  ] as const) {
+    const err = await refusal(() => rename(key));
+    assert.equal(err.code, '23514', `UPDATE to ${key} was not refused`);
+    assert.equal(err.constraint, constraint);
+  }
+
+  // Anti-vacuity: the identical UPDATE to a catalogued key does land, so the
+  // three refusals are about the key and not about UPDATE being broken here.
+  await rename('TWO_RAID_WINDOW_SECONDS');
+  const rows = await testDb.db
+    .prepare(`SELECT key FROM guild_settings WHERE guild_id = ?`)
+    .all(GUILD);
+  assert.deepEqual(
+    (rows as Array<{ key: string }>).map((r) => r.key),
+    ['TWO_RAID_WINDOW_SECONDS'],
+  );
+});
+
+test("an upsert's DO UPDATE arm is checked, not just its INSERT arm", async () => {
+  await rawInsert('TWO_RAID_JOIN_THRESHOLD', '5');
+
+  // The shape store.set() emits. The conflict fires, so the INSERT arm is
+  // never the thing evaluated - only DO UPDATE is.
+  const viaKey = await refusal(() =>
+    testDb.db
+      .prepare(
+        `INSERT INTO guild_settings (guild_id, key, value, version, updated_by)
+         VALUES (?, 'TWO_RAID_JOIN_THRESHOLD', '6'::jsonb, nextval('guild_settings_version_seq'), ?)
+         ON CONFLICT (guild_id, key) DO UPDATE SET key = 'TWO_INTERNAL_ALLOW_MODERATION'`,
+      )
+      .run(GUILD, ADMIN),
+  );
+  assert.equal(viaKey.code, '23514');
+  assert.equal(viaKey.constraint, 'guild_settings_no_internal_keys');
+
+  // And the INSERT arm of an upsert naming an env-only key outright.
+  const viaInsert = await refusal(() =>
+    testDb.db
+      .prepare(
+        `INSERT INTO guild_settings (guild_id, key, value, version, updated_by)
+         VALUES (?, 'TWO_MODERATION', '"1"'::jsonb, nextval('guild_settings_version_seq'), ?)
+         ON CONFLICT (guild_id, key) DO UPDATE SET value = EXCLUDED.value`,
+      )
+      .run(GUILD, ADMIN),
+  );
+  assert.equal(viaInsert.code, '23514');
+  assert.equal(viaInsert.constraint, 'guild_settings_env_only_keys');
+});
+
+test('both refusals are VALID constraints, checked on every write', async () => {
+  // `convalidated` is the half that can actually move: ADD CONSTRAINT ... NOT
+  // VALID is accepted by Postgres and skips the scan of existing rows, so a
+  // key already in the table when 0027 lands would stay. Mutation-checked -
+  // adding NOT VALID to 0027 fails this test and only this test.
+  //
+  // `condeferrable` is NOT a live guard and is not claimed as one: Postgres
+  // rejects `DEFERRABLE` on a CHECK constraint outright (0A000, "CHECK
+  // constraints cannot be marked DEFERRABLE"), so this can only fail if one of
+  // these stops being a CHECK - a trigger or FK rewrite, where deferral is
+  // reachable and `SET CONSTRAINTS ALL DEFERRED` would hold an illegal key
+  // live inside a transaction. It is a tripwire on the constraint type, and it
+  // survives mutation because there is no mutation to make.
+  //
+  // Read from the catalog rather than attempted: an attempted deferral refuses
+  // either way, so the attempt cannot tell a non-deferrable constraint from a
+  // deferred one.
+  const rows = (await testDb.db
+    .prepare(
+      `SELECT conname, convalidated, condeferrable
+         FROM pg_constraint
+        WHERE conrelid = 'guild_settings'::regclass AND contype = 'c'
+        ORDER BY conname`,
+    )
+    .all()) as Array<{ conname: string; convalidated: boolean; condeferrable: boolean }>;
+
+  assert.deepEqual(
+    rows.map((r) => r.conname),
+    ['guild_settings_env_only_keys', 'guild_settings_no_internal_keys'],
+    'both CHECK constraints are present on the table',
+  );
+  for (const r of rows) {
+    assert.equal(r.convalidated, true, `${r.conname} is NOT VALID: existing rows were never checked`);
+    assert.equal(r.condeferrable, false, `${r.conname} is DEFERRABLE and can be postponed past a write`);
+  }
+});
