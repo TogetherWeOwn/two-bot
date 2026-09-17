@@ -81,6 +81,8 @@ type Stub = {
   spawnAfterWrites(writeCount: number, channel: Channel): void;
   /** Delete a channel from live state, the way the generator does when a room empties. */
   despawn(channelId: string): void;
+  /** The despawn half of {@link spawnAfterWrites}: a room empties mid-apply or mid-rollback. */
+  despawnAfterWrites(writeCount: number, channelId: string): void;
   /**
    * Move a child the way a third party would, out from under the phase. Because sync
    * is decided by value, this also drops the child out of the synchronized set.
@@ -154,6 +156,7 @@ async function stubDiscord(): Promise<Stub> {
   let onboardingStatus = 200;
   let onboardingRaw: { contentType: string; payload: string | null; status: number } | null = null;
   let pendingSpawn: { after: number; channel: Channel } | null = null;
+  let pendingDespawn: { after: number; channelId: string } | null = null;
   const hiddenOverwriteReads = new Set<string>();
   const server: Server = createServer((req, res) => {
     const method = req.method ?? 'GET';
@@ -208,6 +211,10 @@ async function stubDiscord(): Promise<Stub> {
         if (pendingSpawn && writes.length >= pendingSpawn.after) {
           state.channels.push(structuredClone(pendingSpawn.channel));
           pendingSpawn = null;
+        }
+        if (pendingDespawn && writes.length >= pendingDespawn.after) {
+          state.channels = state.channels.filter((item) => item.id !== pendingDespawn!.channelId);
+          pendingDespawn = null;
         }
         return send(200, channel);
       });
@@ -275,6 +282,7 @@ async function stubDiscord(): Promise<Stub> {
     partialWriteOn(objectId: string) { partialNextWrite = true; partialWriteTarget = objectId; },
     spawnAfterWrites(writeCount: number, channel: Channel) { pendingSpawn = { after: writeCount, channel }; },
     despawn(channelId: string) { state.channels = state.channels.filter((item) => item.id !== channelId); },
+    despawnAfterWrites(writeCount: number, channelId: string) { pendingDespawn = { after: writeCount, channelId }; },
     desyncChild(childId: string, overwrites: Channel['permission_overwrites']) {
       state.channels.find((item) => item.id === childId)!.permission_overwrites = structuredClone(overwrites);
     },
@@ -1262,22 +1270,46 @@ test('auto-voice churn at every apply and rollback gate no longer refuses or str
 
   // Recovery is the half that mattered most: a spawn between apply and rollback used to
   // block the rollback of an already-applied phase, and one mid-rollback stranded it.
-  for (const landing of ['between', 'mid-rollback'] as const) {
+  //
+  // Both directions matter and they are not the same path through the inventory gate. A spawn
+  // adds an id to the live side; a despawn removes one that the *pre-snapshot* side still
+  // carries, which is the case the round-14 review reproduced (child present at plan and at
+  // apply, gone by rollback). Filtering only the live side would pass every spawn case here
+  // and still refuse every despawn. `gone` is the id rollback must find missing and not try
+  // to recreate — it is ephemeral, so its absence is not damage to repair.
+  const recoveries = [
+    { landing: 'spawn-between', gone: null },
+    { landing: 'spawn-mid-rollback', gone: null },
+    { landing: 'despawn-between', gone: HANGOUT(5).id },
+    { landing: 'despawn-mid-rollback', gone: HANGOUT(6).id },
+  ] as const;
+  for (const { landing, gone } of recoveries) {
     const stub = await stubDiscord();
     const dir = mkdtempSync(join(tmpdir(), `two-live-clean-churn-${landing}-`));
     try {
+      // A despawn case needs the child alive across plan *and* apply, so that the id it
+      // later loses is one both stored snapshots recorded.
+      if (gone) stub.state.channels.push(landing === 'despawn-between' ? HANGOUT(5) : HANGOUT(6));
       assert.equal((await plan(stub, dir)).code, 0);
       assert.equal((await apply(stub, dir)).code, 0);
       const applyWrites = stub.writes.length;
-      if (landing === 'between') stub.state.channels.push(HANGOUT(3));
-      else stub.spawnAfterWrites(applyWrites + 5, HANGOUT(4));
+      if (landing === 'spawn-between') stub.state.channels.push(HANGOUT(3));
+      else if (landing === 'spawn-mid-rollback') stub.spawnAfterWrites(applyWrites + 5, HANGOUT(4));
+      else if (landing === 'despawn-between') stub.despawn(gone!);
+      else stub.despawnAfterWrites(applyWrites + 5, gone!);
       const restored = await rollback(stub, dir);
       assert.equal(restored.code, 0, `${landing}: ${restored.stderr}`);
       assert.doesNotMatch(restored.stderr, /inventory drifted|inventory differs|semantic hash mismatch/);
       assert.equal((JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest).status, 'rolled_back');
       const pre = JSON.parse(readFileSync(join(dir, 'snapshot', 'pre.json'), 'utf8')) as LiveCleanupSnapshot;
+      assert.ok(gone === null || pre.channels.some((channel) => channel.id === gone), `${landing}: pre.json must carry the id that later vanished`);
       for (const channel of pre.channels) {
-        const live = stub.state.channels.find((item) => item.id === channel.id)!;
+        const live = stub.state.channels.find((item) => item.id === channel.id);
+        if (channel.id === gone) {
+          assert.equal(live, undefined, `${landing}: rollback recreated an ephemeral child it never deleted`);
+          continue;
+        }
+        assert.ok(live, `${landing}: ${channel.id} missing after rollback`);
         assert.equal(stable(normalizeOverwrites(live.permission_overwrites)), stable(normalizeOverwrites(channel.permission_overwrites)), `${landing}: ${channel.id}`);
       }
     } finally { await stub.close(); }
