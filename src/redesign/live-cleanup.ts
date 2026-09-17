@@ -843,6 +843,80 @@ export function withSemanticHash(input: Omit<LiveCleanupSnapshot, 'semanticHash'
   return { ...input, semanticHash: sha256(semanticSnapshot(input)) };
 }
 
+/**
+ * Objects this phase reviewed by ID, in any role. A drift comparison may never drop one of
+ * these from what it compares, whatever shape it is wearing at read time — see
+ * {@link isDriftExcluded}. Kept beside `assertReviewedShape`, which pins the shapes.
+ */
+const REVIEWED_UNTOUCHED_SHAPES = new Map<string, { type: number; parentId: string | null }>([
+  ['1545924265868525588', { type: 4, parentId: null }],
+  ['1545924268489973841', { type: 0, parentId: '1545924265868525588' }],
+  ['1545924265247903884', { type: 4, parentId: null }],
+  ['1545924267453976696', { type: 4, parentId: null }],
+]);
+const REVIEWED_OBJECT_IDS: ReadonlySet<string> = new Set<string>([
+  ...ACTIVE_CATEGORY_IDS,
+  ...ACTIVE_CHANNEL_IDS,
+  ...LEGACY_CATEGORY_IDS,
+  ...LEGACY_CHANNEL_IDS,
+  ...REVIEWED_UNTOUCHED_SHAPES.keys(),
+]);
+
+/**
+ * Whether an object is dropped from the two-read comparisons that ask "has live state moved
+ * since the plan was signed" — the apply-time drift gate, the postflight hash, and both of
+ * rollback's inventory gates.
+ *
+ * Auto-voice ephemeral children have to be dropped, because they are *always* moving. The
+ * generator spawns one per occupied lobby and deletes it when it empties, so any comparison
+ * over the whole channel list is unsatisfiable for as long as auto-voice is on, and every
+ * one of those gates is reached at a different price. Measured against the production
+ * fixture (TOG-3141): a spawn between plan and apply refuses with zero writes; a spawn
+ * *during* apply refuses at the postflight hash with all 65 writes already landed and the
+ * phase left `apply_failed`; a spawn after that refuses rollback's preflight, so the
+ * recovery path for the previous case is shut too; and a spawn during rollback stops it
+ * 34 of 65 operations in, with the manifest stuck `rolling_back`. Two of those four leave
+ * the live guild changed, which is why this is not left to an operator keeping the
+ * generator switched off.
+ *
+ * Dropping them costs the gates nothing they were defending. This phase writes only to
+ * `LEGACY_*` objects; `planArchiveOperations` re-asserts that no operation names one of
+ * these; they sit under an *active* category so they can never join a legacy category's
+ * synchronized-child set; and nothing signs their overwrites into an `expectedBefore` or an
+ * `inverseWrite`. Everything else a drift gate covers — roles, members, integrations, the
+ * guild payload, `references`, and every reviewed channel — is still compared byte for byte.
+ *
+ * The `REVIEWED_OBJECT_IDS` clause is the part that makes this safe rather than merely
+ * narrow. `isAutoVoiceEphemeralChild` is a *shape* test, and shape is attacker-controlled:
+ * moving a reviewed legacy channel under the auto-voice category and flipping it to type 2
+ * wears exactly that shape. Without this clause such a channel would vanish from the
+ * comparison and take its real drift with it. With it, a reviewed ID is never excludable,
+ * so that move still refuses (measured: it does, before any write).
+ */
+export function isDriftExcluded(channel: Pick<Channel, 'id' | 'type' | 'parent_id'>): boolean {
+  return isAutoVoiceEphemeralChild(channel) && !REVIEWED_OBJECT_IDS.has(channel.id);
+}
+
+/** The channel list a drift comparison sees. Apply the same filter to both reads. */
+export function driftComparableChannels<T extends Pick<Channel, 'id' | 'type' | 'parent_id'>>(channels: readonly T[]): T[] {
+  return channels.filter((channel) => !isDriftExcluded(channel));
+}
+
+/** IDs {@link driftComparableChannels} dropped, so a run can name them instead of hiding them. */
+export function driftExcludedIds(channels: readonly Pick<Channel, 'id' | 'type' | 'parent_id'>[]): string[] {
+  return channels.filter((channel) => isDriftExcluded(channel)).map((channel) => channel.id).sort();
+}
+
+/**
+ * `semanticHash` over the drift-comparable channel list. Never use this as an object's
+ * stored hash: `pre.json` carries the real {@link withSemanticHash} value, which is what the
+ * plan signature covers and what the artifact has to prove it read. This is only for the
+ * moment two live reads are compared to each other.
+ */
+export function driftSemanticHash(input: Omit<LiveCleanupSnapshot, 'semanticHash'>): string {
+  return sha256(semanticSnapshot({ ...input, channels: driftComparableChannels(input.channels) }));
+}
+
 export function assertReviewedShape(snapshot: LiveCleanupSnapshot): void {
   if (snapshot.guildId !== LIVE_GUILD_ID || snapshot.applicationId !== LIVE_BOT_APPLICATION_ID) throw new Error('Snapshot identity does not match the live Owen application and guild.');
   if (snapshot.guild.name !== LIVE_GUILD_NAME) throw new Error(`Expected guild name ${LIVE_GUILD_NAME}.`);
@@ -859,12 +933,7 @@ export function assertReviewedShape(snapshot: LiveCleanupSnapshot): void {
     if (!channel || channel.type === 4) throw new Error(`Reviewed legacy channel ${id} is missing or is a category.`);
     if (!channel.parent_id || !LEGACY_CATEGORY_IDS.includes(channel.parent_id as never)) throw new Error(`Reviewed legacy channel ${id} is not under a reviewed legacy category.`);
   }
-  const reviewedUntouchedShapes = new Map([
-    ['1545924265868525588', { type: 4, parentId: null }],
-    ['1545924268489973841', { type: 0, parentId: '1545924265868525588' }],
-    ['1545924265247903884', { type: 4, parentId: null }],
-    ['1545924267453976696', { type: 4, parentId: null }],
-  ]);
+  const reviewedUntouchedShapes = REVIEWED_UNTOUCHED_SHAPES;
   for (const [id, expected] of reviewedUntouchedShapes) {
     const channel = snapshot.channels.find((item) => item.id === id);
     if (!channel || channel.type !== expected.type || channel.parent_id !== expected.parentId) {

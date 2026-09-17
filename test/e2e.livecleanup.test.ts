@@ -29,6 +29,7 @@ import {
   readJournalWitness,
   type Role,
   stable,
+  withSemanticHash,
 } from '../src/redesign/live-cleanup.ts';
 import { LIVE_BOT_APPLICATION_ID, LIVE_GUILD_ID, LIVE_GUILD_NAME } from '../src/staging/spec.ts';
 
@@ -70,6 +71,16 @@ type Stub = {
   partialNextWrite(): void;
   /** Tear the write to one specific object rather than whichever comes first. */
   partialWriteOn(objectId: string): void;
+  /**
+   * Push a channel into live state once the Nth PATCH of this stub's life has been served.
+   * The auto-voice generator spawns on a member joining the lobby, which is not synchronized
+   * with anything the phase does, so the cases that matter are the ones where it lands
+   * *between* a gate and the writes it guards — mid-apply and mid-rollback. Counting writes
+   * is what makes those deterministic instead of a sleep race.
+   */
+  spawnAfterWrites(writeCount: number, channel: Channel): void;
+  /** Delete a channel from live state, the way the generator does when a room empties. */
+  despawn(channelId: string): void;
   /**
    * Move a child the way a third party would, out from under the phase. Because sync
    * is decided by value, this also drops the child out of the synchronized set.
@@ -142,6 +153,7 @@ async function stubDiscord(): Promise<Stub> {
   let partialWriteTarget: string | null = null;
   let onboardingStatus = 200;
   let onboardingRaw: { contentType: string; payload: string | null; status: number } | null = null;
+  let pendingSpawn: { after: number; channel: Channel } | null = null;
   const hiddenOverwriteReads = new Set<string>();
   const server: Server = createServer((req, res) => {
     const method = req.method ?? 'GET';
@@ -189,6 +201,13 @@ async function stubDiscord(): Promise<Stub> {
           for (const child of state.channels.filter((item) => item.parent_id === channel.id)) {
             if (stable(normalizeOverwrites(child.permission_overwrites)) === previous) child.permission_overwrites = structuredClone(overwrites);
           }
+        }
+        // The auto-voice generator answers a member join, not anything the phase does, so
+        // the interesting landings are the ones between a gate and the writes it guards.
+        // Counting served writes makes those deterministic instead of a sleep race.
+        if (pendingSpawn && writes.length >= pendingSpawn.after) {
+          state.channels.push(structuredClone(pendingSpawn.channel));
+          pendingSpawn = null;
         }
         return send(200, channel);
       });
@@ -254,6 +273,8 @@ async function stubDiscord(): Promise<Stub> {
     failNextWrite(status: number) { nextFailure = status; },
     partialNextWrite() { partialNextWrite = true; },
     partialWriteOn(objectId: string) { partialNextWrite = true; partialWriteTarget = objectId; },
+    spawnAfterWrites(writeCount: number, channel: Channel) { pendingSpawn = { after: writeCount, channel }; },
+    despawn(channelId: string) { state.channels = state.channels.filter((item) => item.id !== channelId); },
     desyncChild(childId: string, overwrites: Channel['permission_overwrites']) {
       state.channels.find((item) => item.id === childId)!.permission_overwrites = structuredClone(overwrites);
     },
@@ -1173,6 +1194,159 @@ test('the auto-voice tolerance never classifies a reviewed active-tree channel a
     isAutoVoiceEphemeralChild({ id: '1549949487949283359', type: 2, parent_id: AUTO_VOICE_CATEGORY_ID }), true,
     'an unreviewed voice child of the auto-voice category is exactly what the predicate exists to tolerate',
   );
+});
+
+/** A fresh `Hangout #N`, the exact shape the generator creates under the active voice category. */
+const HANGOUT = (n: number): Channel => ({
+  id: String(1549949487949283359n + BigInt(n)),
+  name: `Hangout #${n}`,
+  type: 2,
+  parent_id: AUTO_VOICE_CATEGORY_ID,
+  permission_overwrites: [{ id: LIVE_GUILD_ID, type: 0, allow: '3146752', deny: '0' }],
+});
+
+/**
+ * Tolerating the shape at plan time (above) only made the dry-run reachable. Every gate that
+ * compares two live reads — apply's pre-write drift check, its postflight, and both of
+ * rollback's inventory/hash checks — was still hashing the whole channel list, so any spawn or
+ * despawn between them refused. Measured at 728a62e6 (TOG-3141): spawn after plan and despawn
+ * after plan both exit 1 before any write; a spawn *mid-apply* fails postflight with all 65
+ * writes already landed and the manifest at `apply_failed`; a spawn after a clean apply blocks
+ * rollback entirely; a spawn mid-rollback strands the guild 34 operations in. The generator
+ * runs continuously on the live guild, so none of these are hypothetical.
+ */
+test('auto-voice churn at every apply and rollback gate no longer refuses or strands the phase', async () => {
+  const spawnAfterPlan = await stubDiscord();
+  const spawnDir = mkdtempSync(join(tmpdir(), 'two-live-clean-churn-spawn-'));
+  try {
+    assert.equal((await plan(spawnAfterPlan, spawnDir)).code, 0);
+    spawnAfterPlan.state.channels.push(HANGOUT(1));
+    const applied = await apply(spawnAfterPlan, spawnDir);
+    assert.equal(applied.code, 0, applied.stderr);
+    assert.doesNotMatch(applied.stderr, /Live state drifted/);
+    // The tolerance is named on the way past the gate, not inferred from `pre.json`.
+    assert.match(applied.stdout, new RegExp(`TOLERATED ${HANGOUT(1).id} Hangout #1`));
+    assert.equal(spawnAfterPlan.writes.length, EXPECTED_OPERATIONS.operationCount);
+    assert.equal((JSON.parse(readFileSync(manifestPath(spawnDir), 'utf8')) as CleanupManifest).status, 'applied');
+  } finally { await spawnAfterPlan.close(); }
+
+  const despawnAfterPlan = await stubDiscord();
+  const despawnDir = mkdtempSync(join(tmpdir(), 'two-live-clean-churn-despawn-'));
+  try {
+    despawnAfterPlan.state.channels.push(HANGOUT(1));
+    assert.equal((await plan(despawnAfterPlan, despawnDir)).code, 0);
+    despawnAfterPlan.despawn(HANGOUT(1).id);
+    const applied = await apply(despawnAfterPlan, despawnDir);
+    assert.equal(applied.code, 0, applied.stderr);
+    assert.equal(despawnAfterPlan.writes.length, EXPECTED_OPERATIONS.operationCount);
+  } finally { await despawnAfterPlan.close(); }
+
+  // The one that used to fail *after* every write had landed.
+  const midApply = await stubDiscord();
+  const midApplyDir = mkdtempSync(join(tmpdir(), 'two-live-clean-churn-mid-apply-'));
+  try {
+    assert.equal((await plan(midApply, midApplyDir)).code, 0);
+    midApply.spawnAfterWrites(5, HANGOUT(2));
+    const applied = await apply(midApply, midApplyDir);
+    assert.equal(applied.code, 0, applied.stderr);
+    assert.doesNotMatch(applied.stderr, /Postflight semantic hash mismatch/);
+    assert.equal(midApply.writes.length, EXPECTED_OPERATIONS.operationCount);
+    assert.equal((JSON.parse(readFileSync(manifestPath(midApplyDir), 'utf8')) as CleanupManifest).status, 'applied');
+    // Postflight comparing a filtered hash must not weaken what `post.json` records:
+    // the stored snapshot still carries the true whole-guild hash the artifact is read on.
+    const post = JSON.parse(readFileSync(join(midApplyDir, 'phase-01', 'post.json'), 'utf8')) as LiveCleanupSnapshot;
+    const { semanticHash: _stored, ...postInput } = post;
+    assert.equal(post.semanticHash, withSemanticHash(postInput).semanticHash);
+    assert.ok(post.channels.some((channel) => channel.id === HANGOUT(2).id), 'the stored post-snapshot keeps the tolerated channel');
+  } finally { await midApply.close(); }
+
+  // Recovery is the half that mattered most: a spawn between apply and rollback used to
+  // block the rollback of an already-applied phase, and one mid-rollback stranded it.
+  for (const landing of ['between', 'mid-rollback'] as const) {
+    const stub = await stubDiscord();
+    const dir = mkdtempSync(join(tmpdir(), `two-live-clean-churn-${landing}-`));
+    try {
+      assert.equal((await plan(stub, dir)).code, 0);
+      assert.equal((await apply(stub, dir)).code, 0);
+      const applyWrites = stub.writes.length;
+      if (landing === 'between') stub.state.channels.push(HANGOUT(3));
+      else stub.spawnAfterWrites(applyWrites + 5, HANGOUT(4));
+      const restored = await rollback(stub, dir);
+      assert.equal(restored.code, 0, `${landing}: ${restored.stderr}`);
+      assert.doesNotMatch(restored.stderr, /inventory drifted|inventory differs|semantic hash mismatch/);
+      assert.equal((JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest).status, 'rolled_back');
+      const pre = JSON.parse(readFileSync(join(dir, 'snapshot', 'pre.json'), 'utf8')) as LiveCleanupSnapshot;
+      for (const channel of pre.channels) {
+        const live = stub.state.channels.find((item) => item.id === channel.id)!;
+        assert.equal(stable(normalizeOverwrites(live.permission_overwrites)), stable(normalizeOverwrites(channel.permission_overwrites)), `${landing}: ${channel.id}`);
+      }
+    } finally { await stub.close(); }
+  }
+});
+
+/**
+ * The exclusion is a shape test, and shape is the one thing an attacker with a channel edit
+ * can choose. Anchoring it on the reviewed ID set is what keeps it from being a laundering
+ * route: move a reviewed legacy channel into the auto-voice shape between plan and apply and
+ * the drift gate must still see it, exactly as it did before PR #117. Deleting the
+ * `REVIEWED_OBJECT_IDS` clause fails this test — the laundered channel drops out of the
+ * comparison and gets reported as tolerated. (It still refuses, because the pre-snapshot side
+ * of the comparison kept the channel; the clause is what stops the tolerance, and with it the
+ * ID set the gate protects, from being anything a third party can widen.)
+ */
+test('a reviewed object wearing the auto-voice shape is still drift, and an unreviewed non-tolerated spawn still refuses', async () => {
+  const launderStub = await stubDiscord();
+  const launderDir = mkdtempSync(join(tmpdir(), 'two-live-clean-churn-launder-'));
+  try {
+    assert.equal((await plan(launderStub, launderDir)).code, 0);
+    const laundered = launderStub.state.channels.find((channel) => channel.id === LEGACY_CHANNEL_IDS[0])!;
+    laundered.type = 2;
+    laundered.parent_id = AUTO_VOICE_CATEGORY_ID;
+    const applied = await apply(launderStub, launderDir);
+    assert.equal(applied.code, 1);
+    assert.match(applied.stderr, /Live state drifted/);
+    assert.doesNotMatch(applied.stdout, new RegExp(`TOLERATED ${LEGACY_CHANNEL_IDS[0]}`));
+    assert.equal(launderStub.writes.length, 0);
+  } finally { await launderStub.close(); }
+
+  const strangerStub = await stubDiscord();
+  const strangerDir = mkdtempSync(join(tmpdir(), 'two-live-clean-churn-stranger-'));
+  try {
+    assert.equal((await plan(strangerStub, strangerDir)).code, 0);
+    // Same category, text channel: one field off the tolerated shape, so still drift.
+    strangerStub.state.channels.push({ ...HANGOUT(5), type: 0, name: 'not a hangout' });
+    const applied = await apply(strangerStub, strangerDir);
+    assert.equal(applied.code, 1);
+    assert.match(applied.stderr, /Live state drifted/);
+    assert.equal(strangerStub.writes.length, 0);
+  } finally { await strangerStub.close(); }
+});
+
+test('the dry-run names every object it tolerated, before it reports writing nothing', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-tolerated-log-'));
+  try {
+    const bare = await plan(stub, dir);
+    assert.equal(bare.code, 0, bare.stderr);
+    assert.match(bare.stdout, /Unreviewed objects tolerated in this snapshot: 0/);
+
+    const churnStub = await stubDiscord();
+    const churnDir = mkdtempSync(join(tmpdir(), 'two-live-clean-tolerated-log-churn-'));
+    try {
+      churnStub.state.channels.push(HANGOUT(1), HANGOUT(2));
+      const result = await plan(churnStub, churnDir);
+      assert.equal(result.code, 0, result.stderr);
+      assert.match(result.stdout, /Unreviewed objects tolerated in this snapshot: 2/);
+      for (const n of [1, 2]) {
+        assert.match(result.stdout, new RegExp(`TOLERATED ${HANGOUT(n).id} Hangout #${n} — auto-voice ephemeral child of ${AUTO_VOICE_CATEGORY_ID}`));
+      }
+      // Beside STAYS-VISIBLE, and before the write count — not appended after it.
+      assert.ok(result.stdout.indexOf('STAYS-VISIBLE') < 0 || result.stdout.indexOf('TOLERATED') > result.stdout.indexOf('STAYS-VISIBLE'));
+      assert.ok(result.stdout.indexOf('TOLERATED') < result.stdout.indexOf('Applied 0 Discord write(s).'), 'tolerances must be named before the write count');
+      // And it has to survive into the artifact, not just the terminal.
+      assert.match(readFileSync(join(churnDir, 'plan.log'), 'utf8'), new RegExp(`TOLERATED ${HANGOUT(1).id}`));
+    } finally { await churnStub.close(); }
+  } finally { await stub.close(); }
 });
 
 test('tampered plan and phase operation bodies refuse apply and rollback before writes', async () => {
