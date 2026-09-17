@@ -2,7 +2,11 @@ import { createHash } from 'node:crypto';
 import { log } from '../core/log.ts';
 import { ActionError } from '../internal/errors.ts';
 import type { ModerationDiscordClient } from './discord.ts';
-import { assertModerationAllowed } from './policy.ts';
+import {
+  assertModerationAllowed,
+  moderationTargetProtection,
+  type ModerationTargetProtectionReason,
+} from './policy.ts';
 import type { ModerationStore } from './store.ts';
 import type { AuditSink } from '../audit/service.ts';
 import {
@@ -10,7 +14,7 @@ import {
   moderationAuditReason,
   moderationAuditToken,
 } from '../audit/moderationIdentity.ts';
-import type { ModerationPolicy, ModerationRequest, ModerationResult } from './types.ts';
+import type { ModerationPolicy, ModerationRequest, ModerationResult, ModerationTarget } from './types.ts';
 
 const MAX_TIMEOUT_SECONDS = 28 * 24 * 60 * 60;
 const MAX_PURGE = 100;
@@ -42,6 +46,19 @@ export class ModerationService {
     this.policy = policy;
     this.now = now;
     this.audit = audit;
+  }
+
+  /**
+   * Ask, without executing anything, whether this service's policy protects a
+   * target from moderation outright.
+   *
+   * Automod calls this before deleting a message (TOG-3092) so the owner/staff
+   * guard runs *ahead* of the mutation instead of after it. Reading the policy
+   * off this service - rather than handing automod its own copy - is what keeps
+   * the pre-check and the sanction that follows it judging by the same rules.
+   */
+  targetProtection(target: ModerationTarget): ModerationTargetProtectionReason | undefined {
+    return moderationTargetProtection(target, this.policy);
   }
 
   /**

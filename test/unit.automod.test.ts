@@ -10,6 +10,7 @@ import { AutomodProcessingError, type AutomodMessage, type AutomodPolicy } from 
 import type { ModerationDiscordClient } from '../src/moderation/discord.ts';
 import { ModerationService } from '../src/moderation/service.ts';
 import { ModerationStore } from '../src/moderation/store.ts';
+import type { ModerationTarget } from '../src/moderation/types.ts';
 import { openTestDb } from './helpers/testDb.ts';
 
 const GUILD = '1545644954272137297';
@@ -18,6 +19,7 @@ const USER = '900000000000000001';
 const OWEN = '1469137636663758888';
 const BYPASS = '900000000000000002';
 const EXEMPT = '900000000000000003';
+const STAFF = '900000000000000004';
 
 const policy: AutomodPolicy = {
   badWords: ['very bad'],
@@ -50,6 +52,21 @@ function message(overrides: Partial<AutomodMessage> = {}): AutomodMessage {
     ...overrides,
   };
 }
+
+/**
+ * An ordinary member: no roles, not the owner, not a bot. Since TOG-3092 every
+ * enforcing match resolves its target before deleting, so a resolver that
+ * throws is only correct where resolution genuinely must not happen.
+ */
+const unprotected = {
+  target: async (_guild: string, userId: string): Promise<ModerationTarget> => ({
+    userId,
+    roleIds: [],
+    highestRolePosition: 1,
+    isBot: false,
+    isGuildOwner: false,
+  }),
+};
 
 test('loads default-off configuration and validates the sanction ladder', () => {
   assert.equal(loadAutomodConfig({}).enabled, false);
@@ -184,7 +201,7 @@ test('dry-run matches do not advance the enforceable sanctions ledger', async ()
     new ModerationService(discord, moderationStore, { owenUserId: OWEN, botUserId: OWEN, protectedRoleIds: new Set() }),
     moderationStore,
     new AutomodStore(testDb.db),
-    { target: async () => { throw new Error('not reached'); } },
+    unprotected,
     { dryRun: false, owenUserId: OWEN, botHighestRolePosition: 10, policy },
   );
   const first = await enforce.inspect(message({ messageId: 'same-message', content: 'very bad' }));
@@ -211,7 +228,7 @@ test('a definite message deletion refusal releases the claim for retry', async (
     new ModerationService(discord, moderationStore, { owenUserId: OWEN, botUserId: OWEN, protectedRoleIds: new Set() }),
     moderationStore,
     new AutomodStore(testDb.db),
-    { target: async () => { throw new Error('not reached'); } },
+    unprotected,
     { dryRun: false, owenUserId: OWEN, botHighestRolePosition: 10, policy },
   );
   await assert.rejects(() => service.inspect(message({ messageId: 'retry-delete', content: 'very bad' })), /Discord refused/);
@@ -281,7 +298,7 @@ test('uncertain post-mutation failure keeps the outer claim in flight', async ()
     new ModerationService(discord, moderationStore, { owenUserId: OWEN, botUserId: OWEN, protectedRoleIds: new Set() }),
     moderationStore,
     new AutomodStore(testDb.db),
-    { target: async () => { throw new Error('not reached'); } },
+    unprotected,
     { dryRun: false, owenUserId: OWEN, botHighestRolePosition: 10, policy },
   );
   await assert.rejects(() => service.inspect(message({ messageId: 'uncertain', content: 'very bad' })), /completion unavailable/);
@@ -315,6 +332,12 @@ test('bypass roles, channel exceptions, bots, and dry-run make no Discord mutati
   await testDb.cleanup();
 });
 
+/**
+ * The two refusal families are deliberately not treated alike (TOG-3092).
+ * A *protection* - who the target is - stops the delete too. A *hierarchy*
+ * limit does not: Manage Messages lets Owen delete a message from someone
+ * ranked above them, so only the timeout rung is out of reach.
+ */
 test('sanction refusals are audited and replay without a second mutation', async () => {
   const refusals = [
     {
@@ -323,6 +346,7 @@ test('sanction refusals are audited and replay without a second mutation', async
       botHighestRolePosition: 10,
       protectedRoleIds: new Set([BYPASS]),
       reason: 'target_staff_role',
+      deletes: false,
     },
     {
       name: 'role hierarchy',
@@ -330,6 +354,7 @@ test('sanction refusals are audited and replay without a second mutation', async
       botHighestRolePosition: 10,
       protectedRoleIds: new Set<string>(),
       reason: 'actor_hierarchy',
+      deletes: true,
     },
   ];
 
@@ -362,9 +387,14 @@ test('sanction refusals are audited and replay without a second mutation', async
       },
     );
     const messageId = `refused-${refusal.reason}`;
+    const expectedCalls = refusal.deletes ? [`delete:${messageId}`] : [];
     const first = await service.inspect(message({ messageId, content: 'very bad' }));
-    assert.deepEqual(first, { matched: true, deleted: true, filter: 'bad_words', sanction: 'timeout' }, refusal.name);
-    assert.deepEqual(calls, [`delete:${messageId}`], `${refusal.name}: no refused sanction reached Discord`);
+    assert.deepEqual(
+      first,
+      { matched: true, deleted: refusal.deletes, filter: 'bad_words', sanction: 'timeout' },
+      refusal.name,
+    );
+    assert.deepEqual(calls, expectedCalls, `${refusal.name}: no refused sanction reached Discord`);
 
     const audit = await testDb.db.prepare(
       `SELECT outcome, metadata_json FROM moderation_audit WHERE action = 'automod.bad_words'`,
@@ -383,7 +413,7 @@ test('sanction refusals are audited and replay without a second mutation', async
 
     const replay = await service.inspect(message({ messageId, content: 'very bad' }));
     assert.equal(replay.replayed, true, refusal.name);
-    assert.deepEqual(calls, [`delete:${messageId}`], `${refusal.name}: replay made no second Discord call`);
+    assert.deepEqual(calls, expectedCalls, `${refusal.name}: replay made no second Discord call`);
     assert.equal((await testDb.db.prepare(`SELECT COUNT(*) AS n FROM automod_violations`).get<{ n: number }>())?.n, 1);
     assert.equal((await testDb.db.prepare(
       `SELECT COUNT(*) AS n FROM moderation_audit WHERE action = 'automod.bad_words'`,
@@ -392,7 +422,127 @@ test('sanction refusals are audited and replay without a second mutation', async
   }
 });
 
-test('unexpected resolver action_not_allowed keeps the outer claim in flight', async () => {
+/**
+ * TOG-3092. Owen deleted the guild owner's own message in TWO Staging on a
+ * FIRST violation - `violation_count=1 sanction=delete` - because the delete ran
+ * unconditionally and the owner/staff guard only ran on the rung above it. The
+ * ladder here is therefore the default one, not a timeout-at-one: the point is
+ * that the delete rung itself must consult protection.
+ */
+test('a protected target is refused before the delete, never after it', async () => {
+  const scenarios = [
+    {
+      name: 'guild owner',
+      target: { userId: USER, roleIds: [], highestRolePosition: 1, isBot: false, isGuildOwner: true },
+      reason: 'target_guild_owner',
+    },
+    {
+      name: 'protected staff role',
+      target: { userId: USER, roleIds: [STAFF], highestRolePosition: 1, isBot: false, isGuildOwner: false },
+      reason: 'target_staff_role',
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const testDb = await openTestDb(import.meta.filename);
+    const calls: string[] = [];
+    const discord: ModerationDiscordClient = {
+      async deleteMessage(_channel, id) { calls.push(`delete:${id}`); },
+      async timeout(_guild, user) { calls.push(`timeout:${user}`); },
+      async ban() {}, async unban() {}, async kick() {},
+      async purge(_channel, count) { return count; }, async setSlowmode() {},
+      async getEveryoneOverwrite() { return null; }, async putEveryoneOverwrite() {}, async deleteEveryoneOverwrite() {},
+    };
+    const moderationStore = new ModerationStore(testDb.db);
+    const service = new AutomodService(
+      discord,
+      new ModerationService(discord, moderationStore, {
+        owenUserId: OWEN,
+        botUserId: OWEN,
+        protectedRoleIds: new Set([STAFF]),
+      }),
+      moderationStore,
+      new AutomodStore(testDb.db),
+      { target: async () => scenario.target },
+      { dryRun: false, owenUserId: OWEN, botHighestRolePosition: 10, policy },
+    );
+
+    const messageId = `protected-${scenario.reason}`;
+    const first = await service.inspect(message({ messageId, content: 'very bad' }));
+    assert.deepEqual(
+      first,
+      { matched: true, deleted: false, filter: 'bad_words', sanction: 'delete' },
+      `${scenario.name}: the match is reported, the deletion is not`,
+    );
+    assert.deepEqual(calls, [], `${scenario.name}: a protected target takes zero Discord mutations`);
+
+    const audit = await testDb.db.prepare(
+      `SELECT outcome, metadata_json FROM moderation_audit WHERE action = 'automod.bad_words'`,
+    ).all<{ outcome: string; metadata_json: string }>();
+    assert.equal(audit.length, 1, `${scenario.name}: exactly one audit row`);
+    assert.equal(audit[0]?.outcome, 'refused', scenario.name);
+    assert.deepEqual(JSON.parse(audit[0]?.metadata_json ?? '{}'), {
+      message_id: messageId,
+      filter: 'bad_words',
+      violation_count: 1,
+      sanction: 'delete',
+      dry_run: false,
+      refusal_reason: scenario.reason,
+    }, scenario.name);
+
+    const replay = await service.inspect(message({ messageId, content: 'very bad' }));
+    assert.equal(replay.replayed, true, scenario.name);
+    assert.deepEqual(calls, [], `${scenario.name}: replay stayed silent too`);
+    await testDb.cleanup();
+  }
+});
+
+test('an unprotected target keeps the delete and the full sanction ladder', async () => {
+  const testDb = await openTestDb(import.meta.filename);
+  const calls: string[] = [];
+  const discord: ModerationDiscordClient = {
+    async deleteMessage(_channel, id) { calls.push(`delete:${id}`); },
+    async timeout(_guild, user) { calls.push(`timeout:${user}`); },
+    async ban() {}, async unban() {}, async kick() {},
+    async purge(_channel, count) { return count; }, async setSlowmode() {},
+    async getEveryoneOverwrite() { return null; }, async putEveryoneOverwrite() {}, async deleteEveryoneOverwrite() {},
+  };
+  const moderationStore = new ModerationStore(testDb.db);
+  const service = new AutomodService(
+    discord,
+    new ModerationService(discord, moderationStore, {
+      owenUserId: OWEN,
+      botUserId: OWEN,
+      // STAFF is protected in the policy, but this target does not hold it.
+      protectedRoleIds: new Set([STAFF]),
+    }),
+    moderationStore,
+    new AutomodStore(testDb.db),
+    { target: async (_guild, userId) => ({ userId, roleIds: [], highestRolePosition: 1, isBot: false, isGuildOwner: false }) },
+    { dryRun: false, owenUserId: OWEN, botHighestRolePosition: 10, policy },
+  );
+
+  const first = await service.inspect(message({ messageId: 'plain-1', content: 'very bad' }));
+  const second = await service.inspect(message({ messageId: 'plain-2', content: 'very bad' }));
+  const third = await service.inspect(message({ messageId: 'plain-3', content: 'very bad' }));
+  assert.deepEqual([first.sanction, second.sanction, third.sanction], ['delete', 'warn', 'timeout']);
+  assert.deepEqual([first.deleted, second.deleted, third.deleted], [true, true, true]);
+  assert.deepEqual(calls.slice(0, 3), ['delete:plain-1', 'delete:plain-2', 'delete:plain-3']);
+  assert.equal(calls[3], `timeout:${USER}`, 'the third violation still reaches the timeout rung');
+  const outcomes = await testDb.db.prepare(
+    `SELECT outcome FROM moderation_audit WHERE action = 'automod.bad_words' ORDER BY created_at`,
+  ).all<{ outcome: string }>();
+  assert.deepEqual(outcomes.map((row) => row.outcome), ['deleted', 'warn', 'timeout']);
+  await testDb.cleanup();
+});
+
+/**
+ * Before TOG-3092 the resolver ran after the delete, so a resolver failure left
+ * a deleted message behind and a claim stranded in flight. It now runs first,
+ * which makes the failure fail closed: nothing reaches Discord, and because
+ * nothing was mutated the claim is released for an honest retry.
+ */
+test('an unexpected resolver refusal mutates nothing and stays retryable', async () => {
   const testDb = await openTestDb(import.meta.filename);
   const calls: string[] = [];
   const discord: ModerationDiscordClient = {
@@ -410,8 +560,8 @@ test('unexpected resolver action_not_allowed keeps the outer claim in flight', a
     { dryRun: false, owenUserId: OWEN, botHighestRolePosition: 10, policy: { ...policy, sanctions: [{ violations: 1, action: 'timeout', timeoutSeconds: 600 }] } },
   );
   await assert.rejects(() => service.inspect(message({ messageId: 'unexpected-resolver', content: 'very bad' })), /Unexpected resolver refusal/);
-  await assert.rejects(() => service.inspect(message({ messageId: 'unexpected-resolver', content: 'very bad' })), /uncertain outcome/);
-  assert.deepEqual(calls, ['delete:unexpected-resolver']);
+  await assert.rejects(() => service.inspect(message({ messageId: 'unexpected-resolver', content: 'very bad' })), /Unexpected resolver refusal/);
+  assert.deepEqual(calls, [], 'an unresolvable target is never deleted on the strength of not knowing');
   assert.equal((await testDb.db.prepare(
     `SELECT COUNT(*) AS n FROM moderation_audit WHERE action = 'automod.bad_words'`,
   ).get<{ n: number }>())?.n, 0);

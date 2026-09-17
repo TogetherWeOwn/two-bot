@@ -127,8 +127,28 @@ export class AutomodService {
     markDeleteSucceeded: () => void,
   ): Promise<AutomodResult> {
     const reason = `Automod ${filter.replace(/_/g, ' ')}`;
+
+    // TOG-3092: resolve the author and settle protection BEFORE touching
+    // Discord. This used to sit below the delete, gated on the sanction being
+    // something other than `delete`, which meant the owner's and protected
+    // staff's messages were deleted outright on a first violation and only the
+    // follow-on sanction was ever refused. A guard that runs after the mutation
+    // is not a guard.
+    //
+    // Dry run resolves nothing: it makes no mutation to gate, and the resolver
+    // is three REST calls we should not spend to reach an outcome of 'dry_run'.
+    //
+    // A resolver failure now fails closed. The message survives, no claim
+    // damage is done (`markDeleteAttempted` has not fired, so `inspect` releases
+    // the claim), and the gateway can retry. Deleting while unable to tell
+    // whether the author is protected is the behaviour this card exists to end.
+    const target = this.options.dryRun
+      ? undefined
+      : await this.resolver.target(message.guildId, message.authorId);
+    let refusalReason: string | undefined = target && this.moderation.targetProtection(target);
+
     let deleted = false;
-    if (!this.options.dryRun) {
+    if (!this.options.dryRun && !refusalReason) {
       if (!this.discord.deleteMessage) throw new Error('automod requires exact message deletion support');
       markDeleteAttempted();
       await this.discord.deleteMessage(message.channelId, message.messageId, reason);
@@ -136,6 +156,8 @@ export class AutomodService {
       deleted = true;
     }
 
+    // Still recorded for a protected author: the ledger counts matches, and the
+    // refused audit row is only informative if it can name the rung it refused.
     const count = this.options.dryRun
       ? 0
       : await this.automodStore.recordViolation(
@@ -145,11 +167,9 @@ export class AutomodService {
           message.messageId,
         );
     const sanction = sanctionFor(Math.max(1, count), this.options.policy.sanctions);
-    let refusalReason: string | undefined;
-    if (!this.options.dryRun && sanction.action !== 'delete') {
-      const target = await this.resolver.target(message.guildId, message.authorId);
+    if (!this.options.dryRun && !refusalReason && sanction.action !== 'delete') {
       try {
-        await this.moderation.execute(this.moderationRequest(message, target, sanction, count, reason));
+        await this.moderation.execute(this.moderationRequest(message, target!, sanction, count, reason));
       } catch (err) {
         if (!isModerationPolicyRefusal(err)) throw err;
         refusalReason = err.logReason;
