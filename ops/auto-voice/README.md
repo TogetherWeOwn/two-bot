@@ -74,32 +74,15 @@ What that costs us, stated plainly:
   identifier of ours, and `test-status-patch.sh` asserts that (G10) so it stays
   true. Offering the compose file is not required and should not be volunteered.
 
-### 1.2 How §13 is discharged — settled, and live
+> ⚠️ **Open item:** publishing this directory is a public-facing act and is not
+> an engineering call. It is raised on **TOG-3150** (Director of Engineering), not
+> decided here and not decided on TOG-3143. Until it is settled we are
+> running a modified AGPL work with an undischarged §13 offer — which was already
+> true the moment the operator patched the live container by hand at 01:46Z on
+> 2026-09-17; this file did not create that state, it only made it durable and
+> visible.
 
-**TOG-3150 decided it: discharge the offer inside the guild; do not publish this
-repository.** §13 obliges a *prominent offer* to the users interacting with the
-program, not publication to the world, and our users are guild members. The two
-halves — the offer and actual source access — are both carried in one channel:
-
-| | |
-|---|---|
-| Channel | `#voice-bot-source` (`1549978014450716773`), in the `🔊 VOICE` category, alongside `➕ Join to Create` |
-| Topic | names `GregZaal/Auto-Voice-Channels` and commit `8fab5e8d78aa252195dcea1bcd3d313cb1ba0802` |
-| Pinned message | `1549978091345019041` — the offer in full, with `status-patch.sh` attached **unredacted** |
-| Posted | 2026-09-17, TOG-3143 |
-
-The channel is read-only to `@everyone` so the offer cannot be pushed off the
-pin list or buried. Access is unconditional: the attachment *is* the patch, so a
-member needs to ask nobody and wait for nothing.
-
-This is not a one-time act. `observe-tick.ts` asserts all three every tick —
-channel exists and can hold a topic, topic still names repo and commit, a pinned
-message still names both *and* still carries `status-patch.sh` — and fails on
-drift (§9). **If you move `AVC_GIT_CONTEXT` to a new commit, the offer in Discord
-names the old one and is wrong from that moment.** Edit the topic and the pin in
-the same change; the tick will tell you if you forget, but only after the fact.
-
-The escape hatch, if the position ever needs reversing: set `AVC_STATUS_MODE` to
+The escape hatch, if the answer is "do not publish": set `AVC_STATUS_MODE` to
 `upstream`. The patch then does nothing, upstream runs verbatim, advert and all,
 and §1's original constraint holds again with no other change. Note this is an
 escape hatch from the *licence* position only — it reinstates the advertisement
@@ -445,33 +428,23 @@ blocked until AVC has run clean in the live guild for seven consecutive days.
 That condition has numbers in it, so it is a script rather than a habit:
 
 ```bash
-AVC_OFFER_CHANNEL_ID=1549978014450716773 \
-  node ops/auto-voice/observe-tick.ts          # observe the live guild
+node ops/auto-voice/observe-tick.ts            # observe the live guild
 node ops/auto-voice/observe-tick.ts --selftest # drive the fixtures, no network
 ```
 
 One tick per day. It needs a bot token that is already in the guild
 (`AVC_OBSERVE_TOKEN`, falling back to `DISCORD_BOT_TOKEN`) and reads the channel
-list and voice states out of a single `GUILD_CREATE`, plus one REST `GET` for the
-offer channel's pins. It is **read-only** — no writes, and it never joins a voice
-channel, so it cannot manufacture the rooms it is counting.
+list and voice states out of a single `GUILD_CREATE`. It is **read-only** — no
+REST writes, and it never joins a voice channel, so it cannot manufacture the
+rooms it is counting.
 
-Six conditions, and the exit code is the verdict:
+Three conditions, and the exit code is the verdict:
 
 | Check | Breached when |
 |---|---|
 | `generator_present` | the generator is gone, or left the 🔊 VOICE category |
 | `lobby_untouched` | `Lobby` is missing, moved, **or renamed** — a renamed Lobby is the signature of AVC having adopted a channel it was never given |
 | `no_ghost_rooms` | a generated room under the category has nobody in it |
-| `offer_channel` | the §13 offer channel was deleted, or points at a voice channel — which can carry neither a topic nor a pin |
-| `offer_in_topic` | the topic was cleared or edited so it no longer names `Auto-Voice-Channels` **and** the commit |
-| `offer_pinned` | nothing is pinned, the pin no longer names both, or the `status-patch.sh` attachment was removed |
-
-The three `offer_*` checks are the ones that keep §1.2 true over time; they are
-the reason a redeploy that bumps the pin cannot quietly leave a stale offer in
-Discord. Matching is loose on prose and strict on the two facts that matter — the
-repository name and the first 8 characters of the commit — so the wording can be
-rewritten freely without breaking the gate.
 
 ```
 exit 0  PASS          every condition held
@@ -483,23 +456,12 @@ exit 2  INCONCLUSIVE  could not observe - no token, gateway refused, timed out
 must not be readable as a clean day; that is how a seven-day streak gets made of
 days nobody looked at.
 
-`AVC_OFFER_CHANNEL_ID` has **no default and is required**: unset, the tick exits
-2 rather than reporting PASS on the three checks it did run. The one outcome
-worse than a red tick is a green one that never looked at half of what it exists
-to watch. `AVC_OFFER_COMMIT` does default — to the pinned commit — so it only
-needs setting while a pin bump is in flight.
-
-A 404 on the offer channel is scored as **FAIL**, not INCONCLUSIVE: 404 means the
-channel is gone, which is the drift itself. 403, a timeout, and 5xx stay
-inconclusive, because those are us failing to look.
-
 Any voice channel under the category that is neither the generator nor `Lobby`
 counts as a generated room. If a permanent one is added deliberately, put its id
 in `AVC_OBSERVE_IGNORE_CHANNEL_IDS` — until then it is a finding, which is the
 direction this check should fail in.
 
 The fixtures in `observe-tick.ts` are the point of the file. A ghost room, an
-adopted Lobby, a deleted generator, a cleared topic, an unpinned offer and a
-stripped attachment are states the live guild will not hold still for, so they
-are the only way to know a green tick means anything. There are 15;
+adopted Lobby and a deleted generator are states the live guild will not hold
+still for, so they are the only way to know a green tick means anything;
 `test/unit.avcobserve.test.ts` runs them in CI.
