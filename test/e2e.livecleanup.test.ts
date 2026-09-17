@@ -1158,29 +1158,85 @@ test('an auto-voice ephemeral child plans unchanged while its near neighbours st
     assert.equal(liveShapeStub.writes.length, 0);
   } finally { await liveShapeStub.close(); }
 
-  // Each neighbour differs from the tolerated shape in exactly one field.
-  const neighbours: { label: string; type: number; parentId: string; expect: RegExp }[] = [
-    { label: 'text-child', type: 0, parentId: AUTO_VOICE_CATEGORY_ID, expect: /unreviewed channel\/category IDs/ },
-    { label: 'other-active-category', type: 2, parentId: ACTIVE_CATEGORY_IDS[0], expect: /unreviewed channel\/category IDs/ },
-    { label: 'legacy-category', type: 2, parentId: LEGACY_CATEGORY_IDS[0], expect: /unexpected child IDs/ },
-    { label: 'no-parent', type: 2, parentId: '', expect: /unreviewed channel\/category IDs/ },
+  // Each neighbour differs from the tolerated shape in exactly one field, and TOG-2907 split
+  // them into two outcomes rather than one. The refusal these used to share was a gate on the
+  // whole guild; it now only covers the reviewed legacy tree, so three of the four plan.
+  //
+  // Planning and drift are different tolerances and this table is what holds them apart. The
+  // first neighbour is `voice-bot-source` verbatim — the permanent type-0 channel that refused
+  // the live 65-operation plan and the read-only audit at 02:59Z, four hours after #117 bought
+  // a tolerance for a different shape. It must plan, and it must land in the *wider* bucket:
+  // widening `isAutoVoiceEphemeralChild` to cover it would move its line from
+  // `UNREVIEWED-TOLERATED` to `TOLERATED` and quietly drop it from every drift gate. That
+  // mutation passes an exit-code assertion, so the bucket is asserted instead.
+  const neighbours: { label: string; id: string; name: string; type: number; parentId: string; refuses?: RegExp }[] = [
+    { label: 'voice-bot-source', id: '1549978014450716773', name: 'voice-bot-source', type: 0, parentId: AUTO_VOICE_CATEGORY_ID },
+    { label: 'other-active-category', id: ID(998), name: 'near neighbour other-active-category', type: 2, parentId: ACTIVE_CATEGORY_IDS[0] },
+    { label: 'no-parent', id: ID(997), name: 'near neighbour no-parent', type: 2, parentId: '' },
+    // The one position a new object could inherit the deny this phase is about to set, or
+    // displace a reviewed child. It still fails closed, by ID.
+    { label: 'legacy-category', id: ID(996), name: 'near neighbour legacy-category', type: 2, parentId: LEGACY_CATEGORY_IDS[0], refuses: /unexpected child IDs/ },
   ];
   for (const neighbour of neighbours) {
     const stub = await stubDiscord();
+    const dir = mkdtempSync(join(tmpdir(), `two-live-clean-autovoice-${neighbour.label}-`));
     try {
       stub.state.channels.push({
-        id: ID(998),
-        name: `near neighbour ${neighbour.label}`,
+        id: neighbour.id,
+        name: neighbour.name,
         type: neighbour.type,
         parent_id: neighbour.parentId === '' ? null : neighbour.parentId,
         permission_overwrites: [],
       });
-      const result = await plan(stub, mkdtempSync(join(tmpdir(), `two-live-clean-autovoice-${neighbour.label}-`)));
-      assert.equal(result.code, 1, `${neighbour.label} must refuse`);
-      assert.match(result.stderr, neighbour.expect, neighbour.label);
+      const result = await plan(stub, dir);
+      if (neighbour.refuses) {
+        assert.equal(result.code, 1, `${neighbour.label} must refuse: ${result.stderr}`);
+        assert.match(result.stderr, neighbour.refuses, neighbour.label);
+        assert.equal(stub.writes.length, 0, neighbour.label);
+        continue;
+      }
+      assert.equal(result.code, 0, `${neighbour.label} must plan: ${result.stderr}`);
+      assert.ok(
+        result.stdout.includes(`UNREVIEWED-TOLERATED ${neighbour.id} ${neighbour.name} — unreviewed type-${neighbour.type} object outside the reviewed legacy tree (parent ${neighbour.parentId === '' ? 'none' : neighbour.parentId})`),
+        `${neighbour.label} must be named in the log as a planning tolerance, not tolerated silently: ${result.stdout}`,
+      );
+      assert.doesNotMatch(
+        result.stdout, new RegExp(`${neighbour.id} .* — auto-voice ephemeral child`),
+        `${neighbour.label} must not reach the narrower drift tolerance, which would drop it from every drift gate`,
+      );
+      assert.match(result.stdout, /Unreviewed objects tolerated in this snapshot: 1/, neighbour.label);
+      // Tolerating must be inert on the plan itself, exactly as the ephemeral shape is.
+      const manifest = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+      assert.equal(manifest.operationCount, EXPECTED_OPERATIONS.operationCount, neighbour.label);
+      assert.equal(manifest.operationSemanticHash, EXPECTED_OPERATIONS.operationSemanticHash, neighbour.label);
+      assert.ok(!manifest.operations.some((operation) => operation.objectId === neighbour.id), `no operation may name ${neighbour.label}`);
       assert.equal(stub.writes.length, 0, neighbour.label);
     } finally { await stub.close(); }
   }
+});
+
+// The tolerance above buys plan reachability and buys nothing after it. A tolerated object is
+// still compared byte for byte by the apply-time drift gate, so the phase's guarantee — that
+// it refuses if the guild moved under it — is unchanged for everything except the generator's
+// churn. Without this test, widening `isDriftExcluded` to match the planning tolerance is a
+// one-line change that no other assertion in this file notices.
+test('a planning tolerance is not a drift tolerance', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-tolerance-not-drift-'));
+  try {
+    assert.equal((await plan(stub, dir)).code, 0);
+    // Created after the plan was signed: the shape planning would have tolerated, arriving at
+    // the one moment tolerating it is not safe.
+    stub.state.channels.push({
+      id: '1549978014450716773', name: 'voice-bot-source', type: 0,
+      parent_id: AUTO_VOICE_CATEGORY_ID, permission_overwrites: [],
+    });
+    const applied = await apply(stub, dir);
+    assert.equal(applied.code, 1, 'an unreviewed object appearing between plan and apply must still refuse');
+    assert.match(applied.stderr, /Live state drifted/);
+    assert.doesNotMatch(applied.stdout, /1549978014450716773/, 'and it must not be reported as tolerated on the apply path');
+    assert.equal(stub.writes.length, 0);
+  } finally { await stub.close(); }
 });
 
 // TOG-3139 finding 1. Tolerating the generator's children at the unreviewed-ID refusal is
