@@ -13,6 +13,7 @@ import {
   AUTO_VOICE_CATEGORY_ID,
   applyOperationOverwrites,
   basePermissions,
+  isAutoVoiceEphemeralChild,
   journalWitnessPath,
   LEGACY_CATEGORY_IDS,
   LEGACY_CHANNEL_IDS,
@@ -1112,6 +1113,66 @@ test('an auto-voice ephemeral child plans unchanged while its near neighbours st
       assert.equal(stub.writes.length, 0, neighbour.label);
     } finally { await stub.close(); }
   }
+});
+
+// TOG-3139 finding 1. Tolerating the generator's children at the unreviewed-ID refusal is
+// what makes the plan reachable; extending that tolerance to the unreadable-overwrite walk
+// is what broke the phase. Measured on the version that skipped the walk: plan exit 0,
+// apply exit 0 with 65 writes landed, then rollback died on an *uncaught* exception out of
+// `normalizeOverwrites` — the run ended applied with its rollback path gone, reported as a
+// Node stack trace. The refusal below is the whole fix, so it is asserted directly.
+test('an auto-voice ephemeral child whose overwrite read did not answer is refused, not tolerated', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-autovoice-unreadable-'));
+  try {
+    const child: Record<string, unknown> = { id: '1549949487949283359', name: 'Hangout #1', type: 2, parent_id: AUTO_VOICE_CATEGORY_ID };
+    stub.state.channels.push(child as unknown as Channel); // no `permission_overwrites` key at all
+    const result = await plan(stub, dir);
+    assert.equal(result.code, 1, 'an unreadable overwrite list must refuse even on a tolerated identity');
+    assert.match(result.stderr, /1549949487949283359 carried no `permission_overwrites` key at all/);
+    assert.match(result.stderr, /permission overwrites are unknown/);
+    assert.equal(stub.writes.length, 0);
+    // Refusing must still preserve the stop evidence rather than collapse the run.
+    assert.ok(existsSync(join(dir, 'snapshot', 'pre.json')), 'the pre-snapshot must survive the refusal');
+  } finally { await stub.close(); }
+
+  // The refusal is about readability, not identity: the same channel with a readable list
+  // still plans. Without this half, deleting the tolerance entirely would also pass above.
+  const readableStub = await stubDiscord();
+  const readableDir = mkdtempSync(join(tmpdir(), 'two-live-clean-autovoice-readable-'));
+  try {
+    readableStub.state.channels.push({
+      id: '1549949487949283359', name: 'Hangout #1', type: 2, parent_id: AUTO_VOICE_CATEGORY_ID,
+      permission_overwrites: [{ id: LIVE_GUILD_ID, type: 0, allow: '3146752', deny: '0' }],
+    });
+    const result = await plan(readableStub, readableDir);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(readableStub.writes.length, 0);
+  } finally { await readableStub.close(); }
+});
+
+// `isAutoVoiceEphemeralChild` excludes `ACTIVE_CHANNEL_IDS` members, and that clause is the
+// only thing standing between the tolerance and two reviewed active-tree objects: `Lobby`
+// and the `➕ Join to Create` generator are themselves type-2 channels sitting directly under
+// the auto-voice category. Every other route to the predicate is shadowed by an earlier
+// assertion, so dropping the clause survives the end-to-end suite — it is provable only
+// against the predicate itself, which is why this test is a unit test and not a run.
+test('the auto-voice tolerance never classifies a reviewed active-tree channel as ephemeral', () => {
+  const autoVoiceChildren = fixtureState().channels.filter((channel) => channel.parent_id === AUTO_VOICE_CATEGORY_ID);
+  assert.ok(autoVoiceChildren.length > 0, 'the fixture must actually contain the shape this guards');
+  for (const channel of autoVoiceChildren) {
+    assert.equal(channel.type, 2, `${channel.id} is the type the predicate tolerates`);
+    assert.ok((ACTIVE_CHANNEL_IDS as readonly string[]).includes(channel.id), `${channel.id} is a reviewed active channel`);
+    assert.equal(
+      isAutoVoiceEphemeralChild(channel), false,
+      `${channel.id} is reviewed and permanent, so tolerating it would drop it out of the reviewed-shape assertions`,
+    );
+  }
+  // The generator's own spawn, which differs only in not being reviewed, must still be tolerated.
+  assert.equal(
+    isAutoVoiceEphemeralChild({ id: '1549949487949283359', type: 2, parent_id: AUTO_VOICE_CATEGORY_ID }), true,
+    'an unreviewed voice child of the auto-voice category is exactly what the predicate exists to tolerate',
+  );
 });
 
 test('tampered plan and phase operation bodies refuse apply and rollback before writes', async () => {

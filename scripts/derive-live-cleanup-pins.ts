@@ -2,14 +2,29 @@
  * Re-derive test/fixtures/live-cleanup-expected-operations.json from the
  * production-shaped state fixture.
  *
- * The expected-operations fixture is the pin the operator compares a live dry-run
- * against, so it must never be hand-edited. Run this after any change to the
- * planner and commit the result; `test/e2e.livecleanup.test.ts` then re-proves the
- * pin by running the real dry-run script against the stub guild and asserting
- * equality, which is also what catches any drift between the snapshot shape built
- * here and the one `captureSnapshot` builds from Discord.
+ * The expected-operations fixture pins the planner's *determinism*: the same snapshot
+ * must always produce the same operations, so it must never be hand-edited. Run this
+ * after any change to the planner and commit the result; `test/e2e.livecleanup.test.ts`
+ * then re-proves the pin by running the real dry-run script against the stub guild and
+ * asserting equality, which is also what catches any drift between the snapshot shape
+ * built here and the one `captureSnapshot` builds from Discord.
  *
  *   node scripts/derive-live-cleanup-pins.ts
+ *
+ * **It is not a number the operator should expect a live dry-run to reproduce, and an
+ * earlier version of this comment said it was.** The operation count is a function of
+ * how far the live guild has drifted from its parent categories at capture time — every
+ * legacy child that is *unsynchronized* earns its own PATCH, and a child that someone
+ * has since re-synchronized is covered by its category instead. Measured on 2026-09-17:
+ * this fixture (captured 2026-09-16T10:27Z) derives 65 = 47 channel + 18 category, while
+ * the same planner against the live guild at 23:46Z derives 59 = 41 + 18 — six legacy
+ * children synchronized in the interval, none gained. Both are correct plans.
+ *
+ * So an operator must never gate apply on matching 65, or a correct run reads as
+ * tampering. The live checks that do hold regardless of drift are the ones the dry-run
+ * prints: `N of N` reviewed legacy channels hidden, and `AUDIT PASSED` from
+ * `scripts/audit-live-cleanup-visibility.ts`. Apply re-derives the plan from a fresh
+ * snapshot and compares it against *that run's own* manifest, not against this file.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
