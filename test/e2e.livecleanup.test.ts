@@ -789,6 +789,64 @@ test('a role that omits position or managed refuses the plan instead of failing 
 });
 
 /**
+ * Round 12 (TOG-3114, non-blocking finding): the same collapse class as the two tests
+ * above, on `member.roles ?? []`. It is fail-*closed* for `assertHierarchy` — Owen with no
+ * roles has no Administrator and refuses — which is why it survived two rounds. Where it
+ * fails open is `archiveVisibilityExemptions`: a collapsed read drops the member's
+ * Administrator-bearing roles, `archiveExemption` returns null, and the principal is left
+ * off the RETAINS-VIEW list the operator signs the manifest against. Discord ignores every
+ * overwrite this phase emits for an Administrator, so nothing downstream corrects it.
+ *
+ * The control has to trip first, or the absence variants prove nothing: the *same member*
+ * is an exemption with its roles read, and must be refused — not silently dropped — with
+ * them unread. The evidence assertions matter as much as the refusal: capture runs before
+ * planning, so both the pre-snapshot and the holders file have to survive it, the latter
+ * naming the member rather than omitting a row that reads as "holds nothing".
+ */
+test('a member whose role list did not answer refuses the plan instead of dropping them from the exemption set', async () => {
+  const control = await stubDiscord();
+  let adminMemberId = '';
+  try {
+    const owenId = LIVE_BOT_APPLICATION_ID;
+    const ownerId = control.state.guild.owner_id as string;
+    const adminRoleIds = new Set(control.state.roles.filter((role) => (BigInt(role.permissions) & BigInt(ADMIN)) !== 0n).map((role) => role.id));
+    const admin = control.state.members.find((member) => member.user.id !== owenId && member.user.id !== ownerId && member.roles.some((id) => adminRoleIds.has(id)))!;
+    adminMemberId = admin.user.id;
+    const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-member-roles-control-'));
+    const result = await plan(control, dir);
+    assert.equal(result.code, 0, result.stderr);
+    const manifest = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    assert.ok(manifest.visibilityExemptions.some((item) => item.memberId === adminMemberId && item.reason === 'administrator'), 'control: the Administrator holder must be a recorded exemption');
+    assert.match(result.stdout, new RegExp(`RETAINS-VIEW administrator \\w+ ${adminMemberId}`));
+  } finally { await control.close(); }
+
+  const variants: Array<{ label: string; wreck: (member: JsonObject) => void; expect: RegExp }> = [
+    { label: 'absent', wreck: (member) => { delete member.roles; }, expect: /carried no `roles` key at all/ },
+    { label: 'null', wreck: (member) => { member.roles = null; }, expect: /carried a `roles` that is not an array \(null\)/ },
+    { label: 'an entry that is not a role id', wreck: (member) => { member.roles = [{ id: '1' }]; }, expect: /carried a `roles\[0\]` that is not a role id string/ },
+  ];
+  for (const { label, wreck, expect } of variants) {
+    const stub = await stubDiscord();
+    try {
+      wreck(stub.state.members.find((member) => member.user.id === adminMemberId)! as unknown as JsonObject);
+      const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-member-roles-absent-'));
+      const result = await plan(stub, dir);
+      assert.notEqual(result.code, 0, `${label} produced a plan`);
+      assert.equal(stub.writes.length, 0, label);
+      assert.ok(!existsSync(planManifestPath(dir)), `${label} produced a plan manifest`);
+      assert.match(result.stderr, new RegExp(`Member ${adminMemberId} `), label);
+      assert.match(result.stderr, expect, label);
+      assert.match(result.stderr, /may hold Administrator/, label);
+      // Refusing still has to leave the stop evidence behind, and the holders file has to
+      // name the member it could not read rather than drop their rows.
+      assert.ok(existsSync(join(dir, 'snapshot', 'pre.json')), label);
+      const holders = readFileSync(join(dir, 'snapshot', 'holders.csv'), 'utf8');
+      assert.match(holders, new RegExp(`"${adminMemberId}",.*UNREADABLE-ROLES`), label);
+    } finally { await stub.close(); }
+  }
+});
+
+/**
  * Apply's own per-operation before-state check is the second opinion on the plan — a fresh
  * `GET /channels/{id}` compared against the signed `expectedBefore`. It laundered an absent
  * list exactly as the plan side did, so when the same read was unanswered at both times the

@@ -36,6 +36,7 @@ import {
   manifestInFlightId,
   normalizeOverwrites,
   normalizedChannel,
+  normalizedMemberRoles,
   operationSemanticHash,
   planSignature,
   planArchiveOperations,
@@ -46,6 +47,7 @@ import {
   SNAPSHOT_MAX_AGE_MS,
   stable,
   type LiveCleanupSnapshot,
+  unreadableMemberRoles,
   unreadableOverwrites,
   withSemanticHash,
 } from '../src/redesign/live-cleanup.ts';
@@ -274,7 +276,7 @@ async function captureSnapshot(): Promise<LiveCleanupSnapshot> {
       id: member.user?.id ?? '',
       bot: Boolean(member.user?.bot),
       username: member.user?.username ?? null,
-      roles: [...(member.roles ?? [])].sort(),
+      roles: normalizedMemberRoles(member.roles),
       premiumSince: member.premium_since ?? null,
       pending: Boolean(member.pending),
     })).filter((member) => member.id).sort((a, b) => a.id.localeCompare(b.id)),
@@ -296,6 +298,15 @@ function holdersCsv(snapshot: LiveCleanupSnapshot): string {
   const rows = ['member_id,username,bot,role_id,role_name'];
   const roleName = new Map(snapshot.roles.map((role) => [role.id, role.name]));
   for (const member of snapshot.members) {
+    // This artifact is written during capture, before anything refuses, so it renders an
+    // unreadable role list rather than throwing on it — a member silently absent from the
+    // holders file reads as a member holding nothing, which is the collapse this phase
+    // refuses to make. `assertHierarchy` is what stops the run.
+    const unreadable = unreadableMemberRoles(member.roles);
+    if (unreadable !== null) {
+      rows.push([member.id, member.username ?? '', member.bot ? 'true' : 'false', '', `UNREADABLE-ROLES (${unreadable})`].map((field) => JSON.stringify(field)).join(','));
+      continue;
+    }
     for (const roleId of member.roles) {
       rows.push([member.id, member.username ?? '', member.bot ? 'true' : 'false', roleId, roleName.get(roleId) ?? ''].map((field) => JSON.stringify(field)).join(','));
     }
