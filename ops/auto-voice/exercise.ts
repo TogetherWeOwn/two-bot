@@ -34,6 +34,18 @@ const INTENTS = (1 << 0) | (1 << 7);
 const GUILD_VOICE = 2;
 
 export type ExerciseEvidence = {
+  /**
+   * ms from our op 4 to the guild reporting us in *any* voice channel - the
+   * proof that our join actually landed.
+   *
+   * Without it, "we joined and AVC did nothing" and "Discord never let us join"
+   * are the same observation: no room appears either way. The first is a breach
+   * and the second is a tick that learned nothing, and scoring the second as the
+   * first resets a six-day streak over a permission change. Any channel counts,
+   * not just the generator: AVC can move us out before we are told we were ever
+   * in, and being in voice at all is what needed proving.
+   */
+  joinLandedMs: number | null;
   /** The room AVC created when we joined the generator, if it created one. */
   createdRoom: { id: string; name: string; parentId: string | null } | null;
   /** ms from our join to AVC's CHANNEL_CREATE. null if no room appeared. */
@@ -98,6 +110,7 @@ export async function exercise(opts: {
     let leftAt = 0;
 
     const evidence: ExerciseEvidence = {
+      joinLandedMs: null,
       createdRoom: null,
       createMs: null,
       movedMs: null,
@@ -143,9 +156,18 @@ export async function exercise(opts: {
       leftAt = now();
       setVoice(null);
 
-      // Nothing was created, so there is nothing to reclaim and nothing to wait
-      // for. Report immediately: the missing room is already the whole finding.
+      // Nothing was created. Before calling that a breach, check we were ever
+      // actually in voice: a join Discord refused (Connect revoked, channel full,
+      // user limit, region outage) produces the identical absence of a room, and
+      // that is INCONCLUSIVE - the exercise could not be performed - not a FAIL.
       if (!evidence.createdRoom) {
+        if (evidence.joinLandedMs === null) {
+          unavailable(
+            `our own join never landed: no voice state for us in ${opts.guildId} within ${windows.createMs}ms of op 4`,
+          );
+          return;
+        }
+        // We were demonstrably in voice and no room appeared. That is the finding.
         finish();
         return;
       }
@@ -228,6 +250,12 @@ export async function exercise(opts: {
       if (payload.t === 'VOICE_STATE_UPDATE') {
         const vs = payload.d as { user_id: string; channel_id?: string | null; guild_id?: string };
         if (vs.user_id !== selfId) return;
+        if (vs.guild_id !== undefined && vs.guild_id !== opts.guildId) return;
+        // First time the guild reports us in a voice channel - any channel. This
+        // is the only evidence that our op 4 was honoured rather than dropped.
+        if (evidence.joinLandedMs === null && vs.channel_id) {
+          evidence.joinLandedMs = now() - joinedAt;
+        }
         if (
           evidence.movedMs === null &&
           evidence.createdRoom &&
@@ -275,10 +303,17 @@ export function describeExercise(
   const room = evidence.createdRoom;
 
   if (!room) {
+    // `exercise` rejects as INCONCLUSIVE when the join never landed, so reaching
+    // here normally means it did. Say which, because a FAIL that resets a streak
+    // has to carry the evidence that we were really in voice when nothing
+    // happened - not just that nothing happened.
     return {
       alive: false,
       reclaimed: false,
-      aliveDetail: 'joined the generator and no channel was created - AVC is not reacting',
+      aliveDetail:
+        evidence.joinLandedMs === null
+          ? 'no channel was created and our join was never witnessed landing - AVC liveness is unproven either way'
+          : `we were in voice at ${evidence.joinLandedMs}ms and no channel was created - AVC is not reacting`,
       reclaimedDetail: 'no room was created, so nothing was reclaimed',
     };
   }

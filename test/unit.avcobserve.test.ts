@@ -13,7 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { FIXTURES, evaluate, type TickInput } from '../ops/auto-voice/observe-tick.ts';
-import type { ExerciseEvidence } from '../ops/auto-voice/exercise.ts';
+import { ExerciseUnavailable, exercise, type ExerciseEvidence } from '../ops/auto-voice/exercise.ts';
 
 for (const fixture of FIXTURES) {
   test(`observation tick: ${fixture.name} -> ${fixture.expect}`, () => {
@@ -79,6 +79,7 @@ test('a voice channel outside the category is none of this tick’s business', (
     ],
     voiceStates: [],
     exercise: {
+      joinLandedMs: 118,
       createdRoom: { id: '900', name: 'Squad #1', parentId: '100' },
       createMs: 366,
       movedMs: 392,
@@ -134,6 +135,7 @@ const LIVE_GUILD: Omit<TickInput, 'exercise'> = {
 };
 
 const HEALTHY_CYCLE: ExerciseEvidence = {
+  joinLandedMs: 118,
   createdRoom: { id: '900', name: 'Squad #1', parentId: '100' },
   createMs: 366,
   movedMs: 392,
@@ -147,13 +149,20 @@ test('the exact tree TOG-3044 describes, with AVC offline, is a FAIL', () => {
   // or not anything is running. Only the exercise can tell those apart.
   const result = evaluate({
     ...LIVE_GUILD,
-    exercise: { createdRoom: null, createMs: null, movedMs: null, deleteMs: null, residualRoomId: null },
+    exercise: { joinLandedMs: 118, createdRoom: null, createMs: null, movedMs: null, deleteMs: null, residualRoomId: null },
   });
 
   assert.equal(result.verdict, 'FAIL');
   assert.deepEqual(
     result.checks.filter((c) => !c.ok).map((c) => c.name),
     ['avc_alive', 'room_reclaimed'],
+  );
+  // The FAIL has to carry why it is a breach and not a bad tick: we were in
+  // voice and nothing happened. Without that, a revoked Connect permission and
+  // a dead container are the same JSON.
+  assert.match(
+    result.checks.find((c) => c.name === 'avc_alive')!.detail,
+    /in voice at 118ms/,
   );
   assert.deepEqual(
     result.checks.filter((c) => c.ok).map((c) => c.name),
@@ -210,4 +219,112 @@ test('a room we caused and AVC never reclaimed is a ghost, even at zero ghosts o
     result.checks.filter((c) => !c.ok).map((c) => c.name),
     ['room_reclaimed'],
   );
+});
+
+/* ------------------------- a refused join is not a dead bot (TOG-3126) ------ */
+
+/**
+ * The two outcomes below are byte-identical in the guild - no room appears - and
+ * they mean opposite things. One resets a six-day streak and one says re-run the
+ * tick. Discriminating them is a property of the gateway loop, not of the pure
+ * evaluator, so it has to be driven through a socket to be checked at all.
+ */
+
+const SELF = 'u-self';
+const GUILD = 'g-1';
+const GENERATOR = 'c-gen';
+
+/** The smallest fake gateway that `exercise()` will talk to. */
+function fakeGateway(opts: { honourTheJoin: boolean }): () => void {
+  const real = globalThis.WebSocket;
+
+  class Fake {
+    listeners = new Map<string, Array<(ev: unknown) => void>>();
+
+    constructor() {
+      // Hello, on a heartbeat interval long enough that it never fires here.
+      queueMicrotask(() => this.emit('message', { data: JSON.stringify({ op: 10, d: { heartbeat_interval: 60_000 } }) }));
+    }
+
+    addEventListener(type: string, cb: (ev: unknown) => void) {
+      this.listeners.set(type, [...(this.listeners.get(type) ?? []), cb]);
+    }
+
+    emit(type: string, ev: unknown) {
+      for (const cb of this.listeners.get(type) ?? []) cb(ev);
+    }
+
+    dispatch(t: string, d: unknown) {
+      this.emit('message', { data: JSON.stringify({ op: 0, t, d }) });
+    }
+
+    send(raw: string) {
+      const payload = JSON.parse(raw) as { op: number; d?: { channel_id?: string | null } };
+
+      if (payload.op === 2) {
+        this.dispatch('READY', { user: { id: SELF } });
+        this.dispatch('GUILD_CREATE', { id: GUILD, channels: [{ id: GENERATOR }] });
+        return;
+      }
+
+      // op 4 with a channel is our join. Honouring it means the guild reports us
+      // in voice; refusing it means total silence, exactly as Discord behaves
+      // when Connect is missing.
+      if (payload.op === 4 && payload.d?.channel_id && opts.honourTheJoin) {
+        this.dispatch('VOICE_STATE_UPDATE', { user_id: SELF, guild_id: GUILD, channel_id: GENERATOR });
+      }
+    }
+
+    close() {
+      // The caller closes once it has settled; emitting a close event here would
+      // race the verdict it just reached.
+    }
+  }
+
+  globalThis.WebSocket = Fake as unknown as typeof WebSocket;
+  return () => {
+    globalThis.WebSocket = real;
+  };
+}
+
+const drive = () =>
+  exercise({
+    token: 't',
+    guildId: GUILD,
+    generatorId: GENERATOR,
+    categoryId: 'cat',
+    windows: { createMs: 40, deleteMs: 40 },
+  });
+
+test('a join Discord never honoured is INCONCLUSIVE, not a breach', async () => {
+  const restore = fakeGateway({ honourTheJoin: false });
+  try {
+    await assert.rejects(drive(), (err: unknown) => {
+      assert.ok(err instanceof ExerciseUnavailable, `expected ExerciseUnavailable, got ${String(err)}`);
+      assert.match((err as Error).message, /join never landed/);
+      return true;
+    });
+  } finally {
+    restore();
+  }
+});
+
+test('a join that landed with no room created is a real FAIL', async () => {
+  // Same absence of a room, opposite verdict. This is the pair that makes the
+  // test above mean something: if the exercise rejected on both, it would just
+  // be refusing to ever report a breach.
+  const restore = fakeGateway({ honourTheJoin: true });
+  let evidence: ExerciseEvidence;
+  try {
+    evidence = await drive();
+  } finally {
+    restore();
+  }
+
+  assert.equal(evidence.createdRoom, null);
+  assert.ok(evidence.joinLandedMs !== null, 'the landed join must be recorded as evidence');
+
+  const result = evaluate({ ...LIVE_GUILD, exercise: evidence });
+  assert.equal(result.verdict, 'FAIL');
+  assert.ok(result.checks.find((c) => c.name === 'avc_alive' && !c.ok));
 });

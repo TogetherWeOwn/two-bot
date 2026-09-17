@@ -272,6 +272,7 @@ const baseChannels: GuildChannel[] = [
 
 /** A complete, healthy create/destroy cycle: AVC made a room, put us in it, took it back. */
 const healthyExercise: ExerciseEvidence = {
+  joinLandedMs: 118,
   createdRoom: { id: '900', name: 'Squad #1', parentId: CAT },
   createMs: 366,
   movedMs: 392,
@@ -356,10 +357,14 @@ export const FIXTURES: ReadonlyArray<{ name: string; input: TickInput; expect: '
   // every one of them is reachable with the AVC container switched off. These
   // are the cases that tell a live bot from a dead one.
   {
+    // `joinLandedMs` set is what makes this a breach rather than a bad tick: we
+    // were demonstrably sitting in voice and AVC still did nothing. The variant
+    // where the join never landed never reaches the evaluator - `exercise`
+    // rejects it as INCONCLUSIVE - which is the distinction the streak needs.
     name: 'AVC is dead: the guild looks perfect and joining the generator does nothing',
     input: {
       ...base,
-      exercise: { createdRoom: null, createMs: null, movedMs: null, deleteMs: null, residualRoomId: null },
+      exercise: { joinLandedMs: 118, createdRoom: null, createMs: null, movedMs: null, deleteMs: null, residualRoomId: null },
     },
     expect: 'FAIL',
   },
