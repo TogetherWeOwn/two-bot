@@ -42,10 +42,13 @@ it. `main` is the TypeScript rewrite and is the AGPL one.)
 
 **We now run a modified version.** The owner asked for upstream's
 `auto-voice.io · /setup` advertisement to be removed from the bot's Discord
-status. Upstream offers no way to configure it — at the pinned commit
+status, and then — 01:48Z, after seeing `/setup` alone — for the whole status to
+go. Upstream offers no way to configure either: at the pinned commit
 `bot/src/gateway/client.ts:17` is a module constant with no environment or
-database read, and it has exactly two references in the whole tree. So the only
-way to honour the request is to change the code, and §3.1 describes how.
+database read, `:50` is the `activities:` array that renders it, those are its
+only two references in the tree, and `setPresence`/`setActivity` have zero hits
+anywhere — so identify is the only place a presence is ever set. The only way to
+honour the request is to change the code, and §3.1 describes how.
 
 What that costs us, stated plainly:
 
@@ -79,9 +82,11 @@ What that costs us, stated plainly:
 > 2026-09-17; this file did not create that state, it only made it durable and
 > visible.
 
-The escape hatch, if the answer is "do not publish": set `AVC_STATUS_TEXT` to the
-empty string. The patch then does nothing, upstream runs verbatim, advert and
-all, and §1's original constraint holds again with no other change.
+The escape hatch, if the answer is "do not publish": set `AVC_STATUS_MODE` to
+`upstream`. The patch then does nothing, upstream runs verbatim, advert and all,
+and §1's original constraint holds again with no other change. Note this is an
+escape hatch from the *licence* position only — it reinstates the advertisement
+the owner asked twice to remove, so it is not a decision to take quietly.
 
 ## 2. Pinned commit and runtime
 
@@ -150,16 +155,35 @@ upstream, so the pinned commit stays an honest description of what we *build*,
 and it keeps this whole change to one reversible block in one file. A tracked
 fork was the other option on the card and is strictly worse on both counts.
 
+**Two anchors, not one.** The patch rewrites both lines of upstream's presence:
+the `SETUP_STATUS` constant at `client.ts:17` *and* the `activities:` array at
+`client.ts:50` that renders it. The array anchor is what makes **removal**
+expressible — no value of the status text can ever produce `activities: []`, and
+removal is what was actually asked for (01:48Z: *"REMOVE THE WHOLE STATUS
+PLEASE"*). A revision that only rewrote the string could change the advert but
+never delete it.
+
 | Variable | Default | Meaning |
 |---|---|---|
-| `AVC_STATUS_TEXT` | `/setup` | The status. **Empty string disables the patch** and runs upstream verbatim. |
-| `AVC_STATUS_ENFORCE` | `strict` | `strict` = refuse to start if the anchor is missing. `warn` = log and boot with upstream's advert. |
+| `AVC_STATUS_MODE` | `none` | `none` = no custom status at all. `text` = a custom status reading `AVC_STATUS_TEXT`. `upstream` = do not patch; upstream's advert in full. |
+| `AVC_STATUS_TEXT` | *(empty)* | The status text. Required and non-empty when `MODE=text`; setting it under `MODE=none` is a **hard start-up failure**, not a silent no-op. |
+| `AVC_STATUS_ENFORCE` | `strict` | `strict` = refuse to start if an anchor is missing. `warn` = log and boot with upstream's advert. Covers upstream *moving*; never covers a bad `MODE`/`TEXT` pair. |
 | `AVC_STATUS_PATCH_PATH` | `./status-patch.sh` | Host path of the script to mount. Only set it if your runner overrides the Compose project directory — see §8. |
 
-> `/setup` is a **placeholder**, chosen to strip the advert with the smallest
-> possible edit. The final text is one of the two surfaces the owner picks on
-> **TOG-3142**. When they pick, change `AVC_STATUS_TEXT` in Coolify and restart —
-> no rebuild and no new patch, which is why the text is a variable at all.
+> **The default is removal.** With no `AVC_*` variable set at all — a redeploy
+> that forgets to pass environment, a fresh Coolify app, a `docker compose up`
+> from a clean shell — the bot comes up with no custom status. The wanted
+> behaviour is what you get by doing nothing; the advert has to be asked for by
+> name. `test-status-patch.sh` G0 scrubs the environment and asserts exactly
+> that, and G0c proves the unpatched fixture really does render the advert, so
+> G0's green is the patch working and not an inert test.
+
+> **TOG-3142** no longer gates this. It did while `/setup` was a placeholder
+> status awaiting the owner's pick; the owner has since said they want no status
+> at all, so there is no template to choose. TOG-3142 still covers **channel
+> name** templates, which is a different surface. `MODE=text` is kept because it
+> costs one branch and makes a future "actually, show X" a variable change plus a
+> restart rather than a new patch.
 
 **Fail-closed by default, on purpose.** The anchor can only go missing if someone
 bumps `AVC_GIT_COMMIT`, so `strict` turns an upstream bump into a loud failure
@@ -175,18 +199,37 @@ ops/auto-voice/test-status-patch.sh
 ```
 
 It runs the shipped `status-patch.sh` itself — no copy, no extraction — so it
-cannot drift from what deploys. 41 assertions: replacement, idempotency across
-restarts, fail-closed on a moved pin (with a positive control), the `warn` hatch,
-duplicate anchors, injection safety for whatever text TOG-3142 picks, the
-128-character Discord limit, the disable switch, the compose⇄script wiring (mount
-path, entrypoint, restated CMD — the seam the split created), that the script
-stays publishable under §1.1, that `set -u` tolerates an environment with no
-`AVC_*` variable at all, and that being handed no command fails loudly instead of
-exiting 0. Each of those last five groups was checked by mutating the file and
-confirming that one assertion, and only it, goes red. Point it at a real build
-with
-`AVC_REAL_DIST=/path/to/bot/dist/gateway/client.js`; it was last run green both
-ways against a `pnpm run build` of the pinned commit on 2026-09-17.
+cannot drift from what deploys. **75 assertions**, of which the load-bearing ones
+are behavioural rather than textual: seven cases `import()` the patched module,
+call `buildGatewayClient`, and read the presence it would hand the gateway, so
+they assert what Discord renders instead of asserting that a line of text looks
+right.
+
+Covered: removal as the no-environment default (G0) with a positive control that
+the unpatched fixture really does render the advert (G0c); the advert being
+unreachable except by asking for it by name (G0b, G8); idempotency of both modes
+across a restart (G2, G13); mode switching in both directions on one writable
+layer, which `docker restart` makes reachable (G14); our own misconfiguration
+failing hard even under `warn` (G15); fail-closed on either anchor moving, with
+`MODE=none` correctly *not* requiring the constant it does not use (G3, G5, G5b,
+G16, G16b); the `warn` hatch (G4); injection safety (G6); the 128-character
+Discord limit (G7); the compose⇄script wiring — mount path, entrypoint, restated
+CMD, and both defaults — which is the seam the split created (G9); that the
+script stays publishable under §1.1 (G10); and that being handed no command fails
+loudly instead of exiting 0 (G12).
+
+Verified by mutation, not by assumption. Reverting the default mode to `text` —
+the defect the review caught — turns exactly four assertions red, G0 among them,
+with the failure printing the rendered advert. Breaking the `activities:` anchor
+turns 27 red. Restoring the file returns 75/75.
+
+Point it at a real build with `AVC_REAL_DIST=/path/to/bot/dist/gateway/client.js`
+(the `import()` cases skip there, since a real build needs `discord.js` on the
+module path). Last run 2026-09-17: **75/75 green** on the fixture and **68/68
+green, 7 skipped** against the actual `tsc --build` output of
+`bot/src/gateway/client.ts` at the pinned commit — which is what pins the two
+anchors, including the 12-space indent and the U+00B7 MIDDLE DOT, to real
+upstream bytes rather than to a hand-written approximation of them.
 
 ## 4. Coolify application
 
@@ -308,8 +351,8 @@ Fully reversible, in the order things were done:
 Nothing above touches Owen, `two-bot`'s database, or `Lobby`.
 
 **Rolling back just the status patch (TOG-3143)**, without touching anything
-else: set `AVC_STATUS_TEXT` to the empty string in Coolify and restart. Upstream
-runs verbatim, advert and all, and the §1 licence position is restored. Deleting
+else: set `AVC_STATUS_MODE=upstream` in Coolify and restart. Upstream runs
+verbatim, advert and all, and the §1 licence position is restored. Deleting
 the `volumes:`/`entrypoint:`/`command:` block from `docker-compose.yml` and
 `status-patch.sh` alongside it has the same effect permanently — remove all of
 them together, since without the `command:` line an image whose CMD is cleared
