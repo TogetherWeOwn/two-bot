@@ -85,9 +85,15 @@ two-bot app.
 |---|---|
 | Type | Docker Compose |
 | Source | the existing **two-bot** VPS git mirror |
-| Branch | `main` (after this PR merges) |
+| Branch | `main` |
 | Compose path | `ops/auto-voice/docker-compose.yml` |
-| Suggested name | `auto-voice` |
+| Name | `auto-voice` — created 2026-09-16, Coolify UUID `dygtaoqg0h4ap1dajl3pdm2d` |
+
+> ⚠️ **The deployed app still builds from `tog-3052/ops-auto-voice`, not `main`.**
+> That branch was auto-deleted when this directory merged and has been recreated
+> as a prop so the app does not break on its next redeploy. Flipping the app to
+> `main` is **TOG-3121**; the compose content is byte-identical, so it is a
+> save-only change and needs no redeploy.
 
 No mirror of the *upstream AVC* repo is needed: the build context is a pinned
 git URL, fetched by the Docker daemon at build time. If the build host cannot
@@ -115,22 +121,24 @@ A creator channel needs **all five** of these, or AVC refuses to use it
 (`bot/src/commands/setupPanel.ts:83-87`): View Channels, Connect, Manage
 Channels, **Move Members**, Manage Roles.
 
-Measured against the live guild on 2026-09-16, the managed role **`Auto-Voice`
-(`1549880755486851214`)** resolves on `Squad` (`1546777867978018887`) to:
+The managed role is **`Auto-Voice` (`1549880755486851214`)**. Measured against
+the live guild on 2026-09-17 — re-derived from the live overwrites, not read off
+the role bitfield, which reports two false gaps — it resolves on the generator
+channel (`1546777867978018887`) to:
 
-| Permission | Effective on `Squad` |
+| Permission | Effective on the generator |
 |---|---|
 | View Channels | ✅ (via `@everyone`, not the role) |
 | Connect | ✅ |
 | Manage Channels | ✅ |
-| **Move Members** | ❌ **missing — required** |
+| **Move Members** | ✅ granted 2026-09-16 22:14Z on the category |
 | Manage Roles | ✅ |
+| Administrator | ❌ — and it stays that way |
 
-**Move Members is the only gap, and it is required.** Without it the bot creates
+**Move Members was the last gap and it is required.** Without it the bot creates
 the room and then cannot move the member into it — the worst failure mode here,
-because it looks like the feature half-works. Grant it on the **🔊 VOICE
-category** (`1545924266590081115`), not server-wide, and do **not** grant
-Administrator.
+because it looks like the feature half-works. It is granted on the **🔊 VOICE
+category** (`1545924266590081115`), not server-wide.
 
 ## 6. Making `Squad` the generator
 
@@ -160,6 +168,18 @@ That file sets:
 Settings keys that are simply absent from the file are left alone, so the import
 changes exactly what is listed above and nothing else.
 
+> ⚠️ **This file was never imported, and the live guild does not match it.**
+> `/import` needs a human to attach the file in Discord, so the generator was
+> configured by writing the two rows the import would have produced. The room
+> name template was not among them: a live join on 2026-09-17 produced
+> **`Hangout #1`**, upstream's default, not `Squad #1`. The generator channel
+> itself was also renamed to **`➕ Join to Create`**.
+>
+> Two consequences. The template is cosmetic and is tracked on **TOG-3122**. The
+> **pre-import snapshot that rollback step 3 depends on does not exist**, because
+> nothing ran `/import` to emit one — so treat §7 step 2 as "clear the settings
+> rows", not "re-import the snapshot".
+
 ## 7. Rollback
 
 Fully reversible, in the order things were done:
@@ -187,3 +207,48 @@ docker compose -f ops/auto-voice/docker-compose.yml exec bot \
 
 It must equal `8fab5e8d78aa252195dcea1bcd3d313cb1ba0802`. A `dev` here means the
 build arg did not reach the builder and the deploy is unpinned.
+
+## 9. The seven-day gate
+
+Phase 2 (**TOG-3062** — porting this into Owen and retiring the second bot) is
+blocked until AVC has run clean in the live guild for seven consecutive days.
+That condition has numbers in it, so it is a script rather than a habit:
+
+```bash
+node ops/auto-voice/observe-tick.ts            # observe the live guild
+node ops/auto-voice/observe-tick.ts --selftest # drive the fixtures, no network
+```
+
+One tick per day. It needs a bot token that is already in the guild
+(`AVC_OBSERVE_TOKEN`, falling back to `DISCORD_BOT_TOKEN`) and reads the channel
+list and voice states out of a single `GUILD_CREATE`. It is **read-only** — no
+REST writes, and it never joins a voice channel, so it cannot manufacture the
+rooms it is counting.
+
+Three conditions, and the exit code is the verdict:
+
+| Check | Breached when |
+|---|---|
+| `generator_present` | the generator is gone, or left the 🔊 VOICE category |
+| `lobby_untouched` | `Lobby` is missing, moved, **or renamed** — a renamed Lobby is the signature of AVC having adopted a channel it was never given |
+| `no_ghost_rooms` | a generated room under the category has nobody in it |
+
+```
+exit 0  PASS          every condition held
+exit 1  FAIL          a condition was breached
+exit 2  INCONCLUSIVE  could not observe - no token, gateway refused, timed out
+```
+
+**Three codes, not two, on purpose.** A tick that could not reach the gateway
+must not be readable as a clean day; that is how a seven-day streak gets made of
+days nobody looked at.
+
+Any voice channel under the category that is neither the generator nor `Lobby`
+counts as a generated room. If a permanent one is added deliberately, put its id
+in `AVC_OBSERVE_IGNORE_CHANNEL_IDS` — until then it is a finding, which is the
+direction this check should fail in.
+
+The fixtures in `observe-tick.ts` are the point of the file. A ghost room, an
+adopted Lobby and a deleted generator are states the live guild will not hold
+still for, so they are the only way to know a green tick means anything;
+`test/unit.avcobserve.test.ts` runs them in CI.
