@@ -787,7 +787,7 @@ export function semanticSnapshot(input: Omit<LiveCleanupSnapshot, 'semanticHash'
     guild: normalizeGuild(input.guild),
     roles: [...input.roles].sort((a, b) => a.id.localeCompare(b.id)),
     channels: [...input.channels].map(normalizedChannel).sort((a, b) => a.id.localeCompare(b.id)),
-    members: [...input.members].map((member) => ({ ...member, roles: [...member.roles].sort() })).sort((a, b) => a.id.localeCompare(b.id)),
+    members: [...input.members].map((member) => ({ ...member, roles: normalizedMemberRoles(member.roles) })).sort((a, b) => a.id.localeCompare(b.id)),
     integrations: [...input.integrations].sort((a, b) => a.id.localeCompare(b.id)),
     // `references` is load-bearing here, not just recorded. `onboardingReferencedChannels`
     // plans off it, and a token-holder who forges `references.onboarding` onto `pre.json`
@@ -873,6 +873,37 @@ export function assertReviewedShape(snapshot: LiveCleanupSnapshot): void {
  *
  * All 191 roles on all five TOG-2907 live pre-snapshots carry all three.
  */
+/**
+ * The same collapse class as `unreadableOverwrites`, one field to the left, on the read
+ * that decides *who can still see an archived object*.
+ *
+ * `[...(member.roles ?? [])]` read a member whose role list did not answer as a member
+ * holding no roles. That is fail-closed for `assertHierarchy` — Owen with no roles has no
+ * Administrator and refuses — but it is fail-**open** for `archiveVisibilityExemptions`,
+ * which is where it matters: a collapsed read drops the member's Administrator-bearing
+ * roles, so `archiveExemption` returns null, the principal is left off the RETAINS-VIEW
+ * list, and the operator signs off on a manifest that under-reports who keeps access.
+ * Discord ignores every overwrite this phase emits for an Administrator, so that
+ * under-report cannot be corrected by any later PATCH.
+ */
+export function unreadableMemberRoles(value: unknown): string | null {
+  if (!Array.isArray(value)) return value === undefined ? 'no `roles` key at all' : `a \`roles\` that is not an array (${value === null ? 'null' : typeof value})`;
+  const index = value.findIndex((entry) => typeof entry !== 'string');
+  return index === -1 ? null : `a \`roles[${index}]\` that is not a role id string`;
+}
+
+/**
+ * A member's role list canonicalized for hashing, copying an unreadable one through
+ * **verbatim** rather than refusing — the `normalizedChannel` contract, for the same
+ * reason: capture and `semanticSnapshot` run before `pre.json` reaches disk, so throwing
+ * here would throw away the evidence of what Discord actually returned. Absence survives
+ * into the semantic hash, where it stays distinguishable from `[]`, and `assertHierarchy`
+ * is what refuses to plan on it.
+ */
+export function normalizedMemberRoles(roles: unknown): string[] {
+  return unreadableMemberRoles(roles) === null ? [...(roles as string[])].sort() : (roles as string[]);
+}
+
 export function unreadableRole(role: Role): string | null {
   const missing = ([['position', 'number'], ['managed', 'boolean'], ['permissions', 'string']] as const)
     .filter(([key, expected]) => typeof role[key] !== expected)
@@ -890,6 +921,15 @@ export function assertHierarchy(snapshot: LiveCleanupSnapshot): void {
     const unreadable = unreadableRole(role);
     if (unreadable !== null) {
       throw new Error(`Role ${role.id} carried ${unreadable}, so this snapshot cannot show Owen outranks every managed role. Planning refuses rather than read an unanswered role field as a role at the bottom of the list, or as one that is not managed at all. Re-run the dry-run from a snapshot whose role read carries \`position\`, \`managed\` and \`permissions\` on every role.`);
+    }
+  }
+  // And before any member's roles are read — by this check, by `basePermissions`, or by
+  // `archiveVisibilityExemptions`. A member whose role list did not answer is not a member
+  // holding no roles; see `unreadableMemberRoles`.
+  for (const member of snapshot.members) {
+    const unreadable = unreadableMemberRoles(member.roles);
+    if (unreadable !== null) {
+      throw new Error(`Member ${member.id} carried ${unreadable}, so this snapshot cannot show which roles that principal holds. Planning refuses rather than read an unanswered role list as a principal holding none — that principal may hold Administrator, which no PATCH this phase emits can hide an archived object from, and it would be left off the recorded visibility-exemption set. Re-run the dry-run from a snapshot whose member read carries \`roles\` on every member.`);
     }
   }
   const owenRoles = snapshot.roles.filter((role) => owenMember.roles.includes(role.id));
