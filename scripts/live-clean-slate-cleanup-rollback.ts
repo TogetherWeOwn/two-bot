@@ -15,6 +15,7 @@ import {
   assertLatestCheckpoint,
   type Channel,
   type CleanupManifest,
+  guildReferenceBlock,
   type JsonObject,
   inFlightDriftIsOurs,
   inFlightExceptionIsAvailable,
@@ -23,6 +24,7 @@ import {
   type LiveCleanupSnapshot,
   manifestInFlightId,
   normalizeOverwrites,
+  normalizedChannel,
   semanticSnapshot,
   sha256,
   stable,
@@ -30,7 +32,9 @@ import {
   planArchiveOperations,
   planSignature,
   reconcileJournalWitness,
+  type Role,
   syncedChildIds,
+  unreadableOverwrites,
 } from '../src/redesign/live-cleanup.ts';
 
 const argv = process.argv.slice(2);
@@ -40,7 +44,6 @@ const token = process.env.DISCORD_BOT_TOKEN;
 const guildId = process.env.DISCORD_GUILD_ID ?? LIVE_GUILD_ID;
 
 type ApiResult<T> = { status: number; body: T | null };
-type Role = { id: string; permissions: string; position?: number };
 type RawMember = { user?: { id: string; username?: string; bot?: boolean }; roles?: string[]; premium_since?: string | null; pending?: boolean };
 
 function die(code: number, message: string): never {
@@ -103,6 +106,11 @@ if (manifest.version !== 1 || manifest.kind !== 'live-clean-slate-cleanup' || ma
 const snapshot = JSON.parse(readFileSync(resolve(manifest.snapshotPath), 'utf8')) as LiveCleanupSnapshot;
 if (snapshot.generatedAt !== manifest.snapshotGeneratedAt) die(2, 'Pre-snapshot timestamp does not match the manifest.');
 if (snapshot.semanticHash !== manifest.snapshotSemanticHash || snapshot.semanticHash !== sha256(semanticSnapshot(snapshot))) die(2, 'Pre-snapshot hash does not match the manifest.');
+// Re-planned from the hash-bound pre-snapshot above, never from a fresh read. That is what
+// keeps the planner's Server-Guide refusals — an unreadable `/onboarding`, a pinned channel
+// synchronized with its category — from ever stranding a rollback: the references this
+// re-plan reads were captured and hashed before the first write, so it cannot start
+// refusing because the live guild changed underneath a run that needs undoing.
 const deterministicOperations = planArchiveOperations(snapshot);
 const deterministicHash = operationSemanticHash(deterministicOperations);
 
@@ -185,12 +193,18 @@ function nonChannelSemantic(
   currentOnboarding: ApiResult<JsonObject>,
   currentScreening: ApiResult<JsonObject>,
 ): JsonObject {
-  return {
+  // Built through `semanticSnapshot` rather than hand-mirrored, so both sides of the
+  // comparison below get exactly the same canonicalization. A local copy is how the
+  // sorted-`guild.features` fix first showed up here: the pre-snapshot side was
+  // canonical, this side was raw, and every rollback read it as live guild drift.
+  const { channels: _channels, ...nonChannel } = semanticSnapshot({
     version: 1,
+    generatedAt: '',
     applicationId: LIVE_BOT_APPLICATION_ID,
     guildId,
     guild: currentGuild,
-    roles: [...currentRoles].sort((a, b) => a.id.localeCompare(b.id)),
+    roles: currentRoles,
+    channels: [],
     members: rawMembers.map((member) => ({
       id: member.user?.id ?? '',
       bot: Boolean(member.user?.bot),
@@ -198,7 +212,7 @@ function nonChannelSemantic(
       roles: [...(member.roles ?? [])].sort(),
       premiumSince: member.premium_since ?? null,
       pending: Boolean(member.pending),
-    })).filter((member) => member.id).sort((a, b) => a.id.localeCompare(b.id)),
+    })).filter((member) => member.id),
     integrations: currentIntegrations.map((integration) => {
       const linkedApplication = integration.application as JsonObject | undefined;
       return {
@@ -207,20 +221,15 @@ function nonChannelSemantic(
         applicationId: typeof linkedApplication?.id === 'string' ? linkedApplication.id : null,
         roleId: typeof integration.role_id === 'string' ? integration.role_id : null,
       };
-    }).sort((a, b) => a.id.localeCompare(b.id)),
+    }),
     references: {
       welcomeScreen: { status: currentWelcome.status, body: currentWelcome.body },
       onboarding: { status: currentOnboarding.status, body: currentOnboarding.body },
       membershipScreening: { status: currentScreening.status, body: currentScreening.body },
-      guildReferences: {
-        applicationId: currentGuild.application_id ?? null,
-        systemChannelId: currentGuild.system_channel_id ?? null,
-        rulesChannelId: currentGuild.rules_channel_id ?? null,
-        publicUpdatesChannelId: currentGuild.public_updates_channel_id ?? null,
-        safetyAlertsChannelId: currentGuild.safety_alerts_channel_id ?? null,
-      },
+      guildReferences: guildReferenceBlock(currentGuild),
     },
-  };
+  });
+  return nonChannel;
 }
 
 const snapshotSemantic = semanticSnapshot(snapshot);
@@ -251,7 +260,9 @@ function operationState(operation: CleanupManifest['operations'][number], channe
   if (operation.objectType === 'channel') {
     const current = channels.get(operation.objectId);
     if (!current) return 'drifted';
-    const overwrites = stable(normalizeOverwrites(current.permission_overwrites ?? []));
+    // `?? []` here decided `applied` vs `inverse` vs `drifted` off an invented empty
+    // list, which is the verdict that picks whether this object is PATCHed at all.
+    const overwrites = stable(normalizeOverwrites(current.permission_overwrites, `Live read of channel ${operation.objectId}`));
     if (expectedApplied === expectedInverse && overwrites === expectedInverse) return 'inverse';
     if (overwrites === expectedApplied) return 'applied';
     if (overwrites === expectedInverse) return 'inverse';
@@ -261,12 +272,12 @@ function operationState(operation: CleanupManifest['operations'][number], channe
     return 'drifted';
   }
   const affected = [operation.objectId, ...snapshot.channels
-    .filter((channel) => channel.parent_id === operation.objectId && stable(normalizeOverwrites(channel.permission_overwrites ?? [])) === expectedInverse)
+    .filter((channel) => channel.parent_id === operation.objectId && stable(normalizeOverwrites(channel.permission_overwrites, `Snapshot channel ${channel.id}`)) === expectedInverse)
     .map((channel) => channel.id)];
   const states = affected.map((id) => {
     const current = channels.get(id);
     if (!current) return 'drifted';
-    const overwrites = stable(normalizeOverwrites(current.permission_overwrites ?? []));
+    const overwrites = stable(normalizeOverwrites(current.permission_overwrites, `Live read of channel ${id}`));
     if (overwrites === expectedApplied) return 'applied';
     if (overwrites === expectedInverse) return 'inverse';
     return 'drifted';
@@ -301,7 +312,7 @@ const inFlightCandidate = inFlight[0] ?? null;
 const witnessAgrees = inFlightCandidate !== null
   && manifestInFlightId(manifest) === inFlightCandidate.id
   && inFlightExceptionIsAvailable(token, manifest, manifestPath);
-const inFlightId = witnessAgrees && inFlightDriftIsOurs(snapshot, inFlightCandidate!, new Map(preRollbackChannels.map((channel) => [channel.id, normalizeOverwrites(channel.permission_overwrites ?? [])])))
+const inFlightId = witnessAgrees && inFlightDriftIsOurs(snapshot, inFlightCandidate!, new Map(preRollbackChannels.map((channel) => [channel.id, normalizeOverwrites(channel.permission_overwrites, `Live read of channel ${channel.id}`)])))
   ? inFlightCandidate!.id
   : null;
 if (inFlightCandidate !== null && inFlightId === null) {
@@ -320,8 +331,8 @@ for (const current of preRollbackChannels) {
   const operation = manifest.operations.find((item) => item.objectId === current.id || item.objectId === current.parent_id);
   if (operation) continue;
   const original = snapshot.channels.find((channel) => channel.id === current.id)!;
-  const currentShape = { ...current, permission_overwrites: normalizeOverwrites(current.permission_overwrites ?? []) };
-  const originalShape = { ...original, permission_overwrites: normalizeOverwrites(original.permission_overwrites ?? []) };
+  const currentShape = { ...current, permission_overwrites: normalizeOverwrites(current.permission_overwrites, `Live read of untouched channel ${current.id}`) };
+  const originalShape = { ...original, permission_overwrites: normalizeOverwrites(original.permission_overwrites, `Pre-snapshot channel ${original.id}`) };
   if (stable(currentShape) !== stable(originalShape)) die(1, `Rollback preflight untouched channel ${current.id} drifted from the pre-snapshot.`);
 }
 manifest.status = 'rolling_back';
@@ -350,11 +361,14 @@ for (const operation of [...manifest.operations].reverse()) {
     checkpoint(manifestPath, manifest);
     die(1, `Rollback failed for ${operation.id}: HTTP ${result.status}. No retry was attempted.`);
   }
-  const restored = normalizeOverwrites(result.body.permission_overwrites ?? []);
-  if (stable(restored) !== stable(operation.inverseWrite.permission_overwrites)) {
+  // Post-write, so an unreadable response is folded into the existing partial-restore
+  // branch rather than thrown past it: the PATCH has already reached Discord and this
+  // run owes the manifest a `rollback_failed` checkpoint before it stops.
+  const unreadableRestore = unreadableOverwrites(result.body.permission_overwrites);
+  if (unreadableRestore !== null || stable(normalizeOverwrites(result.body.permission_overwrites)) !== stable(operation.inverseWrite.permission_overwrites)) {
     manifest.status = 'rollback_failed';
     checkpoint(manifestPath, manifest);
-    die(1, `Rollback returned a partial/unexpected state for ${operation.id}.`);
+    die(1, `Rollback returned a partial/unexpected state for ${operation.id}${unreadableRestore === null ? '' : `: the response carried ${unreadableRestore}, so what the restore left behind is unknown`}.`);
   }
   // Discord's sync only carries children that matched the category's *previous* value,
   // so a category left at a partial value re-syncs nothing and its children stay where
@@ -364,12 +378,23 @@ for (const operation of [...manifest.operations].reverse()) {
   // operation already checkpointed, leaving nothing for a retry to re-enter.
   for (const childId of syncedChildIds(snapshot, operation)) {
     const child = (await mustGet<Channel>(`/channels/${childId}`, `Read rollback child ${childId}`));
-    if (stable(normalizeOverwrites(child.permission_overwrites ?? [])) === stable(operation.inverseWrite.permission_overwrites)) continue;
-    const childResult = await api<Channel>('PATCH', `/channels/${childId}`, operation.inverseWrite);
-    if (childResult.status === 429 || childResult.status >= 300 || !childResult.body || stable(normalizeOverwrites(childResult.body.permission_overwrites ?? [])) !== stable(operation.inverseWrite.permission_overwrites)) {
+    // `?? []` here answered "does this child still need restoring?" with an invented
+    // empty list, and an empty list never equals `inverseWrite`, so an unreadable read
+    // meant a PATCH the run could not justify. Both this read and the response below
+    // are past the parent's write, so they checkpoint `rollback_failed` rather than throw.
+    const unreadableChild = unreadableOverwrites(child.permission_overwrites);
+    if (unreadableChild !== null) {
       manifest.status = 'rollback_failed';
       checkpoint(manifestPath, manifest);
-      die(1, `Rollback could not restore synchronized child ${childId} of ${operation.id}: HTTP ${childResult.status}. No retry was attempted.`);
+      die(1, `Rollback could not read synchronized child ${childId} of ${operation.id}: the 200 carried ${unreadableChild}, so whether it still holds the applied value is unknown.`);
+    }
+    if (stable(normalizeOverwrites(child.permission_overwrites)) === stable(operation.inverseWrite.permission_overwrites)) continue;
+    const childResult = await api<Channel>('PATCH', `/channels/${childId}`, operation.inverseWrite);
+    const unreadableChildResult = childResult.body === null ? null : unreadableOverwrites(childResult.body.permission_overwrites);
+    if (childResult.status === 429 || childResult.status >= 300 || !childResult.body || unreadableChildResult !== null || stable(normalizeOverwrites(childResult.body.permission_overwrites)) !== stable(operation.inverseWrite.permission_overwrites)) {
+      manifest.status = 'rollback_failed';
+      checkpoint(manifestPath, manifest);
+      die(1, `Rollback could not restore synchronized child ${childId} of ${operation.id}: HTTP ${childResult.status}${unreadableChildResult === null ? '' : `, and the response carried ${unreadableChildResult}`}. No retry was attempted.`);
     }
     console.log(`RESYNCED ${childId} under ${operation.id}`);
   }
@@ -399,7 +424,9 @@ const restored = {
   guildId,
   guild: postGuild,
   roles: postRoles as LiveCleanupSnapshot['roles'],
-  channels: currentChannels.map((channel) => ({ ...channel, permission_overwrites: normalizeOverwrites(channel.permission_overwrites ?? []) })),
+  // Same mapper capture uses, so an unreadable post-rollback channel stays distinguishable
+  // from an empty one inside the hash instead of matching a pre-snapshot that was empty.
+  channels: currentChannels.map(normalizedChannel),
   members: postMembers.map((member) => ({
     id: member.user?.id ?? '',
     bot: Boolean(member.user?.bot),
@@ -421,13 +448,7 @@ const restored = {
     welcomeScreen: { status: postWelcome.status, body: postWelcome.body },
     onboarding: { status: postOnboarding.status, body: postOnboarding.body },
     membershipScreening: { status: postScreening.status, body: postScreening.body },
-    guildReferences: {
-      applicationId: postGuild.application_id ?? null,
-      systemChannelId: postGuild.system_channel_id ?? null,
-      rulesChannelId: postGuild.rules_channel_id ?? null,
-      publicUpdatesChannelId: postGuild.public_updates_channel_id ?? null,
-      safetyAlertsChannelId: postGuild.safety_alerts_channel_id ?? null,
-    },
+    guildReferences: guildReferenceBlock(postGuild),
   },
 };
 const restoredHash = sha256(semanticSnapshot(restored));

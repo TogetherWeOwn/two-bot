@@ -50,9 +50,20 @@ type State = {
 type Stub = {
   base: string;
   state: State;
+  /** Mutable Server Guide payload, served from `GET /guilds/{id}/onboarding`. */
+  references: { onboarding: JsonObject };
+  /** Every `guild.features` ordering this stub has served, newest last. */
+  featureOrders: string[];
   writes: Array<{ method: string; path: string; body: unknown }>;
   writeOrder: string[];
   rollbackOrder: string[];
+  failOnboardingRead(status: number): void;
+  /**
+   * Serve `GET /onboarding` as a raw body; `null` payload sends no body at all. `status`
+   * defaults to 200 so a caller that only shapes the body keeps reading an authoritative
+   * answer; pass a non-200 to pin the status half of the readability gate.
+   */
+  serveOnboardingRaw(contentType: string, payload: string | null, status?: number): void;
   failNextWrite(status: number): void;
   partialNextWrite(): void;
   /** Tear the write to one specific object rather than whichever comes first. */
@@ -62,6 +73,12 @@ type Stub = {
    * is decided by value, this also drops the child out of the synchronized set.
    */
   desyncChild(childId: string, overwrites: Channel['permission_overwrites']): void;
+  /**
+   * Omit `permission_overwrites` from the single-object read `GET /channels/{id}` only,
+   * leaving the list read complete. That splits the plan from apply's own second-opinion
+   * read, so a test can pin the apply-side gate on a plan built from a full answer.
+   */
+  hideOverwritesOnObjectRead(objectId: string): void;
   close(): Promise<void>;
 };
 type Run = { code: number; stdout: string; stderr: string };
@@ -101,9 +118,19 @@ async function stubDiscord(): Promise<Stub> {
   const writes: Stub['writes'] = [];
   const writeOrder: string[] = [];
   const rollbackOrder: string[] = [];
+  // Measured live across five TOG-2907 pre-snapshots, `GET /guilds/{id}/onboarding`
+  // returns `guild_id`, `prompts`, `default_channel_ids`, `enabled` and `mode` on every
+  // 200 — `default_channel_ids` is always present, empty or not. The stub used to omit it,
+  // which is what let a status-only readability gate look total (TOG-3060).
+  const references: Stub['references'] = { onboarding: { enabled: false, default_channel_ids: [], prompts: [] } };
+  const featureOrders: string[] = [];
+  let guildReads = 0;
   let nextFailure = 0;
   let partialNextWrite = false;
   let partialWriteTarget: string | null = null;
+  let onboardingStatus = 200;
+  let onboardingRaw: { contentType: string; payload: string | null; status: number } | null = null;
+  const hiddenOverwriteReads = new Set<string>();
   const server: Server = createServer((req, res) => {
     const method = req.method ?? 'GET';
     const path = req.url ?? '';
@@ -156,17 +183,48 @@ async function stubDiscord(): Promise<Stub> {
     }
     if (path === '/api/v10/users/@me') return send(200, { id: LIVE_BOT_APPLICATION_ID });
     if (path === '/api/v10/users/@me/guilds') return send(200, [{ id: LIVE_GUILD_ID }]);
-    if (path === `/api/v10/guilds/${LIVE_GUILD_ID}`) return send(200, state.guild);
+    if (path === `/api/v10/guilds/${LIVE_GUILD_ID}`) {
+      // Discord hands back `features` in a different order on essentially every
+      // request, so every hash the tooling compares across two reads has to survive
+      // that. Rotating it on each GET keeps the whole suite honest about it rather
+      // than parking the behaviour in one test nobody else exercises.
+      const features = Array.isArray(state.guild.features) ? state.guild.features as string[] : [];
+      const at = features.length === 0 ? 0 : guildReads++ % features.length;
+      const rotated = [...features.slice(at), ...features.slice(0, at)];
+      featureOrders.push(rotated.join(','));
+      return send(200, { ...state.guild, features: rotated });
+    }
     if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/roles`) return send(200, state.roles);
     if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/channels`) return send(200, state.channels);
     if (path.startsWith(`/api/v10/guilds/${LIVE_GUILD_ID}/members?`)) return send(200, state.members);
     if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/integrations`) return send(200, state.integrations);
     if (path === '/api/v10/oauth2/applications/@me') return send(200, state.application);
     if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/welcome-screen`) return send(200, { enabled: true });
-    if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/onboarding`) return send(200, { enabled: false, prompts: [] });
+    // `captureSnapshot` reads this one best-effort, so the stub has to be able to fail it
+    // the way Discord does — an error body, not the onboarding object with a bad status.
+    if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/onboarding`) {
+      // A 200 that is not a Server Guide payload: an edge interstitial, an empty body, a
+      // rate-limit object. `api()` reduces every one of these to `{status: 200, body: …}`
+      // with nothing the derivation can read, so the stub has to serve the raw bytes
+      // rather than a JSON value the test helper would re-encode.
+      if (onboardingRaw !== null) {
+        const { contentType, payload, status } = onboardingRaw;
+        if (payload === null) return res.writeHead(status, { 'content-type': contentType }).end();
+        res.writeHead(status, { 'content-type': contentType, 'content-length': Buffer.byteLength(payload) });
+        return res.end(payload);
+      }
+      return onboardingStatus === 200 ? send(200, references.onboarding) : send(onboardingStatus, { message: 'stubbed failure', code: 0 });
+    }
     if (path === `/api/v10/guilds/${LIVE_GUILD_ID}/member-verification`) return send(200, { form_fields: [] });
     const channel = /\/channels\/(\d+)$/.exec(path);
-    if (channel) return send(200, state.channels.find((item) => item.id === channel[1]) ?? {});
+    if (channel) {
+      const found = state.channels.find((item) => item.id === channel[1]);
+      if (found && hiddenOverwriteReads.has(found.id)) {
+        const { permission_overwrites: _absent, ...rest } = found;
+        return send(200, rest);
+      }
+      return send(200, found ?? {});
+    }
     return send(404, { path });
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -174,15 +232,20 @@ async function stubDiscord(): Promise<Stub> {
   return {
     base: `http://127.0.0.1:${port}/api/v10`,
     state,
+    references,
+    featureOrders,
     writes,
     writeOrder,
     rollbackOrder,
+    failOnboardingRead(status: number) { onboardingStatus = status; },
+    serveOnboardingRaw(contentType: string, payload: string | null, status = 200) { onboardingRaw = { contentType, payload, status }; },
     failNextWrite(status: number) { nextFailure = status; },
     partialNextWrite() { partialNextWrite = true; },
     partialWriteOn(objectId: string) { partialNextWrite = true; partialWriteTarget = objectId; },
     desyncChild(childId: string, overwrites: Channel['permission_overwrites']) {
       state.channels.find((item) => item.id === childId)!.permission_overwrites = structuredClone(overwrites);
     },
+    hideOverwritesOnObjectRead(objectId: string) { hiddenOverwriteReads.add(objectId); },
     close: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }
@@ -298,6 +361,488 @@ test('production-shaped 51-channel drift fixture pins 69 stable operations and d
     const secondManifest = JSON.parse(readFileSync(planManifestPath(secondDir), 'utf8')) as CleanupManifest;
     assert.equal(secondManifest.operationSemanticHash, firstManifest.operationSemanticHash);
     assert.deepEqual(secondManifest.operations.map((operation) => operation.id), firstManifest.operations.map((operation) => operation.id));
+  } finally { await stub.close(); }
+});
+
+/**
+ * The live failure this pins (TOG-2806, 2026-09-16): `--apply` refused 15 consecutive
+ * times with `Live state drifted`, because `guild.features` comes back in a fresh
+ * order per request and the snapshot hash therefore never repeated. Two reads three
+ * minutes apart were set-equal and hash-different. Nothing about the guild changed.
+ */
+test('a reordered guild.features is not live drift, through plan, apply and rollback', async () => {
+  const stub = await stubDiscord();
+  try {
+    const firstDir = mkdtempSync(join(tmpdir(), 'two-live-clean-features-a-'));
+    const first = await plan(stub, firstDir);
+    assert.equal(first.code, 0, first.stderr);
+    const secondDir = mkdtempSync(join(tmpdir(), 'two-live-clean-features-b-'));
+    const second = await plan(stub, secondDir);
+    assert.equal(second.code, 0, second.stderr);
+    // The guild is untouched between these two reads, so the semantic hash — which
+    // excludes generatedAt — has to be identical, whatever order the features arrived in.
+    const firstSnapshot = JSON.parse(readFileSync(join(firstDir, 'snapshot', 'pre.json'), 'utf8')) as LiveCleanupSnapshot;
+    const secondSnapshot = JSON.parse(readFileSync(join(secondDir, 'snapshot', 'pre.json'), 'utf8')) as LiveCleanupSnapshot;
+    assert.ok(stub.featureOrders.length >= 2, 'the stub must have served the guild more than once');
+    assert.ok(new Set(stub.featureOrders).size > 1, 'the stub must have served more than one feature ordering');
+    assert.equal(secondSnapshot.semanticHash, firstSnapshot.semanticHash);
+    // And the drift gate that consumes that hash has to agree, which is the part the
+    // operator could not get past: apply re-reads the guild before its first write.
+    const applied = await apply(stub, firstDir);
+    assert.equal(applied.code, 0, applied.stderr);
+    assert.doesNotMatch(applied.stderr, /Live state drifted/);
+    // Rollback re-reads it again and compares the non-channel half against the
+    // pre-snapshot, so a second canonicalization site would surface right here.
+    const restored = await rollback(stub, firstDir);
+    assert.equal(restored.code, 0, restored.stderr);
+    assert.doesNotMatch(restored.stderr, /non-channel drift/);
+  } finally { await stub.close(); }
+});
+
+/**
+ * Discord answers 400 code 350003 `Onboarding channels must be readable by everyone`
+ * for any channel the Server Guide or the community guild references point at, and a
+ * bot cannot clear the reference (403 code 20001 on `PUT /guilds/{id}/onboarding`).
+ * Measured live on TOG-2806: apply stopped on operation 31 and five reviewed legacy
+ * channels stayed visible. The plan has to say so up front instead of dying into it.
+ */
+test('a Server Guide reference drops its channel from the plan and is reported, not hidden', async () => {
+  const stub = await stubDiscord();
+  try {
+    const pinned = PERMISSION_DRIFT.mismatches[0]!.channelId;
+    const promptId = ID(90);
+    stub.references.onboarding = {
+      enabled: true,
+      default_channel_ids: [],
+      prompts: [{ id: promptId, options: [{ id: ID(91), channel_ids: [pinned] }] }],
+    };
+    const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-onboarding-'));
+    const result = await plan(stub, dir);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(stub.writes.length, 0);
+    const manifest = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    assert.equal(manifest.operationCount, EXPECTED_OPERATIONS.operationCount - 1);
+    assert.equal(manifest.operations.filter((operation) => operation.objectId === pinned).length, 0);
+    assert.deepEqual(manifest.onboardingExclusions, [{ channelId: pinned, referencedBy: [`onboarding.prompt:${promptId}`] }]);
+    assert.match(result.stdout, new RegExp(`STAYS-VISIBLE ${pinned}`));
+    assert.match(result.stdout, /will hide: 111 of 112/);
+    // A manifest that under-reports its exclusions claims to hide all 112 while
+    // planning 68 operations, which is exactly the shape the operator would sign off
+    // on by mistake. The exclusion list is outside the plan signature — like the
+    // exemption set — so apply has to check it against the live guild itself.
+    writeFileSync(planManifestPath(dir), `${JSON.stringify({ ...manifest, onboardingExclusions: [] }, null, 2)}\n`);
+    chmodSync(planManifestPath(dir), 0o600);
+    const applied = await apply(stub, dir);
+    assert.equal(applied.code, 1);
+    assert.equal(stub.writes.length, 0);
+    assert.match(applied.stderr, /Manifest onboarding exclusions do not match/);
+  } finally { await stub.close(); }
+});
+
+test('guild references exclude too, and a Server Guide that is off pins nothing', async () => {
+  const stub = await stubDiscord();
+  try {
+    const pinned = PERMISSION_DRIFT.mismatches[1]!.channelId;
+    stub.state.guild.rules_channel_id = pinned;
+    const referencedDir = mkdtempSync(join(tmpdir(), 'two-live-clean-rules-ref-'));
+    const referenced = await plan(stub, referencedDir);
+    assert.equal(referenced.code, 0, referenced.stderr);
+    const referencedManifest = JSON.parse(readFileSync(planManifestPath(referencedDir), 'utf8')) as CleanupManifest;
+    assert.deepEqual(referencedManifest.onboardingExclusions, [{ channelId: pinned, referencedBy: ['guild.rules_channel_id'] }]);
+    assert.equal(referencedManifest.operationCount, EXPECTED_OPERATIONS.operationCount - 1);
+    // A Server Guide that is switched off pins nothing, so excluding its channels
+    // would leave them visible for no reason. Without this the `enabled` gate is free
+    // to be vacuous.
+    // `null`, not `delete`: Discord sends the key on every guild read and answers `null`
+    // when the guild pins nothing. Absence means the read did not answer, which the
+    // planner now refuses — see the guild-reference readability test below.
+    stub.state.guild.rules_channel_id = null;
+    stub.references.onboarding = {
+      enabled: false,
+      default_channel_ids: [pinned],
+      prompts: [{ id: ID(92), options: [{ id: ID(93), channel_ids: [PERMISSION_DRIFT.mismatches[0]!.channelId] }] }],
+    };
+    const offDir = mkdtempSync(join(tmpdir(), 'two-live-clean-guide-off-'));
+    const off = await plan(stub, offDir);
+    assert.equal(off.code, 0, off.stderr);
+    const offManifest = JSON.parse(readFileSync(planManifestPath(offDir), 'utf8')) as CleanupManifest;
+    assert.deepEqual(offManifest.onboardingExclusions, []);
+    assert.equal(offManifest.operationCount, EXPECTED_OPERATIONS.operationCount);
+  } finally { await stub.close(); }
+});
+
+test('a pinned channel synchronized with its legacy category refuses the whole plan', async () => {
+  const stub = await stubDiscord();
+  try {
+    const drifted = new Set(PERMISSION_DRIFT.mismatches.map((mismatch) => mismatch.channelId));
+    const synchronized = LEGACY_CHANNEL_IDS.find((id) => !drifted.has(id))!;
+    const parentId = stub.state.channels.find((channel) => channel.id === synchronized)!.parent_id!;
+    stub.references.onboarding = {
+      enabled: true,
+      default_channel_ids: [synchronized],
+      prompts: [],
+    };
+    const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-guide-synced-'));
+    const result = await plan(stub, dir);
+    // Skipping the channel PATCH would not save it: the category deny reaches it by
+    // inheritance, through a write Discord never gets the chance to refuse. There is
+    // no honest partial plan, so refuse and name the reference to move.
+    assert.notEqual(result.code, 0);
+    assert.equal(stub.writes.length, 0);
+    assert.match(result.stderr, new RegExp(`Reviewed legacy channel ${synchronized} is pinned publicly readable`));
+    assert.match(result.stderr, new RegExp(`permission-synchronized with category ${parentId}`));
+    // The refusal still has to leave the stop evidence behind.
+    assert.ok(existsSync(join(dir, 'snapshot', 'pre.json')));
+  } finally { await stub.close(); }
+});
+
+/**
+ * The Server Guide read is best-effort in `captureSnapshot` — a transient failure must not
+ * cost the pre-snapshot. But this PR promoted it from evidence to a planning input, and an
+ * error body has no `enabled`/`default_channel_ids`/`prompts`, so a 403/429/500 is
+ * indistinguishable from a Server Guide that pins nothing. Nothing downstream catches it:
+ * `assertManifest` compares dry-run against apply and both read the same failing endpoint,
+ * and the independent audit derives its exclusions from the same field. Left unguarded the
+ * synchronized case is silent — no exclusion, so no refusal, no channel PATCH for Discord
+ * to answer 350003 to, and the category deny hides the pinned channel by inheritance while
+ * the run reports `will hide: 112 of 112` and exits 0.
+ */
+test('an unreadable Server Guide refuses the plan instead of pinning nothing', async () => {
+  for (const status of [403, 429, 500]) {
+    const stub = await stubDiscord();
+    try {
+      const drifted = new Set(PERMISSION_DRIFT.mismatches.map((mismatch) => mismatch.channelId));
+      const synchronized = LEGACY_CHANNEL_IDS.find((id) => !drifted.has(id))!;
+      // Read at 200 this pins a synchronized legacy channel, which refuses loudly. The
+      // failing read must not turn that refusal into a clean 69-operation plan.
+      stub.references.onboarding = { enabled: true, default_channel_ids: [synchronized], prompts: [] };
+      stub.failOnboardingRead(status);
+      const dir = mkdtempSync(join(tmpdir(), `two-live-clean-guide-${status}-`));
+      const result = await plan(stub, dir);
+      assert.notEqual(result.code, 0);
+      assert.equal(stub.writes.length, 0);
+      assert.match(result.stderr, new RegExp(`Server Guide .* answered HTTP ${status}`));
+      assert.ok(!existsSync(planManifestPath(dir)), `HTTP ${status} produced a plan manifest`);
+      // Refusing still has to leave the stop evidence behind.
+      assert.ok(existsSync(join(dir, 'snapshot', 'pre.json')));
+    } finally { await stub.close(); }
+  }
+});
+
+/**
+ * Round 8 (TOG-3060): gating the status alone is the same defect one field to the left.
+ * `api()` records `body: await response.json().catch(() => null)`, so a 200 that is not a
+ * Server Guide payload arrives as `status: 200` with nothing the derivation can read — and
+ * reads exactly like a guild that pins nothing. Reproduced 5/5 before the readability gate:
+ * every body below planned clean, exit 0, `onboardingExclusions: []`, 69 operations,
+ * `will hide: 112 of 112`. The error-object case needs no parse failure at all.
+ *
+ * Driven with a *synchronized* pinned channel, because that is the silent half: a real 200
+ * refuses the whole plan, so anything that still exits 0 has lost the answer.
+ */
+test('a 200 that is not a Server Guide payload refuses the plan', async () => {
+  const bodies: Array<{ label: string; contentType: string; payload: string | null }> = [
+    { label: 'html interstitial', contentType: 'text/html', payload: '<!doctype html><title>error</title>' },
+    { label: 'empty body', contentType: 'application/json', payload: null },
+    { label: 'json null', contentType: 'application/json', payload: 'null' },
+    { label: 'json array', contentType: 'application/json', payload: '[]' },
+    { label: 'rate limit object', contentType: 'application/json', payload: JSON.stringify({ message: 'You are being rate limited.', code: 0, retry_after: 1.5 }) },
+    { label: 'server guide missing default_channel_ids', contentType: 'application/json', payload: JSON.stringify({ guild_id: LIVE_GUILD_ID, enabled: true, prompts: [] }) },
+    { label: 'server guide missing prompts', contentType: 'application/json', payload: JSON.stringify({ guild_id: LIVE_GUILD_ID, enabled: true, default_channel_ids: [] }) },
+  ];
+  for (const { label, contentType, payload } of bodies) {
+    const stub = await stubDiscord();
+    try {
+      const drifted = new Set(PERMISSION_DRIFT.mismatches.map((mismatch) => mismatch.channelId));
+      const synchronized = LEGACY_CHANNEL_IDS.find((id) => !drifted.has(id))!;
+      stub.references.onboarding = { enabled: true, default_channel_ids: [synchronized], prompts: [] };
+      stub.serveOnboardingRaw(contentType, payload);
+      const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-guide-unreadable-'));
+      const result = await plan(stub, dir);
+      assert.notEqual(result.code, 0, `${label} produced a plan`);
+      assert.equal(stub.writes.length, 0, label);
+      assert.match(result.stderr, /is not a Server Guide payload/, label);
+      assert.ok(!existsSync(planManifestPath(dir)), `${label} produced a plan manifest`);
+      // Refusing still has to leave the stop evidence behind.
+      assert.ok(existsSync(join(dir, 'snapshot', 'pre.json')), label);
+    } finally { await stub.close(); }
+  }
+});
+
+/**
+ * The status half of the Server Guide gate, pinned on its own.
+ *
+ * Readability subsumes the status check for every body Discord actually sends with an
+ * error, so deleting `onboardingStatus !== 200 ||` left the suite green — genuine
+ * defence in depth, but unpinned, which means a refactor can delete it and stay green.
+ * This is the case that needs it: a non-200 carrying a well-formed Server Guide payload,
+ * the shape a caching proxy or an edge that replays a stale body produces. A 429 is not
+ * an authoritative answer about what the guild pins right now no matter how well-formed
+ * its body is, so readability alone must not be enough to clear it.
+ */
+test('a non-200 carrying a well-formed Server Guide payload still refuses the plan', async () => {
+  const stub = await stubDiscord();
+  try {
+    const drifted = new Set(PERMISSION_DRIFT.mismatches.map((mismatch) => mismatch.channelId));
+    const synchronized = LEGACY_CHANNEL_IDS.find((id) => !drifted.has(id))!;
+    // Read at 200 this pins a synchronized legacy channel, which refuses loudly; the
+    // point is that the refusal must come from the status, not from that.
+    stub.serveOnboardingRaw('application/json', JSON.stringify({
+      guild_id: LIVE_GUILD_ID,
+      enabled: true,
+      default_channel_ids: [synchronized],
+      prompts: [],
+    }), 429);
+    const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-guide-stale-'));
+    const result = await plan(stub, dir);
+    assert.notEqual(result.code, 0);
+    assert.equal(stub.writes.length, 0);
+    assert.match(result.stderr, /Server Guide .* answered HTTP 429/);
+    assert.ok(!existsSync(planManifestPath(dir)));
+    assert.ok(existsSync(join(dir, 'snapshot', 'pre.json')));
+  } finally { await stub.close(); }
+});
+
+/**
+ * The same defect class as the two tests above, on the source that actually pins channels
+ * on this guild: all five TOG-2907 pre-snapshots have `onboarding.enabled === false`, so
+ * the Server Guide contributes 0 exclusions and both real ones come from `guildReferences`.
+ *
+ * `guild` is a `mustGet`, so no transport failure reaches the derivation — what does is
+ * field-level absence inside a 200, which a status code does not rule out. Before the
+ * gate, on the live 2026-09-16T12:20:52Z pre-snapshot: 67 operations excluding
+ * 1132448261253369939 and 1138590808715571300, against 69 with both PATCHed — and those
+ * two PATCHes are the 400/350003 that stopped the TOG-2806 apply on operation 31.
+ *
+ * Driven, like the Server Guide cases, off a channel *synchronized* with its category:
+ * that is the silent half, where losing the exclusion loses a refusal rather than
+ * producing a PATCH Discord would have rejected.
+ */
+test('an unreadable guild reference block refuses the plan', async () => {
+  const variants: Array<{ label: string; wreck: (guild: JsonObject) => void }> = [
+    { label: 'all three keys absent', wreck: (guild) => { delete guild.rules_channel_id; delete guild.public_updates_channel_id; delete guild.safety_alerts_channel_id; } },
+    { label: 'one key absent', wreck: (guild) => { delete guild.public_updates_channel_id; } },
+    { label: 'key present but not a channel id', wreck: (guild) => { guild.safety_alerts_channel_id = { id: '1' }; } },
+  ];
+  for (const { label, wreck } of variants) {
+    const stub = await stubDiscord();
+    try {
+      const drifted = new Set(PERMISSION_DRIFT.mismatches.map((mismatch) => mismatch.channelId));
+      const synchronized = LEGACY_CHANNEL_IDS.find((id) => !drifted.has(id))!;
+      stub.state.guild.rules_channel_id = synchronized;
+      wreck(stub.state.guild);
+      const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-guild-refs-'));
+      const result = await plan(stub, dir);
+      assert.notEqual(result.code, 0, `${label} produced a plan`);
+      assert.equal(stub.writes.length, 0, label);
+      assert.match(result.stderr, /Guild references \(GET \/guilds\/\{id\}\) carried no/, label);
+      assert.ok(!existsSync(planManifestPath(dir)), `${label} produced a plan manifest`);
+      // Refusing still has to leave the stop evidence behind.
+      assert.ok(existsSync(join(dir, 'snapshot', 'pre.json')), label);
+    } finally { await stub.close(); }
+  }
+});
+
+/**
+ * The guild-reference defect class again, on the field that carries this phase's entire
+ * rollback guarantee. `permission_overwrites ?? []` read a channel object that arrived
+ * inside a 200 without the key as a channel with no overwrites — and that invented empty
+ * list is what gets signed as the operation's `expectedBefore` *and* its `inverseWrite`,
+ * so rollback would have deleted the overwrites it promises to restore rather than merely
+ * failing to restore them.
+ *
+ * Measured on the live 2026-09-16T12:20:52Z pre-snapshot before the gate: dropping the key
+ * from channel 1047562772407398500 left all 67 operations in place and shipped a *signed*
+ * `inverseWrite` of 0 overwrites against its 2 real ones. Nothing downstream could catch
+ * it — apply re-reads the same collapsed field and agrees with the plan.
+ *
+ * Driven off both halves, because they fail differently: a drifted channel is its own
+ * operation, and its category decides the synchronized set that picks which children are
+ * written at all.
+ */
+test('a channel that omits permission_overwrites inside a 200 refuses the plan', async () => {
+  const drifted = PERMISSION_DRIFT.mismatches[0]!;
+  const variants: Array<{ label: string; wreck: (state: State) => void; expect: RegExp }> = [
+    {
+      label: 'absent on a drifted legacy channel',
+      wreck: (state) => { delete (state.channels.find((channel) => channel.id === drifted.channelId) as Partial<Channel>).permission_overwrites; },
+      expect: new RegExp(`Reviewed object ${drifted.channelId} carried no \`permission_overwrites\` key at all`),
+    },
+    {
+      label: 'absent on the parent legacy category',
+      wreck: (state) => { delete (state.channels.find((channel) => channel.id === drifted.parentId) as Partial<Channel>).permission_overwrites; },
+      expect: new RegExp(`Reviewed object ${drifted.parentId} carried no \`permission_overwrites\` key at all`),
+    },
+    {
+      label: 'present but null',
+      wreck: (state) => { (state.channels.find((channel) => channel.id === drifted.channelId) as JsonObject).permission_overwrites = null; },
+      expect: /carried a `permission_overwrites` that is not an array \(null\)/,
+    },
+    {
+      label: 'an entry with no allow/deny',
+      wreck: (state) => { state.channels.find((channel) => channel.id === drifted.channelId)!.permission_overwrites = [{ id: LIVE_GUILD_ID, type: 0 } as unknown as Overwrite]; },
+      expect: /carried a `permission_overwrites\[0\]` with no readable `allow`, `deny`/,
+    },
+  ];
+  for (const { label, wreck, expect } of variants) {
+    const stub = await stubDiscord();
+    try {
+      wreck(stub.state);
+      const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-absent-overwrites-'));
+      const result = await plan(stub, dir);
+      assert.notEqual(result.code, 0, `${label} produced a plan`);
+      assert.equal(stub.writes.length, 0, label);
+      assert.match(result.stderr, expect, label);
+      assert.ok(!existsSync(planManifestPath(dir)), `${label} produced a plan manifest`);
+      // The unanswered read is the evidence; refusing must not destroy it.
+      assert.ok(existsSync(join(dir, 'snapshot', 'pre.json')), label);
+    } finally { await stub.close(); }
+  }
+});
+
+/**
+ * `assertReviewedShape` covers the channel objects a snapshot read produced, but
+ * `expectedBefore`, `write` and `inverseWrite` arrive from a *manifest file on disk* and
+ * reach `inFlightDriftIsOurs` and the rollback script through `normalizeOverwrites` alone.
+ * That makes the throw inside `normalizeOverwrites` the only gate on those, not a duplicate
+ * of the snapshot one — and it is also what stops `String(overwrite.allow)` turning an
+ * absent `allow` into the literal string `"undefined"`, which used to compare equal to
+ * itself at plan time and then fail as a 400 on operation N, live, mid-phase.
+ *
+ * Called directly because no snapshot read can reach it: the snapshot gate refuses first.
+ */
+test('normalizeOverwrites refuses an unanswered list rather than returning an empty one', async () => {
+  const cases: Array<{ label: string; value: unknown; expect: RegExp }> = [
+    { label: 'absent', value: undefined, expect: /carried no `permission_overwrites` key at all/ },
+    { label: 'null', value: null, expect: /carried a `permission_overwrites` that is not an array \(null\)/ },
+    { label: 'an entry with no allow', value: [{ id: LIVE_GUILD_ID, type: 0, deny: '1024' }], expect: /`permission_overwrites\[0\]` with no readable `allow`/ },
+    { label: 'an entry with a numeric allow', value: [{ id: LIVE_GUILD_ID, type: 0, allow: 0, deny: '1024' }], expect: /`permission_overwrites\[0\]` with no readable `allow`/ },
+    { label: 'an entry that is not an object', value: ['1024'], expect: /`permission_overwrites\[0\]` that is not an object/ },
+  ];
+  for (const { label, value, expect } of cases) {
+    assert.throws(() => normalizeOverwrites(value as Overwrite[], 'Manifest operation body'), expect, label);
+    assert.throws(() => normalizeOverwrites(value as Overwrite[], 'Manifest operation body'), /Refusing rather than read an unanswered permission overwrite list as an empty one/, label);
+  }
+  // A readable list still normalizes: the gate is not a blanket refusal.
+  assert.deepEqual(
+    normalizeOverwrites([{ id: 'b', type: 0, allow: '0', deny: '1024' }, { id: 'a', type: 0, allow: '0', deny: '1024' }] as Overwrite[]),
+    [{ id: 'a', type: 0, allow: '0', deny: '1024' }, { id: 'b', type: 0, allow: '0', deny: '1024' }],
+  );
+});
+
+/**
+ * `assertHierarchy` is the check that proves Owen outranks every managed role before this
+ * phase writes anything, and it failed open on exactly the absence above: `role.position ??
+ * -1` read an unanswered rank as the bottom of the list, and a falsy `managed` dropped the
+ * role out of the target set entirely. Both absences passed a snapshot the control refuses.
+ *
+ * The control runs first and has to trip, or the two absence variants below prove nothing:
+ * they are the *same role*, lifted to the same position that the control refuses.
+ */
+test('a role that omits position or managed refuses the plan instead of failing the hierarchy check open', async () => {
+  const control = await stubDiscord();
+  let liftedRoleId = '';
+  let liftedPosition = 0;
+  try {
+    const owen = control.state.members.find((member) => member.user.id === LIVE_BOT_APPLICATION_ID)!;
+    const highestOwen = Math.max(...control.state.roles.filter((role) => owen.roles.includes(role.id)).map((role) => role.position));
+    const target = control.state.roles.find((role) => role.managed && role.id !== LIVE_GUILD_ID && !owen.roles.includes(role.id))!;
+    liftedRoleId = target.id;
+    liftedPosition = highestOwen + 5;
+    target.position = liftedPosition;
+    const result = await plan(control, mkdtempSync(join(tmpdir(), 'two-live-clean-hierarchy-control-')));
+    assert.notEqual(result.code, 0, 'control: a managed role above Owen produced a plan');
+    assert.match(result.stderr, /Owen is not above every managed target role/);
+    assert.equal(control.writes.length, 0);
+  } finally { await control.close(); }
+
+  const variants: Array<{ label: string; wreck: (role: Role) => void; expect: RegExp }> = [
+    { label: 'position absent', wreck: (role) => { delete (role as Partial<Role>).position; }, expect: /carried no readable `position`/ },
+    { label: 'managed absent', wreck: (role) => { delete (role as Partial<Role>).managed; }, expect: /carried no readable `managed`/ },
+    { label: 'position present but a string', wreck: (role) => { (role as JsonObject).position = String(liftedPosition); }, expect: /carried no readable `position`/ },
+  ];
+  for (const { label, wreck, expect } of variants) {
+    const stub = await stubDiscord();
+    try {
+      const role = stub.state.roles.find((item) => item.id === liftedRoleId)!;
+      role.position = liftedPosition;
+      wreck(role);
+      const result = await plan(stub, mkdtempSync(join(tmpdir(), 'two-live-clean-hierarchy-absent-')));
+      assert.notEqual(result.code, 0, `${label} produced a plan`);
+      assert.equal(stub.writes.length, 0, label);
+      assert.match(result.stderr, new RegExp(`Role ${liftedRoleId} `), label);
+      assert.match(result.stderr, expect, label);
+    } finally { await stub.close(); }
+  }
+});
+
+/**
+ * Apply's own per-operation before-state check is the second opinion on the plan — a fresh
+ * `GET /channels/{id}` compared against the signed `expectedBefore`. It laundered an absent
+ * list exactly as the plan side did, so when the same read was unanswered at both times the
+ * two agreed on `[]` and the PATCH went out under a signed, empty `inverseWrite`.
+ *
+ * Here the list read stays complete, so the plan is built and signed from a full answer and
+ * only apply's own read is unanswered. It has to stop mid-phase, before any write, naming
+ * the read rather than blaming the plan for a before-state mismatch.
+ */
+test("an unreadable live read refuses apply mid-phase, before that operation's PATCH", async () => {
+  const stub = await stubDiscord();
+  try {
+    const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-apply-absent-'));
+    assert.equal((await plan(stub, dir)).code, 0);
+    const manifest = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    const first = manifest.operations[0]!;
+    stub.hideOverwritesOnObjectRead(first.objectId);
+    const result = await apply(stub, dir);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr, new RegExp(`Live read of ${first.objectType} ${first.objectId} \\(GET /channels/\\{id\\}\\) carried no \`permission_overwrites\` key at all`));
+    assert.equal(stub.writes.length, 0, 'apply issued a write after an unanswered live read');
+  } finally { await stub.close(); }
+});
+
+/**
+ * Neither of these two scripts is referenced by CI, `package.json`, or any other test, so
+ * `check` cannot see them — which is how round 8 shipped a planner change that made both
+ * throw on their own documented invocation while the suite and `tsc` stayed green
+ * (TOG-3059, TOG-3060). This is the cheapest thing that would have caught it.
+ *
+ * `derive` rewrites the committed pin in place, so this also re-proves that the pin the
+ * operator diffs a live dry-run against is what the current planner actually derives.
+ */
+test('the pin regenerator and the independent audit both still run', async () => {
+  const pinPath = fileURLToPath(new URL('./fixtures/live-cleanup-expected-operations.json', import.meta.url));
+  const committed = readFileSync(pinPath);
+  try {
+    const derive = await run(fileURLToPath(new URL('../scripts/derive-live-cleanup-pins.ts', import.meta.url)), []);
+    assert.equal(derive.code, 0, derive.stderr);
+    assert.match(derive.stdout, new RegExp(`operationCount: ${EXPECTED_OPERATIONS.operationCount}`));
+    assert.match(derive.stdout, new RegExp(`operationSemanticHash: ${EXPECTED_OPERATIONS.operationSemanticHash}`));
+    // Byte-for-byte, not just equal by count and hash: the pin is committed output.
+    assert.equal(readFileSync(pinPath).toString(), committed.toString(), 'scripts/derive-live-cleanup-pins.ts no longer reproduces the committed pin');
+  } finally {
+    writeFileSync(pinPath, committed);
+  }
+  const audit = await run(fileURLToPath(new URL('../scripts/audit-live-cleanup-visibility.ts', import.meta.url)), []);
+  assert.equal(audit.code, 0, audit.stderr);
+  assert.match(audit.stdout, /AUDIT PASSED/);
+  assert.match(audit.stdout, new RegExp(`audited: ${LEGACY_CHANNEL_IDS.length}`));
+});
+
+test('a Server Guide with no `enabled` field is read as enabled and still excludes', async () => {
+  const stub = await stubDiscord();
+  try {
+    const pinned = PERMISSION_DRIFT.mismatches[0]!.channelId;
+    // Absent `enabled` is the claim we cannot check, so it has to fail towards excluding:
+    // reading it as disabled would plan a PATCH Discord answers 350003 to. Without this the
+    // `enabled !== false` gate passes just as well written `enabled === true`.
+    stub.references.onboarding = { default_channel_ids: [pinned], prompts: [] };
+    const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-guide-noenabled-'));
+    const result = await plan(stub, dir);
+    assert.equal(result.code, 0, result.stderr);
+    const manifest = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    assert.deepEqual(manifest.onboardingExclusions, [{ channelId: pinned, referencedBy: ['onboarding.default_channel_ids'] }]);
+    assert.equal(manifest.operationCount, EXPECTED_OPERATIONS.operationCount - 1);
   } finally { await stub.close(); }
 });
 
