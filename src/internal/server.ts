@@ -83,6 +83,11 @@ export interface InternalServerOptions {
   expectedJoins?: ExpectedJoins | null;
   /** Automations import/export service; null means those verbs fail closed. */
   automations?: ActionContext['automations'];
+  /**
+   * The config store behind `settings.get` / `settings.set` (TOG-3100).
+   * Absent means both verbs refuse with `action_not_allowed` rather than 500.
+   */
+  settings?: ActionContext['settings'];
   /** Destructive imports need a stronger capability than ordinary import/export. */
   allowAutomationOverwrite?: boolean;
   /** Publish custom slash commands after a successful signed import. */
@@ -296,7 +301,8 @@ async function authoriseAndRun(
   seen.action = action.slice(0, 64);
 
   const store = opts.store ?? null;
-  assertAllowed(action, { enabled: opts.enabled, store });
+  const settings = opts.settings ?? null;
+  assertAllowed(action, { enabled: opts.enabled, store, settings });
 
   // The tighter bucket on the one action that touches membership.
   if (action === 'guild.add_member') {
@@ -320,6 +326,7 @@ async function authoriseAndRun(
     syncCommands: opts.syncCommands ?? null,
     enabled: opts.enabled,
     store,
+    settings,
     moderation: opts.moderation ?? null,
     idempotencyKey: null,
   };

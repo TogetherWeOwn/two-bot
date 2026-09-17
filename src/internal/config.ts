@@ -17,6 +17,15 @@
  * | `TWO_INTERNAL_ALLOW_ADD_MEMBER` | `1` to enable `guild.add_member`. **Requires the CEO's sign-off (TOG-44).** |
  * | `TWO_INTERNAL_ALLOW_AUTOMATIONS` | `1` to enable non-destructive `automations.import` and `automations.export`. Default off pending allowlist approval. |
  * | `TWO_INTERNAL_ALLOW_AUTOMATIONS_OVERWRITE` | `1` to permit destructive imports. Requires the base automations flag too. |
+ * | `TWO_INTERNAL_ALLOW_SETTINGS` | `1` to enable `settings.get` and `settings.set`. Default off pending the CEO's allowlist sign-off (TOG-3101). |
+ *
+ * Every `TWO_INTERNAL_*` variable on this page is read from the environment
+ * and from nowhere else. They are not settings and they must never become
+ * settings: they are the switches that decide what the *website* may make the
+ * bot do, so a website that could change them could grant itself the rest of
+ * the allowlist. `settings.set` refuses the whole namespace - in the handler
+ * (src/internal/actions.ts), in the store (src/core/settings.ts), and in the
+ * schema (migrations/0026_guild_settings.sql).
  */
 import { parseKeys, type SigningKey } from './signing.ts';
 import { buildRoleKeys, buildChannelKeys, type ActionName } from './actions.ts';
@@ -62,6 +71,14 @@ export function loadInternalActionsConfig(env: NodeJS.ProcessEnv = process.env):
   if (env.TWO_INTERNAL_ALLOW_AUTOMATIONS === '1') {
     enabled.add('automations.import');
     enabled.add('automations.export');
+  }
+  // The admin dashboard's read and write path (TOG-3093 slice 2). Same
+  // arrangement as the two above and for the same reason: shipping the
+  // implementation must not widen the allowlist. The flag is the record of the
+  // CEO's sign-off, not a convenience, and it defaults off.
+  if (env.TWO_INTERNAL_ALLOW_SETTINGS === '1') {
+    enabled.add('settings.get');
+    enabled.add('settings.set');
   }
   if (env.TWO_INTERNAL_ALLOW_MODERATION === '1' && env.TWO_MODERATION === '1') {
     for (const action of [

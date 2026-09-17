@@ -15,6 +15,7 @@
 import { ActionError } from './errors.ts';
 import type { ActionDiscord, ScheduledEventInput } from './discordActions.ts';
 import type { InternalActionStore } from './store.ts';
+import { isStorableKey } from '../core/settings.ts';
 import type { ModerationResolver } from '../moderation/resolver.ts';
 import type { ModerationService } from '../moderation/service.ts';
 import { runModerationAction } from '../moderation/actions.ts';
@@ -31,6 +32,8 @@ export const IMPLEMENTED_ACTIONS = [
   'event.upsert',
   'automations.import',
   'automations.export',
+  'settings.get',
+  'settings.set',
   ...MODERATION_ACTIONS,
 ] as const;
 export type ActionName = (typeof IMPLEMENTED_ACTIONS)[number];
@@ -46,13 +49,49 @@ export const NEEDS_IDEMPOTENCY_KEY: ReadonlySet<string> = new Set([
   'announcement.post',
   'event.upsert',
   'automations.import',
+  // A settings write is not naturally idempotent the way role.assign is: two
+  // deliveries of the same save are two audit rows and two version bumps, and
+  // if a concurrent save landed in between, the second delivery silently
+  // reverts it. The key makes the retry replay one stored result instead.
+  'settings.set',
   ...MODERATION_ACTIONS,
 ]);
+
+/**
+ * Actions that cannot run without the config store wired in. Same shape as the
+ * NEEDS_IDEMPOTENCY_KEY/store check: configured-on with nothing behind it is a
+ * typed refusal, never a 500.
+ */
+export const NEEDS_SETTINGS_STORE: ReadonlySet<string> = new Set(['settings.get', 'settings.set']);
+
+/**
+ * What a settings key may look like: the shape of an environment variable,
+ * which is what every reader in `src/` was written against.
+ *
+ * This is NOT the security guard - `TWO_INTERNAL_FOO` matches this pattern
+ * perfectly well. It is here so a typo lands as a typed `malformed` instead of
+ * a row nothing will ever read. The guard is isStorableKey(), below.
+ */
+const SETTINGS_KEY_PATTERN = /^[A-Z][A-Z0-9_]{1,127}$/;
+
+/** Discord's own ceiling on a message is 2000; a setting has no reason to be larger. */
+const MAX_SETTING_VALUE_BYTES = 8192;
 
 /** Discord's own ceilings. Rejecting here beats a bare 400 from Discord. */
 const MAX_MESSAGE_CHARS = 2000;
 const MAX_EVENT_NAME_CHARS = 100;
 const MAX_EVENT_DESCRIPTION_CHARS = 1000;
+
+/**
+ * The slice of `SettingsStore` (src/core/settings.ts) these actions use.
+ * `SettingsStore` satisfies it structurally; nothing here imports the class.
+ */
+export interface SettingsPort {
+  /** The stored value, or undefined when the key has no row. Never reads env. */
+  get(guildId: string, key: string): unknown;
+  /** Write (or, for `null`, delete) one key, with the actor recorded. */
+  set(guildId: string, key: string, value: unknown, actor: string): Promise<void>;
+}
 
 export interface ActionContext {
   guildId: string;
@@ -76,6 +115,15 @@ export interface ActionContext {
   enabled: Set<string>;
   /** Durable state. Required by every action in NEEDS_IDEMPOTENCY_KEY. */
   store: InternalActionStore | null;
+  /**
+   * The config store (TOG-3100), narrowed to the two calls these actions make.
+   *
+   * A port rather than the SettingsStore class on purpose: this file must be
+   * testable against a store that does NOT enforce the key rules, which is the
+   * only way to prove the refusal below is enforced *here* and is not just the
+   * store's refusal showing through. See test/unit.internalsettings.test.ts.
+   */
+  settings?: SettingsPort | null;
   /** Automations import/export service; absent means those verbs fail closed. */
   automations?: {
     importMee6(
@@ -161,7 +209,10 @@ export function isImplemented(action: string): action is ActionName {
  * Check the action is one we will run, before anything looks at the rest of
  * the body. Throws action_not_allowed, which is never retryable.
  */
-export function assertAllowed(action: string, ctx: Pick<ActionContext, 'enabled' | 'store'>): asserts action is ActionName {
+export function assertAllowed(
+  action: string,
+  ctx: Pick<ActionContext, 'enabled' | 'store'> & Partial<Pick<ActionContext, 'settings'>>,
+): asserts action is ActionName {
   if (!isImplemented(action)) {
     throw new ActionError('action_not_allowed', `"${action}" is not an allowlisted action`, {
       logReason: 'action_unknown',
@@ -178,6 +229,11 @@ export function assertAllowed(action: string, ctx: Pick<ActionContext, 'enabled'
   if (NEEDS_IDEMPOTENCY_KEY.has(action) && !ctx.store) {
     throw new ActionError('action_not_allowed', `"${action}" needs the durable store`, {
       logReason: 'action_needs_store',
+    });
+  }
+  if (NEEDS_SETTINGS_STORE.has(action) && !ctx.settings) {
+    throw new ActionError('action_not_allowed', `"${action}" needs the config store`, {
+      logReason: 'action_needs_settings',
     });
   }
 }
@@ -200,6 +256,10 @@ export async function runAction(
       return automationsImport(body, ctx);
     case 'automations.export':
       return automationsExport(ctx);
+    case 'settings.get':
+      return settingsGet(body, ctx);
+    case 'settings.set':
+      return settingsSet(body, ctx);
     case 'moderation.ban':
     case 'moderation.tempban':
     case 'moderation.kick':
@@ -521,4 +581,116 @@ async function automationsExport(ctx: ActionContext): Promise<ActionOutcome> {
     result: { commands },
     outcome: `exported ${commands.length}`,
   };
+}
+
+/**
+ * The key guard for both settings actions (TOG-3101, TOG-3093 ADR §2.4).
+ *
+ * `src/core/settings.ts` refuses `TWO_INTERNAL_*` too, and migration
+ * 0026_guild_settings.sql refuses it a third time with a CHECK constraint.
+ * That repetition is deliberate, and this copy is the one that matters most,
+ * because it is the only one that runs before an attacker-supplied key reaches
+ * any of our code that writes.
+ *
+ * The property being defended is the first paragraph of this file: an attacker
+ * holding the website's key can do exactly what is on the allowlist and
+ * nothing else. `TWO_INTERNAL_ALLOW_*` are the switches that decide what is on
+ * that allowlist, and `TWO_INTERNAL_KEYS` is the signing secret itself. An
+ * action that could set - or read - one of those turns a website compromise
+ * into a bot compromise.
+ */
+function requireSettingsKey(body: Record<string, unknown>, action: string): string {
+  const key = requireString(body, 'key');
+  if (!SETTINGS_KEY_PATTERN.test(key)) {
+    throw new ActionError('malformed', '"key" must look like an environment variable name', {
+      logReason: 'settings_key_malformed',
+    });
+  }
+  if (!isStorableKey(key)) {
+    throw new ActionError(
+      'action_not_allowed',
+      `"${key}" is environment-only and cannot be reached by "${action}"`,
+      { logReason: 'settings_key_env_only' },
+    );
+  }
+  return key;
+}
+
+/**
+ * `settings.get` - read one configured key. Naturally idempotent; no key needed.
+ *
+ * It answers from the config store and **only** from the config store. It does
+ * not fall through to `process.env`, even though `loadConfig()` does, and that
+ * asymmetry is the point: the environment holds `DISCORD_TOKEN`,
+ * `DATABASE_URL` and `TWO_INTERNAL_KEYS`, so a read-through would turn the
+ * first settings verb into a credential exfiltration primitive. An unset key
+ * answers `source: "unset"`, which is what the dashboard needs to show "still
+ * coming from the environment" without being told what the value is.
+ */
+async function settingsGet(body: Record<string, unknown>, ctx: ActionContext): Promise<ActionOutcome> {
+  const settings = ctx.settings;
+  if (!settings) {
+    throw new ActionError('internal', 'The config store is not available', {
+      logReason: 'settings_store_missing',
+    });
+  }
+
+  const key = requireSettingsKey(body, 'settings.get');
+  const value = settings.get(ctx.guildId, key);
+  const source = value === undefined ? 'unset' : 'store';
+  return {
+    result: { key, value: value === undefined ? null : value, source },
+    // The key, never the value: this line goes to our structured log and a
+    // setting can hold a webhook URL or an invite code.
+    outcome: `read ${key} (${source})`,
+  };
+}
+
+/**
+ * `settings.set` - write one configured key, or delete it with `value: null`.
+ *
+ * `updated_by` is the Discord user id of the admin who clicked save. The
+ * caller passes it and we record it; the bot never infers it, because the only
+ * thing the bot could infer is "the website", which is exactly the attribution
+ * an audit trail is useless without.
+ *
+ * A repeat is NOT harmless (see NEEDS_IDEMPOTENCY_KEY), so server.ts has
+ * already taken the idempotency claim by the time this runs. Nothing here
+ * re-implements that guard - same reasoning as announcement.post.
+ */
+async function settingsSet(body: Record<string, unknown>, ctx: ActionContext): Promise<ActionOutcome> {
+  const settings = ctx.settings;
+  if (!settings) {
+    throw new ActionError('internal', 'The config store is not available', {
+      logReason: 'settings_store_missing',
+    });
+  }
+
+  const key = requireSettingsKey(body, 'settings.set');
+  const updatedBy = requireSnowflake(body, 'updated_by');
+
+  if (!('value' in body)) {
+    throw new ActionError('malformed', '"value" is required; send null to unset the key', {
+      logReason: 'missing_value',
+    });
+  }
+  const value = body.value ?? null;
+  if (value !== null) {
+    // Cheap ceiling on what one setting may weigh. A dashboard field that
+    // needs more than this is not a setting, and the cap keeps one signed
+    // request from filling the table.
+    const encoded = Buffer.byteLength(JSON.stringify(value) ?? 'null', 'utf8');
+    if (encoded > MAX_SETTING_VALUE_BYTES) {
+      throw new ActionError('malformed', `"value" is larger than ${MAX_SETTING_VALUE_BYTES} bytes`, {
+        logReason: 'settings_value_too_large',
+      });
+    }
+  }
+
+  await settings.set(ctx.guildId, key, value, updatedBy);
+
+  const outcome = value === null ? 'unset' : 'saved';
+  // No value in the result either. The website already knows what it sent, and
+  // the result is what gets stored against the idempotency key and replayed.
+  return { result: { key, outcome }, outcome: `${outcome} ${key}` };
 }
