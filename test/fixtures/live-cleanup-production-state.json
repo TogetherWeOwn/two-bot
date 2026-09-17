@@ -1461,8 +1461,8 @@
       "id": "327082608611557377",
       "name": "channel-327082608611557377",
       "type": 5,
-      "parent_id": "1087198131512430642",
-      "position": 3,
+      "parent_id": "1546777858200965120",
+      "position": 102,
       "topic": null,
       "permission_overwrites": [
         {
@@ -1505,8 +1505,8 @@
       "id": "1045943373007171674",
       "name": "channel-1045943373007171674",
       "type": 0,
-      "parent_id": "1087199234706640940",
-      "position": 24,
+      "parent_id": "1546777859031433236",
+      "position": 0,
       "topic": null,
       "permission_overwrites": [
         {
@@ -1783,8 +1783,8 @@
       "id": "1058572809607073832",
       "name": "channel-1058572809607073832",
       "type": 0,
-      "parent_id": "1078761198708858891",
-      "position": 51,
+      "parent_id": "1546777860046454784",
+      "position": 106,
       "topic": null,
       "permission_overwrites": [
         {
@@ -2881,8 +2881,8 @@
       "id": "1104836077761593354",
       "name": "channel-1104836077761593354",
       "type": 0,
-      "parent_id": "1078761198708858891",
-      "position": 50,
+      "parent_id": "1546777860046454784",
+      "position": 107,
       "topic": null,
       "permission_overwrites": [
         {
@@ -3409,8 +3409,8 @@
       "id": "1138590808715571300",
       "name": "channel-1138590808715571300",
       "type": 0,
-      "parent_id": "1078761198708858891",
-      "position": 45,
+      "parent_id": "1546777860046454784",
+      "position": 105,
       "topic": null,
       "permission_overwrites": [
         {
@@ -3577,8 +3577,8 @@
       "id": "1139711709980925962",
       "name": "channel-1139711709980925962",
       "type": 0,
-      "parent_id": "1139711707443368079",
-      "position": 93,
+      "parent_id": "1546777860046454784",
+      "position": 108,
       "topic": null,
       "permission_overwrites": [
         {
