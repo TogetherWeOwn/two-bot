@@ -989,6 +989,10 @@ test('only Owner, Owen and Administrator holders keep visibility; every other bo
     }
     assert.match(result.stdout, /Principals that still see the archived objects after this plan: \d+/);
     for (const item of manifest.visibilityExemptions) assert.match(result.stdout, new RegExp(`RETAINS-VIEW ${item.reason} \\w+ ${item.memberId}`));
+    // This fixture holds no ephemeral child, so the tolerance must report exactly zero. A
+    // predicate that matched any active-category child would report 2 here and stay invisible
+    // everywhere else — the count line is the only place that over-match is observable.
+    assert.match(result.stdout, /Auto-voice ephemeral children tolerated and left untouched: 0\./);
   } finally { await stub.close(); }
 });
 
@@ -1087,6 +1091,10 @@ test('an auto-voice ephemeral child plans unchanged while its near neighbours st
       !manifest.operations.some((operation) => operation.objectId === '1549949487949283359'),
       'no planned operation may name an auto-voice ephemeral channel',
     );
+    // Inert in the plan is not the same as invisible to the operator. Tolerating an object
+    // silently is what TOG-3140 F2 objected to, so the log must name every one it skipped.
+    assert.match(result.stdout, /Auto-voice ephemeral children tolerated and left untouched: 1\./);
+    assert.match(result.stdout, /TOLERATED 1549949487949283359 Hangout #1 —/);
     assert.equal(liveShapeStub.writes.length, 0);
   } finally { await liveShapeStub.close(); }
 
