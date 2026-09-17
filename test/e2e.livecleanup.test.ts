@@ -101,6 +101,16 @@ const EXPECTED_OPERATIONS = JSON.parse(readFileSync(fileURLToPath(new URL('./fix
   operations: Array<{ sequence: number; id: string; objectType: 'category' | 'channel'; objectId: string }>;
 };
 
+// The drift fixture is the live capture from 2026-09-16T10:27:52Z and is left exactly as
+// captured — it is the evidence this phase was re-planned on, so it is never rewritten to
+// match the code. It predates the owner's reuse rule (TOG-2806, 18:20Z), under which six of
+// the channels it reviewed as legacy became active-tree channels. Every expectation below is
+// therefore the still-legacy subset of that capture, derived from LEGACY_CHANNEL_IDS rather
+// than hard-coded, so reclassifying a channel moves the expectation and reclassifying one
+// that never drifted does not.
+assert.equal(PERMISSION_DRIFT.mismatchCount, PERMISSION_DRIFT.mismatches.length);
+const DRIFT_STILL_LEGACY = PERMISSION_DRIFT.mismatches.filter((mismatch) => LEGACY_CHANNEL_IDS.includes(mismatch.channelId as never));
+
 function fixtureState(): State {
   const state = structuredClone(PRODUCTION_STATE);
   assert.equal(state.guild.id, LIVE_GUILD_ID);
@@ -108,8 +118,8 @@ function fixtureState(): State {
     const parent = state.channels.find((item) => item.id === channel.parent_id)!;
     return stable(normalizeOverwrites(channel.permission_overwrites)) !== stable(normalizeOverwrites(parent.permission_overwrites));
   });
-  assert.equal(mismatches.length, PERMISSION_DRIFT.mismatchCount);
-  assert.deepEqual(mismatches.map((channel) => channel.id).sort(), PERMISSION_DRIFT.mismatches.map((mismatch) => mismatch.channelId).sort());
+  assert.equal(mismatches.length, DRIFT_STILL_LEGACY.length);
+  assert.deepEqual(mismatches.map((channel) => channel.id).sort(), DRIFT_STILL_LEGACY.map((mismatch) => mismatch.channelId).sort());
   return state;
 }
 
@@ -314,29 +324,29 @@ async function rollback(stub: Stub, dir: string): Promise<Run> {
   return run(ROLLBACK, ['--manifest', manifestPath(dir), '--confirm-main-guild', '--apply'], { MAIN_GUILD_API_BASE: stub.base });
 }
 
-test('production-shaped 51-channel drift fixture pins 69 stable operations and dry-run writes nothing', async () => {
+test('production-shaped drift fixture pins 65 stable operations and dry-run writes nothing', async () => {
   const stub = await stubDiscord();
   try {
     const runtimeMismatches = stub.state.channels.filter((channel) => LEGACY_CHANNEL_IDS.includes(channel.id as never)).filter((channel) => {
       const parent = stub.state.channels.find((item) => item.id === channel.parent_id)!;
       return stable(normalizeOverwrites(channel.permission_overwrites)) !== stable(normalizeOverwrites(parent.permission_overwrites));
     });
-    assert.equal(runtimeMismatches.length, PERMISSION_DRIFT.mismatchCount);
-    assert.deepEqual(runtimeMismatches.map((channel) => channel.id).sort(), PERMISSION_DRIFT.mismatches.map((mismatch) => mismatch.channelId).sort());
+    assert.equal(runtimeMismatches.length, DRIFT_STILL_LEGACY.length);
+    assert.deepEqual(runtimeMismatches.map((channel) => channel.id).sort(), DRIFT_STILL_LEGACY.map((mismatch) => mismatch.channelId).sort());
     const firstDir = mkdtempSync(join(tmpdir(), 'two-live-clean-plan-'));
     const first = await plan(stub, firstDir);
     assert.equal(first.code, 0, first.stderr);
     assert.equal(stub.writes.length, 0);
     const firstManifest = JSON.parse(readFileSync(planManifestPath(firstDir), 'utf8')) as CleanupManifest;
     assert.equal(firstManifest.operationCount, EXPECTED_OPERATIONS.operationCount);
-    assert.equal(firstManifest.reviewedLegacyChannelIds.length, 112);
+    assert.equal(firstManifest.reviewedLegacyChannelIds.length, 106);
     assert.equal(firstManifest.reviewedLegacyCategoryIds.length, 18);
     assert.equal(firstManifest.operationSemanticHash, operationSemanticHash(firstManifest.operations));
     assert.equal(firstManifest.operationSemanticHash, EXPECTED_OPERATIONS.operationSemanticHash);
     assert.equal(new Set(firstManifest.operations.map((operation) => operation.id)).size, EXPECTED_OPERATIONS.operationCount);
     assert.equal(firstManifest.operations.filter((operation) => operation.objectType === 'category').length, 18);
     const channelOperations = firstManifest.operations.filter((operation) => operation.objectType === 'channel');
-    assert.equal(channelOperations.length, 51);
+    assert.equal(channelOperations.length, 47);
     assert.deepEqual(firstManifest.operations.map(({ sequence, id, objectType, objectId }) => ({ sequence, id, objectType, objectId })), EXPECTED_OPERATIONS.operations);
     for (const operation of channelOperations) {
       const mismatch = PERMISSION_DRIFT.mismatches.find((item) => item.channelId === operation.objectId)!;
@@ -425,10 +435,10 @@ test('a Server Guide reference drops its channel from the plan and is reported, 
     assert.equal(manifest.operations.filter((operation) => operation.objectId === pinned).length, 0);
     assert.deepEqual(manifest.onboardingExclusions, [{ channelId: pinned, referencedBy: [`onboarding.prompt:${promptId}`] }]);
     assert.match(result.stdout, new RegExp(`STAYS-VISIBLE ${pinned}`));
-    assert.match(result.stdout, /will hide: 111 of 112/);
-    // A manifest that under-reports its exclusions claims to hide all 112 while
-    // planning 68 operations, which is exactly the shape the operator would sign off
-    // on by mistake. The exclusion list is outside the plan signature — like the
+    assert.match(result.stdout, new RegExp(`will hide: ${LEGACY_CHANNEL_IDS.length - 1} of ${LEGACY_CHANNEL_IDS.length}`));
+    // A manifest that under-reports its exclusions claims to hide all 106 while
+    // planning one operation fewer, which is exactly the shape the operator would sign
+    // off on by mistake. The exclusion list is outside the plan signature — like the
     // exemption set — so apply has to check it against the live guild itself.
     writeFileSync(planManifestPath(dir), `${JSON.stringify({ ...manifest, onboardingExclusions: [] }, null, 2)}\n`);
     chmodSync(planManifestPath(dir), 0o600);
@@ -505,7 +515,7 @@ test('a pinned channel synchronized with its legacy category refuses the whole p
  * and the independent audit derives its exclusions from the same field. Left unguarded the
  * synchronized case is silent — no exclusion, so no refusal, no channel PATCH for Discord
  * to answer 350003 to, and the category deny hides the pinned channel by inheritance while
- * the run reports `will hide: 112 of 112` and exits 0.
+ * the run reports `will hide: 106 of 106` and exits 0.
  */
 test('an unreadable Server Guide refuses the plan instead of pinning nothing', async () => {
   for (const status of [403, 429, 500]) {
@@ -514,7 +524,7 @@ test('an unreadable Server Guide refuses the plan instead of pinning nothing', a
       const drifted = new Set(PERMISSION_DRIFT.mismatches.map((mismatch) => mismatch.channelId));
       const synchronized = LEGACY_CHANNEL_IDS.find((id) => !drifted.has(id))!;
       // Read at 200 this pins a synchronized legacy channel, which refuses loudly. The
-      // failing read must not turn that refusal into a clean 69-operation plan.
+      // failing read must not turn that refusal into a clean 65-operation plan.
       stub.references.onboarding = { enabled: true, default_channel_ids: [synchronized], prompts: [] };
       stub.failOnboardingRead(status);
       const dir = mkdtempSync(join(tmpdir(), `two-live-clean-guide-${status}-`));
@@ -534,8 +544,8 @@ test('an unreadable Server Guide refuses the plan instead of pinning nothing', a
  * `api()` records `body: await response.json().catch(() => null)`, so a 200 that is not a
  * Server Guide payload arrives as `status: 200` with nothing the derivation can read — and
  * reads exactly like a guild that pins nothing. Reproduced 5/5 before the readability gate:
- * every body below planned clean, exit 0, `onboardingExclusions: []`, 69 operations,
- * `will hide: 112 of 112`. The error-object case needs no parse failure at all.
+ * every body below planned clean, exit 0, `onboardingExclusions: []`, a full-count plan and
+ * `will hide: <all> of <all>`. The error-object case needs no parse failure at all.
  *
  * Driven with a *synchronized* pinned channel, because that is the silent half: a real 200
  * refuses the whole plan, so anything that still exits 0 has lost the answer.
@@ -612,7 +622,9 @@ test('a non-200 carrying a well-formed Server Guide payload still refuses the pl
  * field-level absence inside a 200, which a status code does not rule out. Before the
  * gate, on the live 2026-09-16T12:20:52Z pre-snapshot: 67 operations excluding
  * 1132448261253369939 and 1138590808715571300, against 69 with both PATCHed — and those
- * two PATCHes are the 400/350003 that stopped the TOG-2806 apply on operation 31.
+ * two PATCHes are the 400/350003 that stopped the TOG-2806 apply on operation 31. (Those
+ * counts are the measurement as taken, before the owner's reuse rule reclassified six
+ * channels — 1138590808715571300 among them — and moved the plan to 65 operations.)
  *
  * Driven, like the Server Guide cases, off a channel *synchronized* with its category:
  * that is the silent half, where losing the exclusion loses a refusal rather than
@@ -777,6 +789,64 @@ test('a role that omits position or managed refuses the plan instead of failing 
 });
 
 /**
+ * Round 12 (TOG-3114, non-blocking finding): the same collapse class as the two tests
+ * above, on `member.roles ?? []`. It is fail-*closed* for `assertHierarchy` — Owen with no
+ * roles has no Administrator and refuses — which is why it survived two rounds. Where it
+ * fails open is `archiveVisibilityExemptions`: a collapsed read drops the member's
+ * Administrator-bearing roles, `archiveExemption` returns null, and the principal is left
+ * off the RETAINS-VIEW list the operator signs the manifest against. Discord ignores every
+ * overwrite this phase emits for an Administrator, so nothing downstream corrects it.
+ *
+ * The control has to trip first, or the absence variants prove nothing: the *same member*
+ * is an exemption with its roles read, and must be refused — not silently dropped — with
+ * them unread. The evidence assertions matter as much as the refusal: capture runs before
+ * planning, so both the pre-snapshot and the holders file have to survive it, the latter
+ * naming the member rather than omitting a row that reads as "holds nothing".
+ */
+test('a member whose role list did not answer refuses the plan instead of dropping them from the exemption set', async () => {
+  const control = await stubDiscord();
+  let adminMemberId = '';
+  try {
+    const owenId = LIVE_BOT_APPLICATION_ID;
+    const ownerId = control.state.guild.owner_id as string;
+    const adminRoleIds = new Set(control.state.roles.filter((role) => (BigInt(role.permissions) & BigInt(ADMIN)) !== 0n).map((role) => role.id));
+    const admin = control.state.members.find((member) => member.user.id !== owenId && member.user.id !== ownerId && member.roles.some((id) => adminRoleIds.has(id)))!;
+    adminMemberId = admin.user.id;
+    const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-member-roles-control-'));
+    const result = await plan(control, dir);
+    assert.equal(result.code, 0, result.stderr);
+    const manifest = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    assert.ok(manifest.visibilityExemptions.some((item) => item.memberId === adminMemberId && item.reason === 'administrator'), 'control: the Administrator holder must be a recorded exemption');
+    assert.match(result.stdout, new RegExp(`RETAINS-VIEW administrator \\w+ ${adminMemberId}`));
+  } finally { await control.close(); }
+
+  const variants: Array<{ label: string; wreck: (member: JsonObject) => void; expect: RegExp }> = [
+    { label: 'absent', wreck: (member) => { delete member.roles; }, expect: /carried no `roles` key at all/ },
+    { label: 'null', wreck: (member) => { member.roles = null; }, expect: /carried a `roles` that is not an array \(null\)/ },
+    { label: 'an entry that is not a role id', wreck: (member) => { member.roles = [{ id: '1' }]; }, expect: /carried a `roles\[0\]` that is not a role id string/ },
+  ];
+  for (const { label, wreck, expect } of variants) {
+    const stub = await stubDiscord();
+    try {
+      wreck(stub.state.members.find((member) => member.user.id === adminMemberId)! as unknown as JsonObject);
+      const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-member-roles-absent-'));
+      const result = await plan(stub, dir);
+      assert.notEqual(result.code, 0, `${label} produced a plan`);
+      assert.equal(stub.writes.length, 0, label);
+      assert.ok(!existsSync(planManifestPath(dir)), `${label} produced a plan manifest`);
+      assert.match(result.stderr, new RegExp(`Member ${adminMemberId} `), label);
+      assert.match(result.stderr, expect, label);
+      assert.match(result.stderr, /may hold Administrator/, label);
+      // Refusing still has to leave the stop evidence behind, and the holders file has to
+      // name the member it could not read rather than drop their rows.
+      assert.ok(existsSync(join(dir, 'snapshot', 'pre.json')), label);
+      const holders = readFileSync(join(dir, 'snapshot', 'holders.csv'), 'utf8');
+      assert.match(holders, new RegExp(`"${adminMemberId}",.*UNREADABLE-ROLES`), label);
+    } finally { await stub.close(); }
+  }
+});
+
+/**
  * Apply's own per-operation before-state check is the second opinion on the plan — a fresh
  * `GET /channels/{id}` compared against the signed `expectedBefore`. It laundered an absent
  * list exactly as the plan side did, so when the same read was unanswered at both times the
@@ -895,7 +965,7 @@ test('only Owner, Owen and Administrator holders keep visibility; every other bo
     assert.ok(botDeny, 'the non-Administrator bot must receive an additive member deny');
     assert.notEqual(BigInt(botDeny.deny) & BigInt(VIEW), 0n);
 
-    // Nobody outside the recorded exemption set may see any of the 112 after the plan.
+    // Nobody outside the recorded exemption set may see any reviewed legacy channel after the plan.
     const after = structuredClone(snapshot);
     for (const item of manifest.operations) applyOperationOverwrites(after, item, item.write.permission_overwrites);
     const exempt = new Map(manifest.visibilityExemptions.map((item) => [item.memberId, item.reason]));
@@ -950,7 +1020,7 @@ test('additional permission drift becomes a child PATCH that preserves explicit 
     assert.equal(result.code, 0, result.stderr);
     assert.equal(stub.writes.length, 0);
     const manifest = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
-    assert.equal(manifest.operationCount, 70);
+    assert.equal(manifest.operationCount, EXPECTED_OPERATIONS.operationCount + 1);
     const operation = manifest.operations.find((item) => item.objectId === channelId)!;
     assert.equal(operation.objectType, 'channel');
     assert.equal(stable(operation.inverseWrite.permission_overwrites), stable(explicit));
@@ -1112,7 +1182,7 @@ test('429 and partial failure stop immediately with a recoverable manifest', asy
     assert.equal((await apply(resumeStub, resumeDir)).code, 1);
     const resumed = await apply(resumeStub, resumeDir);
     assert.equal(resumed.code, 0, resumed.stderr);
-    assert.equal(resumeStub.writeOrder.length, 68);
+    assert.equal(resumeStub.writeOrder.length, EXPECTED_OPERATIONS.operationCount - 1);
   } finally { await resumeStub.close(); }
 
   const partialStub = await stubDiscord();
@@ -1201,8 +1271,8 @@ test('interrupted apply resumes without replay, then rollback restores exact sem
     assert.equal(stub.writes.length, 3);
     const resumed = await apply(stub, dir);
     assert.equal(resumed.code, 0, resumed.stderr);
-    assert.equal(stub.writeOrder.length, 69);
-    assert.equal(new Set(stub.writeOrder).size, 69, 'retry must not replay completed writes');
+    assert.equal(stub.writeOrder.length, EXPECTED_OPERATIONS.operationCount);
+    assert.equal(new Set(stub.writeOrder).size, EXPECTED_OPERATIONS.operationCount, 'retry must not replay completed writes');
     assert.equal(stub.state.channels.length, before.length, 'channel IDs/history must be preserved');
     for (const original of before) assert.equal(stub.state.channels.find((channel) => channel.id === original.id)?.topic, original.topic);
 
