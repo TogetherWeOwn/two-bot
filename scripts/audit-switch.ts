@@ -12,7 +12,7 @@
  * stops sends.
  *
  * Safe to run while the bot is up. openDb takes the migration advisory lock,
- * so a first run on a database that predates migration 0026 applies it here
+ * so a first run on a database that predates migration 0027 applies it here
  * rather than erroring on a missing table.
  */
 import { hostname } from 'node:os';
