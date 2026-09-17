@@ -10,6 +10,7 @@ import {
   ACTIVE_CATEGORY_IDS,
   ACTIVE_CHANNEL_IDS,
   appendJournalWitness,
+  AUTO_VOICE_CATEGORY_ID,
   applyOperationOverwrites,
   basePermissions,
   journalWitnessPath,
@@ -1057,6 +1058,60 @@ test('reviewed untouched objects and legacy-category children must retain their 
     assert.match(result.stderr, /unexpected child IDs/);
     assert.equal(extraChildStub.writes.length, 0);
   } finally { await extraChildStub.close(); }
+});
+
+// The live guild spawned `1549949487949283359` (`Hangout #1`) under the active `🔊 VOICE`
+// category at 2026-09-17T01:05:54Z, between this phase's review snapshot and its first live
+// dry-run, and the unreviewed-ID refusal stopped the whole 65-operation plan. The generator
+// creates and deletes these continuously, so the shape has to plan — while every neighbouring
+// shape it could be confused with still refuses.
+test('an auto-voice ephemeral child plans unchanged while its near neighbours still refuse', async () => {
+  const liveShapeStub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-autovoice-'));
+  try {
+    liveShapeStub.state.channels.push({
+      id: '1549949487949283359',
+      name: 'Hangout #1',
+      type: 2,
+      parent_id: AUTO_VOICE_CATEGORY_ID,
+      permission_overwrites: [{ id: LIVE_GUILD_ID, type: 0, allow: '3146752', deny: '0' }],
+    });
+    const result = await plan(liveShapeStub, dir);
+    assert.equal(result.code, 0, result.stderr);
+    const manifest = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    // Tolerating it must be inert: same count, same pinned hash as a guild without it.
+    assert.equal(manifest.operationCount, EXPECTED_OPERATIONS.operationCount);
+    assert.equal(manifest.operationSemanticHash, EXPECTED_OPERATIONS.operationSemanticHash);
+    assert.ok(
+      !manifest.operations.some((operation) => operation.objectId === '1549949487949283359'),
+      'no planned operation may name an auto-voice ephemeral channel',
+    );
+    assert.equal(liveShapeStub.writes.length, 0);
+  } finally { await liveShapeStub.close(); }
+
+  // Each neighbour differs from the tolerated shape in exactly one field.
+  const neighbours: { label: string; type: number; parentId: string; expect: RegExp }[] = [
+    { label: 'text-child', type: 0, parentId: AUTO_VOICE_CATEGORY_ID, expect: /unreviewed channel\/category IDs/ },
+    { label: 'other-active-category', type: 2, parentId: ACTIVE_CATEGORY_IDS[0], expect: /unreviewed channel\/category IDs/ },
+    { label: 'legacy-category', type: 2, parentId: LEGACY_CATEGORY_IDS[0], expect: /unexpected child IDs/ },
+    { label: 'no-parent', type: 2, parentId: '', expect: /unreviewed channel\/category IDs/ },
+  ];
+  for (const neighbour of neighbours) {
+    const stub = await stubDiscord();
+    try {
+      stub.state.channels.push({
+        id: ID(998),
+        name: `near neighbour ${neighbour.label}`,
+        type: neighbour.type,
+        parent_id: neighbour.parentId === '' ? null : neighbour.parentId,
+        permission_overwrites: [],
+      });
+      const result = await plan(stub, mkdtempSync(join(tmpdir(), `two-live-clean-autovoice-${neighbour.label}-`)));
+      assert.equal(result.code, 1, `${neighbour.label} must refuse`);
+      assert.match(result.stderr, neighbour.expect, neighbour.label);
+      assert.equal(stub.writes.length, 0, neighbour.label);
+    } finally { await stub.close(); }
+  }
 });
 
 test('tampered plan and phase operation bodies refuse apply and rollback before writes', async () => {
