@@ -1490,6 +1490,137 @@ test('a field the exclusion does not name is still live drift, on the same chann
 });
 
 /**
+ * The untouched-channel walk is the eighth live-vs-live comparison and the only one that does
+ * not run through `driftSemanticHash`, so it carries its own `driftComparableChannel` call on
+ * each side. Stripping the *pre-snapshot* side alone survived all 59 tests of this file before
+ * this one existed, and it survived for a fixture reason rather than a code reason: the
+ * production fixture carries `last_message_id` on 0 of its 148 channels where the live guild
+ * carries it on 124, so every existing test populates the live side only, and a comparison with
+ * one populated side cannot tell a one-sided projection from a correct one.
+ *
+ * So the pre-snapshot has to carry the field too, on a channel this walk really visits — an
+ * active-tree channel, since the walk skips anything a manifest operation names. That is what
+ * the message before `plan` below is for; the second message is the drift the walk then has to
+ * forgive. Kept fail-closed either way: `driftComparableChannel` only deletes keys, so a
+ * one-sided projection can invent a difference but never erase one, which is why this gap was a
+ * missing refusal-path test and not a forgery hole. Contrast `driftComparableChannels`, which
+ * drops whole objects and is a forgery primitive one-sided — that one is pinned separately.
+ */
+test('a message landing before rollback is forgiven on a channel the pre-snapshot also had traffic in', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-message-both-sides-'));
+  const chatty = chattyChannelId();
+  try {
+    stub.postMessage(chatty);
+    assert.equal((await plan(stub, dir)).code, 0);
+    const pre = JSON.parse(readFileSync(join(dir, 'snapshot', 'pre.json'), 'utf8')) as LiveCleanupSnapshot;
+    const captured = (pre.channels.find((channel) => channel.id === chatty) as unknown as JsonObject | undefined);
+    assert.equal(typeof captured?.last_message_id, 'string', 'the pre-snapshot side of the walk must carry the field, or this test proves nothing');
+    assert.equal((await apply(stub, dir)).code, 0);
+    stub.postMessage(chatty);
+    const live = stub.state.channels.find((channel) => channel.id === chatty) as unknown as JsonObject;
+    assert.notEqual(live.last_message_id, captured!.last_message_id, 'and the two sides must hold different values, or the walk compares equal and forgives nothing');
+    const restored = await rollback(stub, dir);
+    assert.equal(restored.code, 0, restored.stderr);
+    assert.doesNotMatch(restored.stderr, /untouched channel .* drifted/);
+    assert.equal((JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest).status, 'rolled_back');
+  } finally { await stub.close(); }
+});
+
+/**
+ * The guild body reached every drift hash by exactly the mechanism `last_message_id` used on the
+ * channel side: `semanticSnapshot` takes `normalizeGuild(input.guild)`, and `normalizeGuild` is
+ * `{ ...guild, features: sorted }` — a cast, not a projection — so all 50 raw fields of
+ * `GET /guilds/{id}` were inside the comparison.
+ *
+ * `premium_subscription_count` is the live residual. Measured across eight real captures it is
+ * flat at `5`, but the window is about 15 hours and boosts lapse on a monthly cycle, so that is
+ * absence of the event rather than evidence of stability — the same footing `last_pin_timestamp`
+ * is listed on. The production fixture's guild carries 9 of the live guild's 50 fields and
+ * neither boost field, so, exactly as with the message above, the stub has to introduce the
+ * field before this suite can see anything about it.
+ */
+const withBoostFields = (stub: Stub): JsonObject => {
+  const guild = stub.state.guild as unknown as JsonObject;
+  guild.premium_subscription_count = 5;
+  guild.premium_tier = 1;
+  return guild;
+};
+
+test('a boost lapsing between dry-run and apply is not live drift', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-boost-after-plan-'));
+  try {
+    const guild = withBoostFields(stub);
+    assert.equal((await plan(stub, dir)).code, 0);
+    guild.premium_subscription_count = 4;
+    const applied = await apply(stub, dir);
+    assert.equal(applied.code, 0, applied.stderr);
+    assert.doesNotMatch(applied.stderr, /Live state drifted/);
+    assert.equal(stub.writes.length, EXPECTED_OPERATIONS.operationCount);
+    // Projected out of the *comparison* only. Both artifacts still record what was live and
+    // still carry the true whole-guild hash the plan signature covers — a filtered stored hash
+    // would quietly narrow what a forged `pre.json` has to survive, which is a worse bug than
+    // the one being fixed here.
+    for (const [path, expected] of [[join(dir, 'snapshot', 'pre.json'), 5], [join(dir, 'phase-01', 'post.json'), 4]] as const) {
+      const artifact = JSON.parse(readFileSync(path, 'utf8')) as LiveCleanupSnapshot;
+      const { semanticHash: stored, ...input } = artifact;
+      assert.equal((artifact.guild as JsonObject).premium_subscription_count, expected, `${path} must keep the field it stopped comparing`);
+      assert.equal(stored, withSemanticHash(input).semanticHash, `${path} stored hash must still cover the raw guild body`);
+    }
+  } finally { await stub.close(); }
+});
+
+/**
+ * Rollback's non-channel preflight is the ninth live-vs-live comparison and the second that does
+ * not run through `driftSemanticHash`, so it projects each side by hand — and this test is what
+ * holds both halves down. Either one alone fails it: with only the live side projected the
+ * pre-snapshot still carries the count and the two differ, and with only the pre-snapshot side
+ * projected the live read still carries it and they differ the other way. So a one-sided edit
+ * here does not merely go untested, it refuses every rollback outright.
+ *
+ * This is also the gate where the cost is highest. Rollback is the recovery path for a torn
+ * apply, so a boost lapsing in the window between apply and the decision to roll back would shut
+ * the one run that has to work after something has already gone wrong.
+ */
+test('a boost lapsing before rollback does not shut the recovery path', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-boost-before-rollback-'));
+  try {
+    const guild = withBoostFields(stub);
+    assert.equal((await plan(stub, dir)).code, 0);
+    assert.equal((await apply(stub, dir)).code, 0);
+    guild.premium_subscription_count = 4;
+    const restored = await rollback(stub, dir);
+    assert.equal(restored.code, 0, restored.stderr);
+    assert.doesNotMatch(restored.stderr, /non-channel drift/);
+    assert.equal((JSON.parse(readFileSync(manifestPath(dir), 'utf8')) as CleanupManifest).status, 'rolled_back');
+  } finally { await stub.close(); }
+});
+
+/**
+ * The companion control, and the reason the guild denylist is one entry rather than "the boost
+ * block". `premium_tier` moves by the same mechanism as the field beside it — it is the tier
+ * those boosts buy — and it is deliberately not projected, because a tier change is a real
+ * change to what the guild can do. Every field projected away is drift these gates stop seeing,
+ * so the neighbour has to keep refusing, in the same window, on the same read.
+ */
+test('a guild field the projection does not name is still live drift, in the same window', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-boost-control-'));
+  try {
+    const guild = withBoostFields(stub);
+    assert.equal((await plan(stub, dir)).code, 0);
+    guild.premium_subscription_count = 4;
+    guild.premium_tier = 2;
+    const applied = await apply(stub, dir);
+    assert.equal(applied.code, 1, 'a tier change must still refuse');
+    assert.match(applied.stderr, /Live state drifted/);
+    assert.equal(stub.writes.length, 0, 'refusal must land before any write');
+  } finally { await stub.close(); }
+});
+
+/**
  * The exclusion is a shape test, and shape is the one thing an attacker with a channel edit
  * can choose. Anchoring it on the reviewed ID set is what keeps it from being a laundering
  * route: move a reviewed legacy channel into the auto-voice shape between plan and apply and
