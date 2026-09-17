@@ -25,7 +25,7 @@
  * and named in the manifest. `allowLower` opts back in.
  */
 import { createHash } from 'node:crypto';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import type { Db } from '../store/driver.ts';
 import {
   LevelingService,
@@ -157,10 +157,13 @@ export function sha256(data: Buffer | string): string {
   return createHash('sha256').update(data).digest('hex');
 }
 
+/** Digest bytes already in hand, so the hash and the parse cannot disagree. */
+export function digestBuffer(path: string, contents: Buffer): FileDigest {
+  return { path, bytes: contents.byteLength, sha256: sha256(contents) };
+}
+
 export async function digestFile(path: string): Promise<FileDigest> {
-  const bytes = await readFile(path);
-  const info = await stat(path);
-  return { path, bytes: info.size, sha256: sha256(bytes) };
+  return digestBuffer(path, await readFile(path));
 }
 
 /**
@@ -431,8 +434,11 @@ export async function runMee6Import(
   filePath: string,
   options: ImportRunOptions = {},
 ): Promise<ImportManifest> {
-  const file = await digestFile(filePath);
-  const rows = parseMee6Export(await readFile(filePath, 'utf8'));
+  // One read, hashed and parsed. Reading twice would let the manifest attest a
+  // checksum of bytes other than the ones it imported.
+  const contents = await readFile(filePath);
+  const file = digestBuffer(filePath, contents);
+  const rows = parseMee6Export(contents.toString('utf8'));
   const plan = await planMee6Import(db, guildId, rows, options);
 
   const reconciliationErrors: string[] = [];

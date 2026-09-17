@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import { openTestDb, type TestDb } from './helpers/testDb.ts';
 import { LevelingService } from '../src/leveling/service.ts';
-import { inventory, parseMee6Export, Mee6ExportError } from '../src/leveling/importManifest.ts';
+import { inventory, parseMee6Export, sha256, Mee6ExportError } from '../src/leveling/importManifest.ts';
 
 const run = promisify(execFile);
 const REPO = new URL('..', import.meta.url).pathname;
@@ -87,6 +87,13 @@ test('one mutated row moves the checksum and every total derived from the data',
 
   assert.notEqual(a.file.sha256, b.file.sha256);
   assert.match(a.file.sha256, /^[0-9a-f]{64}$/);
+
+  // The manifest's checksum must be of the bytes it actually imported, not of
+  // whatever a second read of the path returned.
+  const { readFileSync } = await import('node:fs');
+  assert.equal(a.file.sha256, sha256(readFileSync(base)));
+  assert.equal(a.file.bytes, readFileSync(base).byteLength);
+  assert.equal(b.file.sha256, sha256(readFileSync(mutated)));
 
   // The point of the card: the totals move too, because they are computed from
   // the rows rather than restated from the file's shape.
