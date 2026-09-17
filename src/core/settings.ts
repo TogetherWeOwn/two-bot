@@ -128,6 +128,14 @@ export class SettingsStore {
   private cache = new Map<string, Map<string, unknown>>();
   /** Highest `version` the cache has seen. `0` means "nothing loaded yet". */
   private version = 0n;
+  /**
+   * Rows the cache was built from. Half of the change detector, not a statistic.
+   *
+   * `max(version)` alone cannot see a delete: the version lived in the row, so
+   * removing it leaves the maximum over what is left exactly where it was unless
+   * the deleted row happened to hold it. See `refreshIfChanged()`.
+   */
+  private rowCount = 0;
   private timer: ReturnType<typeof setInterval> | null = null;
   private listeners: (() => void)[] = [];
   private readonly db: Db;
@@ -164,30 +172,52 @@ export class SettingsStore {
     }
     this.cache = next;
     this.version = max;
+    this.rowCount = rows.length;
   }
 
   /**
    * One cheap query, and a full refetch only when the answer moved.
+   *
+   * The query is `max(version)` **and** `count(*)`, because neither alone sees
+   * every change. Found on staging (TOG-3100): deleting `TWO_RAID_JOIN_THRESHOLD`
+   * while a second key was stored left `max(version)` exactly where it was - the
+   * deleted row was not the one holding the maximum - so the running bot kept
+   * serving a value that was no longer in the table, and kept serving it until
+   * the next unrelated save. `settings.set()` does burn a `nextval` on delete,
+   * which looks like it covers this and cannot: the number it allocates is
+   * discarded along with the row, so nothing observable moves.
+   *
+   * The pair is sufficient, and the argument is short. Versions are only ever
+   * issued by one monotonic sequence. If the stored set changed, then either a
+   * row was inserted or updated - taking a version strictly greater than every
+   * one issued before, so `max` rises - or the change was deletions only, so
+   * `count` falls. A change that both adds and removes still raises `max`. So
+   * both unchanged means nothing changed.
    *
    * Returns true when the cache changed, which is what the tests assert on and
    * what drives the change log line.
    */
   async refreshIfChanged(): Promise<boolean> {
     const row = await this.db
-      .prepare(`SELECT COALESCE(max(version), 0) AS v FROM guild_settings`)
-      .get<{ v: string | number }>();
+      .prepare(`SELECT COALESCE(max(version), 0) AS v, count(*) AS n FROM guild_settings`)
+      .get<{ v: string | number; n: string | number }>();
     const latest = BigInt(row?.v ?? 0);
-    // Only ever moves forward, so `!==` would also fire on a restored backup
-    // with a lower sequence. Reload in that case too: a lower max means rows
-    // were deleted, which is a real change.
-    if (latest === this.version) return false;
+    const rows = Number(row?.n ?? 0);
+    // `!==` rather than `>`, so a restored backup with a lower sequence reloads
+    // too. A lower max means rows went away, which is a real change.
+    if (latest === this.version && rows === this.rowCount) return false;
 
     const before = this.version;
+    const beforeRows = this.rowCount;
     await this.load();
     for (const fn of this.listeners) fn();
+    // Both counts, not just the versions: on a pure delete the versions are
+    // identical and the row count is the only thing that moved, so a line
+    // carrying versions alone would read as a reload that reloaded nothing.
     log.info('settings_reloaded', {
       fromVersion: String(before),
       toVersion: String(this.version),
+      fromKeys: beforeRows,
       keys: this.size(),
     });
     return true;
@@ -267,10 +297,12 @@ export class SettingsStore {
         .get<{ value: unknown }>(guildId, key);
 
       if (value === null) {
+        // No `nextval` here. There used to be one, with a comment claiming it
+        // was what made other processes notice the delete, and it was not: the
+        // number it allocated went nowhere, because the row that would have
+        // carried it is the row being removed. What actually makes a delete
+        // visible is the row count in `refreshIfChanged()`.
         await tx.prepare(`DELETE FROM guild_settings WHERE guild_id = ? AND key = ?`).run(guildId, key);
-        // A delete still has to move the version, or the other processes keep
-        // serving the deleted value until something else happens to be saved.
-        await tx.prepare(`SELECT nextval('guild_settings_version_seq')`).get();
       } else {
         await tx
           .prepare(

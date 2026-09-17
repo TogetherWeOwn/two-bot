@@ -135,13 +135,26 @@ test('deleting the row hands the key back to the environment, live', async () =>
   const { cfg, changes } = bootLikeIndex(store);
 
   await store.set(GUILD, 'TWO_RAID_JOIN_THRESHOLD', 3, ADMIN);
+  // A second, newer row, so the one about to be deleted is not the one holding
+  // max(version). Written second on purpose: with the threshold alone in the
+  // table, deleting it moves the maximum and the delete would be noticed for a
+  // reason that does not generalise. This is the shape that failed on staging.
+  // `TWO_ONBOARDING_DRY_RUN` is storable but not HOT_WIRED, so it adds a row
+  // without adding a line to `changes`.
+  await store.set(GUILD, 'TWO_ONBOARDING_DRY_RUN', true, ADMIN);
   await store.refreshIfChanged();
   assert.equal(cfg().raidJoinThreshold, 3);
+  const versionBefore = store.currentVersion();
 
   // This is the documented undo path for the whole programme: stop writing
   // rows. It has to work without a restart for the same reason the write does.
   await store.set(GUILD, 'TWO_RAID_JOIN_THRESHOLD', null, ADMIN);
-  assert.equal(await store.refreshIfChanged(), true, 'a delete moves the version too');
+  assert.equal(await store.refreshIfChanged(), true, 'the delete reached the poll');
+  assert.equal(
+    store.currentVersion(),
+    versionBefore,
+    'and did so on the row count, because max(version) never moved',
+  );
   assert.equal(cfg().raidJoinThreshold, 5, 'back to the environment value');
 
   // And both moves are named, which is what makes the staging proof readable:

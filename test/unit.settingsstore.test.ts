@@ -194,21 +194,42 @@ test('the audit trail cannot be edited or erased by the process that writes it',
 
 // --- the version poll ---------------------------------------------------------
 
-test('a delete moves the version, or other processes keep serving a deleted value', async () => {
-  // The bug this guards: DELETE writes no row, so without an explicit nextval
-  // the global max(version) is unchanged and every other process's poll sees
-  // nothing to do. The value would stay live everywhere but here.
+test('a delete is visible to the poll even when it is not the newest row', async () => {
+  // This test used to store one key, delete it, and assert the poll noticed.
+  // It passed, and it was not testing what it said: with one row, deleting it
+  // takes max(version) from 1 to 0, so the version alone was enough and the
+  // delete-shaped hole was invisible.
+  //
+  // The hole, found on staging under TOG-3100: the deleted row carries its own
+  // version away with it, so if any *newer* row remains, max(version) does not
+  // move and every other process keeps serving a value that is no longer in the
+  // table. Ordering here is the whole test - the survivor is written second, on
+  // purpose, so it holds the maximum.
   const writer = store();
   await writer.set(GUILD, 'TWO_ONBOARDING_DRY_RUN', true, ADMIN);
+  await writer.set(GUILD, 'TWO_RAID_JOIN_THRESHOLD', 9, ADMIN);
 
   const reader = store();
   await reader.load();
   assert.equal(reader.get(GUILD, 'TWO_ONBOARDING_DRY_RUN'), true);
+  const versionBefore = reader.currentVersion();
 
   await writer.set(GUILD, 'TWO_ONBOARDING_DRY_RUN', null, ADMIN);
 
   assert.equal(await reader.refreshIfChanged(), true, 'the delete must be visible to the poll');
   assert.equal(reader.get(GUILD, 'TWO_ONBOARDING_DRY_RUN'), undefined);
+  assert.equal(
+    reader.get(GUILD, 'TWO_RAID_JOIN_THRESHOLD'),
+    9,
+    'and the surviving key is untouched',
+  );
+  // The assertion that pins *why* this is not the old test: the version really
+  // did stay put, so nothing about this reload can be credited to it.
+  assert.equal(
+    reader.currentVersion(),
+    versionBefore,
+    'max(version) is unchanged - the row count is what caught this',
+  );
 });
 
 test('the poll is cheap when nothing changed and reloads when something did', async () => {
