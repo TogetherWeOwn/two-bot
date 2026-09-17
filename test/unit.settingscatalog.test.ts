@@ -20,6 +20,7 @@ import {
   classifyKey,
   isEnvOnlyKey,
 } from '../src/core/settingsCatalog.ts';
+import { HOT_WIRED_FIELDS, type Config } from '../src/core/config.ts';
 
 /**
  * The TOG-3100 census, as code rather than as a shell pipeline in a card.
@@ -179,6 +180,32 @@ test('hot-wired keys are a subset of hot keys', () => {
   for (const name of HOT_WIRED) {
     assert.equal(classifyKey(name), 'hot', `${name} is wired live but not classed hot`);
   }
+});
+
+test('every hot-wired key has a Config field the reload line can name, and vice versa', () => {
+  // Both directions, because the two failures are different and neither is
+  // visible from the other side. A key wired into a live consumer but missing
+  // from HOT_WIRED_FIELDS changes the bot's behaviour with nothing in the log
+  // to say so, which is the state TOG-3100's staging proof exists to rule out.
+  // A key in HOT_WIRED_FIELDS but not in HOT_WIRED logs a change that no
+  // consumer has picked up - a line that reads like proof and is not.
+  const wired = [...HOT_WIRED].sort();
+  const logged = Object.keys(HOT_WIRED_FIELDS).sort();
+  assert.deepEqual(logged, wired);
+
+  // And the accessors have to read different fields: two entries returning the
+  // same value would satisfy the parity check above while making one of the two
+  // log lines a lie.
+  const a = { raidJoinThreshold: 5, raidWindowSeconds: 60 } as Config;
+  const b = { raidJoinThreshold: 3, raidWindowSeconds: 60 } as Config;
+  assert.notEqual(
+    HOT_WIRED_FIELDS.TWO_RAID_JOIN_THRESHOLD(a),
+    HOT_WIRED_FIELDS.TWO_RAID_JOIN_THRESHOLD(b),
+  );
+  assert.equal(
+    HOT_WIRED_FIELDS.TWO_RAID_WINDOW_SECONDS(a),
+    HOT_WIRED_FIELDS.TWO_RAID_WINDOW_SECONDS(b),
+  );
 });
 
 test('no key is both prefix-refused and classed storable', () => {

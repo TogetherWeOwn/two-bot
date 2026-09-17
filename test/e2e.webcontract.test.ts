@@ -513,6 +513,59 @@ describe('web_v1 contract', () => {
         await asWeb.end();
       }
     });
+
+    test('the config-store write probe fails when the grant is actually there', async (ctx) => {
+      // The mutation for the check above. Give the role a real INSERT on
+      // guild_settings and leave `default_transaction_read_only` exactly as
+      // provisioned - which is the state that matters, because it is what a
+      // careless GRANT would produce in production.
+      //
+      // Before TOG-3100 the probe ran inside the read-only default and reported
+      // "refused (25006)", so this grant would have been invisible: the website
+      // role would have held INSERT on the table that decides how the bot
+      // behaves at the next poll, and the check that exists to catch that would
+      // have been green. A session GUC is not a privilege, and the probe now
+      // clears it before measuring.
+      const can = await admin.query<{ ok: boolean }>(
+        `SELECT rolcreaterole OR rolsuper AS ok FROM pg_roles WHERE rolname = current_user`,
+      );
+      if (!can.rows[0]?.ok) {
+        ctx.skip('test database user has neither CREATEROLE nor SUPERUSER');
+        return;
+      }
+
+      await provisionWebRole(admin, { role, password, botSchema: t.schema!, webSchema: web });
+      // USAGE as well as INSERT. The tests run in a named schema that nobody has
+      // USAGE on, so a table grant alone is refused before Postgres ever looks
+      // at it - and a mutation that the schema boundary swallows would prove
+      // nothing about the table probe. Production's bot schema is `public`,
+      // where USAGE is already granted, so this is the faithful mirror.
+      await admin.query(`GRANT USAGE ON SCHEMA ${t.schema} TO ${role}`);
+      await admin.query(`GRANT INSERT ON ${t.schema}.guild_settings TO ${role}`);
+
+      const url = new URL(TEST_PG_URL);
+      url.username = role;
+      url.password = password;
+      const asWeb = new pg.Client({ connectionString: url.toString() });
+      await asWeb.connect();
+
+      try {
+        const ro = await asWeb.query<{ s: string }>(
+          `SELECT current_setting('default_transaction_read_only') AS s`,
+        );
+        assert.equal(ro.rows[0].s, 'on', 'the mutation must not also remove the read-only default');
+
+        const results = await runWebRoleChecks(asWeb, { botSchema: t.schema!, webSchema: web });
+        const store = results.find((r) => r.name === 'cannot write the config store');
+        assert.ok(store, 'the config-store probe must still be in the list');
+        assert.equal(store.ok, false, 'a real INSERT grant must fail the probe');
+        assert.match(store.detail, /SUCCEEDED once the read-only default was cleared/);
+      } finally {
+        await asWeb.end();
+        await admin.query(`REVOKE INSERT ON ${t.schema}.guild_settings FROM ${role}`);
+        await admin.query(`REVOKE USAGE ON SCHEMA ${t.schema} FROM ${role}`);
+      }
+    });
   });
 });
 

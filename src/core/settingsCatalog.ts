@@ -38,7 +38,7 @@
  *   `TWO_INTERNAL_ALLOW_MODERATION` (`src/internal/config.ts:83`), and is
  *   outside the namespace.
  * - `TWO_ONBOARDING_MODE` is fed through `actionsForOnboardingMode()` at
- *   `src/index.ts:543`, which deletes `role.assign` from the allowlist in
+ *   `src/index.ts:599`, which deletes `role.assign` from the allowlist in
  *   session mode (`src/onboarding/mode.ts:9`). A stored `legacy` would put that
  *   verb back at the next restart.
  *
@@ -101,7 +101,7 @@ export const SETTING_CLASSES: Readonly<Record<string, SettingClass>> = {
   // ------------------------------------------------------------------- boot
   // Read before the settings store exists, or used to find the store at all.
   CREDENTIALS_DIRECTORY: 'env_only', // where every systemd credential is read from
-  TWO_DB_POOL_MAX: 'env_only', // pool is built by openDb() at src/index.ts:129
+  TWO_DB_POOL_MAX: 'env_only', // pool is built by openDb() at src/index.ts:137
   // The store is keyed by guild id, so a guild-scoped row cannot tell the
   // process which guild it is. This one is structural, not a policy choice.
   DISCORD_GUILD_ID: 'env_only',
@@ -132,7 +132,7 @@ export const SETTING_CLASSES: Readonly<Record<string, SettingClass>> = {
 
   // Outside the namespace, inside the blast radius. See the file docblock.
   TWO_MODERATION: 'env_only', // src/internal/config.ts:83, co-gate on 9 verbs
-  TWO_ONBOARDING_MODE: 'env_only', // src/index.ts:543 -> src/onboarding/mode.ts:9
+  TWO_ONBOARDING_MODE: 'env_only', // src/index.ts:599 -> src/onboarding/mode.ts:9
 
   // These do not switch verbs on; they decide who an already-enabled verb may
   // reach. Widening them from the web is the same escalation one step later.
@@ -148,21 +148,21 @@ export const SETTING_CLASSES: Readonly<Record<string, SettingClass>> = {
   // Read once at boot. The card scoped cold to TWO_AUTOMOD; reading src/index.ts
   // says otherwise - every feature master switch gates construction or slash
   // command registration, and none of them can flip on a live client.
-  TWO_AUTOMOD: 'cold', // partials/makeCache fixed at src/discord/client.ts:101, called once at src/index.ts:165
-  TWO_ANNOUNCEMENTS: 'cold', // command data at src/index.ts:379, poller at :411
-  TWO_AUTOMATIONS: 'cold', // command data at src/index.ts:378, registration at :385
+  TWO_AUTOMOD: 'cold', // partials/makeCache fixed at src/discord/client.ts:101, called once at src/index.ts:215
+  TWO_ANNOUNCEMENTS: 'cold', // command data at src/index.ts:435, poller at :467
+  TWO_AUTOMATIONS: 'cold', // command data at src/index.ts:434, registration at :441
   TWO_TEXT_COMMANDS: 'cold', // derived from TWO_AUTOMATIONS at src/automations/config.ts:24
-  TWO_ANTI_NUKE: 'cold', // JoinRiskScorer built at src/index.ts:252, listeners at :280
-  TWO_ANTI_NUKE_DRY_RUN: 'cold', // same construction, and guarded at src/index.ts:112
-  TWO_COMMUNITY_SCORECARD: 'cold', // fact store at src/index.ts:162, job at :633
-  TWO_COMMUNITY_RECOMMENDATIONS: 'cold', // passed into the job at src/index.ts:645
-  TWO_COMMUNITY_CORRECTION_CYCLES: 'cold', // passed into the job at src/index.ts:646
-  TWO_SELF_ROLE_PANELS: 'cold', // panels registered at src/index.ts:494
-  TWO_PRESENCE_PROBE: 'cold', // probe started or skipped at src/index.ts:582
-  TWO_FEED_POLL_SECONDS: 'cold', // interval fixed by startFeedPoller at src/index.ts:423
-  TWO_INACTIVITY_DAYS: 'cold', // bound into the sweep closure at src/index.ts:671
-  TWO_TICKET_COOLDOWN_SECONDS: 'cold', // ticket service built at src/index.ts:331
-  LOG_LEVEL: 'cold', // setLogLevel() at src/index.ts:97; re-appliable, but not wired yet
+  TWO_ANTI_NUKE: 'cold', // JoinRiskScorer built at src/index.ts:308, listeners at :336
+  TWO_ANTI_NUKE_DRY_RUN: 'cold', // same construction, and guarded at src/index.ts:120
+  TWO_COMMUNITY_SCORECARD: 'cold', // fact store at src/index.ts:212, job at :689
+  TWO_COMMUNITY_RECOMMENDATIONS: 'cold', // passed into the job at src/index.ts:701
+  TWO_COMMUNITY_CORRECTION_CYCLES: 'cold', // passed into the job at src/index.ts:702
+  TWO_SELF_ROLE_PANELS: 'cold', // panels registered at src/index.ts:550
+  TWO_PRESENCE_PROBE: 'cold', // probe started or skipped at src/index.ts:638
+  TWO_FEED_POLL_SECONDS: 'cold', // interval fixed by startFeedPoller at src/index.ts:479
+  TWO_INACTIVITY_DAYS: 'cold', // bound into the sweep closure at src/index.ts:727
+  TWO_TICKET_COOLDOWN_SECONDS: 'cold', // ticket service built at src/index.ts:387
+  LOG_LEVEL: 'cold', // setLogLevel() at src/index.ts:105; re-appliable, but not wired yet
 
   // -------------------------------------------------------------------- hot
   // Channel, role and category ids: read per event, so a saved value applies on

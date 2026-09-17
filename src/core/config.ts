@@ -187,6 +187,25 @@ export function storeFirst(
 }
 
 /**
+ * The `Config` field each hot-wired key feeds.
+ *
+ * `HOT_WIRED` names the keys whose consumers read live; this says which loaded
+ * value each one moves, which is what the reload log line in `src/index.ts` has
+ * to print. "Settings reloaded" tells whoever is reading the log during an
+ * incident nothing at all; "TWO_RAID_JOIN_THRESHOLD 5 -> 3" tells them which
+ * number they are now living with.
+ *
+ * Kept in step with `HOT_WIRED` by a test in both directions. A key wired into
+ * a live consumer but missing here would change the bot's behaviour with no
+ * line in the log; a key here but not in `HOT_WIRED` would announce a change
+ * that no consumer has actually picked up.
+ */
+export const HOT_WIRED_FIELDS: Record<string, (c: Config) => string | number | boolean | null> = {
+  TWO_RAID_JOIN_THRESHOLD: (c) => c.raidJoinThreshold,
+  TWO_RAID_WINDOW_SECONDS: (c) => c.raidWindowSeconds,
+};
+
+/**
  * Build the config from `src`, with secrets and boot inputs always from the
  * environment.
  *
