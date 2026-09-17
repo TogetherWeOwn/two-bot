@@ -67,7 +67,8 @@ What that costs us, stated plainly:
   credential here is referenced by variable name only).
 
 > ⚠️ **Open item:** publishing this directory is a public-facing act and is not
-> an engineering call. It is raised on **TOG-3143**. Until it is settled we are
+> an engineering call. It is raised on **TOG-3150** (Director of Engineering), not
+> decided here and not decided on TOG-3143. Until it is settled we are
 > running a modified AGPL work with an undischarged §13 offer — which was already
 > true the moment the operator patched the live container by hand at 01:46Z on
 > 2026-09-17; this file did not create that state, it only made it durable and
