@@ -5,17 +5,6 @@ function iso(ms: number): string {
   return new Date(ms).toISOString();
 }
 
-/**
- * How long a claimed moderation idempotency row (or a `running` unban job) is
- * honoured before another process may take it over.
- *
- * Same reasoning as CLAIM_STALE_SECONDS in internal/store.ts: a crash between
- * claim and result must not pin the key forever, and the window is far outside
- * any moderation verb's own budget. At-most-once inside a living process; a
- * bounded, logged window across a crash.
- */
-export const MODERATION_CLAIM_STALE_SECONDS = 60;
-
 export interface ModerationAuditRow {
   requestId: string;
   guildId: string;
@@ -58,14 +47,12 @@ export interface LockdownRecord {
 export class ModerationStore {
   private db: Db;
   private now: () => number;
-  private claimStaleMs: number;
   private memberQueues = new Map<string, Promise<void>>();
   private channelQueues = new Map<string, Promise<void>>();
 
-  constructor(db: Db, now: () => number = Date.now, claimStaleSeconds = MODERATION_CLAIM_STALE_SECONDS) {
+  constructor(db: Db, now: () => number = Date.now) {
     this.db = db;
     this.now = now;
-    this.claimStaleMs = claimStaleSeconds * 1000;
   }
 
   async serializeMember<T>(guildId: string, userId: string, fn: () => Promise<T>): Promise<T> {
@@ -287,8 +274,9 @@ export class ModerationStore {
   }
 
   /**
-   * Atomically move due `pending` jobs (and `running` jobs whose claim went
-   * stale) into `running`, returning exactly the rows this caller won.
+   * Atomically move due `pending` jobs into `running`, returning exactly the
+   * rows this caller won. `running` rows are never reclaimed, however old
+   * their claim is - see the note on the candidate query below.
    *
    * The old SELECT-then-act let two overlapping `runDueUnbans()` sweeps
    * process the same job - a double unban and a double audit row
