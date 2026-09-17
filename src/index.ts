@@ -44,6 +44,7 @@ import { ModerationDiscord } from './moderation/discord.ts';
 import { RestModerationResolver } from './moderation/resolver.ts';
 import { ModerationService } from './moderation/service.ts';
 import { ModerationStore } from './moderation/store.ts';
+import { enforceModerationShutdownPreflight } from './moderation/shutdownPreflight.ts';
 import { MODERATION_COMMAND_DATA, registerModerationHandler } from './moderation/commands.ts';
 import { ANNOUNCEMENT_COMMAND_DATA, AUTOMATION_COMMAND_DATA, COMMUNITY_COMMAND_DATA } from './discord/commandNames.ts';
 import { loadAutomodConfig } from './automod/config.ts';
@@ -165,6 +166,16 @@ const handlers = new FunnelHandlers(store, leveling, communityFacts);
 const client = createClient(process.env.TWO_AUTOMOD === '1');
 const moderationCfg = loadModerationConfig();
 const moderationStore = new ModerationStore(db);
+// TOG-3190. Switching moderation off while a tempban's unban is still pending,
+// or a channel is still locked down, leaves nothing running to release them.
+// Refuse to boot in that state, naming every member and channel affected.
+// TWO_MODERATION_DISABLE_OVERRIDE=1 proceeds and logs the stranded set instead.
+// Before the edit, run `npm run moderation:disable-preflight` - same reads, no
+// restart. See docs/MODERATION.md "Turning moderation off".
+await enforceModerationShutdownPreflight({
+  enabled: moderationCfg.enabled,
+  store: moderationStore,
+});
 const moderationDiscord = new ModerationDiscord({
   token: cfg.discordToken,
   base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,

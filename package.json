@@ -41,6 +41,7 @@
     "backup": "node scripts/pg-backup.ts",
     "verify:catalog": "node scripts/verify-catalog.ts",
     "event:sunday-squad": "node scripts/sunday-squad-event.ts",
+    "moderation:disable-preflight": "node scripts/moderation-disable-preflight.ts",
     "staging:doctor": "node scripts/staging-doctor.ts",
     "staging:reset": "node scripts/staging-reset.ts",
     "staging:check": "node scripts/staging-reset.ts --check",
