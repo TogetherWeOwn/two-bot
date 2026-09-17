@@ -51,6 +51,21 @@ export interface CommandRegistryOptions {
   automations: AutomationStore;
   /** Every other enabled feature's commands. This registry is the only writer. */
   additionalBuiltins?: readonly ApplicationCommandDataResolvable[];
+  /**
+   * Whether DB-backed custom commands may be published at all. Default true.
+   * With automations disabled this registry must not put them back: the
+   * disable sweep in src/automations/disable.ts deletes them, and the very
+   * next sync would otherwise re-publish every one (TOG-3189).
+   */
+  automationsEnabled?: boolean;
+  /**
+   * Awaited once on ready, before the first sync replaces the guild's command
+   * set. The automations disable sweep (src/automations/disable.ts) hangs here
+   * rather than off its own ready listener: it has to read the set Discord is
+   * actually publishing, and two independent ready handlers would race.
+   * A failure here is logged and the sync still runs.
+   */
+  beforeFirstSync?: () => Promise<void>;
 }
 
 /**
@@ -63,6 +78,8 @@ export class CommandRegistry {
   private guildId: string;
   private automations: AutomationStore;
   private additionalBuiltins: readonly ApplicationCommandDataResolvable[];
+  private automationsEnabled: boolean;
+  private beforeFirstSync?: () => Promise<void>;
   private syncTail: Promise<void> = Promise.resolve();
 
   constructor(client: Client, options: CommandRegistryOptions) {
@@ -70,10 +87,20 @@ export class CommandRegistry {
     this.guildId = options.guildId;
     this.automations = options.automations;
     this.additionalBuiltins = options.additionalBuiltins ?? [];
+    this.automationsEnabled = options.automationsEnabled ?? true;
+    this.beforeFirstSync = options.beforeFirstSync;
   }
 
   register(): void {
     this.client.once(Events.ClientReady, async () => {
+      if (this.beforeFirstSync) {
+        try {
+          await this.beforeFirstSync();
+        } catch (err) {
+          // Never let a pre-sync step cost the guild its command registry.
+          log.error('guild_command_pre_sync_failed', { guildId: this.guildId, err: String(err) });
+        }
+      }
       try {
         const count = await this.sync();
         log.info('guild_commands_ready', { guildId: this.guildId, count });
@@ -97,7 +124,7 @@ export class CommandRegistry {
       // complete registry, so letting two snapshots overlap can publish them in
       // reverse order and resurrect an older definition set.
       const commands = mergedCommandData(
-        await this.automations.listCommands(this.guildId),
+        this.automationsEnabled ? await this.automations.listCommands(this.guildId) : [],
         this.additionalBuiltins,
       );
       await guild.commands.set(commands);
