@@ -38,6 +38,45 @@ builds from a git context instead of vendoring their tree.
 (The `master` branch is the *old Python* bot, unmaintained and MIT. We do not run
 it. `main` is the TypeScript rewrite and is the AGPL one.)
 
+### 1.1 One deliberate exception: the bot status (TOG-3143)
+
+**We now run a modified version.** The owner asked for upstream's
+`auto-voice.io · /setup` advertisement to be removed from the bot's Discord
+status. Upstream offers no way to configure it — at the pinned commit
+`bot/src/gateway/client.ts:17` is a module constant with no environment or
+database read, and it has exactly two references in the whole tree. So the only
+way to honour the request is to change the code, and §3.1 describes how.
+
+What that costs us, stated plainly:
+
+- **Removing the advert is itself permitted.** It is a marketing status, not an
+  "Appropriate Legal Notice" under §5(d) and not an author attribution protected
+  under §7(b), and upstream's `LICENSE` is stock AGPL-3.0 with no §7 additional
+  terms. Nothing forbids the edit.
+- **But §13 now applies to us.** Running a modified version as a network service
+  means we must offer its Corresponding Source to the users interacting with it.
+  The commit pointer above is no longer a sufficient offer on its own, because
+  the thing we run is no longer that commit.
+- **The fix is small and does not reach `two-bot`.** Corresponding Source here is
+  the pinned upstream commit (already public) plus *this directory*. It does not
+  extend to `two-bot`'s own source: Owen is a separate program in a separate
+  container under a separate Discord application, with no linking — so the
+  earlier worry that a patch "pulls a source-offer obligation onto `two-bot`"
+  overstates it. What it does create is an obligation to publish **this
+  directory**, which is currently private and contains no secrets (every
+  credential here is referenced by variable name only).
+
+> ⚠️ **Open item:** publishing this directory is a public-facing act and is not
+> an engineering call. It is raised on **TOG-3143**. Until it is settled we are
+> running a modified AGPL work with an undischarged §13 offer — which was already
+> true the moment the operator patched the live container by hand at 01:46Z on
+> 2026-09-17; this file did not create that state, it only made it durable and
+> visible.
+
+The escape hatch, if the answer is "do not publish": set `AVC_STATUS_TEXT` to the
+empty string. The patch then does nothing, upstream runs verbatim, advert and
+all, and §1's original constraint holds again with no other change.
+
 ## 2. Pinned commit and runtime
 
 | | |
@@ -75,6 +114,56 @@ Fixing that in their file means editing upstream, which is precisely what the
 licence position forbids. So `docker-compose.yml` here builds *their* Dockerfile
 from the pinned git context and declares our own runtime: no published ports, a
 real Postgres password, log caps, and a healthcheck on `/health`.
+
+### 3.1 The bot-status patch (TOG-3143)
+
+Read §1.1 first for why this exists and what it costs.
+
+**Mechanism.** `services.bot.entrypoint` in `docker-compose.yml` rewrites the
+compiled constant in `/app/bot/dist/gateway/client.js` and then execs upstream's
+own `CMD`. It runs **on every container start**, in the container's writable
+layer. That is the whole point of the card: the operator's original hand-edit
+survived a restart but a Coolify redeploy recreates the container from the image
+and would have brought the advert back.
+
+**Why start-time and not build-time.** A build-time patch needs a Dockerfile of
+our own, and the only way to inject a step into upstream's multi-stage build is
+to duplicate it — which drifts from upstream silently and copies their tree into
+ours. Patching at start keeps the image we build byte-identical to stock
+upstream, so the pinned commit stays an honest description of what we *build*,
+and it keeps this whole change to one reversible block in one file. A tracked
+fork was the other option on the card and is strictly worse on both counts.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `AVC_STATUS_TEXT` | `/setup` | The status. **Empty string disables the patch** and runs upstream verbatim. |
+| `AVC_STATUS_ENFORCE` | `strict` | `strict` = refuse to start if the anchor is missing. `warn` = log and boot with upstream's advert. |
+
+> `/setup` is a **placeholder**, chosen to strip the advert with the smallest
+> possible edit. The final text is one of the two surfaces the owner picks on
+> **TOG-3142**. When they pick, change `AVC_STATUS_TEXT` in Coolify and restart —
+> no rebuild and no new patch, which is why the text is a variable at all.
+
+**Fail-closed by default, on purpose.** The anchor can only go missing if someone
+bumps `AVC_GIT_COMMIT`, so `strict` turns an upstream bump into a loud failure
+*inside that deploy*, which is far cheaper than silently re-advertising for
+weeks. If you hit it and need the bot up immediately, set `AVC_STATUS_ENFORCE=warn`,
+then re-derive the patch against the new pin.
+
+**Tests.** The anchor is a string match against generated code, so it is a script,
+not a habit:
+
+```bash
+ops/auto-voice/test-status-patch.sh
+```
+
+It extracts the script out of `docker-compose.yml` and runs it, so it cannot
+drift from what ships. 28 assertions: replacement, idempotency across restarts,
+fail-closed on a moved pin (with a positive control), the `warn` hatch, duplicate
+anchors, injection safety for whatever text TOG-3142 picks, the 128-character
+Discord limit, and the disable switch. Point it at a real build with
+`AVC_REAL_DIST=/path/to/bot/dist/gateway/client.js`; it was last run green both
+ways against a `pnpm run build` of the pinned commit on 2026-09-17.
 
 ## 4. Coolify application
 
@@ -195,6 +284,12 @@ Fully reversible, in the order things were done:
 
 Nothing above touches Owen, `two-bot`'s database, or `Lobby`.
 
+**Rolling back just the status patch (TOG-3143)**, without touching anything
+else: set `AVC_STATUS_TEXT` to the empty string in Coolify and restart. Upstream
+runs verbatim, advert and all, and the §1 licence position is restored. Deleting
+the `entrypoint:` block from `docker-compose.yml` has the same effect
+permanently.
+
 ## 8. Verifying what is actually deployed
 
 `GIT_COMMIT` is baked in at build time and surfaced on `/health` and
@@ -207,6 +302,32 @@ docker compose -f ops/auto-voice/docker-compose.yml exec bot \
 
 It must equal `8fab5e8d78aa252195dcea1bcd3d313cb1ba0802`. A `dev` here means the
 build arg did not reach the builder and the deploy is unpinned.
+
+**And the status patch (TOG-3143), which a redeploy is exactly what tests:**
+
+```bash
+# 1. the patch ran this boot — one line, near the top of the container log
+docker compose -f ops/auto-voice/docker-compose.yml logs bot | grep avc-status
+#    expect: [avc-status] bot status set to "/setup"   (or "already applied")
+
+# 2. the advert is gone from the code the container is actually running
+docker compose -f ops/auto-voice/docker-compose.yml exec bot \
+  grep -n 'SETUP_STATUS = ' bot/dist/gateway/client.js
+#    expect exactly one line, and NO `auto-voice.io`
+
+# 3. the bot came up anyway
+docker compose -f ops/auto-voice/docker-compose.yml ps
+#    expect bot = healthy, and `bot ready` in the log
+```
+
+Then **look at the bot in Discord** — the member list is the only place that
+proves what Discord actually rendered. A custom status shows with no "Playing"
+prefix. Steps 1–2 can pass while Discord still shows a cached presence for a
+minute or two after a restart.
+
+If step 1 prints nothing, the container is running an image whose entrypoint was
+not overridden — check that Coolify redeployed from the branch that has this
+compose file, not a cached one.
 
 ## 9. The seven-day gate
 

@@ -103,6 +103,78 @@ services:
       # but set it anyway: `docker compose exec` is not the only way in.
       DIAGNOSTICS_TOKEN: ${AVC_DIAGNOSTICS_TOKEN:-}
 
+      # --- Discord status text (TOG-3143) ----------------------------------
+      # Read by the entrypoint below, NOT by upstream — upstream hardcodes its
+      # status and offers no setting for it (verified at the pinned commit:
+      # `bot/src/gateway/client.ts:17` is a module const with no env or DB read,
+      # and it has exactly two references in the tree).
+      #
+      # `/setup` is the PLACEHOLDER the operator applied live at 01:46Z to strip
+      # upstream's `auto-voice.io · /setup` advertisement. It is not the final
+      # text: the owner picks that on TOG-3142. When they do, change this value
+      # and restart the container — no rebuild, no new patch.
+      #
+      # Set it EMPTY to disable the patch entirely and run upstream's status
+      # verbatim (see the Licence note in README.md §1.1).
+      AVC_STATUS_TEXT: ${AVC_STATUS_TEXT:-/setup}
+      # `strict` (default) = if the patch cannot find its anchor, the container
+      # refuses to start. `warn` = log and boot with upstream's advert instead.
+      # Strict is the default deliberately: the anchor can only go missing if
+      # someone bumps the upstream pin, and a loud failure inside that deploy is
+      # much cheaper than silently re-advertising for weeks. `warn` is the escape
+      # hatch for an operator who needs the bot up *now*.
+      AVC_STATUS_ENFORCE: ${AVC_STATUS_ENFORCE:-strict}
+
+    # --- Discord status patch (TOG-3143) -----------------------------------
+    # The owner asked for upstream's advertisement to be removed from the bot's
+    # Discord status. Upstream exposes no setting for it, so the only way to
+    # honour that is to change the code — see README.md §1.1 for the licence
+    # consequence, which is real and is NOT discharged by this file alone.
+    #
+    # We rewrite the compiled constant in the container's writable layer on
+    # EVERY start, rather than patching at build time, because:
+    #   * the image we build stays byte-identical to stock upstream, so the
+    #     pinned commit above remains the honest description of what we build;
+    #   * it needs no Dockerfile of our own, so we never duplicate upstream's
+    #     multi-stage build and cannot drift from it;
+    #   * it is reversible by deleting this block, and it is idempotent, so a
+    #     restart re-applies it and a redeploy cannot revert it. That last point
+    #     is the entire reason this card exists.
+    #
+    # `exec node bot/dist/index.js` mirrors upstream's own `CMD` at the pinned
+    # commit (`Dockerfile:61`), relative to its `WORKDIR /app`. Setting
+    # `entrypoint:` clears the image's CMD, so it has to be restated here; the
+    # anchor check below is what catches an upstream move.
+    #
+    # NOTE: no dollar sign may appear in the script below. Compose interpolates
+    # dollar-variable syntax in compose values, so forwarding the image CMD the
+    # usual way (exec with the shell argument-list variable) would need it
+    # doubled, and would break silently under any runner that did not un-escape
+    # it. Hardcoding the command avoids that whole class of bug.
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        node -e '
+        const fs = require("node:fs");
+        const target = process.env.AVC_STATUS_TARGET || "/app/bot/dist/gateway/client.js";
+        const text = process.env.AVC_STATUS_TEXT || "";
+        const strict = (process.env.AVC_STATUS_ENFORCE || "strict") !== "warn";
+        const fail = (msg) => { console.error("[avc-status] " + msg); process.exit(strict ? 1 : 0); };
+        if (text === "") { console.error("[avc-status] AVC_STATUS_TEXT is empty - leaving upstream status in place"); process.exit(0); }
+        if (Array.from(text).length > 128) fail("AVC_STATUS_TEXT is longer than the 128-character Discord limit");
+        let src = "";
+        try { src = fs.readFileSync(target, "utf8"); } catch (err) { fail("cannot read " + target + ": " + err.message); }
+        const anchor = () => new RegExp("^const SETUP_STATUS = .*;", "gm");
+        const hits = src.match(anchor()) || [];
+        if (hits.length !== 1) fail("expected exactly 1 SETUP_STATUS declaration in " + target + ", found " + hits.length + " - the upstream pin has moved, re-derive this patch before deploying");
+        const line = "const SETUP_STATUS = " + JSON.stringify(text) + ";";
+        if (hits[0] === line) { console.log("[avc-status] already applied"); process.exit(0); }
+        fs.writeFileSync(target, src.replace(anchor(), () => line));
+        console.log("[avc-status] bot status set to " + JSON.stringify(text));
+        ' || exit 1
+        exec node bot/dist/index.js
+
     # No `ports:`. AVC makes outbound connections to Discord and Postgres and
     # needs nothing inbound from the internet. Coolify reaches /health on the
     # container network. Upstream's compose maps 8477->8080 for laptop use; on
