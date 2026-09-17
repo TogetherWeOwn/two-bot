@@ -63,9 +63,9 @@
  *        Both are pure and total over their input, and are asserted directly by
  *        test/unit.onboardingmode.test.ts.
  *     2. Their call sites, which are what make those two functions bind the
- *        running bot rather than only themselves: src/index.ts:543 (internal
- *        actions) and src/index.ts:272 (leveling).
- *     3. src/index.ts:449-484. Session mode registers ONLY the roleless
+ *        running bot rather than only themselves: src/index.ts:554 (internal
+ *        actions) and src/index.ts:283 (leveling).
+ *     3. src/index.ts:460-495. Session mode registers ONLY the roleless
  *        `registerSessionWelcome`; the legacy picker and anchor-welcome
  *        handlers are left unregistered, and nothing in
  *        src/discord/sessionWelcome.ts calls `roles.add`/`roles.remove`.
@@ -1067,8 +1067,8 @@ async function main(): Promise<void> {
       );
       console.log(
         'The zero-role-write guarantee is in the code, not in this run: session mode registers only ' +
-          'the roleless welcome (src/index.ts:449-484), drops role.assign and leveling role writes ' +
-          '(src/onboarding/mode.ts, wired at src/index.ts:543 and :272), and refuses to boot beside ' +
+          'the roleless welcome (src/index.ts:460-495), drops role.assign and leveling role writes ' +
+          '(src/onboarding/mode.ts, wired at src/index.ts:554 and :283), and refuses to boot beside ' +
           'self-role panels or armed containment (src/index.ts:99-103, :112-117). The two helpers are ' +
           'asserted by test/unit.onboardingmode.test.ts and the wiring, the boot guards and a full ' +
           'zero-role-write walk by test/e2e.session.test.ts.',
