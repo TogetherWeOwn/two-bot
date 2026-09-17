@@ -238,7 +238,17 @@ export interface AutomationCommandHandlerOptions {
   syncCommands?: () => Promise<number>;
   /** Random id source, injectable for tests. */
   newId?: () => string;
+  /**
+   * Whether automations are on. Default true, so every existing caller is
+   * unchanged. Registered with `false`, the handler refuses instead of
+   * executing - see src/automations/disable.ts for why deregistering the
+   * commands is not on its own enough (TOG-3189).
+   */
+  enabled?: boolean;
 }
+
+/** Said to anybody who reaches an automation command while the feature is off. */
+export const AUTOMATIONS_DISABLED_REPLY = 'Automations are disabled on this server.';
 
 function ephemeralReply(interaction: Interaction, content: string): Promise<unknown> {
   const i = interaction as ChatInputCommandInteraction;
@@ -250,11 +260,16 @@ function ephemeralReply(interaction: Interaction, content: string): Promise<unkn
  * member permissions keep the commands out of non-admin pickers, while this
  * handler independently enforces ManageGuild before any admin operation. The
  * guild-id check is the separate data-isolation boundary.
+ *
+ * Register this whether or not automations are enabled: with `enabled: false`
+ * it is the half of disable that a deregister cannot cover, because an
+ * interaction can already be in flight when the DELETE lands.
  */
 export function registerAutomationCommands(
   client: Client,
   options: AutomationCommandHandlerOptions,
 ): void {
+  const enabled = options.enabled ?? true;
   client.on(Events.InteractionCreate, async (interaction: Interaction) => {
     if (!interaction.isChatInputCommand()) return;
     const name = interaction.commandName;
@@ -268,7 +283,15 @@ export function registerAutomationCommands(
       if (BUILTIN_COMMAND_NAMES.has(name)) return;
       try {
         const custom = await options.store.getCommand(options.guildId, name);
-        if (!custom?.enabled) return;
+        if (!custom) return; // some other application's command; not ours to answer
+        // A row that exists while the feature is off gets an explicit refusal,
+        // not silence: silence from a still-published command reads to Discord
+        // as "the application failed to respond".
+        if (!enabled) {
+          await ephemeralReply(interaction, AUTOMATIONS_DISABLED_REPLY);
+          return;
+        }
+        if (!custom.enabled) return;
         await options.service.runCommand(
           options.guildId,
           custom.name,
@@ -281,6 +304,10 @@ export function registerAutomationCommands(
           await ephemeralReply(interaction, 'The custom command failed.').catch(() => {});
         }
       }
+      return;
+    }
+    if (!enabled) {
+      await ephemeralReply(interaction, AUTOMATIONS_DISABLED_REPLY);
       return;
     }
     if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) {
