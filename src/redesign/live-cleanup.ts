@@ -959,13 +959,57 @@ export function driftComparableChannel<T extends object>(channel: T): T {
 }
 
 /**
- * `semanticHash` over the drift-comparable channel list. Never use this as an object's
- * stored hash: `pre.json` carries the real {@link withSemanticHash} value, which is what the
- * plan signature covers and what the artifact has to prove it read. This is only for the
- * moment two live reads are compared to each other.
+ * The guild-body companion to {@link DRIFT_VOLATILE_CHANNEL_FIELDS}, and it exists because
+ * `semanticSnapshot` reaches the guild by exactly the mechanism that made `last_message_id`
+ * break the channel side: `normalizeGuild` is `{ ...guild, features: sorted }` — a cast, not
+ * a projection — so all 50 raw fields of `GET /guilds/{id}` sit inside every drift hash.
+ *
+ * Measured across eight real captures of the live guild (`scripts/live-cleanup-drift-diff.ts`
+ * reports the guild only as one `non-channel drift: guild` line, so this was measured field by
+ * field). Exactly four fields ever moved. `features` moved on 7/7 adjacent pairs and was
+ * set-equal on all eight, which is `normalizeGuild`'s sort doing its job and is why that sort
+ * is load-bearing rather than cosmetic — and being set-equal, it still refuses a real feature
+ * add or removal. `roles`, `rules_channel_id` and `safety_alerts_channel_id` each moved on
+ * exactly one pair, the same pair, which is the operator's real reorganization of 2026-09-16
+ * and must keep refusing. The remaining 46 fields never moved.
+ *
+ * So nothing here is justified by the captures, and `premium_subscription_count` is listed
+ * anyway — on the same grounds `last_pin_timestamp` is listed on the channel side. It reads
+ * flat at `5` across all eight, but the captures span about 15 hours and a boost lapses on a
+ * monthly cycle, so that is absence of the event, not evidence of stability. A boost expiring
+ * mid-apply reproduces the post-write failure class in a new field: the pre-apply gate refuses
+ * safely, but the postflight hash and rollback's post-rollback hash are both reached with every
+ * write already landed, so it would strand a correct phase `apply_failed` or leave the manifest
+ * `rolling_back` over a guild that had in fact been restored.
+ *
+ * Dropping it is free in the two ways that matter, which is the test to apply before adding
+ * anything else here. This phase never writes it, and it appears in no `expectedBefore`, no
+ * `inverseWrite`, and nothing `planArchiveOperations` or {@link guildReferenceBlock} reads — its
+ * only other reader in the tree is `scripts/audit-report.ts`, which reports rather than gates.
+ * Note also what is *not* dropped: this projection is applied to live-vs-live comparisons only,
+ * so `pre.json` keeps hashing the raw guild under {@link withSemanticHash}, and the forgery
+ * coverage the plan signature buys over the guild body is unchanged.
+ *
+ * Add a field here only with a live measurement or a named mechanism behind it. Every field
+ * projected away is drift these gates stop seeing.
+ */
+const DRIFT_VOLATILE_GUILD_FIELDS = ['premium_subscription_count'] as const;
+
+/** The guild body as a drift comparison sees it. Apply to both reads or to neither. */
+export function driftComparableGuild(guild: JsonObject): JsonObject {
+  const comparable = { ...guild };
+  for (const field of DRIFT_VOLATILE_GUILD_FIELDS) delete comparable[field];
+  return comparable;
+}
+
+/**
+ * `semanticHash` over the drift-comparable channel list and guild body. Never use this as an
+ * object's stored hash: `pre.json` carries the real {@link withSemanticHash} value, which is
+ * what the plan signature covers and what the artifact has to prove it read. This is only for
+ * the moment two live reads are compared to each other.
  */
 export function driftSemanticHash(input: Omit<LiveCleanupSnapshot, 'semanticHash'>): string {
-  return sha256(semanticSnapshot({ ...input, channels: driftComparableChannels(input.channels).map(driftComparableChannel) }));
+  return sha256(semanticSnapshot({ ...input, guild: driftComparableGuild(input.guild), channels: driftComparableChannels(input.channels).map(driftComparableChannel) }));
 }
 
 export function assertReviewedShape(snapshot: LiveCleanupSnapshot): void {
