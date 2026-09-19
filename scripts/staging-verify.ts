@@ -410,6 +410,128 @@ if (!panelRaw.trim()) {
   }
 }
 
+// 8. Session goodbye path (TOG-1644/TOG-1654, gap closed by TOG-3314). The
+// welcome half already has a staging walkthrough (TOG-1264); the goodbye half
+// - registerSessionWelcome's GuildMemberRemove handler in
+// src/discord/sessionWelcome.ts - had none. `botCanPost` there resolves the
+// first channel in DISCORD_GOODBYE_CHANNEL_IDS the bot can actually post in
+// and silently no-ops if none qualify, exactly like the role-hierarchy check
+// above: a wrong number, not a crash. This reproduces that same
+// resolve-first-postable walk against the real permission grid so a
+// misconfigured or over-locked-down goodbye channel fails loudly here instead
+// of only in a member's absence going unremarked.
+console.log('\nSession goodbye path\n');
+const goodbyeChannelIds = (process.env.DISCORD_GOODBYE_CHANNEL_IDS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+if (!goodbyeChannelIds.length) {
+  fail('DISCORD_GOODBYE_CHANNEL_IDS is empty', 'session_goodbye_dry_run/session_goodbye_posted can never fire');
+} else {
+  const everyoneId = guildId;
+  const botRoleIds = new Set((self.body as { roles?: string[] } | null)?.roles ?? []);
+  const channelById = new Map(stagingChannels.map((c) => [c.id, c]));
+  const VIEW_CHANNEL = 1n << 10n;
+  const SEND_MESSAGES = 1n << 11n;
+  let resolved: { id: string; name: string } | null = null;
+  for (const id of goodbyeChannelIds) {
+    const channel = channelById.get(id);
+    if (!channel) {
+      fail(`goodbye channel ${id} does not exist`, 'DISCORD_GOODBYE_CHANNEL_IDS names a channel not in the guild');
+      continue;
+    }
+    if (weOwnIt) {
+      // Same bypass as section 5: an owner-bot skips overwrite resolution
+      // entirely, so there is nothing to compute here.
+      resolved = resolved ?? { id: channel.id, name: channel.name };
+      continue;
+    }
+    const overwrites = channel.permission_overwrites ?? [];
+    const byKey = new Map(overwrites.map((o) => [`${o.type}:${o.id}`, o]));
+    let perms = 0n;
+    for (const r of allRoles) {
+      if (botRoleIds.has(r.id) || r.id === guildId) {
+        perms |= BigInt((r as unknown as { permissions: string }).permissions ?? '0');
+      }
+    }
+    const everyoneOw = byKey.get(`0:${everyoneId}`);
+    if (everyoneOw) perms = (perms & ~BigInt(everyoneOw.deny)) | BigInt(everyoneOw.allow);
+    let roleAllow = 0n;
+    let roleDeny = 0n;
+    for (const r of allRoles) {
+      if (!botRoleIds.has(r.id)) continue;
+      const ow = byKey.get(`0:${r.id}`);
+      if (ow) {
+        roleAllow |= BigInt(ow.allow);
+        roleDeny |= BigInt(ow.deny);
+      }
+    }
+    perms = (perms & ~roleDeny) | roleAllow;
+    const memberOw = byKey.get(`1:${botId}`);
+    if (memberOw) perms = (perms & ~BigInt(memberOw.deny)) | BigInt(memberOw.allow);
+    if ((perms & (VIEW_CHANNEL | SEND_MESSAGES)) === (VIEW_CHANNEL | SEND_MESSAGES)) {
+      resolved = resolved ?? { id: channel.id, name: channel.name };
+    }
+  }
+  if (resolved) {
+    pass(
+      `goodbye resolves to #${resolved.name}`,
+      `first postable channel in [${goodbyeChannelIds.join(', ')}], matching botCanPost's own walk order`,
+    );
+  } else {
+    fail(
+      'no goodbye channel is postable',
+      `checked [${goodbyeChannelIds.join(', ')}] - GuildMemberRemove will return early and post nothing`,
+    );
+  }
+
+  // Evidence half: proves an actual send, not just the precondition above.
+  // Opt-in via TWO_GOODBYE_VERIFY_SINCE because it requires a real member to
+  // have left staging since that timestamp - staging-verify runs without a
+  // fresh departure to check must not FAIL on this, only report it as
+  // unproven.
+  const goodbyeSince = process.env.TWO_GOODBYE_VERIFY_SINCE?.trim();
+  if (!goodbyeSince) {
+    console.log(
+      '        Not checked this run: set TWO_GOODBYE_VERIFY_SINCE=<ISO timestamp> to a moment ' +
+        'immediately before a real member leaves/is kicked from TWO Staging, then re-run to confirm ' +
+        'the actual send (not just that the channel is postable).',
+    );
+  } else if (!Number.isFinite(Date.parse(goodbyeSince))) {
+    fail('TWO_GOODBYE_VERIFY_SINCE is not a valid ISO timestamp', goodbyeSince);
+  } else if (!resolved) {
+    fail('cannot verify a goodbye send', 'no channel resolved above to read messages from');
+  } else {
+    const query = new URLSearchParams({ limit: '50' });
+    const history = await api<Array<{ id: string; content: string; timestamp: string; author: { id: string; bot?: boolean } }>>(
+      `/channels/${resolved.id}/messages?${query}`,
+    );
+    if (history.status !== 200 || !history.body) {
+      fail('could not read the goodbye channel history', `HTTP ${history.status}`);
+    } else {
+      const sent = history.body.find(
+        (m) =>
+          m.author.id === botId &&
+          Date.parse(m.timestamp) >= Date.parse(goodbyeSince) &&
+          /left the server/.test(m.content) &&
+          /stay on the books/.test(m.content) &&
+          !/<@/.test(m.content),
+      );
+      if (sent) {
+        pass(
+          'a real goodbye message was posted',
+          `message ${sent.id} in #${resolved.name} at ${sent.timestamp}, pings nobody`,
+        );
+      } else {
+        fail(
+          'no goodbye message found since TWO_GOODBYE_VERIFY_SINCE',
+          `checked #${resolved.name} for a bot message matching goodbyeText() after ${goodbyeSince}`,
+        );
+      }
+    }
+  }
+}
+
 async function discordMarkerMessageIds(channelId: string, entryId: string, since: string): Promise<string[]> {
   const matches: string[] = [];
   let before = '';
