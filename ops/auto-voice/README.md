@@ -503,7 +503,10 @@ AVC_OBSERVE_GENERATOR_ID=<the Lobby id> node ops/auto-voice/observe-tick.ts
 Any voice channel under the category that is neither the generator nor `Lobby`
 counts as a generated room. If a permanent one is added deliberately, put its id
 in `AVC_OBSERVE_IGNORE_CHANNEL_IDS` — until then it is a finding, which is the
-direction this check should fail in.
+direction this check should fail in. The live guild's own `💤 AFK` channel
+(`1045950023663370260`, created 2022-11-26, three years before AVC) is already
+in the default allowlist for this reason (TOG-3126); override the env var only
+if the guild's permanent-channel set actually changes.
 
 The fixtures in `observe-tick.ts` are the point of the file. A ghost room, an
 adopted Lobby, a deleted generator, an AVC that has stopped reacting and an AVC

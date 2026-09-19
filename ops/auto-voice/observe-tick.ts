@@ -418,7 +418,13 @@ async function main(): Promise<number> {
   const categoryId = process.env.AVC_OBSERVE_CATEGORY_ID ?? '1545924266590081115';
   const generatorId = process.env.AVC_OBSERVE_GENERATOR_ID ?? '1546777867978018887';
   const lobbyId = process.env.AVC_OBSERVE_LOBBY_ID ?? '1546777866648289300';
-  const ignoreChannelIds = (process.env.AVC_OBSERVE_IGNORE_CHANNEL_IDS ?? '')
+  // '💤 AFK' (1045950023663370260) predates AVC by three years (created
+  // 2022-11-26, per the guild's own channel snowflake) - a legitimate
+  // permanent room under the category, not a generated room AVC leaked.
+  // Found via TOG-3126 tick 2026-09-19T19:33Z: it flagged this channel as a
+  // ghost while avc_alive/room_reclaimed both passed, i.e. AVC's create/
+  // destroy cycle was clean and the finding was this allowlist being empty.
+  const ignoreChannelIds = (process.env.AVC_OBSERVE_IGNORE_CHANNEL_IDS ?? '1045950023663370260')
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
