@@ -78,6 +78,64 @@ async function botCanPost(
 export function makeOperationalAudit(client: Client, options: OperationalAuditOptions): AuditSink {
   const configured = new Set(Object.values(options.channels).filter((id): id is string => Boolean(id)));
 
+  /**
+   * Kill switch read (TOG-3187). Checked immediately before every
+   * `channel.send` and once per pending row, never once per batch, so an
+   * engaged switch stops sends within one message, not one sweep. The read is
+   * a single primary-key row, priced like a round trip to the store the send
+   * is about to write to anyway.
+   *
+   * A read failure must not become a standing halt: the switch is an operator
+   * lever, not a fault interlock, and an unreachable store already fails every
+   * send through its own paths. So it fails open and logs its own
+   * classification.
+   */
+  let observedHalted: boolean | null = null;
+  const deliveryHalted = async (): Promise<boolean> => {
+    if (!options.store) return false;
+    let halted = false;
+    try {
+      halted = await options.store.isDeliveryHalted();
+    } catch {
+      log.error('operational_audit_kill_switch_read_failed', {
+        classification: 'audit_kill_switch_read_failed',
+      });
+      return false;
+    }
+    if (observedHalted === halted) return halted;
+    const was = observedHalted;
+    observedHalted = halted;
+    // A process that boots already halted says so once; one that boots clear
+    // says nothing. Only real transitions (and a first read of "engaged")
+    // are worth a line at error level.
+    if (halted || was !== null) {
+      log.error(halted ? 'operational_audit_kill_switch_engaged' : 'operational_audit_kill_switch_disengaged', {
+        classification: halted ? 'audit_kill_switch_engaged' : 'audit_kill_switch_disengaged',
+      });
+    }
+    return halted;
+  };
+
+  /**
+   * Release a claimed row the switch stopped before Discord saw anything.
+   * Store errors are swallowed on purpose: the row keeps its lease and the
+   * sweep's own expiry returns it to `pending`, so a store hiccup cannot turn
+   * the stop into a quarantine.
+   */
+  const holdForKillSwitch = async (stored: StoredOperationalAudit): Promise<void> => {
+    const channelId = stored.mirrorChannelId;
+    log.info('operational_audit_delivery_held', {
+      entryId: stored.event.entryId,
+      channelId,
+      classification: 'audit_kill_switch_held',
+    });
+    try {
+      await options.store?.holdDeliveryForHalt(stored.event.entryId, stored.deliveryClaimToken!);
+    } catch {
+      // Lease expiry is the backstop for a claim this process could not release.
+    }
+  };
+
   const reconcileDelivered = async (stored: StoredOperationalAudit): Promise<void> => {
     const channelId = stored.mirrorChannelId;
     const messageId = stored.mirrorMessageId;
@@ -194,6 +252,12 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
       });
       return;
     }
+    // An engaged kill switch outranks everything downstream of the durable
+    // write: no permission reads, no history scans, no sends (TOG-3187).
+    if (await deliveryHalted()) {
+      await holdForKillSwitch(stored);
+      return;
+    }
     if (options.dryRun) {
       await options.store?.markDeliveryFailed(stored.event.entryId, claimToken!, 'dry_run');
       log.info('operational_audit_dry_run', { entryId: stored.event.entryId, channelId });
@@ -257,6 +321,13 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
       } else {
         const searchBefore = await newestMessageCursor(channel);
         await options.store?.prepareDeliverySend(stored.event.entryId, claimToken!, searchBefore);
+        // The switch is re-checked here, immediately before the send, because
+        // every earlier check has a race window: this is the one that
+        // guarantees an engaged switch costs at most nothing (TOG-3187).
+        if (await deliveryHalted()) {
+          await holdForKillSwitch(stored);
+          return;
+        }
         sendStarted = true;
         const message = await channel.send({
           content: formatAuditEvent(stored.event),
@@ -422,7 +493,16 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
     async retryPending() {
       if (!options.store) return 0;
       const pending = await options.store.claimPending();
-      for (const item of pending) await deliver(item);
+      for (const item of pending) {
+        // Re-checked per row, not per sweep, so a sweep that claimed a batch
+        // before the operator pulled the lever still stops inside it. Held
+        // rows return to `pending` untouched, for the sweep after disengage.
+        if (await deliveryHalted()) {
+          await holdForKillSwitch(item);
+          continue;
+        }
+        await deliver(item);
+      }
       const delivered = await options.store.selectDeliveredForReconciliation();
       for (const item of delivered) {
         try {
