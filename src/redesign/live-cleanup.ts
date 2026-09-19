@@ -28,13 +28,22 @@ export const AUTO_VOICE_CATEGORY_ID = '1545924266590081115';
  * 2026-09-17T01:05:54Z, between this phase's review snapshot and its first live dry-run,
  * and `assertReviewedShape` refused the whole 65-operation plan over it.
  *
- * Tolerating them is safe *only* because this phase never touches the active tree: they
- * are excluded from the unreviewed-ID refusal, and {@link planArchiveOperations} re-asserts
- * afterwards that no planned operation names one. Everything else still fails closed — a
- * non-voice child here, a voice channel under any other category, and any unexpected child
- * of a legacy category all still refuse. The tolerance is scoped to *identity*, not to
- * readability: a tolerated child whose overwrite read did not answer is still refused by
- * {@link assertReviewedShape}, because the rollback preflight reads it regardless.
+ * This predicate no longer gates the unreviewed-ID refusal. It could not keep up: the refusal
+ * it bought tolerance from is a whole-guild gate, and four hours later `voice-bot-source`
+ * (`1549978014450716773`, a permanent type-0 channel) broke it again in a different shape.
+ * Chasing that per-shape is a treadmill, so {@link assertReviewedShape} now tolerates every
+ * unreviewed ID outside the reviewed legacy tree and reports what it tolerated (TOG-2907).
+ *
+ * What this predicate still decides is {@link isDriftExcluded} — which objects are dropped
+ * from the apply-time and rollback-time comparisons — and that is the position where its
+ * narrowness is load-bearing, because a drift exclusion hides real movement while a plan
+ * tolerance only declines to refuse. The two must not be conflated: a tolerated
+ * `voice-bot-source` appearing between plan and apply still refuses at the drift gate.
+ *
+ * It also still classifies the log. `assertReviewedShape` partitions what it tolerated into
+ * this transient churn and everything else, so an operator can tell a lobby spawn from a
+ * channel somebody added — and so an over-matching predicate shows up as a count in the wrong
+ * bucket rather than as silence.
  *
  * Two limits worth stating rather than discovering (TOG-3139):
  *
@@ -180,6 +189,13 @@ export type ArchiveExemptionReason = 'owner' | 'owen' | 'administrator';
 export type ArchiveVisibilityExemption = { memberId: string; bot: boolean; reason: ArchiveExemptionReason };
 /** A reviewed legacy channel Discord refuses to hide, and every guild reference that pins it. */
 export type ArchiveOnboardingExclusion = { channelId: string; referencedBy: string[] };
+/**
+ * What {@link assertReviewedShape} tolerated instead of refusing on. `autoVoiceEphemeral` and
+ * `otherUnreviewed` partition `toleratedUnreviewed` exactly, so a log that prints both counts
+ * shows an over-matching {@link isAutoVoiceEphemeralChild} as a number moving between the two
+ * rather than as nothing at all.
+ */
+export type ReviewedShapeResult = { toleratedUnreviewed: Channel[]; autoVoiceEphemeral: Channel[]; otherUnreviewed: Channel[] };
 export type CleanupManifest = {
   version: 1;
   kind: 'live-clean-slate-cleanup';
@@ -1012,7 +1028,13 @@ export function driftSemanticHash(input: Omit<LiveCleanupSnapshot, 'semanticHash
   return sha256(semanticSnapshot({ ...input, guild: driftComparableGuild(input.guild), channels: driftComparableChannels(input.channels).map(driftComparableChannel) }));
 }
 
-export function assertReviewedShape(snapshot: LiveCleanupSnapshot): void {
+/**
+ * Refuses unless the live guild still matches what this phase reviewed, and returns the
+ * objects it tolerated rather than refused on, so no caller can report a narrowed scope
+ * without naming what it narrowed. The refusal and the log therefore share one
+ * implementation; a second walk here would be a second answer.
+ */
+export function assertReviewedShape(snapshot: LiveCleanupSnapshot): ReviewedShapeResult {
   if (snapshot.guildId !== LIVE_GUILD_ID || snapshot.applicationId !== LIVE_BOT_APPLICATION_ID) throw new Error('Snapshot identity does not match the live Owen application and guild.');
   if (snapshot.guild.name !== LIVE_GUILD_NAME) throw new Error(`Expected guild name ${LIVE_GUILD_NAME}.`);
   const channelIds = new Set(snapshot.channels.map((channel) => channel.id));
@@ -1040,31 +1062,58 @@ export function assertReviewedShape(snapshot: LiveCleanupSnapshot): void {
   if (unexpectedLegacyChildren.length > 0) {
     throw new Error(`Reviewed legacy categories contain unexpected child IDs: ${unexpectedLegacyChildren.map((channel) => channel.id).join(', ')}.`);
   }
-  const reviewed = new Set<string>([...ACTIVE_CATEGORY_IDS, ...ACTIVE_CHANNEL_IDS, ...LEGACY_CATEGORY_IDS, ...LEGACY_CHANNEL_IDS, ...reviewedUntouchedShapes.keys()]);
-  const unknown = snapshot.channels.filter((channel) => !reviewed.has(channel.id) && !isAutoVoiceEphemeralChild(channel));
-  if (unknown.length > 0) throw new Error(`Fresh snapshot contains unreviewed channel/category IDs: ${unknown.map((channel) => channel.id).join(', ')}.`);
-  // Every channel below is a reviewed one, and every reviewed one is planned over or
-  // reasoned about as a synchronized child — so this walk is the whole set, and it is
-  // the last point at which an unreadable overwrite list is still distinguishable from
-  // an empty one. `normalizedChannel` deliberately carried the absence this far instead
-  // of refusing at capture, so that the pre-snapshot survives to show what Discord
-  // actually returned; refusing to *plan* on it is this function's job.
+  // Everything that is still a refusal is above this line, and the dangerous case is the
+  // one immediately above: an unreviewed object *inside* a reviewed legacy category. That
+  // is the only position from which a new object could join a category this phase writes,
+  // inherit the deny it is about to set, or displace a reviewed child — and it still fails
+  // closed, by ID, with the offending IDs named.
   //
-  // Auto-voice ephemeral children are tolerated by the refusal above but deliberately
-  // NOT skipped here, and the distinction is load-bearing (TOG-3139 finding 1). Skipping
-  // them is sound for *this* function's writes — nothing signs their overwrites into an
-  // `expectedBefore` or an `inverseWrite`, and they are never a synchronized child — but
-  // it is not sound for the phase, because the rollback preflight walks every
-  // pre-snapshot channel no operation names and calls `normalizeOverwrites` on it
-  // (`scripts/live-clean-slate-cleanup-rollback.ts:335`). Letting an unreadable one
-  // through therefore bought a plan and an apply whose rollback then died on an uncaught
-  // exception with 65 writes already landed. Measured, not argued: plan 0 -> apply 0
-  // (65 writes) -> rollback stack trace.
+  // Outside the legacy tree, an unreviewed ID is reported and not refused (TOG-2907). The
+  // blanket refusal that used to live here was correct against a stale reviewed-ID list and
+  // wrong as a gate on the guild: any channel anyone adds anywhere disables the planner, and
+  // because `audit-live-cleanup-visibility.ts` reaches its independent permission stack
+  // *through* `planArchiveOperations`, it disabled the read-only auditor with it. Measured,
+  // not argued: `1549978014450716773` (`voice-bot-source`, a permanent type-0 channel created
+  // at 02:59Z for the AGPL source offer) refused the whole 65-operation plan and the audit,
+  // four hours after #117 bought a tolerance for a different shape. Fixing that per-shape is
+  // a treadmill; the reviewed *legacy* tree is the thing this phase actually needs pinned.
   //
-  // So this walk is the whole set, with no exception: every channel in a signed
-  // pre-snapshot has a readable overwrite list. An unanswered read is a momentary
-  // Discord failure that a re-run clears, not something a lobby occupant can cause, so
-  // refusing here costs none of the plan reachability the tolerance above exists to buy.
+  // Tolerating is safe here and nowhere else, for reasons that are all checked rather than
+  // asserted: no write can name one, because every operation is sourced from `LEGACY_*` and
+  // `planArchiveOperations` re-proves that over the finished plan; none can be a legacy
+  // category's synchronized child, because the refusal above keeps the legacy tree closed;
+  // and none is excluded from anything *after* planning — `isDriftExcluded` still drops only
+  // the auto-voice shape, so a `voice-bot-source` appearing between plan and apply refuses at
+  // the drift gate exactly as it did before. Plan tolerance is deliberately not drift
+  // tolerance; widening one must never widen the other.
+  //
+  // The caller gets the list rather than a count so the log can name every one of them.
+  // Tolerating an object silently is the thing this phase's own standard rules out
+  // ("an audit that quietly narrows its own scope is worse than a red one",
+  // `scripts/audit-live-cleanup-visibility.ts:112`).
+  const toleratedUnreviewed = snapshot.channels.filter((channel) => !REVIEWED_OBJECT_IDS.has(channel.id));
+  // Every channel below — reviewed or tolerated — is walked, and that is the point. This is
+  // the last place an unreadable overwrite list is still distinguishable from an empty one.
+  // `normalizedChannel` deliberately carried the absence this far instead of refusing at
+  // capture, so that the pre-snapshot survives to show what Discord actually returned;
+  // refusing to *plan* on it is this function's job.
+  //
+  // Tolerated objects are tolerated by the refusal above but deliberately NOT skipped here,
+  // and the distinction is load-bearing (TOG-3139 finding 1). Skipping them is sound for
+  // *this* function's writes — nothing signs their overwrites into an `expectedBefore` or an
+  // `inverseWrite`, and they are never a synchronized child — but it is not sound for the
+  // phase, because the rollback preflight walks every pre-snapshot channel no operation names
+  // and calls `normalizeOverwrites` on it
+  // (`scripts/live-clean-slate-cleanup-rollback.ts:335`). Letting an unreadable one through
+  // therefore bought a plan and an apply whose rollback then died on an uncaught exception
+  // with 65 writes already landed. Measured, not argued: plan 0 -> apply 0 (65 writes) ->
+  // rollback stack trace.
+  //
+  // So this walk is the whole set, with no exception: every channel in a signed pre-snapshot
+  // has a readable overwrite list. An unanswered read is a momentary Discord failure that a
+  // re-run clears, not something a lobby occupant can cause, so refusing here costs none of
+  // the plan reachability the tolerance above exists to buy. The tolerance is scoped to
+  // *identity*, not to readability.
   for (const channel of snapshot.channels) {
     const unreadable = unreadableOverwrites(channel.permission_overwrites);
     if (unreadable !== null) {
@@ -1072,6 +1121,11 @@ export function assertReviewedShape(snapshot: LiveCleanupSnapshot): void {
     }
   }
   if (snapshot.semanticHash !== sha256(semanticSnapshot(snapshot))) throw new Error('Snapshot semantic hash does not match its content.');
+  return {
+    toleratedUnreviewed,
+    autoVoiceEphemeral: toleratedUnreviewed.filter((channel) => isAutoVoiceEphemeralChild(channel)),
+    otherUnreviewed: toleratedUnreviewed.filter((channel) => !isAutoVoiceEphemeralChild(channel)),
+  };
 }
 
 /**
@@ -1358,18 +1412,23 @@ export function planArchiveOperations(snapshot: LiveCleanupSnapshot): CleanupOpe
     const write = archiveVisibilityOverwrites(snapshot, target, before);
     return { objectId, objectType, before, write };
   });
-  // `assertReviewedShape` stopped refusing on auto-voice ephemeral children, which is only
-  // sound while no operation can name one. That is currently true by construction — every
-  // write above comes from `LEGACY_CHANNEL_IDS` or `LEGACY_CATEGORY_IDS`, and the generator
-  // sits under an active category — so this re-assertion is unreachable today, and a
-  // mutation that neuters it survives the suite. Keep it anyway, but for the accurate
-  // reason (TOG-3139): reclassifying a legacy channel under the auto-voice category cannot
-  // reach here, because the legacy-parent assertion above refuses first. What this defends
-  // is someone *deleting or reordering that assertion* — it is the one check that sees the
-  // finished plan, so it is the backstop that survives the loops above being rewritten.
-  const autoVoiceIds = new Set(snapshot.channels.filter((channel) => isAutoVoiceEphemeralChild(channel)).map((channel) => channel.id));
-  const planned = writes.filter(({ objectId }) => autoVoiceIds.has(objectId));
-  if (planned.length > 0) throw new Error(`Planned operations target auto-voice ephemeral channels ${planned.map(({ objectId }) => objectId).join(', ')}, which this phase must never write.`);
+  // `assertReviewedShape` stopped refusing on unreviewed objects outside the legacy tree,
+  // which is only sound while no operation can name one. This is where that is proved rather
+  // than assumed, and it is deliberately stated as the full invariant — every operation names
+  // a reviewed *legacy* object — instead of the narrower auto-voice form it replaces
+  // (TOG-2907). The wider tolerance needs the wider re-assertion: an auto-voice-shaped check
+  // would have let a tolerated `voice-bot-source` through if the loops above ever sourced one.
+  //
+  // It is unreachable today, by construction: every write above comes from
+  // `LEGACY_CHANNEL_IDS` or `LEGACY_CATEGORY_IDS`. So a mutation that neuters it survives the
+  // suite, and that is recorded rather than papered over with a test that cannot fail
+  // honestly (TOG-3139). What it defends is someone *rewriting or reordering the loops above*
+  // — it is the one check that sees the finished plan, so it is the backstop that outlives
+  // them. Against the old auto-voice form, that rewrite was caught only if the new source
+  // happened to be an auto-voice channel; against this form it is caught whatever it is.
+  const writable = new Set<string>([...LEGACY_CHANNEL_IDS, ...LEGACY_CATEGORY_IDS]);
+  const planned = writes.filter(({ objectId }) => !writable.has(objectId));
+  if (planned.length > 0) throw new Error(`Planned operations target ${planned.map(({ objectId }) => objectId).join(', ')}, which are not reviewed legacy objects and which this phase must never write.`);
   return writes.map(({ objectId, objectType, before, write }, index) => {
     const kind = objectType === 'category' ? 'patch-category-overwrites' as const : 'patch-channel-overwrites' as const;
     const body = { phase: ARCHIVE_PHASE, kind, objectType, objectId, expectedBefore: { permission_overwrites: before }, write: { permission_overwrites: write }, inverseWrite: { permission_overwrites: before } };
