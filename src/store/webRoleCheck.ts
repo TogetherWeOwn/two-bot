@@ -147,6 +147,9 @@ export const BOT_TABLES = [
   // editable by the party it exists to hold to account.
   'guild_settings',
   'guild_settings_audit',
+  // 0027 — the audit-mirror kill switch (TOG-3187). One operational row that
+  // says who halted sends and when; an operator control, never website data.
+  'audit_kill_switch',
 ];
 
 function ident(schema: string, name: string): string {

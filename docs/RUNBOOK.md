@@ -331,6 +331,38 @@ journalctl -u two-bot -f          # follow
 A healthy start logs `{"msg":"ready","user":"...","guilds":1}` within a few
 seconds. If you see `ready` you are connected to Discord.
 
+## Stop the audit mirror right now (kill switch)
+
+When the audit mirror is misbehaving — posting to the wrong place, spamming,
+or mirroring something it should not — you do not have to redeploy or restart
+anything. The switch is one durable row the bot re-reads before every single
+Discord send and once per pending row, so it takes effect within one message:
+
+```bash
+docker exec two-bot npm run audit:halt     # stop all mirror sends + retries now
+docker exec two-bot npm run audit:switch   # show state and what is being held
+docker exec two-bot npm run audit:resume   # undo: held rows deliver on the next sweep (<= 30s)
+```
+
+What it does, precisely:
+
+* **Stops sends, keeps evidence.** Durable audit rows are never touched. New
+  events still land in `operational_audit_log`; they are held as `pending`
+  with `delivery_last_error = 'audit_kill_switch_held'` and deliver after
+  `audit:resume`. Nothing is dropped, skipped, or quarantined by the switch.
+* **Survives a restart.** The switch is a database row, not memory — if the
+  container restarts while engaged, it comes up still engaged.
+* **Logs its own classification.** Engaging is visible as
+  `operational_audit_kill_switch_engaged`, each held row as
+  `operational_audit_delivery_held` (`classification:
+  'audit_kill_switch_held'`) — greppable, and distinct from every delivery
+  error.
+
+The halt is a lever, not a diagnosis: after the bleeding stops, find the
+actual defect before resuming. Both directions are idempotent, and
+`npm run audit:halt -- --by <who>` records who pulled it (`audit:switch`
+shows it).
+
 ## Rotate the bot token
 
 **Due once at first deploy, then any time the token has been somewhere it should

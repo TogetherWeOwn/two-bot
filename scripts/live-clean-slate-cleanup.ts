@@ -22,6 +22,7 @@ import {
   archiveOnboardingExclusions,
   archiveVisibilityExemptions,
   assertLatestCheckpoint,
+  assertReviewedShape,
   AUTO_VOICE_CATEGORY_ID,
   buildManifest,
   type Channel,
@@ -45,6 +46,7 @@ import {
   planArchiveOperations,
   readJournalWitness,
   reconcileJournalWitness,
+  type ReviewedShapeResult,
   type Role,
   syncedChildIds,
   SNAPSHOT_MAX_AGE_MS,
@@ -321,12 +323,37 @@ function holdersCsv(snapshot: LiveCleanupSnapshot): string {
  * One line per object this run tolerated without reviewing it. The repo's standard for a
  * plan that quietly skips something is to name it in the artifact the operator compares
  * against, not only in `pre.json` — see the STAYS-VISIBLE and RETAINS-VIEW lines below.
+ *
+ * Split in two because the two tolerances are not the same promise, and an operator's next
+ * action differs (TOG-2907). Keeping them on one label would have read as one.
  */
-function toleranceLines(snapshot: LiveCleanupSnapshot): string[] {
+function driftToleranceLines(snapshot: LiveCleanupSnapshot): string[] {
   return driftExcludedIds(snapshot.channels).map((id) => {
     const channel = snapshot.channels.find((item) => item.id === id);
     return `  TOLERATED ${id} ${channel?.name ?? '?'} — auto-voice ephemeral child of ${AUTO_VOICE_CATEGORY_ID}, not planned over and excluded from the drift comparison`;
   });
+}
+
+/**
+ * Objects planning declined to refuse on, which are **not** dropped from any later
+ * comparison. A channel somebody added lands here: the plan steps around it, and then every
+ * drift gate still compares it byte for byte, so creating one between plan and apply stops
+ * the run exactly as it did before this tolerance existed.
+ *
+ * That is why this is printed on the planning path only. At apply time there is no such
+ * tolerance to report — saying otherwise would advertise a leniency the gate does not have.
+ *
+ * The bucket is taken from `assertReviewedShape`, the function that actually made the
+ * decision, rather than re-derived here: a second walk is a second answer, and the one that
+ * disagreed would be the one nobody ran. The `driftExcluded` filter is not bookkeeping — the
+ * two buckets come from different predicates, so it is what stops a future divergence from
+ * printing one object twice and inflating the count the operator reads.
+ */
+function planToleranceLines(tolerated: ReviewedShapeResult, driftExcluded: readonly string[]): string[] {
+  const named = new Set(driftExcluded);
+  return tolerated.otherUnreviewed
+    .filter((channel) => !named.has(channel.id))
+    .map((channel) => `  UNREVIEWED-TOLERATED ${channel.id} ${channel.name ?? '?'} — unreviewed type-${channel.type} object outside the reviewed legacy tree (parent ${channel.parent_id ?? 'none'}); not planned over, and still compared by every drift gate`);
 }
 
 function assertManifest(manifest: CleanupManifest, snapshot: LiveCleanupSnapshot): void {
@@ -402,10 +429,20 @@ async function dryRun(): Promise<void> {
   // Same rule for the auto-voice tolerance (TOG-3140 F2): these IDs are the one class of
   // object `assertReviewedShape` stops refusing on, and until now they appeared only in
   // `pre.json`. An operator reading this log is entitled to see every object the plan
-  // decided not to reason about, not just the ones it decided not to hide. Sourced from
-  // `toleranceLines`, which is the same set apply and rollback drop from their drift
-  // comparisons, so this names exactly what those later gates will ignore (TOG-3141).
-  const tolerated = toleranceLines(snapshot);
+  // decided not to reason about, not just the ones it decided not to hide. The first bucket
+  // is the same set apply and rollback drop from their drift comparisons, so it names exactly
+  // what those later gates will ignore (TOG-3141); the second is the wider planning tolerance
+  // added by TOG-2907, which those gates do *not* ignore. Both are printed, under labels that
+  // say which is which, and the count covers both.
+  //
+  // `assertReviewedShape` already ran inside `planArchiveOperations` above, so this call
+  // cannot be the first thing to refuse — it re-reads a decision that has been made, and
+  // re-reading it is what keeps the log from being a second, disagreeing walk.
+  const driftExcluded = driftExcludedIds(snapshot.channels);
+  const tolerated = [
+    ...driftToleranceLines(snapshot),
+    ...planToleranceLines(assertReviewedShape(snapshot), driftExcluded),
+  ];
   log(`Unreviewed objects tolerated in this snapshot: ${tolerated.length}`);
   for (const line of tolerated) log(line);
   log(`Snapshot semantic hash: ${snapshot.semanticHash}`);
@@ -478,7 +515,12 @@ async function apply(): Promise<void> {
   // reviews. Printed here rather than logged, because `logLines` is reset for the phase
   // log below and the refusal path never reaches it; the same lines are logged again once
   // the gate has passed, so they also survive into `phase-01.log`.
-  const toleratedLines = toleranceLines(fresh);
+  //
+  // Drift tolerance only. The wider planning tolerance (TOG-2907) is deliberately absent
+  // here: an unreviewed object that planning stepped around is still compared byte for byte
+  // by the gate three lines below, so printing it under a "tolerated" heading on the apply
+  // path would advertise a leniency this path does not have.
+  const toleratedLines = driftToleranceLines(fresh);
   for (const line of toleratedLines) console.log(line);
   const freshDriftHash = driftSemanticHash(fresh);
   const acceptableHashes = new Set<string>();
