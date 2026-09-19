@@ -16,6 +16,7 @@ import { ActionError } from './errors.ts';
 import type { ActionDiscord, ScheduledEventInput } from './discordActions.ts';
 import type { InternalActionStore } from './store.ts';
 import { isStorableKey } from '../core/settings.ts';
+import { isDeclaredEnvOnly } from '../core/settingsCatalog.ts';
 import type { ModerationResolver } from '../moderation/resolver.ts';
 import type { ModerationService } from '../moderation/service.ts';
 import { runModerationAction } from '../moderation/actions.ts';
@@ -586,8 +587,16 @@ async function automationsExport(ctx: ActionContext): Promise<ActionOutcome> {
 /**
  * The key guard for both settings actions (TOG-3101, TOG-3093 ADR §2.4).
  *
- * `src/core/settings.ts` refuses `TWO_INTERNAL_*` too, and migration
- * 0026_guild_settings.sql refuses it a third time with a CHECK constraint.
+ * Since TOG-3100 the rule is catalog membership, not a prefix: a key is
+ * writable if `src/core/settingsCatalog.ts` classes it `hot` or `cold`, and
+ * refused otherwise. That is fail-closed - a name nobody has classified is
+ * refused rather than allowed - which is what closes TOG-3183, where
+ * `TWO_MODERATION` co-gated nine moderation verbs while carrying no
+ * `TWO_INTERNAL_` prefix and so passed the old namespace test.
+ *
+ * `src/core/settings.ts` refuses the same set, and migrations
+ * 0026_guild_settings.sql and 0027_guild_settings_env_only.sql refuse it again
+ * with two CHECK constraints.
  * That repetition is deliberate, and this copy is the one that matters most,
  * because it is the only one that runs before an attacker-supplied key reaches
  * any of our code that writes.
@@ -607,10 +616,18 @@ function requireSettingsKey(body: Record<string, unknown>, action: string): stri
     });
   }
   if (!isStorableKey(key)) {
+    // Both refusals are absolute, but they are not the same answer and the
+    // dashboard should not conflate them. "Environment-only" is a policy
+    // decision about a key we do classify. An unclassified key is almost
+    // always a typo, and telling that admin it is "environment-only" sends
+    // them to argue with a policy document about a key that does not exist.
+    const declared = isDeclaredEnvOnly(key);
     throw new ActionError(
       'action_not_allowed',
-      `"${key}" is environment-only and cannot be reached by "${action}"`,
-      { logReason: 'settings_key_env_only' },
+      declared
+        ? `"${key}" is environment-only and cannot be reached by "${action}"`
+        : `"${key}" is not a setting this bot reads, so "${action}" will not reach it`,
+      { logReason: declared ? 'settings_key_env_only' : 'settings_key_unknown' },
     );
   }
   return key;

@@ -6,6 +6,23 @@
  * runs exactly as it does today, with no listener and no open port. Off is the
  * default, and turning it on is a deliberate act.
  *
+ * **That is now a security property, not just a convenience (TOG-3183).** Since
+ * TOG-3100, `loadConfig()` reads the settings store first and the environment
+ * second. This function must never do the same. Its `env` parameter exists for
+ * tests and defaults to `process.env`; threading a `SettingsStore` snapshot
+ * into it would mean a row in `guild_settings` could decide which verbs the
+ * website is allowed to invoke - the privilege-escalation primitive ADR
+ * TOG-3093 §2.4 exists to prevent. `TWO_MODERATION` is the concrete case: it
+ * co-gates nine moderation verbs below and carries no `TWO_INTERNAL_` prefix,
+ * so the prefix refusal never covered it.
+ *
+ * Both halves are defended. The catalog refuses to store these names at all
+ * (`src/core/settingsCatalog.ts`, plus the CHECK constraints in migrations 0026
+ * and 0027), and `test/unit.internalconfig.envonly.test.ts` fails if this
+ * function is ever handed a non-environment source. Either alone would hold
+ * today; the pair survives one of them being refactored away by somebody who
+ * did not read this comment.
+ *
  * | Variable | Meaning |
  * |---|---|
  * | `TWO_INTERNAL_ACTIONS` | `1` to run the listener at all. |
