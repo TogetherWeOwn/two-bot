@@ -50,6 +50,16 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     minTests: 2,
     why: 'parallel Discord audit entries must serialize before destructive containment',
   },
+  {
+    // TOG-3100. The residual check below catches an unregistered suite that
+    // SKIPS or FAILS, but not one that reports nothing at all - and this suite
+    // is the only place the env-only refusal is exercised against a real
+    // Postgres, so it vanishing silently is the failure that matters.
+    // Measured 2026-09-17 against Postgres 18.1, at f538689 + this commit.
+    file: 'test/e2e.settingshotreload.test.ts',
+    minTests: 8,
+    why: 'a HOT key reloading without a restart, and the schema-level refusal of every env-only key',
+  },
 ];
 
 /**

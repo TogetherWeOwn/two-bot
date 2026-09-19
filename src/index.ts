@@ -1,4 +1,5 @@
-import { loadConfig } from './core/config.ts';
+import { loadConfig, storeFirst, HOT_WIRED_FIELDS } from './core/config.ts';
+import { SettingsStore } from './core/settings.ts';
 import { setLogLevel, log } from './core/log.ts';
 import { openDb } from './store/db.ts';
 import { applyWebContract } from './store/webContract.ts';
@@ -86,6 +87,13 @@ import { AnnouncementsStore } from './announcements/store.ts';
 import { AnnouncementsService } from './announcements/service.ts';
 import { DiscordAnnouncements, XmlFeedReader, registerAnnouncementCommands, startFeedPoller } from './announcements/discord.ts';
 
+// The environment-only view. Everything needed to reach the database has to
+// come from here, because the settings store lives in the database: this is the
+// bootstrap, and it is why TWO_DB_POOL_MAX and the URL itself are env-only in
+// src/core/settingsCatalog.ts rather than by policy.
+//
+// `liveCfg` below replaces this once the store is open. Read that, not this,
+// anywhere a value can change while the process runs.
 const cfg = loadConfig();
 const automationCfg = loadAutomationConfig();
 const processStartedAt = new Date().toISOString();
@@ -130,6 +138,48 @@ if (
 const db = await openDb(cfg.databaseUrl, { poolMax: cfg.dbPoolMax });
 // Never log the URL itself - it carries the password. See docs/SECRETS.md.
 log.info('datastore_open', { poolMax: cfg.dbPoolMax });
+
+// The config store (TOG-3100 / TOG-3093 slice 1).
+//
+// Additive by construction: a key with no row reads exactly as it did before
+// this table existed, so the day this ships nothing changes and the Coolify
+// environment can be emptied one key at a time. The undo path for the whole
+// admin-dashboard programme is "stop writing rows".
+//
+// It polls `SELECT max(version)` every 15s rather than using LISTEN/NOTIFY,
+// which would need a dedicated connection; docs/STACK.md sizes the pool at 5
+// deliberately and this is not worth one of them.
+const settings = new SettingsStore(db);
+await settings.load();
+
+/**
+ * The store-first config, rebuilt whenever the store changes.
+ *
+ * Read this rather than `cfg` for anything that can change at runtime. It is
+ * still the same `loadConfig()`, and every env-only key inside it is still read
+ * from the environment - see the note on loadConfig() for which, and why three
+ * of them could not come from the store even if policy allowed it.
+ */
+let liveCfg = loadConfig(storeFirst(settings.envSnapshot(cfg.guildId)));
+
+settings.onChange(() => {
+  const previous = liveCfg;
+  liveCfg = loadConfig(storeFirst(settings.envSnapshot(cfg.guildId)));
+  // One line naming what actually moved. A raid threshold that changed at
+  // 03:00 with no record of it is the kind of thing that makes an incident
+  // unreconstructable afterwards, and "config reloaded" would not have told
+  // anyone which number they are now living with.
+  for (const [key, read] of Object.entries(HOT_WIRED_FIELDS)) {
+    const from = read(previous);
+    const to = read(liveCfg);
+    if (from !== to) log.info('setting_changed', { key, from, to });
+  }
+});
+settings.start();
+log.info('settings_store_ready', {
+  rows: settings.size(),
+  version: settings.currentVersion(),
+});
 
 // Keep the website's read-only views (docs/WEBSITE_CONTRACT.md) in step with
 // the code that owns them. Idempotent, so this is a no-op on a normal boot.
@@ -244,16 +294,22 @@ if (cfg.apiBase) {
 
 // Join-burst detection (TWO-56). Always on - three raids reached this server
 // unnoticed. Where the alert goes is configurable; whether we watch is not.
+//
+// Thunks, not numbers: these two are the keys slice 1 wires live, so each join
+// is judged against whatever the last settings poll left in `liveCfg` rather
+// than against whatever the environment said at boot. Everything else here
+// still reads `cfg` - see the HOT_WIRED note in src/core/settingsCatalog.ts for
+// why "hot" is a permission and not yet a promise.
 const raid = {
   watch: new RaidWatch({
-    threshold: cfg.raidJoinThreshold,
-    windowSeconds: cfg.raidWindowSeconds,
+    threshold: () => liveCfg.raidJoinThreshold,
+    windowSeconds: () => liveCfg.raidWindowSeconds,
   }),
   announce: makeRaidAnnouncer(client, { channelId: cfg.staffAlertChannelId }),
 };
 log.info('raid_watch_enabled', {
-  threshold: cfg.raidJoinThreshold,
-  windowSeconds: cfg.raidWindowSeconds,
+  threshold: liveCfg.raidJoinThreshold,
+  windowSeconds: liveCfg.raidWindowSeconds,
   // No staff channel means the alert exists only in this log. Said out loud at
   // boot so it is a known state rather than a surprise during a raid.
   alertTarget: cfg.staffAlertChannelId ?? 'log only (DISCORD_STAFF_ALERT_CHANNEL_ID unset)',
@@ -727,6 +783,9 @@ async function shutdown(signal: string) {
   communitySnapshots?.stop();
   scheduledEvents?.stop();
   communityScorecard?.stop();
+  // Before db.close(), or the next poll runs a query against a closed pool and
+  // the last line of a clean shutdown is a settings_poll_failed.
+  settings.stop();
   // Health goes down first: while the rest is closing, the bot must already be
   // reporting itself out of service so the platform stops routing to it.
   if (health) await health.close();
