@@ -94,6 +94,73 @@ export class OperationalAuditStore {
     return row ? storedAudit(row) : null;
   }
 
+  /**
+   * Emergency kill switch (TOG-3187). Row presence means every mirror send and
+   * every pending-row retry must stop now, without a redeploy. Read before
+   * each `channel.send`, so the effect is per-message and not per-batch.
+   */
+  async isDeliveryHalted(): Promise<boolean> {
+    const row = await this.db
+      .prepare(`SELECT 1 AS halted FROM audit_kill_switch WHERE id = 1`)
+      .get<{ halted: number }>();
+    return Boolean(row);
+  }
+
+  /** Engage the kill switch. Idempotent: the first engagement wins the record. */
+  async engageDeliveryHalt(engagedBy: string): Promise<boolean> {
+    const now = new Date().toISOString();
+    const result = await this.db
+      .prepare(
+        `INSERT INTO audit_kill_switch (id, engaged_at, engaged_by)
+         VALUES (1, ?, ?)
+         ON CONFLICT (id) DO NOTHING`,
+      )
+      .run(now, engagedBy);
+    return result.changes === 1;
+  }
+
+  /** Disengage the kill switch. Idempotent. Held rows resume on the next sweep. */
+  async disengageDeliveryHalt(): Promise<boolean> {
+    const result = await this.db
+      .prepare(`DELETE FROM audit_kill_switch WHERE id = 1`)
+      .run();
+    return result.changes === 1;
+  }
+
+  /** Who engaged the switch and when, for runbooks and dashboards. */
+  async deliveryHaltState(): Promise<{ engagedAt: string; engagedBy: string } | null> {
+    const row = await this.db
+      .prepare(`SELECT engaged_at, engaged_by FROM audit_kill_switch WHERE id = 1`)
+      .get<Record<string, unknown>>();
+    return row ? { engagedAt: toIso(row.engaged_at), engagedBy: String(row.engaged_by) } : null;
+  }
+
+  /**
+   * Release a claimed row back to `pending` because the kill switch stopped
+   * delivery before Discord was asked anything. Not `markDeliveryFailed`:
+   * nothing was attempted, so the attempt count must not move, and the
+   * recovery boundary must be cleared - it was only written in preparation
+   * for a send that this same call guarantees never happened, so leaving it
+   * would fail the row closed as `discord_marker_missing` on the next pass
+   * instead of resuming it (TOG-3187: disengaging must not skip held rows).
+   */
+  async holdDeliveryForHalt(entryId: string, claimToken: string): Promise<boolean> {
+    const result = await this.db
+      .prepare(
+        `UPDATE operational_audit_log
+            SET delivery_state = 'pending',
+                delivery_lease_until = NULL,
+                delivery_claim_token = NULL,
+                delivery_search_before = NULL,
+                delivery_last_error = 'audit_kill_switch_held'
+          WHERE entry_id = ?
+            AND delivery_state = 'delivering'
+            AND delivery_claim_token = ?`,
+      )
+      .run(entryId, claimToken);
+    return result.changes === 1;
+  }
+
   async claim(entryId: string, leaseMs = AUDIT_DELIVERY_LEASE_MS): Promise<StoredOperationalAudit | null> {
     const now = new Date();
     const leaseUntil = new Date(now.getTime() + leaseMs).toISOString();
