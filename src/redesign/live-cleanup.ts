@@ -72,8 +72,19 @@ export function isAutoVoiceEphemeralChild(channel: Pick<Channel, 'id' | 'type' |
  * channel to sit under a legacy category. Classifying a hidden twin as legacy would refuse
  * the whole plan. They are already denied to `@everyone`; nothing here re-reveals them.
  *
- * The first ten are the originally-provisioned tree; the last six are the reused channels,
- * each annotated with the legacy name it carried before the move.
+ * A seventh entry followed the same shape without an owner-invoked reuse: `💤 AFK`
+ * (`1045950023663370260`, voice, was under legacy category `TWO | LOBBY`) turned up
+ * re-parented under {@link AUTO_VOICE_CATEGORY_ID} on a fresh-clone-of-main live dry-run
+ * at 2026-09-19T05:23Z (TOG-3358) — new structural drift after the TOG-2907 review, not
+ * an owner-directed move and not a tooling defect. It has no `*-unused` twin, because
+ * `AUTO_VOICE_CATEGORY_ID` is the auto-voice category, not one of the originally-provisioned
+ * template categories that generated one. `assertReviewedShape` refused rather than mis-hide
+ * a channel now live in the active tree, exactly as designed; reclassifying it here is what
+ * that refusal was asking for.
+ *
+ * The first ten are the originally-provisioned tree; the next six are the owner-directed
+ * reuse, each annotated with the legacy name and category it carried before the move; the
+ * last is AFK's post-review re-parent.
  */
 export const ACTIVE_CHANNEL_IDS = [
   '1546777861199896589',
@@ -92,6 +103,7 @@ export const ACTIVE_CHANNEL_IDS = [
   '1104836077761593354', // audit-log, was ❗〢audit-log under TWO | LEADERSHIP
   '1138590808715571300', // discord-updates, was 🔧〢updates-and-changes under TWO | LEADERSHIP
   '1139711709980925962', // voice-log, was voice-log under logs
+  '1045950023663370260', // AFK, was 💤 AFK under TWO | LOBBY (TOG-3358)
 ] as const;
 
 export const LEGACY_CATEGORY_IDS = [
@@ -104,11 +116,12 @@ export const LEGACY_CATEGORY_IDS = [
 ] as const;
 
 /**
- * 106, not the 112 this phase first reviewed. Six of the original 112 were reused into the
- * active tree by owner rule and now appear in `ACTIVE_CHANNEL_IDS` instead; see the note
- * there. The count is deliberately not a round number — it is whatever survives the move,
- * and `assertReviewedShape` re-proves the partition against a fresh snapshot on every run,
- * so a wrong count here refuses rather than plans.
+ * 105, not the 112 this phase first reviewed. Seven of the original 112 were reused into
+ * the active tree — six by owner rule, one (AFK, TOG-3358) by post-review structural drift
+ * this phase merely reconciled — and now appear in `ACTIVE_CHANNEL_IDS` instead; see the
+ * note there. The count is deliberately not a round number — it is whatever survives the
+ * move, and `assertReviewedShape` re-proves the partition against a fresh snapshot on every
+ * run, so a wrong count here refuses rather than plans.
  */
 export const LEGACY_CHANNEL_IDS = [
   '1146611215511081012', '1087198966346690570', '1132448261253369939',
@@ -122,7 +135,7 @@ export const LEGACY_CHANNEL_IDS = [
   '1266840224835833920', '1266840693637255363', '1175127344072118405',
   '1269750661722148954', '1269753028404056076', '1269753534346432644',
   '1269753860193521816', '1269754268265480242', '1269754877303721985',
-  '1045950023663370260', '1465060666972049439', '1087199619546632232',
+  '1465060666972049439', '1087199619546632232',
   '1056447465286541333', '1092312335529541632', '1087199559719067748',
   '1087199767718809650', '1154904611799437404', '1078083546054397982',
   '1057456170320801802', '1113979181391429672', '1117480270044594186',

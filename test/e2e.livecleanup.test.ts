@@ -409,7 +409,7 @@ test('production-shaped drift fixture pins 65 stable operations and dry-run writ
     assert.equal(stub.writes.length, 0);
     const firstManifest = JSON.parse(readFileSync(planManifestPath(firstDir), 'utf8')) as CleanupManifest;
     assert.equal(firstManifest.operationCount, EXPECTED_OPERATIONS.operationCount);
-    assert.equal(firstManifest.reviewedLegacyChannelIds.length, 106);
+    assert.equal(firstManifest.reviewedLegacyChannelIds.length, 105);
     assert.equal(firstManifest.reviewedLegacyCategoryIds.length, 18);
     assert.equal(firstManifest.operationSemanticHash, operationSemanticHash(firstManifest.operations));
     assert.equal(firstManifest.operationSemanticHash, EXPECTED_OPERATIONS.operationSemanticHash);
@@ -506,7 +506,7 @@ test('a Server Guide reference drops its channel from the plan and is reported, 
     assert.deepEqual(manifest.onboardingExclusions, [{ channelId: pinned, referencedBy: [`onboarding.prompt:${promptId}`] }]);
     assert.match(result.stdout, new RegExp(`STAYS-VISIBLE ${pinned}`));
     assert.match(result.stdout, new RegExp(`will hide: ${LEGACY_CHANNEL_IDS.length - 1} of ${LEGACY_CHANNEL_IDS.length}`));
-    // A manifest that under-reports its exclusions claims to hide all 106 while
+    // A manifest that under-reports its exclusions claims to hide all 105 while
     // planning one operation fewer, which is exactly the shape the operator would sign
     // off on by mistake. The exclusion list is outside the plan signature — like the
     // exemption set — so apply has to check it against the live guild itself.
@@ -585,7 +585,7 @@ test('a pinned channel synchronized with its legacy category refuses the whole p
  * and the independent audit derives its exclusions from the same field. Left unguarded the
  * synchronized case is silent — no exclusion, so no refusal, no channel PATCH for Discord
  * to answer 350003 to, and the category deny hides the pinned channel by inheritance while
- * the run reports `will hide: 106 of 106` and exits 0.
+ * the run reports `will hide: 105 of 105` and exits 0.
  */
 test('an unreadable Server Guide refuses the plan instead of pinning nothing', async () => {
   for (const status of [403, 429, 500]) {
