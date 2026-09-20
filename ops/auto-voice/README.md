@@ -373,25 +373,41 @@ build arg did not reach the builder and the deploy is unpinned.
 
 **And the status patch (TOG-3143), which a redeploy is exactly what tests:**
 
+These are written for the shipped default, `AVC_STATUS_MODE=none`. Under
+`MODE=text` the expected strings differ — see the note after step 3.
+
 ```bash
 # 1. the patch ran this boot — one line, near the top of the container log
 docker compose -f ops/auto-voice/docker-compose.yml logs bot | grep avc-status
-#    expect: [avc-status] bot status set to "/setup"   (or "already applied")
+#    expect: [avc-status] custom status removed - presence activities set to []
+#    (or:    [avc-status] already applied - no custom status)
 
-# 2. the advert is gone from the code the container is actually running
+# 2. the status is gone from the code the container is actually running
 docker compose -f ops/auto-voice/docker-compose.yml exec bot \
-  grep -n 'SETUP_STATUS = ' bot/dist/gateway/client.js
-#    expect exactly one line, and NO `auto-voice.io`
+  grep -n 'activities:' bot/dist/gateway/client.js
+#    expect exactly one line, and it must be `activities: [],`
 
 # 3. the bot came up anyway
 docker compose -f ops/auto-voice/docker-compose.yml ps
 #    expect bot = healthy, and `bot ready` in the log
 ```
 
+**Do not grep `SETUP_STATUS` for this.** Under `MODE=none` the patch empties the
+`activities:` array and deliberately leaves the `SETUP_STATUS` constant in place
+as dead data — it renders nothing once the array is empty, and requiring it to
+change would fail a deploy that is entirely correct (`status-patch.sh:121-130`).
+So `grep SETUP_STATUS` still prints `auto-voice.io · /setup` on a **working**
+deploy. The `activities:` line in step 2 is the check that actually discriminates.
+
+Under `MODE=text` it is the other way round: step 1 reads `bot status set to
+"<your text>"`, step 2's line is `activities: [{ type: ActivityType.Custom, ... }]`,
+and `grep SETUP_STATUS` is then the meaningful check — it must show your text and
+no `auto-voice.io`.
+
 Then **look at the bot in Discord** — the member list is the only place that
-proves what Discord actually rendered. A custom status shows with no "Playing"
-prefix. Steps 1–2 can pass while Discord still shows a cached presence for a
-minute or two after a restart.
+proves what Discord actually rendered. Under `MODE=none` the bot should show no
+custom status line at all. Steps 1–2 can pass while Discord still shows a cached
+presence for a minute or two after a restart.
 
 If step 1 prints nothing, the container is running an image whose entrypoint was
 not overridden — check that Coolify redeployed from the branch that has this
