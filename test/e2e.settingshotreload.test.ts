@@ -25,6 +25,12 @@ import { openTestDb, type TestDb } from './helpers/testDb.ts';
 import { SettingsStore } from '../src/core/settings.ts';
 import { loadConfig, storeFirst, HOT_WIRED_FIELDS } from '../src/core/config.ts';
 import { RaidWatch } from '../src/analytics/raidWatch.ts';
+import { AutomodService, type AutomodTargetResolver } from '../src/automod/service.ts';
+import type { AutomodMessage, AutomodPolicy } from '../src/automod/types.ts';
+import type { ModerationDiscordClient } from '../src/moderation/discord.ts';
+import type { ModerationService } from '../src/moderation/service.ts';
+import type { ModerationStore } from '../src/moderation/store.ts';
+import type { AutomodStore } from '../src/automod/store.ts';
 
 const GUILD = '326474832151838730';
 const ADMIN = '111111111111111111';
@@ -42,6 +48,10 @@ before(async () => {
   // Set explicitly rather than left unset, so what follows is store-beats-env
   // and not store-beats-the-`?? 5`-default in loadConfig().
   process.env.TWO_RAID_JOIN_THRESHOLD = '5';
+  // TOG-3536: same reasoning - explicit so what follows is store-beats-env,
+  // not store-beats-the-`?? ...`-default in loadConfig().
+  process.env.DISCORD_LANDING_CHANNEL_IDS = '100000000000000001,100000000000000002';
+  process.env.TWO_AUTOMOD_REPEAT_COUNT = '4';
 });
 after(async () => {
   await testDb.cleanup();
@@ -163,6 +173,126 @@ test('deleting the row hands the key back to the environment, live', async () =>
     { key: 'TWO_RAID_JOIN_THRESHOLD', from: 5, to: 3 },
     { key: 'TWO_RAID_JOIN_THRESHOLD', from: 3, to: 5 },
   ]);
+});
+
+/**
+ * TOG-3536: the onboarding landing channels and the automod repeat-count are
+ * the two settings this card wires. Same discipline as the raid pair above -
+ * built once, before the write, with a control that shows what the old,
+ * captured-once behaviour would have done with the identical events.
+ */
+test('a stored landing channel list reaches a thunk built before the write', async () => {
+  const store = new SettingsStore(testDb.db);
+  await store.load();
+  const { cfg } = bootLikeIndex(store);
+  // The exact shape src/index.ts passes into OnboardingDeps/SessionWelcomeDeps.
+  const live = () => cfg().landingChannelIds;
+  // The control: a plain array captured once, which is what shipped before
+  // this card (`registerOnboarding`/`registerSessionWelcome` destructured the
+  // list itself rather than a thunk).
+  const fixed = cfg().landingChannelIds;
+
+  assert.deepEqual(live(), ['100000000000000001', '100000000000000002']);
+
+  await store.set(GUILD, 'DISCORD_LANDING_CHANNEL_IDS', ['200000000000000003'], ADMIN);
+  assert.equal(await store.refreshIfChanged(), true, 'the version poll saw the write');
+
+  assert.deepEqual(
+    live(),
+    ['200000000000000003'],
+    'the thunk this card wires into onboarding/session welcome sees the new list',
+  );
+  assert.deepEqual(
+    fixed,
+    ['100000000000000001', '100000000000000002'],
+    'a value captured once, the way it shipped before this card, does not move',
+  );
+});
+
+const AUTOMOD_POLICY: AutomodPolicy = {
+  badWords: [],
+  blockedAttachmentExtensions: [],
+  allowedDomains: [],
+  // Overridden per-call by the live/fixed thunk below; irrelevant here.
+  repeatedMessageCount: 4,
+  repeatedMessageWindowSeconds: 30,
+  mentionLimit: 3,
+  bypassRoleIds: new Set(),
+  exemptChannelIds: new Set(),
+  sanctions: [{ violations: 1, action: 'delete' }],
+};
+
+function repeatMessage(id: string, at: number): AutomodMessage {
+  return {
+    guildId: GUILD,
+    channelId: '900000000000000001',
+    messageId: id,
+    authorId: '800000000000000001',
+    authorIsBot: false,
+    roleIds: [],
+    content: 'buy discounted widgets now',
+    mentionedUserIds: [],
+    attachmentNames: [],
+    observedTimestamp: at,
+  };
+}
+
+/** Dry run so the only thing exercised is `matchAutomod` and the live thunk - no Discord, no moderation execution. */
+function dryRunAutomod(liveRepeatedMessageCount: () => number): AutomodService {
+  const moderationStore = {
+    claim: async () => ({ state: 'claimed' as const }),
+    recordAudit: async () => {},
+    complete: async () => {},
+    release: async () => {},
+  } as unknown as ModerationStore;
+  const resolver = {
+    target: async () => {
+      throw new Error('dry run must never resolve a target');
+    },
+  } as unknown as AutomodTargetResolver;
+  return new AutomodService(
+    {} as ModerationDiscordClient,
+    { targetProtection: () => undefined } as unknown as ModerationService,
+    moderationStore,
+    {} as AutomodStore,
+    resolver,
+    { dryRun: true, owenUserId: 'owen', botHighestRolePosition: 0, policy: AUTOMOD_POLICY },
+    undefined,
+    liveRepeatedMessageCount,
+  );
+}
+
+test('a stored repeat-count threshold reaches an AutomodService built before the write', async () => {
+  const store = new SettingsStore(testDb.db);
+  await store.load();
+  const { cfg } = bootLikeIndex(store);
+  const live = dryRunAutomod(() => cfg().automodRepeatedMessageCount);
+  // The control: the exact default `AutomodServiceOptions` falls back to when
+  // TOG-3536 never reaches the call site - a number captured once.
+  const fixed = dryRunAutomod(() => 4);
+
+  assert.equal(cfg().automodRepeatedMessageCount, 4, 'the environment value is the starting point');
+
+  // Two repeats each: under 4, so neither tracker fires yet.
+  for (let i = 0; i < 2; i++) {
+    const at = T0 + i * 1000;
+    assert.equal((await live.inspect(repeatMessage(`m${i}`, at))).matched, false);
+    assert.equal((await fixed.inspect(repeatMessage(`f${i}`, at))).matched, false);
+  }
+
+  await store.set(GUILD, 'TWO_AUTOMOD_REPEAT_COUNT', 2, ADMIN);
+  assert.equal(await store.refreshIfChanged(), true, 'the version poll saw the write');
+  assert.equal(cfg().automodRepeatedMessageCount, 2, 'the store beat the environment');
+
+  // The third identical message from the same author: both trackers have now
+  // seen 3 repeats, but only the live threshold moved (2 <= 3; the control's
+  // stayed at 4, and 3 < 4).
+  const at = T0 + 2000;
+  const liveResult = await live.inspect(repeatMessage('m2', at));
+  const fixedResult = await fixed.inspect(repeatMessage('f2', at));
+  assert.equal(fixedResult.matched, false, 'the control must not match yet');
+  assert.equal(liveResult.matched, true, 'the live service matches on a threshold it was never constructed with');
+  assert.equal(liveResult.filter, 'repeated_message');
 });
 
 /** Insert straight into the table, bypassing `store.set()` and its TypeScript guard. */

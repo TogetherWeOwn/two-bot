@@ -30,6 +30,7 @@ export class AutomodService {
   private resolver: AutomodTargetResolver;
   private options: AutomodServiceOptions;
   private repeats: RepeatTracker;
+  private liveRepeatedMessageCount: () => number;
 
   constructor(
     discord: ModerationDiscordClient,
@@ -39,6 +40,12 @@ export class AutomodService {
     resolver: AutomodTargetResolver,
     options: AutomodServiceOptions,
     repeats: RepeatTracker = new MemoryRepeatTracker(),
+    // TOG-3536: the settings store refreshes `Config` every poll, but this
+    // options object is a boot-time snapshot. A thunk lets the store-first
+    // value reach `matchAutomod()` on every message without widening
+    // anything else in `policy` (bypass roles, exempt channels, sanctions
+    // stay boot-only, matching the issue's scope).
+    liveRepeatedMessageCount: () => number = () => options.policy.repeatedMessageCount,
   ) {
     this.discord = discord;
     this.moderation = moderation;
@@ -47,6 +54,7 @@ export class AutomodService {
     this.resolver = resolver;
     this.options = options;
     this.repeats = repeats;
+    this.liveRepeatedMessageCount = liveRepeatedMessageCount;
   }
 
   async inspect(message: AutomodMessage): Promise<AutomodResult> {
@@ -56,7 +64,11 @@ export class AutomodService {
       return { matched: false, deleted: false };
     }
 
-    const filter = matchAutomod(message, this.options.policy, this.repeats);
+    const policy: AutomodPolicy = {
+      ...this.options.policy,
+      repeatedMessageCount: this.liveRepeatedMessageCount(),
+    };
+    const filter = matchAutomod(message, policy, this.repeats);
     if (!filter) return { matched: false, deleted: false };
     const idempotencyKey = `automod:${this.options.dryRun ? 'dry-run:' : ''}${message.messageId}`;
     const requestHash = createHash('sha256')
