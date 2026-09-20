@@ -63,13 +63,13 @@
  *        Both are pure and total over their input, and are asserted directly by
  *        test/unit.onboardingmode.test.ts.
  *     2. Their call sites, which are what make those two functions bind the
- *        running bot rather than only themselves: src/index.ts:610 (internal
- *        actions) and src/index.ts:339 (leveling).
- *     3. src/index.ts:516-551. Session mode registers ONLY the roleless
+ *        running bot rather than only themselves: src/index.ts:677 (internal
+ *        actions) and src/index.ts:345 (leveling).
+ *     3. src/index.ts:583-618. Session mode registers ONLY the roleless
  *        `registerSessionWelcome`; the legacy picker and anchor-welcome
  *        handlers are left unregistered, and nothing in
  *        src/discord/sessionWelcome.ts calls `roles.add`/`roles.remove`.
- *     4. src/index.ts:108-112 and :121-126. Self-role panels and armed anti-nuke
+ *     4. src/index.ts:114-118 and :127-132. Self-role panels and armed anti-nuke
  *        containment each write member roles, so session mode refuses to boot
  *        alongside either - at startup, not at the first incident.
  *
@@ -1067,9 +1067,9 @@ async function main(): Promise<void> {
       );
       console.log(
         'The zero-role-write guarantee is in the code, not in this run: session mode registers only ' +
-          'the roleless welcome (src/index.ts:516-551), drops role.assign and leveling role writes ' +
-          '(src/onboarding/mode.ts, wired at src/index.ts:610 and :339), and refuses to boot beside ' +
-          'self-role panels or armed containment (src/index.ts:108-112, :121-126). The two helpers are ' +
+          'the roleless welcome (src/index.ts:583-618), drops role.assign and leveling role writes ' +
+          '(src/onboarding/mode.ts, wired at src/index.ts:677 and :345), and refuses to boot beside ' +
+          'self-role panels or armed containment (src/index.ts:114-118, :127-132). The two helpers are ' +
           'asserted by test/unit.onboardingmode.test.ts and the wiring, the boot guards and a full ' +
           'zero-role-write walk by test/e2e.session.test.ts.',
       );
