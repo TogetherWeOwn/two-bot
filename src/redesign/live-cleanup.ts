@@ -17,8 +17,13 @@ export const ACTIVE_CATEGORY_IDS = [
 /**
  * The active `🔊 VOICE` category, which holds the `➕ Join to Create` generator
  * (`ops/auto-voice`, TOG-3052).
+ *
+ * This is the same id as `ACTIVE_CATEGORY_IDS[2]`, referenced rather than
+ * repeated: a second literal would double-count it under the TOG-3103
+ * snowflake ratchet (`scripts/ci/check-src-snowflakes.sh`), which counts
+ * quoted literals, not distinct ids.
  */
-export const AUTO_VOICE_CATEGORY_ID = '1545924266590081115';
+export const AUTO_VOICE_CATEGORY_ID = ACTIVE_CATEGORY_IDS[2];
 
 /**
  * The generator spawns one voice channel per occupied lobby directly under
