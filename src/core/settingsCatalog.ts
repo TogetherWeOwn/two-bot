@@ -235,13 +235,16 @@ export const SETTING_CLASSES: Readonly<Record<string, SettingClass>> = {
  * field for a key that is hot-but-unwired would show the owner a saved value
  * that silently does nothing - the failure this set exists to prevent.
  *
- * Slice 1 wires the raid pair, because that is what TOG-3100's staging proof
- * asks for. Converting the rest is slice 2 work; the UI should render an
- * unwired hot key as "next restart" until it appears here.
+ * Slice 1 wired the raid pair, because that is what TOG-3100's staging proof
+ * asked for. TOG-3536 adds the onboarding landing channels and the automod
+ * repeated-message threshold. The rest of the hot set stays unwired; the UI
+ * should render an unwired hot key as "next restart" until it appears here.
  */
 export const HOT_WIRED: ReadonlySet<string> = new Set([
   'TWO_RAID_JOIN_THRESHOLD',
   'TWO_RAID_WINDOW_SECONDS',
+  'DISCORD_LANDING_CHANNEL_IDS',
+  'TWO_AUTOMOD_REPEAT_COUNT',
 ]);
 
 /** `undefined` for a name this file has never heard of. */

@@ -50,8 +50,12 @@ export interface SessionWelcomeDeps {
   store: EventStore;
   /** Session mode is intentionally restricted to exactly one guild. */
   guildId: string;
-  /** Welcome goes to the first of these the bot can post in. */
-  landingChannelIds: string[];
+  /**
+   * Welcome goes to the first of these the bot can post in. A thunk rather
+   * than a plain array so a settings-store reload (TOG-3536) is visible to
+   * the next member without a restart.
+   */
+  landingChannelIds: () => string[];
   /** Where goodbyes go. Same rule: first postable channel wins. */
   goodbyeChannelIds: string[];
   /** Per-guild picker destinations; channel ids must never be shared across guilds. */
@@ -111,11 +115,12 @@ export function registerSessionWelcome(client: Client, deps: SessionWelcomeDeps)
     // welcomed again, no matter how many times pending flips.
     if (await deps.store.hasEvent(member.guild.id, member.id, 'onboarding_prompted')) return;
 
+    const landingChannelIds = deps.landingChannelIds();
     const target =
-      deps.landingChannelIds.map((id) => botCanPost(client, id, deps.guildId)).find(Boolean) ?? null;
+      landingChannelIds.map((id) => botCanPost(client, id, deps.guildId)).find(Boolean) ?? null;
     if (!target) {
       log.error('session_welcome_no_channel', {
-        tried: deps.landingChannelIds,
+        tried: landingChannelIds,
         memberId: member.id,
       });
       return;
