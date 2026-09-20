@@ -433,35 +433,83 @@ node ops/auto-voice/observe-tick.ts --selftest # drive the fixtures, no network
 ```
 
 One tick per day. It needs a bot token that is already in the guild
-(`AVC_OBSERVE_TOKEN`, falling back to `DISCORD_BOT_TOKEN`) and reads the channel
-list and voice states out of a single `GUILD_CREATE`. It is **read-only** — no
-REST writes, and it never joins a voice channel, so it cannot manufacture the
-rooms it is counting.
+(`AVC_OBSERVE_TOKEN`, falling back to `AVC_DISCORD_BOT_TOKEN` then
+`DISCORD_BOT_TOKEN`).
 
-Three conditions, and the exit code is the verdict:
+A tick is **two halves, in that order**:
+
+1. **Observation** — absence of harm. Reads the channel list and voice states out
+   of a single `GUILD_CREATE`. Read-only: no REST writes, no voice join, so it
+   cannot manufacture the rooms it counts, and it measures the guild *before* we
+   have touched it.
+2. **Exercise** (`exercise.ts`) — presence of the feature. A second gateway
+   session sends op 4 to join the generator; AVC must create a room, move us into
+   it, and reclaim it when we disconnect.
+
+Five conditions, and the exit code is the verdict:
 
 | Check | Breached when |
 |---|---|
 | `generator_present` | the generator is gone, or left the 🔊 VOICE category |
 | `lobby_untouched` | `Lobby` is missing, moved, **or renamed** — a renamed Lobby is the signature of AVC having adopted a channel it was never given |
 | `no_ghost_rooms` | a generated room under the category has nobody in it |
+| `avc_alive` | joining the generator produced no room, produced one outside the category, or produced one nobody was ever moved into |
+| `room_reclaimed` | the room we caused was still there when we stopped waiting |
 
 ```
 exit 0  PASS          every condition held
 exit 1  FAIL          a condition was breached
-exit 2  INCONCLUSIVE  could not observe - no token, gateway refused, timed out
+exit 2  INCONCLUSIVE  could not observe or could not exercise - no token,
+                      gateway refused, timed out
 ```
 
 **Three codes, not two, on purpose.** A tick that could not reach the gateway
 must not be readable as a clean day; that is how a seven-day streak gets made of
 days nobody looked at.
 
+### Why half 2 exists (TOG-3126)
+
+The first three checks are all satisfied by a guild the AVC container **stopped
+touching days ago** — a Discord channel object outlives the process watching it.
+"Generator present, `Lobby` untouched, no ghosts" is equally true of a bot that
+died on day 1, and `no_ghost_rooms` is *vacuous* on any day nobody happened to
+use the generator. Seven of those ticks measure "nothing bad is visible", not
+"AVC ran clean", and the streak they build is worth nothing.
+
+`avc_alive` and `room_reclaimed` are the only checks that require a process to
+have been running *during this tick*, and together they make every PASS a
+witnessed create/destroy cycle rather than an absence of evidence.
+
+**No human is needed.** Upstream's `maybeCreate` has no bot filter — `m.bot` is
+only filtered out of the *emptiness* counts — so a bot's voice state takes the
+identical path a member's does. The exercise opens a second session (the
+deployed container's own session is undisturbed), sends op 4, and never
+completes the voice UDP handshake, because the guild only ever sees the voice
+state. It is self-cleaning: the room is AVC's to delete, and if AVC is dead no
+room is created at all, so a failed exercise leaves nothing behind.
+
+Tunable when the guild is slow: `AVC_EXERCISE_CREATE_MS` (default 20000) and
+`AVC_EXERCISE_DELETE_MS` (default 60000). `AVC_EXERCISE_TOKEN` overrides the
+token used for the join only.
+
+To satisfy yourself the liveness half can fail against the live guild rather
+than only against fixtures, point it at a channel AVC does not watch:
+
+```bash
+AVC_OBSERVE_GENERATOR_ID=<the Lobby id> node ops/auto-voice/observe-tick.ts
+# -> avc_alive FAIL "joined the generator and no channel was created", exit 1
+```
+
 Any voice channel under the category that is neither the generator nor `Lobby`
 counts as a generated room. If a permanent one is added deliberately, put its id
 in `AVC_OBSERVE_IGNORE_CHANNEL_IDS` — until then it is a finding, which is the
-direction this check should fail in.
+direction this check should fail in. The live guild's own `💤 AFK` channel
+(`1045950023663370260`, created 2022-11-26, three years before AVC) is already
+in the default allowlist for this reason (TOG-3126); override the env var only
+if the guild's permanent-channel set actually changes.
 
 The fixtures in `observe-tick.ts` are the point of the file. A ghost room, an
-adopted Lobby and a deleted generator are states the live guild will not hold
-still for, so they are the only way to know a green tick means anything;
+adopted Lobby, a deleted generator, an AVC that has stopped reacting and an AVC
+that leaks the room it made are states the live guild will not hold still for,
+so they are the only way to know a green tick means anything;
 `test/unit.avcobserve.test.ts` runs them in CI.
