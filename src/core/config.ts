@@ -68,6 +68,12 @@ export interface Config {
   /** Joins inside `raidWindowSeconds` that raise an alert. */
   raidJoinThreshold: number;
   raidWindowSeconds: number;
+  /**
+   * Automod's repeated-message threshold (TOG-3536). The `TWO_AUTOMOD` master
+   * switch stays boot-only on purpose; this tuning value does not gate a
+   * capability, so it is safe to read store-first like the raid pair.
+   */
+  automodRepeatedMessageCount: number;
   /** Metadata-only Discord event mirrors. Null means durable/process audit only. */
   auditLogChannelId: string | null;
   voiceLogChannelId: string | null;
@@ -203,6 +209,8 @@ export function storeFirst(
 export const HOT_WIRED_FIELDS: Record<string, (c: Config) => string | number | boolean | null> = {
   TWO_RAID_JOIN_THRESHOLD: (c) => c.raidJoinThreshold,
   TWO_RAID_WINDOW_SECONDS: (c) => c.raidWindowSeconds,
+  DISCORD_LANDING_CHANNEL_IDS: (c) => c.landingChannelIds.join(','),
+  TWO_AUTOMOD_REPEAT_COUNT: (c) => c.automodRepeatedMessageCount,
 };
 
 /**
@@ -240,6 +248,7 @@ export function loadConfig(src: ConfigSource = envSource): Config {
     staffAlertChannelId: str('DISCORD_STAFF_ALERT_CHANNEL_ID'),
     raidJoinThreshold: Number(src.get('TWO_RAID_JOIN_THRESHOLD') ?? 5),
     raidWindowSeconds: Number(src.get('TWO_RAID_WINDOW_SECONDS') ?? 60),
+    automodRepeatedMessageCount: Number(src.get('TWO_AUTOMOD_REPEAT_COUNT') ?? 3),
     auditLogChannelId: str('DISCORD_AUDIT_LOG_CHANNEL_ID'),
     voiceLogChannelId: str('DISCORD_VOICE_LOG_CHANNEL_ID'),
     moderationLogChannelId: str('DISCORD_MODERATION_LOG_CHANNEL_ID'),

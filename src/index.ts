@@ -289,6 +289,8 @@ const automodService = cfg.guildId && automodCfg.enabled && moderationResolver &
         botHighestRolePosition: await moderationResolver.botHighestRolePosition(cfg.guildId),
         policy: automodCfg.policy,
       },
+      undefined,
+      () => liveCfg.automodRepeatedMessageCount,
     )
   : null;
 
@@ -572,7 +574,7 @@ if (cfg.guildId && announcementsCfg.enabled) {
 // chooses which (TOG-93); with it unset this block behaves as it always has.
 const onboardingDeps = {
   recorder: new OnboardingRecorder(store),
-  landingChannelIds: cfg.landingChannelIds,
+  landingChannelIds: () => liveCfg.landingChannelIds,
   dryRun: cfg.onboardingDryRun,
 };
 
@@ -585,7 +587,7 @@ if (cfg.onboardingMode === 'session') {
     recorder: new SessionRecorder(store),
     guildId: cfg.guildId!,
     store,
-    landingChannelIds: cfg.landingChannelIds,
+    landingChannelIds: () => liveCfg.landingChannelIds,
     goodbyeChannelIds: cfg.goodbyeChannelIds,
     picks: buildSessionPicks({
       lookingToPlay: cfg.sessionLookingToPlayChannelId!,
