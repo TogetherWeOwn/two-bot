@@ -12,6 +12,7 @@
  *   - re-selection answers identically and records a second routing
  *   - an unknown key from a stale panel gets a retry message, not a crash
  *   - a leave posts a goodbye that pings nobody
+ *   - a leave under dry-run logs session_goodbye_dry_run and posts nothing (TOG-3467)
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -339,6 +340,29 @@ test(
       return row && Number(row.n) > 0 ? row : undefined;
     }, 'the onboarding_prompted row to be recorded');
     assert.equal(Number(prompted.n), 1, 'recorded exactly once, only after the picker was posted');
+
+    // Goodbye dry-run (TOG-3467): unlike the welcome above, GuildMemberRemove
+    // returns immediately after logging when dry-run is set - see
+    // src/discord/sessionWelcome.ts:157-160 - so this must prove the inverse
+    // of the "leaves -> goodbye posted" case already covered by the non-dry-run
+    // test above: the log line fires and nothing is sent.
+    const postedBeforeLeave = postedMessages(mock).length;
+    mock.memberRemove(NEWBIE, 'newbie');
+    await waitFor(
+      () => (botLog.join('').includes('session_goodbye_dry_run') ? true : undefined),
+      `session_goodbye_dry_run log line.\n${botLog.join('')}`,
+    );
+    await sleep(600); // let a wrongly-non-dry-run send land if the guard regresses
+    assert.equal(
+      postedMessages(mock).length,
+      postedBeforeLeave,
+      'dry-run goodbye must not post a message',
+    );
+    assert.doesNotMatch(
+      botLog.join(''),
+      /"msg":"session_goodbye_posted"/,
+      'dry-run goodbye must never log the live-send line',
+    );
   },
 );
 
