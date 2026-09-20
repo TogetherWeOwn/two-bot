@@ -51,6 +51,17 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     why: 'parallel Discord audit entries must serialize before destructive containment',
   },
   {
+    // TOG-3471 (ported from the TOG-3052 slice). The residual check below
+    // catches an unregistered suite that SKIPS or FAILS, but not one that
+    // reports nothing at all - and this suite is the only place the "no
+    // persisted row, no delete" invariant is exercised against a real
+    // Postgres, so it vanishing silently is the failure that matters.
+    // Measured 2026-09-20 against Postgres 18.1.
+    file: 'test/unit.tempvoice.test.ts',
+    minTests: 54,
+    why: 'the "no persisted row, no delete" invariant, and the atomic per-user cap claim behind it',
+  },
+  {
     // TOG-3100. The residual check below catches an unregistered suite that
     // SKIPS or FAILS, but not one that reports nothing at all - and this suite
     // is the only place the env-only refusal is exercised against a real

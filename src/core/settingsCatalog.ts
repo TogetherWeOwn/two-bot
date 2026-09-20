@@ -144,6 +144,23 @@ export const SETTING_CLASSES: Readonly<Record<string, SettingClass>> = {
   // A filesystem path chosen by a web form is a write primitive.
   TWO_ANTI_NUKE_SNAPSHOT_PATH: 'env_only',
 
+  // ---------------------------------------------------------------- temp voice
+  // Staging-only join-to-create (TOG-3052). The generator channel and its
+  // category determine what Discord objects the bot may create, so a stored
+  // value would let a website compromise redirect channel creation.
+  TWO_TEMP_VOICE: 'env_only',
+  TWO_TEMP_VOICE_GENERATOR_CHANNEL_ID: 'env_only',
+  TWO_TEMP_VOICE_CATEGORY_ID: 'env_only',
+  TWO_TEMP_VOICE_PROTECTED_CHANNEL_IDS: 'env_only',
+  TWO_TEMP_VOICE_NAME_TEMPLATE: 'env_only',
+  TWO_TEMP_VOICE_EMPTY_GRACE_SECONDS: 'env_only',
+  TWO_TEMP_VOICE_SWEEP_SECONDS: 'env_only',
+  TWO_TEMP_VOICE_MAX_PER_USER: 'env_only',
+  TWO_TEMP_VOICE_MAX_PER_GUILD: 'env_only',
+  TWO_TEMP_VOICE_CREATE_COOLDOWN_SECONDS: 'env_only',
+  TWO_TEMP_VOICE_PANEL_CHANNEL_ID: 'env_only',
+  TWO_TEMP_VOICE_DISABLED_CONTROLS: 'env_only',
+
   // ------------------------------------------------------------------- cold
   // Read once at boot. The card scoped cold to TWO_AUTOMOD; reading src/index.ts
   // says otherwise - every feature master switch gates construction or slash

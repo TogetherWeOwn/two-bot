@@ -150,6 +150,11 @@ export const BOT_TABLES = [
   // 0027 — the audit-mirror kill switch (TOG-3187). One operational row that
   // says who halted sends and when; an operator control, never website data.
   'audit_kill_switch',
+  // 0028 — staging-only temporary voice (TOG-3052). Ephemeral channels; the
+  // website has no business reading them.
+  'temp_voice_channels',
+  'temp_voice_creates',
+  'temp_voice_audit',
 ];
 
 function ident(schema: string, name: string): string {

@@ -98,6 +98,11 @@ const TABLES = [
   'automod_processed_messages',
   'self_role_audit',
   'self_role_panel_claims',
+  // TOG-3052 temp voice. Same treatment as any other test data: leftover rows
+  // (owner caps, cooldowns, audit) would collide with the next fixture's PKs.
+  'temp_voice_audit',
+  'temp_voice_creates',
+  'temp_voice_channels',
   // TOG-3101 config store. guild_settings_audit is append-only by trigger, but
   // TRUNCATE does not fire row triggers, which is why the reset still works and
   // a stray UPDATE/DELETE still does not.

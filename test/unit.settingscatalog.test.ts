@@ -348,20 +348,26 @@ test('TOG-3217: migration 0027 and the catalog refuse the same names', () => {
   // half of one rule, and a name added to the catalog but not the constraint is
   // refused by the handler and accepted by psql, which is precisely the case
   // the constraint was added for.
-  const sql = readFileSync('migrations/0027_guild_settings_env_only.sql', 'utf8');
-  const list = sql.slice(sql.indexOf('key NOT IN ('));
-  assert.ok(list.length > 0, 'the 0027 CHECK list is gone - repoint or delete this test');
-  const inSql = [
-    ...new Set(
+  // 0028 extends the same CHECK with the 12 TOG-3052 temp-voice keys without
+  // editing the already-applied 0027 (checksum immutability), so the expected
+  // set is the union of both files.
+  function namesInConstraint(path: string): string[] {
+    const sql = readFileSync(path, 'utf8');
+    const at = sql.indexOf('key NOT IN (');
+    if (at === -1) return [];
+    const list = sql.slice(at);
+    return [...new Set(
       list
         .split('\n')
-        .map((l) => l.replace(/--.*$/, '')) // drop SQL comments, keep the names
+        .map((l) => l.replace(/--.*$/, ''))
         .join('\n')
         .matchAll(/'([A-Z][A-Z0-9_]+)'/g),
-    ),
-  ]
-    .map((m) => m[1])
-    .sort();
+    )].map((m) => (m as RegExpMatchArray)[1]);
+  }
+  const inSql = [...new Set([
+    ...namesInConstraint('migrations/0027_guild_settings_env_only.sql'),
+    ...namesInConstraint('migrations/0028_temp_voice.sql'),
+  ])].sort();
 
   // The prefix carve-out below is only sound while the prefix set is exactly
   // the one 0026's CHECK encodes. A second prefix here and no matching
@@ -382,7 +388,7 @@ test('TOG-3217: migration 0027 and the catalog refuse the same names', () => {
   assert.deepEqual(
     inSql,
     inCatalog,
-    'migrations/0027_guild_settings_env_only.sql and SETTING_CLASSES disagree. ' +
+    'migrations/0027+0028 and SETTING_CLASSES disagree. ' +
       'Both must list every env_only name outside the TWO_INTERNAL_ prefix: ' +
       `only in SQL [${inSql.filter((n) => !inCatalog.includes(n))}], ` +
       `only in the catalog [${inCatalog.filter((n) => !inSql.includes(n))}]`,
