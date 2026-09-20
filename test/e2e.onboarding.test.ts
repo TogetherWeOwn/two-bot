@@ -406,3 +406,89 @@ test('the bot never opens a DM channel during onboarding', { timeout: 90_000 }, 
   const dmAttempts = mock.captured.filter((c) => /\/users\/@me\/channels/.test(c.url));
   assert.deepEqual(dmAttempts, [], 'onboarding must stay in-server; no DMs without CEO sign-off');
 });
+
+test(
+  'join -> pick games -> leave -> rejoin within 60s: no duplicate welcome, no bulk-PATCH error',
+  { timeout: 90_000 },
+  async (t) => {
+    // events.ts's idempotencyKey() is explicit that onboarding_prompted stays
+    // once-per-member forever - a re-post would inflate the top of the funnel
+    // - so "re-run welcome" on a rejoin means the gateway events are handled
+    // cleanly a second time, not that a second landing-channel message goes
+    // out. What must hold: no second welcome post, the picker's role grant on
+    // rejoin is a no-op-safe bulk PATCH (discord.js merges into one array; it
+    // is not a per-role call that can partially fail), and neither pass logs
+    // an error.
+    const { mock, reader, botLog } = await startHarness(t);
+    const shooters = pickByKey('shooters')!;
+
+    // First pass: join, accept, pick Shooters.
+    mock.memberJoinPending(NEWBIE, 'newbie');
+    await sleep(300);
+    mock.memberAcceptRules(NEWBIE, 'newbie');
+    await waitFor(
+      () => postedMessages(mock).find((p) => p.channelId === mock.textChannelId),
+      `first welcome post.\n${botLog.join('')}`,
+    );
+    mock.selectGames(NEWBIE, 'newbie', ['shooters']);
+    await waitFor(
+      () =>
+        queryDb(reader, (db) =>
+          db
+            .prepare(`SELECT 1 AS x FROM events WHERE event_type='channel_routed' AND member_id=?`)
+            .get(NEWBIE),
+        ),
+      `first channel_routed.\n${botLog.join('')}`,
+    );
+
+    const bulkPatchCountAfterFirst = mock.captured.filter(
+      (c) => /\/api\/v10\/guilds\/\d+\/members\/\d+$/.test(c.url) && c.method === 'PATCH',
+    ).length;
+    assert.equal(bulkPatchCountAfterFirst, 1, 'exactly one bulk role PATCH for the first pick');
+
+    // Leave, then rejoin the same member inside the 60s window the issue
+    // names - modelled here as back-to-back gateway events, since the harness
+    // has no reason to actually wait out a minute of wall clock.
+    mock.memberRemove(NEWBIE, 'newbie');
+    await sleep(300);
+    mock.memberJoinPending(NEWBIE, 'newbie');
+    await sleep(300);
+    mock.memberAcceptRules(NEWBIE, 'newbie');
+    await sleep(1000);
+
+    // No second welcome landed in the channel - onboarding_prompted is a
+    // once-per-member guard, and a rejoin handled without incident is exactly
+    // what "the second welcome succeeds" means here: no thrown error, no
+    // duplicate post.
+    const welcomePosts = postedMessages(mock).filter((p) => p.channelId === mock.textChannelId);
+    assert.equal(welcomePosts.length, 1, `a rejoin produced a second welcome post.\n${botLog.join('')}`);
+    const promptedCount = (await queryDb(reader, (db) =>
+      db.prepare(`SELECT COUNT(*) AS n FROM events WHERE event_type='onboarding_prompted'`).get(),
+    )) as { n: number } | null;
+    assert.equal(Number(promptedCount?.n ?? 0), 1, 'onboarding_prompted must stay once-per-member');
+
+    // Re-run the picker as the same member would on rejoin (the panel message
+    // is still live in the channel). Re-selecting the same game must not
+    // error and must not fan out into more than one role write.
+    mock.selectGames(NEWBIE, 'newbie', ['shooters']);
+    await sleep(1000);
+
+    const bulkPatches = mock.captured.filter(
+      (c) => /\/api\/v10\/guilds\/\d+\/members\/\d+$/.test(c.url) && c.method === 'PATCH',
+    );
+    assert.equal(bulkPatches.length, 2, 'the re-pick must be exactly one more bulk PATCH, not a retry storm');
+    const lastRoles = (bulkPatches.at(-1)!.body as { roles?: string[] }).roles ?? [];
+    assert.deepEqual(
+      lastRoles,
+      [...new Set(lastRoles)],
+      'the bulk PATCH role array must not carry a duplicate role id',
+    );
+    assert.ok(lastRoles.includes(shooters.roleId), 'the re-picked role must still be granted');
+
+    assert.doesNotMatch(
+      botLog.join(''),
+      /picker_role_change_failed|anchor_welcome_failed|onboarding_prompt_failed/,
+      `the rejoin or the re-pick logged a failure.\n${botLog.join('')}`,
+    );
+  },
+);
