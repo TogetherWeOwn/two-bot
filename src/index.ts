@@ -75,6 +75,12 @@ import { AutomationService } from './automations/service.ts';
 import { registerAutomationGateway } from './automations/gateway.ts';
 import { startScheduler } from './automations/scheduler.ts';
 import { loadAutomationConfig } from './automations/config.ts';
+import {
+  AutomationDisableIncomplete,
+  RestGuildCommandRegistrar,
+  removeDbBackedCommands,
+  summariseDisable,
+} from './automations/disable.ts';
 import { CommunityClassifier, loadCommunityClassifierConfig } from './analytics/communityClassifier.ts';
 import { CommunityFactStore } from './analytics/communityFacts.ts';
 import {
@@ -435,10 +441,54 @@ const automationDiscord = new AutomationDiscord({
 });
 const automationService = new AutomationService(automationStore, automationDiscord);
 
+/**
+ * Deregister every DB-backed custom command an earlier enabled boot published
+ * (TOG-3189). Runs as the command registry's `beforeFirstSync` hook rather than
+ * off its own ready listener: it has to read the set Discord is *currently*
+ * publishing, and the registry's first sync replaces that set wholesale.
+ */
+async function sweepDisabledAutomationCommands(guildId: string): Promise<void> {
+  const applicationId = client.application?.id;
+  if (!applicationId) {
+    log.error('automations_disable_sweep_failed', {
+      guildId,
+      err: 'client.application is unset at ready; custom commands may still be published',
+    });
+    return;
+  }
+  const registrar = new RestGuildCommandRegistrar({
+    token: cfg.discordToken,
+    applicationId,
+    guildId,
+    base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+  });
+  try {
+    const result = await removeDbBackedCommands(guildId, automationStore, registrar);
+    log.info('automations_disable_sweep', {
+      summary: summariseDisable(result),
+      removed: result.removed,
+      alreadyAbsent: result.alreadyAbsent,
+    });
+  } catch (err) {
+    // Loud, and specific about what is still answering. Not fatal: the handler
+    // wiring below already refuses every one of these, so a retryable Discord
+    // failure must not turn into a boot loop.
+    const partial = err instanceof AutomationDisableIncomplete ? err.result : null;
+    log.error('automations_disable_sweep_failed', {
+      guildId,
+      err: String(err),
+      removed: partial?.removed ?? [],
+      stillPublished: partial?.failed.map((f) => f.name) ?? [],
+      untouched: partial?.untouched ?? [],
+    });
+  }
+}
+
 let commandRegistry: CommandRegistry | null = null;
 if (cfg.guildId) {
+  const registryGuildId = cfg.guildId;
   commandRegistry = new CommandRegistry(client, {
-    guildId: cfg.guildId,
+    guildId: registryGuildId,
     automations: automationStore,
     additionalBuiltins: [
       ...(communityFacts ? COMMUNITY_COMMAND_DATA : []),
@@ -446,8 +496,13 @@ if (cfg.guildId) {
       ...(announcementsCfg.enabled ? ANNOUNCEMENT_COMMAND_DATA : []),
       ...(moderationResolver && moderationService ? MODERATION_COMMAND_DATA : []),
     ],
+    // Disabled automations must not have their custom commands re-published by
+    // the very next sync after the disable sweep removed them (TOG-3189).
+    automationsEnabled: automationCfg.enabled,
+    beforeFirstSync: automationCfg.enabled
+      ? undefined
+      : () => sweepDisabledAutomationCommands(registryGuildId),
   });
-  commandRegistry.register();
 }
 if (cfg.guildId && automationCfg.enabled) {
   registerAutomationCommands(client, {
@@ -467,11 +522,23 @@ if (cfg.guildId && automationCfg.enabled) {
     guildId: cfg.guildId,
     textCommands: automationCfg.textCommandsEnabled ? 'on' : 'off (slash-only)',
   });
-} else {
-  log.info('automations_disabled', {
-    reason: cfg.guildId ? 'TWO_AUTOMATIONS is not 1' : 'DISCORD_GUILD_ID is unset',
+} else if (cfg.guildId) {
+  // Disabled, but the guild is configured - so admin-defined commands may still
+  // be published from a previous enabled boot. Two halves, both needed
+  // (TOG-3189): refuse every invocation, and deregister the commands.
+  registerAutomationCommands(client, {
+    guildId: cfg.guildId,
+    service: automationService,
+    store: automationStore,
+    enabled: false,
   });
+  // The deregister half runs as the command registry's beforeFirstSync hook
+  // (above), so it reads the published set before the first full-set replace.
+  log.info('automations_disabled', { reason: 'TWO_AUTOMATIONS is not 1' });
+} else {
+  log.info('automations_disabled', { reason: 'DISCORD_GUILD_ID is unset' });
 }
+commandRegistry?.register();
 
 // Announcements / scheduled-event RSVP / LFG / feed relays (TOG-1649).
 let feedPoller: ReturnType<typeof startFeedPoller> | null = null;
