@@ -218,6 +218,14 @@ retains recovery evidence rather than causing a blind resend. Repeating the read
 produce duplicate notices; the sender never does that. Notice enablement
 continues to fail closed at boot without the full binding.
 
+The shared store does not imply shared delivery ownership. Generic audit
+`claimPending` and delivered-mirror reconciliation exclude `rota_notice` rows
+**before their batch limits**; generic `record` also refuses that kind. Only the
+rota sender claims those identities and understands their marker. The generic
+30-second retry timer cannot send or quarantine notices while the rota scheduler
+is disabled, or bypass the eligibility/reader checks. Ordinary audit work retains
+its existing queue and reconciliation behavior.
+
 Recovery scans at most five pages of 100 messages, renewing the claim before
 each page and refusing renewal failure. Every page must have valid descending
 snowflakes, advancing cursors, known authors and non-partial messages in the
