@@ -26,11 +26,13 @@ import {
   type LiveCleanupSnapshot,
   type Member as SnapshotMember,
   normalizeOverwrites,
+  onboardingReferencedChannels,
   operationSemanticHash,
   type Overwrite,
   readJournalWitness,
   type Role,
   stable,
+  unreadableGuildReferences,
   withSemanticHash,
 } from '../src/redesign/live-cleanup.ts';
 import { LIVE_BOT_APPLICATION_ID, LIVE_GUILD_ID, LIVE_GUILD_NAME } from '../src/staging/spec.ts';
@@ -551,6 +553,66 @@ test('guild references exclude too, and a Server Guide that is off pins nothing'
   } finally { await stub.close(); }
 });
 
+/**
+ * `PINNED_GUILD_REFERENCES` pairs each block field with the Discord key it reads and the
+ * `referencedBy` source label the STAYS-VISIBLE line reports. The test above only ever
+ * drives `rulesChannelId`, so a mapping entry that read the *wrong* Discord key for
+ * `publicUpdatesChannelId`/`safetyAlertsChannelId` — e.g. the two swapped with each
+ * other — stayed green: both still produced an exclusion, just for the wrong channel
+ * under a label that sounds right. That is silent to every consumer of the manifest,
+ * and it is the line an operator reads before trusting `--apply` not to touch a pinned
+ * channel.
+ *
+ * Pinning two *different* channels on the two neighboring keys is what makes a swap
+ * detectable: if the mapping reads across, each exclusion's `channelId` comes out
+ * matching the other key's channel, not its own.
+ */
+test('each guild reference field is labeled with its own Discord key, not a neighbor\'s', async () => {
+  const stub = await stubDiscord();
+  try {
+    const publicPinned = PERMISSION_DRIFT.mismatches[0]!.channelId;
+    const safetyPinned = PERMISSION_DRIFT.mismatches[1]!.channelId;
+    assert.notEqual(publicPinned, safetyPinned, 'the two fixtures must differ or a swap cannot be detected');
+    stub.state.guild.public_updates_channel_id = publicPinned;
+    stub.state.guild.safety_alerts_channel_id = safetyPinned;
+    const dir = mkdtempSync(join(tmpdir(), 'two-live-clean-guild-ref-labels-'));
+    const result = await plan(stub, dir);
+    assert.equal(result.code, 0, result.stderr);
+    const manifest = JSON.parse(readFileSync(planManifestPath(dir), 'utf8')) as CleanupManifest;
+    assert.deepEqual(
+      [...manifest.onboardingExclusions].sort((a, b) => a.channelId.localeCompare(b.channelId)),
+      [
+        { channelId: publicPinned, referencedBy: ['guild.public_updates_channel_id'] },
+        { channelId: safetyPinned, referencedBy: ['guild.safety_alerts_channel_id'] },
+      ].sort((a, b) => a.channelId.localeCompare(b.channelId)),
+    );
+    assert.match(result.stdout, new RegExp(`STAYS-VISIBLE ${publicPinned} .*referenced by guild\\.public_updates_channel_id`));
+    assert.match(result.stdout, new RegExp(`STAYS-VISIBLE ${safetyPinned} .*referenced by guild\\.safety_alerts_channel_id`));
+  } finally { await stub.close(); }
+});
+
+/**
+ * `unreadableGuildReferences` only asks whether each pinned field is `null` or a
+ * string — an empty string satisfies that and is declared readable. `referencedId`
+ * then drops it (`value.length > 0`), so an empty-string reference produces no
+ * exclusion and no error: readable, then silently nothing. Discord has never been
+ * observed to send `""` for one of these — it is `null` or a real snowflake — so this
+ * pins the choice as intentional rather than leaving it for the next reader to guess
+ * whether it is a gap.
+ */
+test('an empty-string guild reference passes the readability gate and is silently treated as no reference', () => {
+  const references: JsonObject = {
+    guildReferences: {
+      rulesChannelId: '',
+      publicUpdatesChannelId: null,
+      safetyAlertsChannelId: null,
+    },
+    onboarding: { status: 200, body: { enabled: false, default_channel_ids: [], prompts: [] } },
+  };
+  assert.equal(unreadableGuildReferences(references), null, 'an empty string still satisfies the per-field readability check');
+  assert.deepEqual(onboardingReferencedChannels({ references }), [], 'an empty-string reference must not surface as an exclusion');
+});
+
 test('a pinned channel synchronized with its legacy category refuses the whole plan', async () => {
   const stub = await stubDiscord();
   try {
@@ -723,6 +785,31 @@ test('an unreadable guild reference block refuses the plan', async () => {
       assert.ok(existsSync(join(dir, 'snapshot', 'pre.json')), label);
     } finally { await stub.close(); }
   }
+});
+
+/**
+ * The variants above wreck individual keys inside a `guildReferences` block that is
+ * still present — `unreadableGuildReferences` reaches its per-field loop and reports
+ * "no readable ...". `captureSnapshot` always builds that block via `guildReferenceBlock`,
+ * so no live read can drive the block-is-entirely-absent branch end to end; it is only
+ * reachable when `references` on a snapshot carries no `guildReferences` key at all, and
+ * `onboardingReferencedChannels` is exercised directly here for that reason.
+ *
+ * Unpinned, `if (block === undefined) return '...'` can be replaced with `return null`
+ * and the suite stays green: `onboardingReferencedChannels` still throws, just from the
+ * bare `TypeError` of indexing `undefined` two lines later, on the incidental `!`
+ * non-null assertion rather than on an asserted refusal. That throw is not this check —
+ * matching the exact message is what tells the two apart.
+ */
+test('a references object with no guildReferences block at all refuses, not incidentally', () => {
+  assert.equal(
+    unreadableGuildReferences({}),
+    'no `guildReferences` block at all',
+  );
+  assert.throws(
+    () => onboardingReferencedChannels({ references: {} }),
+    /^Error: Guild references \(GET \/guilds\/\{id\}\) carried no `guildReferences` block at all, so the set of channels Discord pins publicly readable is unknown\./,
+  );
 });
 
 /**
