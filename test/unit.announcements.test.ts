@@ -221,7 +221,8 @@ test('feed reader stops streamed bodies above the byte ceiling', async () => {
 test('feed destinations reject private, link-local, metadata, and ULA addresses', async () => {
   for (const address of [
     '10.0.0.1', '127.0.0.1', '169.254.169.254', '192.168.1.1', '::1', '::ffff:10.0.0.1',
-    '64:ff9b:1::a00:1', '100:0:0:1::', '2002:0a00:0001::', '3fff::1', '5f00::1', 'fd00::1', 'fe80::1',
+    '64:ff9b::a9fe:a9fe', '64:ff9b::7f00:1', '64:ff9b::a00:1', '64:ff9b:1::a00:1',
+    '100:0:0:1::', '2002:0a00:0001::', '3fff::1', '5f00::1', 'fd00::1', 'fe80::1',
   ]) {
     assert.equal(isPublicAddress(address), false, address);
   }
