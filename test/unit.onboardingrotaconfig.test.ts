@@ -22,6 +22,7 @@ const protectedKeys = [
   'TWO_ONBOARDING_ROTA_NOTICE',
   'TWO_ONBOARDING_ROTA_PSEUDONYM_KEY',
   'TWO_ONBOARDING_ROTA_PRIMARY_ACTOR_ID',
+  'TWO_ONBOARDING_ROTA_READER_IDS',
 ];
 
 test('rota defaults off and only exact 1 opts into measurement', () => {
@@ -76,6 +77,20 @@ test('primary binding is optional, explicit, validated and ignored during master
     assert.deepEqual(loadOnboardingRotaConfig({ TWO_ONBOARDING_ROTA_PRIMARY_ACTOR_ID: value }),
       { enabled: false, noticeEnabled: false });
   }
+});
+
+test('reader binding is optional, explicit, comma-separated and ignored during master rollback', () => {
+  const [a, b] = ['444444444444444444', '555555555555555555'];
+  const cfg = loadOnboardingRotaConfig({ ...enabledEnv(), TWO_ONBOARDING_ROTA_READER_IDS: ` ${a} , ${b} ` });
+  assert.ok(cfg.enabled);
+  assert.deepEqual(cfg.readerIds, [a, b]);
+  assert.equal(cfg.noticeEnabled, false, 'reader binding alone does not opt into notices');
+  for (const value of ['owner', '123', `${a},nope`, `${a},${a.slice(1)}x`, `${a} ${b}`, `${a},${a}`]) {
+    assert.throws(() => loadOnboardingRotaConfig({ ...enabledEnv(), TWO_ONBOARDING_ROTA_READER_IDS: value }),
+      { message: 'Onboarding rota reader binding requires comma-separated Discord user ids.' });
+  }
+  assert.deepEqual(loadOnboardingRotaConfig({ TWO_ONBOARDING_ROTA_READER_IDS: a }),
+    { enabled: false, noticeEnabled: false });
 });
 
 test('notice rollback leaves measurement enabled and ignores stale destination', () => {

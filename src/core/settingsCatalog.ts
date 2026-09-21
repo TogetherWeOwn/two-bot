@@ -141,6 +141,7 @@ export const SETTING_CLASSES: Readonly<Record<string, SettingClass>> = {
   TWO_ONBOARDING_ROTA_NOTICE: 'env_only', // src/analytics/onboardingRotaConfig.ts
   TWO_ONBOARDING_ROTA_PSEUDONYM_KEY: 'env_only', // dedicated HMAC credential
   TWO_ONBOARDING_ROTA_PRIMARY_ACTOR_ID: 'env_only', // accepted primary, never a dashboard grant
+  TWO_ONBOARDING_ROTA_READER_IDS: 'env_only', // explicit notice readers, never a dashboard grant
 
   // These do not switch verbs on; they decide who an already-enabled verb may
   // reach. Widening them from the web is the same escalation one step later.
