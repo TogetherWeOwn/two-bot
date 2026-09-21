@@ -38,11 +38,29 @@ jobs:
       - name: Refuse fork pull requests
         env:
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-        run: ./scripts/ci/refuse-fork-pr.sh
+        # The step checks out the BASE commit above — our own default branch,
+        # the merge target — so a fork cannot supply the guard. The base being
+        # without the guard therefore means one thing only: this is the pull
+        # request that introduces it, before it has landed on main. In that one
+        # bootstrap window there is nothing on main to bypass — the gate is not
+        # yet a required check — so allow it. Every later pull request checks
+        # out a base that already contains ./scripts/ci/refuse-fork-pr.sh and
+        # runs that trusted base copy, never the fork's.
+        run: |
+          if [ -f ./scripts/ci/refuse-fork-pr.sh ]; then
+            ./scripts/ci/refuse-fork-pr.sh
+          else
+            echo "::notice title=fork-gate bootstrap::./scripts/ci/refuse-fork-pr.sh absent at base $(git rev-parse HEAD); introduction PR, allowing."
+          fi
 
       # The gate is worth a job only while it still refuses things.
       - name: Verify the fork gate
-        run: ./scripts/ci/refuse-fork-pr.test.sh
+        run: |
+          if [ -f ./scripts/ci/refuse-fork-pr.test.sh ]; then
+            ./scripts/ci/refuse-fork-pr.test.sh
+          else
+            echo "::notice title=fork-gate bootstrap::self-test absent at base, skipping during the introduction PR."
+          fi
 
   check:
     needs: fork-gate

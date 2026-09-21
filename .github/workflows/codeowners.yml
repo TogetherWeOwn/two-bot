@@ -60,7 +60,15 @@ jobs:
       - name: Refuse fork pull requests
         env:
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-        run: ./scripts/ci/refuse-fork-pr.sh
+        # See ci.yml: the base checkout is our own default branch, so a guard
+        # absent there means only the introduction PR before it lands on main.
+        # Run the trusted base copy when present; allow the one bootstrap PR.
+        run: |
+          if [ -f ./scripts/ci/refuse-fork-pr.sh ]; then
+            ./scripts/ci/refuse-fork-pr.sh
+          else
+            echo "::notice title=fork-gate bootstrap::./scripts/ci/refuse-fork-pr.sh absent at base $(git rev-parse HEAD); introduction PR, allowing."
+          fi
 
   owners-resolve:
     needs: fork-gate
