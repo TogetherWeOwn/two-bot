@@ -29,6 +29,7 @@ import {
   type GuildTextBasedChannel,
 } from 'discord.js';
 import { log } from '../core/log.ts';
+import type { DiscordOnboardingRota } from './onboardingRota.ts';
 import type { OnboardingRecorder } from '../onboarding/flow.ts';
 import {
   SUNDAY_SQUAD,
@@ -50,6 +51,7 @@ export interface AnchorWelcomeDeps {
   now?: () => number;
   /** Decide and log, post nothing, record nothing. Used by preflight. */
   dryRun?: boolean;
+  onboardingRota?: Pick<DiscordOnboardingRota, 'promptShown'>;
 }
 
 /** Can the bot post in here? A welcome we cannot send is worth saying out loud. */
@@ -115,11 +117,14 @@ export async function sendAnchorWelcome(
   }
 
   try {
-    await target.send({
+    const message = await target.send({
       content: anchorWelcomeText(`<@${member.id}>`, at, spec),
       // The mention is the whole point of this message existing; nothing else
       // in it may ping. No roles, no @everyone, even if the copy changes.
       allowedMentions: { users: [member.id], roles: [], parse: [] },
+    });
+    void deps.onboardingRota?.promptShown({
+      member, message, variant: 'anchor', actionChannelId: target.id,
     });
   } catch (err) {
     log.error('anchor_welcome_failed', { memberId: member.id, err: String(err) });

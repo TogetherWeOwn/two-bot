@@ -136,7 +136,7 @@ export const SETTING_CLASSES: Readonly<Record<string, SettingClass>> = {
   TWO_ONBOARDING_MODE: 'env_only', // src/index.ts:599 -> src/onboarding/mode.ts:9
 
   // Staging-only collection and notice capabilities, never dashboard-settable.
-  // The loader is not wired to the runtime yet. These remain boot/env inputs.
+  // Read by the runtime loader at boot, never from the settings snapshot.
   TWO_ONBOARDING_ROTA_MEASUREMENT: 'env_only', // src/analytics/onboardingRotaConfig.ts
   TWO_ONBOARDING_ROTA_NOTICE: 'env_only', // src/analytics/onboardingRotaConfig.ts
   TWO_ONBOARDING_ROTA_PSEUDONYM_KEY: 'env_only', // dedicated HMAC credential
