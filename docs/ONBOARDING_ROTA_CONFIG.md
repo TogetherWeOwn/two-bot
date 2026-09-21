@@ -24,6 +24,7 @@ Only the exact string `1` opts in, matching the existing feature loaders.
 | `DISCORD_GUILD_ID` | When enabled, a 17–20 digit id matching `DISCORD_STAGING_GUILD_ID`; the live TWO guild is always refused, even if set as staging. |
 | `TWO_ONBOARDING_ROTA_PSEUDONYM_KEY` | When enabled, dedicated UTF-8 HMAC key of at least 32 bytes, not all whitespace. Use a securely generated key; the length check does not establish entropy. |
 | `DISCORD_STAFF_ALERT_CHANNEL_ID` | Required valid id only when notices are enabled. No member-facing fallback. |
+| `TWO_ONBOARDING_ROTA_PRIMARY_ACTOR_ID` | Optional explicit accepted primary binding, 17–20 digits when set. Enables the authenticated, ephemeral acknowledgement command only while measurement is on. No owner/staff inference. Unset to omit command publication/input. Master-off ignores stale values. |
 
 Prefer the systemd credential `onboarding_rota_pseudonym_key` over the environment
 key. The existing credential reader controls precedence and normalization. Do
@@ -31,11 +32,12 @@ not log the returned config, key, or environment. Do not reuse a Discord token o
 moderation signing key as the pseudonym key. Key deletion/rotation is outside
 this configuration change and requires the existing credential decision path.
 
-Both switches and the pseudonym key are **env-only**, not dashboard controls:
-settings writes must not enable this collection or redirect the credential.
-The catalog, store-first filter and migration 0029 enforce that boundary.
-The existing 0027 constraint is preserved. No new table, dependency, surface or
-research-survey store is added.
+Both switches, the pseudonym key and primary binding are **env-only**, not
+dashboard controls: settings writes must not enable collection, redirect the
+credential or grant primary acknowledgement to another identity. The catalog,
+store-first filter and migrations 0029/0031 enforce that boundary, including raw
+SQL refusal. Earlier migrations remain unchanged. No new table, dependency or
+research-survey store is added; the optional command uses the existing registry.
 
 ## Runtime integration and remaining release work
 
@@ -46,11 +48,11 @@ than inferring them from configuration, with the core classifier unchanged.
 
 Still required:
 
-1. Bind an authenticated primary acknowledgement input to the durable core API
-   and wire the read-only deadline query into a durable delivery/claim path. The
-   core now derives the deadline from the persisted first message and retains
-   primary acknowledgements in the existing fact log, but no primary identity
-   environment setting or runtime acknowledgement command exists yet. A notice is
+1. Wire the read-only deadline query into a durable delivery/claim path. The
+   core derives the deadline from the persisted first message and retains primary
+   acknowledgements in the existing fact log. The authenticated command is wired
+   when the primary binding is configured, but no deployment binding has been
+   changed or staging acceptance performed by these tests. A notice is
    due only after **30 minutes without a human reply or primary acknowledgement**
    (accepted TOG-2347 coverage binding, revision 3). This is not an immediate
    first-message ping. The published coverage block is America/Chicago
@@ -90,5 +92,5 @@ TWO_TEST_DATABASE_URL=postgres://... node --test \
 The fixtures prove disabled-by-default, master and notice-only rollback, staging
 identity refusal (including live-as-staging), credential precedence and key
 validation, catalog drift checks, settings-store bypass protection and raw SQL
-refusal of all three rota keys. They are local fixtures, not Discord staging
+refusal of all four rota keys. They are local fixtures, not Discord staging
 proof. Full repository regression uses `TWO_TEST_DATABASE_URL=... npm test`.

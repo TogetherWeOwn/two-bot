@@ -127,6 +127,17 @@ for (const key of [
   });
 }
 
+test('rota primary identity cannot be changed through settings or raw SQL', async () => {
+  const key = 'TWO_ONBOARDING_ROTA_PRIMARY_ACTOR_ID';
+  await assert.rejects(() => store().set(GUILD, key, '111111111111111111', ADMIN), EnvOnlyKeyError);
+  await assert.rejects(() => testDb.db.prepare(
+    `INSERT INTO guild_settings (guild_id, key, value, version, updated_by)
+     VALUES (?, ?, '"111111111111111111"'::jsonb, nextval('guild_settings_version_seq'), ?)`,
+  ).run(GUILD, key, ADMIN), /guild_settings_rota_primary_env_only/);
+  const rows = await testDb.db.prepare('SELECT count(*)::int AS n FROM guild_settings_audit').get<{ n: number }>();
+  assert.equal(rows?.n, 0);
+});
+
 test('the underscore in the constraint is an escape, so ordinary keys are unaffected', async () => {
   // `LIKE 'TWO\_INTERNAL\_%'` - if those escapes were dropped, `_` would be a
   // single-character wildcard and TWO?INTERNAL? patterns would over-match. The

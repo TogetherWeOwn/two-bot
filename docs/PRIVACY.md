@@ -56,8 +56,9 @@ just the same.
 
 The measurement core described in [ONBOARDING_ROTA.md](ONBOARDING_ROTA.md) adds
 pseudonymous derived rows to `community_facts`. The disabled-by-default runtime
-adapter observes the existing gateway flow; primary acknowledgement has a durable
-core API but no runtime command yet. These rows contain a guild-separated keyed member pseudonym,
+adapter observes the existing gateway flow. An explicitly bound primary can use
+the staging-only, ephemeral acknowledgement command; it stores no message body,
+handle or raw primary id. These rows contain a guild-separated keyed member pseudonym,
 source-cohort code, timestamps, action/channel IDs and a keyed responder
 pseudonym, never a public-message body or handle. The dedicated key is not stored
 in the database. Do not expose rota rows through public reporting views.

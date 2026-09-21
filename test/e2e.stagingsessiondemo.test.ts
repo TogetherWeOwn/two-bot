@@ -374,23 +374,23 @@ const INDEX_CITATIONS: ReadonlyArray<{
   what: string;
 }> = [
   {
-    printed: 'src/index.ts:610-647',
-    start: 610,
-    end: 647,
+    printed: 'src/index.ts:616-653',
+    start: 616,
+    end: 653,
     contains: /registerSessionWelcome\(client, \{/,
     what: 'exclusive session registration',
   },
   {
-    printed: 'src/index.ts:706 and :371',
-    start: 706,
-    end: 706,
+    printed: 'src/index.ts:712 and :373',
+    start: 712,
+    end: 712,
     contains: /actionsForOnboardingMode\(/,
     what: 'the internal role.assign call site',
   },
   {
-    printed: 'src/index.ts:706 and :371',
-    start: 371,
-    end: 371,
+    printed: 'src/index.ts:712 and :373',
+    start: 373,
+    end: 373,
     contains: /levelRoleWritesForOnboardingMode\(/,
     what: 'the leveling role-write call site',
   },
