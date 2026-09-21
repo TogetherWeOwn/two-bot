@@ -10,6 +10,8 @@ export type OnboardingRotaRuntimeConfig =
     pseudonymKey: string;
     noticeChannelId: string | null;
     primaryActorId?: string;
+    /** Explicit authorized notice readers, never inferred from staff roles. */
+    readerIds?: readonly string[];
   };
 
 /** Boot-only controls. No collection or Discord side effects happen here. */
@@ -47,9 +49,27 @@ export function loadOnboardingRotaConfig(
   if (primaryActorId !== undefined && !/^\d{17,20}$/.test(primaryActorId)) {
     throw new Error('Onboarding rota primary binding requires a valid Discord user id.');
   }
-  // A valid id is not a permissions check. The sender must verify guild identity
-  // and staff-only visibility against Discord before every send.
+  // Explicit reader set for the future staff-only notice: accepted primary,
+  // Community Manager and President & COO principals, never inferred from
+  // staff roles. A valid list is not a permissions check. The sender must
+  // verify guild identity and staff-only visibility against Discord before
+  // every send.
+  const readerRaw = env.TWO_ONBOARDING_ROTA_READER_IDS?.trim();
+  let readerIds: readonly string[] | undefined;
+  if (readerRaw !== undefined && readerRaw !== '') {
+    const ids = readerRaw.split(',').map((id) => id.trim()).filter((id) => id !== '');
+    const seen = new Set<string>();
+    for (const id of ids) {
+      if (!/^\d{17,20}$/.test(id) || seen.has(id)) {
+        throw new Error('Onboarding rota reader binding requires comma-separated Discord user ids.');
+      }
+      seen.add(id);
+    }
+    if (!seen.size) throw new Error('Onboarding rota reader binding requires comma-separated Discord user ids.');
+    readerIds = [...seen];
+  }
   return { enabled: true, noticeEnabled, guildId, pseudonymKey, noticeChannelId,
-    ...(primaryActorId ? { primaryActorId } : {}) };
+    ...(primaryActorId ? { primaryActorId } : {}),
+    ...(readerIds ? { readerIds } : {}) };
 
 }
