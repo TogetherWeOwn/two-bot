@@ -9,6 +9,7 @@ export type OnboardingRotaRuntimeConfig =
     guildId: string;
     pseudonymKey: string;
     noticeChannelId: string | null;
+    primaryActorId?: string;
   };
 
 /** Boot-only controls. No collection or Discord side effects happen here. */
@@ -42,7 +43,13 @@ export function loadOnboardingRotaConfig(
   if (noticeEnabled && !/^\d{17,20}$/.test(noticeChannelId ?? '')) {
     throw new Error('Onboarding rota notices require DISCORD_STAFF_ALERT_CHANNEL_ID.');
   }
+  const primaryActorId = env.TWO_ONBOARDING_ROTA_PRIMARY_ACTOR_ID?.trim();
+  if (primaryActorId !== undefined && !/^\d{17,20}$/.test(primaryActorId)) {
+    throw new Error('Onboarding rota primary binding requires a valid Discord user id.');
+  }
   // A valid id is not a permissions check. The sender must verify guild identity
   // and staff-only visibility against Discord before every send.
-  return { enabled: true, noticeEnabled, guildId, pseudonymKey, noticeChannelId };
+  return { enabled: true, noticeEnabled, guildId, pseudonymKey, noticeChannelId,
+    ...(primaryActorId ? { primaryActorId } : {}) };
+
 }

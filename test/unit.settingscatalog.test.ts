@@ -351,6 +351,7 @@ test('TOG-3217: env-only constraints and the catalog refuse the same names', () 
   const list = [
     'migrations/0027_guild_settings_env_only.sql',
     'migrations/0029_onboarding_rota_env_only.sql',
+    'migrations/0031_rota_primary_env_only.sql',
   ].map((path) => {
     const sql = readFileSync(path, 'utf8');
     const start = sql.indexOf('key NOT IN (');

@@ -86,6 +86,7 @@ import { CommunityFactStore } from './analytics/communityFacts.ts';
 import { OnboardingRota } from './analytics/onboardingRota.ts';
 import { loadOnboardingRotaConfig } from './analytics/onboardingRotaConfig.ts';
 import { DiscordOnboardingRota } from './discord/onboardingRota.ts';
+import { ROTA_ACKNOWLEDGEMENT_COMMAND, registerRotaAcknowledgement } from './discord/rotaAcknowledgement.ts';
 import {
   startCommunityScorecardJob,
   type CommunityScorecardJobHandle,
@@ -231,6 +232,7 @@ const moderationCfg = loadModerationConfig();
 const onboardingRota = onboardingRotaCfg.enabled
   ? new DiscordOnboardingRota(db, new OnboardingRota(db, communityClassifier, onboardingRotaCfg), {
     guildId: onboardingRotaCfg.guildId,
+    primaryActorId: onboardingRotaCfg.primaryActorId,
     staffRoleIds: new Set([
       ...moderationCfg.protectedRoleIds,
       ...(cfg.ticketStaffRoleId ? [cfg.ticketStaffRoleId] : []),
@@ -518,6 +520,7 @@ if (cfg.guildId) {
     automations: automationStore,
     additionalBuiltins: [
       ...(communityFacts ? COMMUNITY_COMMAND_DATA : []),
+      ...(onboardingRotaCfg.enabled && onboardingRotaCfg.primaryActorId ? [ROTA_ACKNOWLEDGEMENT_COMMAND] : []),
       ...(automationCfg.enabled ? AUTOMATION_COMMAND_DATA : []),
       ...(announcementsCfg.enabled ? ANNOUNCEMENT_COMMAND_DATA : []),
       ...(moderationResolver && moderationService ? MODERATION_COMMAND_DATA : []),
@@ -563,6 +566,9 @@ if (cfg.guildId && automationCfg.enabled) {
   log.info('automations_disabled', { reason: 'TWO_AUTOMATIONS is not 1' });
 } else {
   log.info('automations_disabled', { reason: 'DISCORD_GUILD_ID is unset' });
+}
+if (onboardingRota && onboardingRotaCfg.enabled && onboardingRotaCfg.primaryActorId) {
+  registerRotaAcknowledgement(client, onboardingRotaCfg.guildId, onboardingRota);
 }
 commandRegistry?.register();
 

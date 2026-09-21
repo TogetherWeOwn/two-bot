@@ -452,7 +452,8 @@ test('all settings refusals are VALID constraints, checked on every write', asyn
 
   assert.deepEqual(
     rows.map((r) => r.conname),
-    ['guild_settings_env_only_keys', 'guild_settings_no_internal_keys', 'guild_settings_rota_env_only_keys'],
+    ['guild_settings_env_only_keys', 'guild_settings_no_internal_keys', 'guild_settings_rota_env_only_keys',
+      'guild_settings_rota_primary_env_only'],
     'all CHECK constraints are present on the table',
   );
   for (const r of rows) {

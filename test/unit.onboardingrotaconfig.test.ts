@@ -21,6 +21,7 @@ const protectedKeys = [
   'TWO_ONBOARDING_ROTA_MEASUREMENT',
   'TWO_ONBOARDING_ROTA_NOTICE',
   'TWO_ONBOARDING_ROTA_PSEUDONYM_KEY',
+  'TWO_ONBOARDING_ROTA_PRIMARY_ACTOR_ID',
 ];
 
 test('rota defaults off and only exact 1 opts into measurement', () => {
@@ -61,6 +62,20 @@ test('notice opt-in requires measurement and a valid explicit destination', () =
   assert.ok(cfg.enabled);
   assert.equal(cfg.noticeEnabled, true);
   assert.equal(cfg.noticeChannelId, CHANNEL);
+});
+
+test('primary binding is optional, explicit, validated and ignored during master rollback', () => {
+  const primary = '333333333333333333';
+  const cfg = loadOnboardingRotaConfig({ ...enabledEnv(), TWO_ONBOARDING_ROTA_PRIMARY_ACTOR_ID: ` ${primary} ` });
+  assert.ok(cfg.enabled);
+  assert.equal(cfg.primaryActorId, primary);
+  assert.equal(cfg.noticeEnabled, false, 'primary acknowledgement does not opt into notices');
+  for (const value of ['', ' ', 'owner', '123', '1'.repeat(21)]) {
+    assert.throws(() => loadOnboardingRotaConfig({ ...enabledEnv(), TWO_ONBOARDING_ROTA_PRIMARY_ACTOR_ID: value }),
+      { message: 'Onboarding rota primary binding requires a valid Discord user id.' });
+    assert.deepEqual(loadOnboardingRotaConfig({ TWO_ONBOARDING_ROTA_PRIMARY_ACTOR_ID: value }),
+      { enabled: false, noticeEnabled: false });
+  }
 });
 
 test('notice rollback leaves measurement enabled and ignores stale destination', () => {

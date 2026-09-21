@@ -145,21 +145,50 @@ coverage. Elapsed deadlines remain 30 real minutes; the query does not defer or
 reset them outside that block, and wider human availability remains best-effort.
 An overdue candidate is not evidence of a delivered notice or a rota miss.
 
-**Not runtime-wired:** no primary environment binding, acknowledgement command,
-scheduler, delivery lease/outbox, or sender is introduced here. The constructor
-binding is exercised only by tests; it is not a deployable configuration knob.
-The future authenticated adapter must bind the accepted primary explicitly,
-restrict rota-log access to the three authorized readers, and not infer identity
-from staff permissions. A sender must recheck reply/ack state under the member
-lock and use durable claim/delivery recovery before any Discord send; repeating
-this read-only query alone would produce duplicate notices. Notice enablement
-continues to fail closed at boot.
+### Authenticated primary input
+
+With staging-only measurement enabled and an explicit boot-time
+`TWO_ONBOARDING_ROTA_PRIMARY_ACTOR_ID`, the existing command registry publishes
+`/rota-acknowledge message-link:<canonical Discord message link>`. The command is
+reserved against custom-command shadowing even while disabled. It defaults to
+Manage Guild visibility, but **the authenticated interaction user must match the
+bound primary** regardless of Discord command-permission overrides. Staff status
+or guild ownership alone cannot acknowledge for the primary. The configured
+primary is also excluded as a newcomer, even without a staff role.
+
+The adapter accepts only `https://discord.com/channels/<guild>/<channel>/<message>`
+in its configured guild and screened-human channel allowlist. No arbitrary URL
+is fetched. It reserves observation order before REST I/O, fetches primary and
+subject members afresh, verifies known screening/roles/permissions and timeout
+state, and requires a normal text channel, primary View/Send/Read History and
+subject View/Send permissions. Bot/webhook/system/partial messages are refused.
+The message must match the **already observed** persisted first action: reading
+historical Discord messages does not enroll members or manufacture milestones.
+The unchanged classifier and core exclusions run again before persistence.
+
+Results are deferred **ephemerally**, with suppressed mentions and generic text
+only—no handle, message link, subject id or rota-log listing in responses. Errors
+log a fixed measurement-gap classification, never payloads or error text. There
+is no public-channel or DM fallback. This interaction response is not the future
+staff-only fallback notice, and does not count as a human reply.
+
+Master-off omits both observer and command handler/publication. Removing the
+primary binding omits the command without stopping measurement; the central
+registry removes its previous publication on a successful sync. No binding is
+inferred from another owner/admin setting. Notice-only off retains primary input.
+Environment binding is a deployment responsibility; no live identity or
+configuration was changed in this slice. Existing rota-log reader limits remain.
+
+**Still not runtime-wired:** scheduler, delivery lease/outbox, or sender. A sender
+must recheck reply/ack state under the member lock and use durable claim/delivery
+recovery before any Discord send; repeating this read-only query alone would
+produce duplicate notices. Notice enablement continues to fail closed at boot.
 
 ## Remaining integration and release gates
 
 1. Wire the accepted **30-minute no-reply/no-acknowledgement fallback**, not
-   an immediate first-message alert. Bind/authenticate primary acknowledgement,
-   persist notice delivery/claim state across restarts, and recheck eligibility
+   an immediate first-message alert. Persist notice delivery/claim state across
+   restarts, bind the accepted primary in the target environment, and recheck eligibility
    before sending. Verify staff-only effective access to the configured
    `#updates-and-changes` destination; never fall back to a human channel or DM.
    Use an explicit bot label and suppressed mentions. A notice cannot stop the
@@ -171,9 +200,8 @@ continues to fail closed at boot.
    existing live-release gates. The author must not merge their own PR.
 
 RSVP, other return-action sources and 24-hour misses must reuse the canonical
-event/rota capabilities if added. Operations acknowledgements now have a durable
-core API, but no authenticated runtime input; none of these is runtime-wired today. Keep missing coverage visible in any
-report. Do not publish conversion success until the required sources are proven.
+event/rota capabilities if added; those sources are not runtime-wired today.
+Keep missing coverage visible in any report. Do not publish conversion success until the required sources are proven.
 
 ## Rollback
 
@@ -194,7 +222,7 @@ npm ci --include=dev
 npm run typecheck
 node --test test/unit.onboardingrota.test.ts test/unit.discordonboardingrota.test.ts \
   test/unit.rotawelcome.test.ts test/unit.rotaboot.test.ts test/unit.communityscorecard.test.ts \
-  test/unit.rotanoticestate.test.ts
+  test/unit.rotanoticestate.test.ts test/unit.rotaacknowledgement.test.ts
 ```
 
 Set `TWO_TEST_DATABASE_URL` to the disposable test database before the test
