@@ -31,15 +31,23 @@ function boot(env: Record<string, string>) {
   return output;
 }
 
-test('boot rejects enabled notices rather than silently accepting an unwired sender', () => {
+test('boot rejects enabled notices without the full channel, primary and reader binding', () => {
   const output = boot({ TWO_ONBOARDING_ROTA_NOTICE: '1', DISCORD_STAFF_ALERT_CHANNEL_ID: '222222222222222222' });
-  assert.match(output, /notice sender is not implemented/);
+  assert.match(output, /require DISCORD_STAFF_ALERT_CHANNEL_ID/);
+});
+
+test('boot accepts fully-bound notices and reaches the existing session guard', () => {
+  const output = boot({ TWO_ONBOARDING_ROTA_NOTICE: '1', DISCORD_STAFF_ALERT_CHANNEL_ID: '222222222222222222',
+    TWO_ONBOARDING_ROTA_PRIMARY_ACTOR_ID: '333333333333333333',
+    TWO_ONBOARDING_ROTA_READER_IDS: '333333333333333333,444444444444444444' });
+  assert.match(output, /session requires DISCORD_GUILD_ID/);
+  assert.doesNotMatch(output, /require DISCORD_STAFF_ALERT_CHANNEL_ID/);
 });
 
 test('measurement with notices off reaches the existing session guard, not an unwired boot path', () => {
   const output = boot({ TWO_ONBOARDING_ROTA_NOTICE: '0' });
   assert.match(output, /session requires DISCORD_GUILD_ID/);
-  assert.doesNotMatch(output, /notice sender is not implemented/);
+  assert.doesNotMatch(output, /require DISCORD_STAFF_ALERT_CHANNEL_ID/);
 });
 
 test('master-off skips key and notice validation in actual boot even with stale opt-ins', () => {
@@ -48,7 +56,7 @@ test('master-off skips key and notice validation in actual boot even with stale 
     TWO_ONBOARDING_ROTA_PSEUDONYM_KEY: '', DISCORD_STAGING_GUILD_ID: '',
   });
   assert.match(output, /session requires DISCORD_GUILD_ID/);
-  assert.doesNotMatch(output, /notice sender is not implemented|rota requires|rota is staging-only/);
+  assert.doesNotMatch(output, /require DISCORD_STAFF_ALERT_CHANNEL_ID|rota requires|rota is staging-only/);
 });
 
 test('boot refuses the live guild even when explicitly configured as staging', () => {
