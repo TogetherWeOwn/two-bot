@@ -31,6 +31,7 @@ import {
   type StringSelectMenuInteraction,
 } from 'discord.js';
 import { log } from '../core/log.ts';
+import type { DiscordOnboardingRota } from './onboardingRota.ts';
 import {
   OnboardingRecorder,
   currentGameKeys,
@@ -55,6 +56,7 @@ export interface OnboardingDeps {
   landingChannelIds: () => string[];
   /** When true, assign no roles and post nothing. Used by preflight. */
   dryRun?: boolean;
+  onboardingRota?: Pick<DiscordOnboardingRota, 'promptShown'>;
 }
 
 // --- picker construction ----------------------------------------------------
@@ -159,10 +161,13 @@ export function registerOnboarding(client: Client, deps: OnboardingDeps): void {
     }
 
     try {
-      await target.send({
+      const message = await target.send({
         content: welcomeText(`<@${member.id}>`),
         components: [buildGameSelect()],
         allowedMentions: { users: [member.id] },
+      });
+      void deps.onboardingRota?.promptShown({
+        member, message, variant: 'legacy', actionChannelId: INTRO_CHANNEL_ID,
       });
       await recorder.prompted(member.guild.id, member.id, target.id);
     } catch (err) {

@@ -2,11 +2,15 @@
 
 ## Delivery status
 
-This change delivers the **measurement core only**. `OnboardingRota` is not yet
-constructed by `src/index.ts`, no gateway handler calls it, and there is no
-notice sender or scheduler. It changes no live configuration or member-facing
-copy. Do not treat the fixture result as a staging Discord demonstration or
-release the measured-evaluation gate yet.
+The measurement core and **disabled-by-default runtime adapter** are wired in
+`src/index.ts`. Observed screening, successful existing welcome sends, accepted
+messages and explicit reply references feed the existing fact log. See
+[configuration](ONBOARDING_ROTA_CONFIG.md) for staging-only controls.
+
+There is still **no notice sender or scheduler**. Boot explicitly refuses
+measurement-on plus notice-on until that implementation exists. This changes no
+live configuration or member-facing copy. Local fixtures are not a staging
+Discord demonstration and do not release the measured-evaluation gate.
 
 The source contracts are TOG-3531 and TOG-1965's `activation-package` §4/§8.3,
 with TOG-2347's accepted `coverage-binding` §3 governing the future notice.
@@ -69,26 +73,59 @@ guild, then delete matching derived `actor_id` rows and rows whose metadata's
 `responderId` matches. Use bound parameters; do not put a raw ID into a work
 product. This is additional to the existing raw-fact/member erasure policy.
 
+## Runtime observations
+
+`src/discord/onboardingRota.ts` is an observer, not an alternate onboarding flow.
+It sends nothing and changes no roles. It is constructed only with measurement
+explicitly enabled, independently of the raw community-scorecard capture flag.
+
+- The gateway reserves join/gate/message order before invite, funnel or automod
+  I/O. Welcome observations join the same queue only after their send resolves.
+  No gate is inferred from a welcome or a historical member row. An ungated join
+  enrolls only if Discord advertises Rules Screening as enabled; otherwise an
+  explicit `pending: true -> false` transition is required. Missing data fails
+  closed. Join time is not substituted for the observed acceptance time.
+- Cohort comes from the existing invite/web attribution and durable `join_source`
+  projection, or `unknown`. The core freezes it on enrollment. There is no new
+  join/attribution store or backfill.
+- Allowed message destinations are the existing configured community human and
+  welcome channel lists, plus the active session find-players destination or
+  anchor room. This allowlist is boot-time. Actual ViewChannel + SendMessages
+  permissions are checked for the member. Threads, DMs, system messages and
+  webhooks are not qualifying sources in this slice.
+- `prompt_shown` uses the actual returned message ID/time. The message-first
+  action destination is session's find-players option, anchor's posted room, or
+  legacy's explicitly linked intro channel (which must also be allowlisted).
+  The landing/send channel is not assumed to be the action destination. Picker
+  clicks, voice joins and RSVP are not counted as message-first prompt actions.
+- Staff exclusions reuse moderation's protected roles and protected actor, the
+  ticket staff role, guild ownership and moderation/management permissions.
+  Deployments must bind their staff roles correctly. Timed-out members and
+  unknown member/permission/screening state are excluded. The unchanged community
+  classifier still excludes staging/test/raid/automation actors; the adapter
+  does not clear exclusions to manufacture a staging activation result.
+- Automod rejection **or inspection failure** cannot advance measurement. Slow
+  inspection cannot let a reply overtake its action. Reply subjects are fetched
+  afresh and must still be eligible; self replies and unrelated references never
+  stop the clock. A human staff respondent is allowed, a staff newcomer is not.
+- Observation failures are contained and emit only
+  `onboarding_rota_observation_failed` / `measurement_gap`, without payloads,
+  SQL binds, member IDs or secret values. The queue is not a durable gateway
+  replay log: process loss can leave a measurement gap. Core milestone
+  idempotency and pseudonyms survive restarts; no missed acceptance is invented.
+
 ## Remaining integration and release gates
 
-1. Wire observed gate, successful existing welcome delivery, message, and explicit
-   reply-reference paths. Resolve current screening/staff/channel access and
-   automod eligibility; missing data must fail closed. Keep the accepted
-   TOG-1644 onboarding behavior and TOG-1649 canonical event ownership.
-2. Add environment/config controls for measurement and the notice independently,
-   with measurement/notice disabled by default and classified in the settings
-   catalog. `enabled: false` already proves zero core writes; it is **not** yet
-   an operator-facing flag wired to the application.
-3. Implement the accepted **30-minute no-reply/no-acknowledgement fallback**, not
+1. Implement the accepted **30-minute no-reply/no-acknowledgement fallback**, not
    an immediate first-message alert. Persist acknowledgement and notice delivery
    state across restarts. Verify staff-only effective access to the configured
    `#updates-and-changes` destination; never fall back to a human channel or DM.
    Use an explicit bot label and suppressed mentions. A notice cannot stop the
    24-hour human-reply clock.
-4. Demonstrate the seven events and labeled notice in the staging environment.
+2. Demonstrate the seven events and labeled notice in the staging environment.
    Report synthetic fixtures separately from real eligible-member observations;
    never turn off staging classification to claim real-member activation.
-5. Obtain Code Reviewer verdict on the exact merge SHA, green CI, and the
+3. Obtain Code Reviewer verdict on the exact merge SHA, green CI, and the
    existing live-release gates. The author must not merge their own PR.
 
 RSVP, other return-action sources, 24-hour misses and operations acknowledgements
@@ -98,12 +135,13 @@ report. Do not publish conversion success until the required sources are proven.
 
 ## Rollback
 
-This core has no application caller, so deploying it alone enables no collection
-or notice. At integration, disable notice independently, or disable both
-measurement and notice to return to the accepted flow without dropping stored
-facts, removing Rules Screening or changing the roleless structure. Do not
-revert the additive migration while derived rows exist; no data deletion is
-needed for rollback.
+Set `TWO_ONBOARDING_ROTA_MEASUREMENT=0` and restart to omit the observer entirely,
+leaving the accepted flow unchanged, without dropping facts, removing Rules
+Screening or changing the roleless structure. A stale notice flag cannot override
+master-off. Notices must remain off in this slice; enabling the unimplemented
+sender is a boot error rather than an apparent success. Do not revert the
+additive migration while derived rows exist; no data deletion is needed for
+rollback. Live/staging restart proof remains a separate release requirement.
 
 ## Focused verification
 
@@ -112,7 +150,8 @@ Against an isolated Postgres database:
 ```sh
 npm ci --include=dev
 npm run typecheck
-node --test test/unit.onboardingrota.test.ts test/unit.communityscorecard.test.ts
+node --test test/unit.onboardingrota.test.ts test/unit.discordonboardingrota.test.ts \
+  test/unit.rotawelcome.test.ts test/unit.rotaboot.test.ts test/unit.communityscorecard.test.ts
 ```
 
 Set `TWO_TEST_DATABASE_URL` to the disposable test database before the test

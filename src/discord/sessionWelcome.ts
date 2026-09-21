@@ -33,6 +33,7 @@ import {
   type GuildTextBasedChannel,
 } from 'discord.js';
 import { log } from '../core/log.ts';
+import type { DiscordOnboardingRota } from './onboardingRota.ts';
 import { EventStore } from '../store/eventStore.ts';
 import {
   SESSION_SELECT_ID,
@@ -65,6 +66,7 @@ export interface SessionWelcomeDeps {
    * because they never write roles.
    */
   dryRun?: boolean;
+  onboardingRota?: Pick<DiscordOnboardingRota, 'promptShown'>;
 }
 
 export function buildSessionMenu(picks: SessionPick[]): ActionRowBuilder<StringSelectMenuBuilder> {
@@ -131,11 +133,15 @@ export function registerSessionWelcome(client: Client, deps: SessionWelcomeDeps)
     }
 
     try {
-      await target.send({
+      const message = await target.send({
         content: sessionWelcomeText(`<@${member.id}>`),
         components: [buildSessionMenu(deps.picks)],
         allowedMentions: { users: [member.id] },
       });
+      const actionChannelId = deps.picks.find((pick) => pick.key === 'find-players')?.channelId;
+      if (actionChannelId) {
+        void deps.onboardingRota?.promptShown({ member, message, variant: 'session', actionChannelId });
+      }
       await recorder.prompted(member.guild.id, member.id, target.id);
     } catch (err) {
       log.error('session_welcome_failed', { memberId: member.id, err: String(err) });
