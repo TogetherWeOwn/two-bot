@@ -114,11 +114,53 @@ explicitly enabled, independently of the raw community-scorecard capture flag.
   replay log: process loss can leave a measurement gap. Core milestone
   idempotency and pseudonyms survive restarts; no missed acceptance is invented.
 
+## Durable primary acknowledgement and notice eligibility
+
+`OnboardingRota.acknowledgePrimary()` records one `welcome_rota_acknowledged`
+operations fact through `CommunityFactStore`, not a new log/table. It requires an
+explicit `primaryActorId` constructor binding, an authenticated eligible human
+primary, an eligible newcomer in the same guild, and the exact persisted first
+message/channel. Staff status alone does not authorize an acknowledgement.
+The trusted caller supplies current screening/classification evidence and a
+server-observed timestamp, not values accepted from a client request body.
+
+Acknowledgements share the existing member transaction lock and unique key,
+retain the original cohort and full pseudonyms, and survive concurrent retries
+and process restarts. They never emit a reply/latency fact or stop the 24-hour
+human-reply clock. Notice-only rollback may still record acknowledgements;
+measurement master-off cannot. The seven milestone types and raw scorecard
+streams are unchanged. Migration 0030 extends the existing fact constraint and
+adds a bounded deadline-query index; it does not change applied migrations.
+
+`dueNotices(guildId, now, limit)` is a **read-only eligibility snapshot, not a send
+claim**. With measurement, notice and primary binding enabled, it returns at most
+100 original first-message facts at least 30 minutes old, excluding subjects
+with a persisted human reply or primary acknowledgement. The deadline is derived
+from the original fact timestamp, so later messages and restarts cannot reset
+it. The first eligible message starts this fallback independently of prompt
+exposure. No historical action or missing RSVP is manufactured.
+
+The published coverage label is **America/Chicago 18:00–22:00 daily**, not 24/7
+coverage. Elapsed deadlines remain 30 real minutes; the query does not defer or
+reset them outside that block, and wider human availability remains best-effort.
+An overdue candidate is not evidence of a delivered notice or a rota miss.
+
+**Not runtime-wired:** no primary environment binding, acknowledgement command,
+scheduler, delivery lease/outbox, or sender is introduced here. The constructor
+binding is exercised only by tests; it is not a deployable configuration knob.
+The future authenticated adapter must bind the accepted primary explicitly,
+restrict rota-log access to the three authorized readers, and not infer identity
+from staff permissions. A sender must recheck reply/ack state under the member
+lock and use durable claim/delivery recovery before any Discord send; repeating
+this read-only query alone would produce duplicate notices. Notice enablement
+continues to fail closed at boot.
+
 ## Remaining integration and release gates
 
-1. Implement the accepted **30-minute no-reply/no-acknowledgement fallback**, not
-   an immediate first-message alert. Persist acknowledgement and notice delivery
-   state across restarts. Verify staff-only effective access to the configured
+1. Wire the accepted **30-minute no-reply/no-acknowledgement fallback**, not
+   an immediate first-message alert. Bind/authenticate primary acknowledgement,
+   persist notice delivery/claim state across restarts, and recheck eligibility
+   before sending. Verify staff-only effective access to the configured
    `#updates-and-changes` destination; never fall back to a human channel or DM.
    Use an explicit bot label and suppressed mentions. A notice cannot stop the
    24-hour human-reply clock.
@@ -128,9 +170,9 @@ explicitly enabled, independently of the raw community-scorecard capture flag.
 3. Obtain Code Reviewer verdict on the exact merge SHA, green CI, and the
    existing live-release gates. The author must not merge their own PR.
 
-RSVP, other return-action sources, 24-hour misses and operations acknowledgements
-must reuse the canonical event/rota capabilities if added; this core does not
-claim those are wired or measured today. Keep missing coverage visible in any
+RSVP, other return-action sources and 24-hour misses must reuse the canonical
+event/rota capabilities if added. Operations acknowledgements now have a durable
+core API, but no authenticated runtime input; none of these is runtime-wired today. Keep missing coverage visible in any
 report. Do not publish conversion success until the required sources are proven.
 
 ## Rollback
@@ -151,7 +193,8 @@ Against an isolated Postgres database:
 npm ci --include=dev
 npm run typecheck
 node --test test/unit.onboardingrota.test.ts test/unit.discordonboardingrota.test.ts \
-  test/unit.rotawelcome.test.ts test/unit.rotaboot.test.ts test/unit.communityscorecard.test.ts
+  test/unit.rotawelcome.test.ts test/unit.rotaboot.test.ts test/unit.communityscorecard.test.ts \
+  test/unit.rotanoticestate.test.ts
 ```
 
 Set `TWO_TEST_DATABASE_URL` to the disposable test database before the test

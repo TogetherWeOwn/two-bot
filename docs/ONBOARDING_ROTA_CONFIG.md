@@ -46,7 +46,11 @@ than inferring them from configuration, with the core classifier unchanged.
 
 Still required:
 
-1. Persist the first-message deadline and primary acknowledgement. A notice is
+1. Bind an authenticated primary acknowledgement input to the durable core API
+   and wire the read-only deadline query into a durable delivery/claim path. The
+   core now derives the deadline from the persisted first message and retains
+   primary acknowledgements in the existing fact log, but no primary identity
+   environment setting or runtime acknowledgement command exists yet. A notice is
    due only after **30 minutes without a human reply or primary acknowledgement**
    (accepted TOG-2347 coverage binding, revision 3). This is not an immediate
    first-message ping. The published coverage block is America/Chicago
