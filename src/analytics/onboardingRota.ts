@@ -226,6 +226,7 @@ export class OnboardingRota {
           AND NOT EXISTS (
             SELECT 1 FROM community_facts AS stop
              WHERE stop.idempotency_key IN (
+               'rota:' || first.guild_id || ':' || first.actor_id || ':welcome_rota_replied',
                'rota:' || first.guild_id || ':' || first.actor_id || ':onboarding_first_human_reply',
                'rota:' || first.guild_id || ':' || first.actor_id || ':welcome_rota_acknowledged'
              )
@@ -267,10 +268,11 @@ export class OnboardingRota {
       const stop = await tx.prepare(
         `SELECT 1 FROM community_facts AS stop
           WHERE stop.idempotency_key IN (
+            'rota:' || ? || ':' || ? || ':welcome_rota_replied',
             'rota:' || ? || ':' || ? || ':onboarding_first_human_reply',
             'rota:' || ? || ':' || ? || ':welcome_rota_acknowledged'
           ) LIMIT 1`,
-      ).get(guildId, memberId, guildId, memberId);
+      ).get(guildId, memberId, guildId, memberId, guildId, memberId);
       if (stop) return null;
       return { dueAt: new Date(Date.parse(first.occurred_at) + NOTICE_DELAY_MS).toISOString() };
     });
@@ -285,8 +287,22 @@ export class OnboardingRota {
     const at = iso(input.occurredAt);
     await this.locked(input.guildId, memberId, async (tx) => {
       const enrollment = await this.enrollment(tx, input.guildId, memberId);
+      if (!enrollment) return;
+      // The notice clock starts at the first eligible message, even without a
+      // prompt. Keep its reply stop separate from prompt activation and latency.
+      const first = await this.milestone(tx, input.guildId, memberId, 'onboarding_first_eligible_message');
+      if (first && at > first.occurred_at) {
+        const action = JSON.parse(first.metadata);
+        if (action.actionId === input.replyToMessageId && action.channelId === input.channelId) {
+          await this.write(tx, input, memberId, 'welcome_rota_replied', enrollment, {
+            actionId: action.actionId, channelId: input.channelId, replyMessageId: input.messageId,
+            responderId: this.memberId(input.guildId, input.actorId),
+            qualifyingActionAt: first.occurred_at, replyAt: at,
+          });
+        }
+      }
       const acted = await this.milestone(tx, input.guildId, memberId, 'onboarding_prompt_acted');
-      if (!enrollment || !acted || at <= acted.occurred_at) return;
+      if (!acted || at <= acted.occurred_at) return;
       const action = JSON.parse(acted.metadata);
       if (action.actionId !== input.replyToMessageId || action.channelId !== input.channelId) return;
       const metadata = {

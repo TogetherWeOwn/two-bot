@@ -130,6 +130,74 @@ test('persisted eligible human reply suppresses the notice; ack after reply is s
   assert.deepEqual(await makeRota().dueNotices(GUILD, DUE), []);
 });
 
+test('human reply without prompt exposure durably stops the first-message notice only', async () => {
+  const actionId = '111111111111111111';
+  const channelId = '222222222222222222';
+  await rota.rulesAccepted({ ...subject, occurredAt: FIRST, sourceCohort: 'invite:campaign' });
+  await rota.message({ ...subject, occurredAt: FIRST, messageId: actionId, channelId, eligibleChannel: true });
+  const memberId = rota.memberId(GUILD, subject.actorId);
+  assert.equal((await rota.dueNotices(GUILD, DUE)).length, 1);
+  assert.deepEqual(await rota.confirmNoticeEligible(GUILD, memberId, actionId, channelId, DUE), { dueAt: DUE });
+  const reply = { ...primary, subject, occurredAt: '2026-09-01T23:10:00.000Z', messageId: 'reply',
+    channelId, eligibleChannel: true, replyToMessageId: actionId };
+  await Promise.all(Array.from({ length: 8 }, () => makeRota().reply(reply)));
+  const restarted = makeRota();
+  assert.deepEqual(await restarted.dueNotices(GUILD, DUE), []);
+  assert.equal(await restarted.confirmNoticeEligible(GUILD, memberId, actionId, channelId, DUE), null);
+  const facts = await rows();
+  assert.deepEqual(facts.map(row => row.event_type), [
+    'onboarding_rules_accepted', 'onboarding_first_eligible_message', 'welcome_rota_replied',
+  ], 'no prompt exposure, activation or prompt-reply latency is invented');
+  assert.equal(facts[2].actor_id, memberId);
+  assert.deepEqual(JSON.parse(facts[2].metadata), {
+    actionId, channelId, replyMessageId: 'reply', responderId: rota.memberId(GUILD, primary.actorId),
+    qualifyingActionAt: FIRST, replyAt: reply.occurredAt,
+    sourceCohort: 'invite:campaign', rulesAcceptedAt: FIRST,
+  });
+  assert.doesNotMatch(JSON.stringify(facts), /new-human|accepted-primary/);
+});
+
+test('without prompt exposure invalid replies cannot suppress the notice', async () => {
+  const actionId = '111111111111111111';
+  const channelId = '222222222222222222';
+  await rota.rulesAccepted({ ...subject, occurredAt: FIRST, sourceCohort: 'unknown' });
+  await rota.message({ ...subject, occurredAt: FIRST, messageId: actionId, channelId, eligibleChannel: true });
+  const reply = { ...primary, subject, occurredAt: '2026-09-01T23:10:00.000Z', messageId: 'reply',
+    channelId, eligibleChannel: true, replyToMessageId: actionId };
+  const exclusions: Partial<Parameters<OnboardingRota['reply']>[0]>[] = [
+    { actorId: subject.actorId }, { isBot: true }, { webhookId: 'webhook' }, { isStaffAutomation: true },
+    { actorId: 'raider' }, { actorId: 'fixture-user' }, { actorId: 'automation' },
+    { pending: true }, { pending: null }, { guildId: 'elsewhere' },
+    { subject: { ...subject, isStaff: true } }, { subject: { ...subject, pending: true } },
+    { eligibleChannel: false }, { rejected: true }, { channelId: 'other' },
+    { replyToMessageId: 'other' }, { occurredAt: FIRST }, { occurredAt: '2026-09-01T23:04:00.000Z' },
+  ];
+  for (const exclusion of exclusions) await rota.reply({ ...reply, ...exclusion });
+  assert.equal((await rows()).length, 2);
+  assert.equal((await makeRota().dueNotices(GUILD, DUE)).length, 1);
+  assert.deepEqual(await makeRota().confirmNoticeEligible(
+    GUILD, rota.memberId(GUILD, subject.actorId), actionId, channelId, DUE,
+  ), { dueAt: DUE });
+});
+
+test('first-message reply stop remains independent of a later prompt action and its latency', async () => {
+  await rota.rulesAccepted({ ...subject, occurredAt: FIRST, sourceCohort: 'unknown' });
+  await rota.message({ ...subject, occurredAt: FIRST, messageId: 'first', channelId: 'general', eligibleChannel: true });
+  await rota.promptShown({ ...subject, occurredAt: '2026-09-01T23:06:00.000Z',
+    promptVariant: 'session', messageId: 'welcome', channelId: 'general' });
+  await rota.message({ ...subject, occurredAt: '2026-09-01T23:07:00.000Z', messageId: 'acted',
+    channelId: 'general', eligibleChannel: true });
+  const reply = { ...primary, subject, occurredAt: '2026-09-01T23:10:00.000Z', messageId: 'reply',
+    channelId: 'general', eligibleChannel: true, replyToMessageId: 'first' };
+  await rota.reply(reply);
+  assert.deepEqual(await makeRota().dueNotices(GUILD, DUE), []);
+  assert.equal((await rows()).filter(r => /human_reply|reply_latency/.test(r.event_type)).length, 0);
+  await rota.reply({ ...reply, replyToMessageId: 'acted', messageId: 'prompt-reply' });
+  const facts = await rows();
+  assert.equal(facts.filter(r => r.event_type === 'welcome_rota_replied').length, 1);
+  assert.equal(JSON.parse(facts.find(r => r.event_type === 'onboarding_reply_latency')!.metadata).latencySeconds, 180);
+});
+
 test('disabled notice, unbound primary and master rollback return no candidates without deleting facts', async () => {
   await act();
   const snapshot = await rows();
@@ -170,9 +238,12 @@ test('guild isolation, bounded ordered results and invalid clocks fail safely', 
   await assert.rejects(ack({ occurredAt: 'not-a-clock' }));
 });
 
-test('acknowledgement creates neither scorecard activity nor new raw-stream coverage requirements', async () => {
+test('operational acknowledgement and reply stops create no scorecard activity or stream requirements', async () => {
   await act();
   await ack();
+  await rota.reply({ ...primary, subject, occurredAt: DUE, messageId: 'reply',
+    channelId: 'general', eligibleChannel: true, replyToMessageId: 'first-message' });
+  assert.equal((await rows()).filter(r => r.event_type === 'welcome_rota_replied').length, 1);
   const store = new CommunityFactStore(fixture.db, classifier);
   for (const stream of ['message_created', 'voice_session_started', 'voice_session_ended',
     'member_joined', 'event_attended', 'rules_accepted'] as const) {

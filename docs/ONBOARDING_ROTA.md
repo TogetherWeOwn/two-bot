@@ -31,7 +31,7 @@ they must not add active humans, messages, bot noise, or stream-coverage duties.
 | `onboarding_prompt_shown` | The existing welcome was actually delivered; capture variant, delivery message ID and action destination. Configuration alone is not evidence. |
 | `onboarding_prompt_acted` | First accepted message in that prompt's destination after it was shown. |
 | `onboarding_first_eligible_message` | First accepted message in an allowed screened-human destination after rules acceptance, independently of prompt delivery. |
-| `onboarding_first_human_reply` | A later explicit Discord reply to the qualifying action, in the same channel, by another eligible human. |
+| `onboarding_first_human_reply` | A later explicit Discord reply to the persisted prompt action, in the same channel, by another eligible human. |
 | `onboarding_reply_latency` | Atomic companion of the reply: action/reply UTC timestamps and their seconds difference. |
 | `onboarding_seven_day_return` | Eligible message during `[rules accepted + 7 days, rules accepted + 8 days)`, UTC. |
 
@@ -72,8 +72,9 @@ privacy policy. Rota-log reader authorization is the accepted primary, Community
 Manager and President & COO; do not expose these rows via public views.
 
 For an authorized erasure, compute the subject's pseudonym with the same key and
-guild, then delete matching derived `actor_id` rows and rows whose metadata's
-`responderId` matches. Use bound parameters; do not put a raw ID into a work
+guild, then delete matching derived and operational `actor_id` rows and rows whose
+metadata's `responderId` matches, including `welcome_rota_acknowledged` and
+`welcome_rota_replied`. Use bound parameters; do not put a raw ID into a work
 product. This is additional to the existing raw-fact/member erasure policy.
 
 ## Runtime observations
@@ -134,6 +135,21 @@ human-reply clock. Notice-only rollback may still record acknowledgements;
 measurement master-off cannot. The seven milestone types and raw scorecard
 streams are unchanged. Migration 0030 extends the existing fact constraint and
 adds a bounded deadline-query index; it does not change applied migrations.
+
+`OnboardingRota.reply()` also records a `welcome_rota_replied` operations fact
+when another eligible human explicitly replies to the persisted first eligible
+message in its channel. It shares the subject transaction lock, cohort and
+pseudonymous identities; concurrent retries create one stop record. This does
+not require a prompt, primary binding or notice enablement. Master-off still
+refuses all writes. Migration 0033 extends the existing fact constraint without
+rewriting prior migrations or backfilling unobserved replies.
+
+This operational stop never manufactures prompt exposure, prompt action or
+prompt-reply latency. If the prompt action differs from the first eligible
+message, each reply is matched independently to its own action. The seven
+milestones remain unchanged; neither operational fact contributes scorecard
+activity or stream coverage. Existing persisted `onboarding_first_human_reply`
+stop records remain honored for compatibility.
 
 `dueNotices(guildId, now, limit)` is a **read-only eligibility snapshot, not a send
 claim**. With measurement, notice and primary binding enabled, it returns at most
