@@ -16,10 +16,12 @@ TOG-1648 also implements `automations.import` and `automations.export`, but
 alone grants every existing signing key nothing new.
 
 TOG-3101 adds `settings.get` and `settings.set` on the same terms: built,
-tested, and inert unless `TWO_INTERNAL_ALLOW_SETTINGS=1` records the CEO's
-approval. Neither verb can read or write a `TWO_INTERNAL_*` key — including
-the flag that enables them — because an action that can widen its own allowlist
-would end the trust model described below. See §3.
+tested, and the CEO has approved widening the allowlist with them (TOG-3101,
+2026-09-17, conditions below) — but the two verbs stay inert until
+`TWO_INTERNAL_ALLOW_SETTINGS=1` is actually set, which has not happened yet in
+any environment. Neither verb can read or write a `TWO_INTERNAL_*` key —
+including the flag that enables them — because an action that can widen its
+own allowlist would end the trust model described below. See §3.
 
 The pieces that were waiting on Postgres landed with TOG-37 and are now in
 `src/internal/store.ts` and `migrations/0002_internal_actions.sql`: the durable
@@ -46,8 +48,15 @@ cannot kick, cannot ban, cannot change permissions, because there is no verb
 for it here.
 
 **The allowlist does not widen without the CEO's sign-off.** That is not my
-call to make and it is written into TOG-44. A new action means a comment on
-TOG-44, an approval, and a line in the changelog at the bottom of this file.
+call to make and it is written into TOG-44. A new action means an approval and
+a line in the changelog at the bottom of this file.
+
+TOG-44 is `done` as of `v0.3`, and commenting on a closed card reopens it — so
+for TOG-3101 the sign-off request was raised as an interaction on the card
+proposing the new action instead, with a comment on TOG-44 afterward for the
+back-reference only (not to resume it). Route it the same way for the next
+widening: ask on the card that proposes the action, not on TOG-44, unless a
+future TOG-44 is itself open.
 
 For the avoidance of doubt: **`announcement.post` and `event.upsert` going live
 in `v0.3` did not widen the allowlist.** Both were named in the original scope
@@ -669,7 +678,7 @@ CHECK constraint, against real Postgres), and
 
 | Version | Date | Change |
 |---|---|---|
-| `v0.6` | 2026-09-17 | TOG-3101: `settings.get` and `settings.set` implemented but default off behind `TWO_INTERNAL_ALLOW_SETTINGS`. **The approved allowlist does not widen with this line — it widens when the CEO approves, and that approval is not recorded here yet.** The request is raised on TOG-3101 rather than as a comment on TOG-44 as §0 describes, because TOG-44 is closed and commenting on it would reopen a completed card; the approval itself is still the CEO's, unchanged. Both verbs refuse `TWO_INTERNAL_*` keys in the handler, in the store and in the schema, and `settings.get` never reads through to `process.env`. New table `guild_settings` and its append-only `guild_settings_audit` (`migrations/0026_guild_settings.sql`). No wire-format change to any existing action. |
+| `v0.6` | 2026-09-17 | TOG-3101: `settings.get` and `settings.set` implemented behind `TWO_INTERNAL_ALLOW_SETTINGS`, default off. **The CEO approved widening the allowlist with these two verbs on 2026-09-17** (TOG-3101, interaction `99e9e289`), on conditions: the three-layer `TWO_INTERNAL_*` refusal and its mutation-checked tests stay; capability gates and signing keys stay env-only; the flag flips on staging first, production only after a posted 15s-pickup proof. The request was raised on TOG-3101 rather than as a comment on TOG-44, because TOG-44 is closed and commenting on it would reopen a completed card — see the amendment to the sign-off paragraph above. Both verbs refuse `TWO_INTERNAL_*` keys in the handler, in the store and in the schema, and `settings.get` never reads through to `process.env`. New table `guild_settings` and its append-only `guild_settings_audit` (`migrations/0026_guild_settings.sql`). No wire-format change to any existing action. **The flag itself is still off in every environment as of this line** — approval is recorded, rollout is not done. |
 | `v0.5` | 2026-09-09 | TOG-1648: `automations.import` and `automations.export` implemented but default off behind `TWO_INTERNAL_ALLOW_AUTOMATIONS`; destructive overwrite has a second flag and imports are bounded by the remaining Discord guild-command budget. This does not widen the approved allowlist by default. |
 | `v0.1` | 2026-08-19 | First specification. Three approved actions from TWO-24, plus `guild.add_member` proposed on TWO-57 and awaiting CEO sign-off. |
 | `v0.2` | 2026-08-19 | TWO-59: the pre-Postgres slice implemented — listener, HMAC, skew, replay, rate limits, error envelope, request logging, `role.assign` live and `guild.add_member` built but switched off. No wire-format change. |
