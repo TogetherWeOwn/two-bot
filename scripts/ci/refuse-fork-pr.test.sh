@@ -98,6 +98,7 @@ run_case 'a missing repository fails closed' fail \
 # behaviour: a skipped job counts as a green required check, so the merge is
 # blocked by fork-gate going red, while the fork's code simply never runs.
 # --------------------------------------------------------------------------
-node "$ROOT/scripts/ci/check-fork-gate-coverage.mjs"
+node --test "$ROOT/scripts/ci/check-fork-gate-coverage.test.mjs"
+node "$ROOT/scripts/ci/check-fork-gate-coverage.mjs" "${1:-$ROOT}"
 
 printf 'refuse-fork-pr: both refusal reasons, both fail-closed cases, the non-PR events and workflow coverage all verified\n'

@@ -1,106 +1,147 @@
-// Asserts that the fork gate is actually wired into every workflow a pull
-// request can trigger (TOG-3103).
-//
-// scripts/ci/refuse-fork-pr.sh proves it refuses. This proves it is reached.
-// Those are different failures and only one of them is visible in a diff: a
-// job added without `needs: fork-gate` looks exactly like a job with it.
-//
-// Deliberately a line parser rather than a YAML dependency. docs/STACK.md
-// makes four runtime dependencies a stated goal, and the shapes below are
-// fixed by GitHub's own schema - jobs at two spaces, keys at four.
-//
-// This does NOT try to understand YAML in general. Every assertion it makes is
-// one it can make wrongly only by being too strict, never by being too lax:
-// an unusual but valid spelling fails the check and somebody teaches it the
-// spelling, which is the direction a security assertion should fail in.
-
-import { readFileSync, readdirSync } from 'node:fs';
+// Check candidate workflow DATA with the trusted policy, not candidate scripts.
+// YAML 1.2 keeps `on` a string; a line parser missed inline triggers, .yaml
+// files, commented-out edges and job conditions that override failed needs.
+// Parser API: https://eemeli.org/yaml/v2/#documents
+// needs/if: https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idneeds
+import { lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseDocument, visit } from 'yaml';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
-const workflowDir = join(root, '.github', 'workflows');
-
 const GATE = 'fork-gate';
 const GUARD = './scripts/ci/refuse-fork-pr.sh';
 const BASE_REF = '${{ github.event.pull_request.base.sha || github.sha }}';
+const HEAD_REPO = '${{ github.event.pull_request.head.repo.full_name }}';
+const BOOTSTRAP_IF = "${{ hashFiles('scripts/ci/refuse-fork-pr.sh') == '' }}";
+const map = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const keysWithin = (value, keys) => Object.keys(value).every((key) => keys.includes(key));
 
-const problems = [];
-const checked = [];
-
-/** Split a workflow into `{ name, body }` per top-level job (two-space key). */
-function parseJobs(text) {
-  const lines = text.split('\n');
-  const start = lines.findIndex((l) => /^jobs:\s*$/.test(l));
-  if (start === -1) return null;
-
-  const jobs = [];
-  for (let i = start + 1; i < lines.length; i += 1) {
-    const match = /^ {2}([A-Za-z0-9_-]+):\s*$/.exec(lines[i]);
-    if (!match) continue;
-    const end = lines.findIndex((l, j) => j > i && /^ {2}[A-Za-z0-9_-]+:\s*$/.test(l));
-    jobs.push({
-      name: match[1],
-      body: lines.slice(i, end === -1 ? lines.length : end).join('\n'),
-    });
+export function parseWorkflow(text) {
+  const doc = parseDocument(text, {
+    version: '1.2', schema: 'core', strict: true, uniqueKeys: true,
+    stringKeys: true, merge: false, resolveKnownTags: false, customTags: [],
+  });
+  if (doc.errors.length || doc.warnings.length) {
+    throw new Error([...doc.errors, ...doc.warnings].map((e) => e.message).join('; '));
   }
-  return jobs;
+  if (doc.directives.yaml.version !== '1.2') throw new Error('YAML 1.2 is required');
+  // Reject aliases explicitly, including self-reference (which conversion may
+  // preserve as a cycle rather than count as expansion).
+  visit(doc, { Alias() { throw new Error('YAML aliases are unsupported'); } });
+  return doc.toJS({ maxAliasCount: 0 });
 }
 
-for (const file of readdirSync(workflowDir).filter((f) => f.endsWith('.yml')).sort()) {
-  const text = readFileSync(join(workflowDir, file), 'utf8');
-
-  // Only workflows a pull request can trigger are in scope. A push- or
-  // schedule-only workflow never runs a fork's ref.
-  if (!/^ {2}pull_request(_target)?:/m.test(text)) continue;
-  checked.push(file);
-
-  const jobs = parseJobs(text);
-  if (!jobs || jobs.length === 0) {
-    problems.push(`${file}: no jobs: block could be parsed`);
-    continue;
+function events(on) {
+  const names = typeof on === 'string' ? [on] : Array.isArray(on) ? on : map(on) ? Object.keys(on) : [];
+  if (!names.length || names.some((name) => typeof name !== 'string' || !/^[a-z_]+$/.test(name))) {
+    throw new Error('unsupported or missing on: trigger declaration');
   }
+  return names;
+}
 
-  const gate = jobs.find((j) => j.name === GATE);
-  if (!gate) {
-    problems.push(`${file}: triggers on pull_request but has no \`${GATE}\` job`);
-    continue;
-  }
-  if (!gate.body.includes(GUARD)) {
-    problems.push(`${file}: the ${GATE} job does not run ${GUARD}`);
-  }
-  if (!gate.body.includes(BASE_REF)) {
-    problems.push(
-      `${file}: the ${GATE} job does not check out the base commit ` +
-        `(expected \`ref: ${BASE_REF}\`). Without it the fork supplies the guard that judges the fork.`,
-    );
-  }
+function checkout(step, ref) {
+  return map(step) && keysWithin(step, ['name', 'uses', 'with']) &&
+    step.uses === 'actions/checkout@v5' && map(step.with) &&
+    keysWithin(step.with, ['ref', 'persist-credentials']) &&
+    step.with.ref === ref && step.with['persist-credentials'] === false;
+}
 
-  for (const job of jobs) {
-    if (job.name === GATE) continue;
-    const needs = /^ {4}needs:\s*(.+)$/m.exec(job.body);
-    if (!needs) {
-      problems.push(`${file}: job \`${job.name}\` has no \`needs:\`, so it runs even when ${GATE} refuses`);
+function gateProblems(gate) {
+  const errors = [];
+  // This is intentionally a small accepted policy shape, not a shell analyzer.
+  // Conditions, custom shells/env, services or earlier candidate steps could
+  // skip, mask or precede the refusal. New shapes need an explicit policy update.
+  if (!map(gate) || !keysWithin(gate, ['runs-on', 'timeout-minutes', 'steps']) || !Array.isArray(gate.steps)) {
+    return ['fork-gate must be an unconditional steps job without env/defaults/services or error overrides'];
+  }
+  const steps = gate.steps;
+  if (!checkout(steps[0], BASE_REF)) errors.push('fork-gate must first check out the trusted base with credentials disabled');
+  let guardIndex = 1;
+  if (steps[1]?.uses === 'actions/checkout@v5') {
+    const { if: condition, ...bootstrap } = steps[1];
+    if (condition !== BOOTSTRAP_IF || !/^[0-9a-f]{40}$/.test(bootstrap.with?.ref ?? '') ||
+        !checkout(bootstrap, bootstrap.with?.ref)) {
+      errors.push('bootstrap must use an immutable reviewed SHA only when the base guard is absent');
+    }
+    guardIndex = 2;
+  }
+  const guard = steps[guardIndex];
+  if (!map(guard) || !keysWithin(guard, ['name', 'env', 'run']) || typeof guard.run !== 'string' || guard.run.trim() !== GUARD ||
+      !map(guard.env) || !keysWithin(guard.env, ['PR_HEAD_REPO']) || guard.env.PR_HEAD_REPO !== HEAD_REPO) {
+    errors.push('fork-gate must run the trusted refusal unconditionally before any other steps');
+  }
+  return errors;
+}
+
+export function checkWorkflow(text) {
+  const workflow = parseWorkflow(text);
+  if (!map(workflow)) throw new Error('workflow must be a mapping');
+  const triggers = events(workflow.on);
+  if (!triggers.some((event) => event === 'pull_request' || event === 'pull_request_target')) {
+    return { checked: false, problems: [] };
+  }
+  const problems = [];
+  if ('env' in workflow || 'defaults' in workflow) {
+    problems.push('workflow-wide env/defaults are unsupported for the trusted gate; set them on dependent jobs');
+  }
+  if (!map(workflow.jobs) || !Object.keys(workflow.jobs).length) {
+    return { checked: true, problems: [...problems, 'missing or unsupported jobs mapping'] };
+  }
+  const jobs = workflow.jobs;
+  if (!Object.hasOwn(jobs, GATE)) problems.push('pull-request workflow has no fork-gate job');
+  else problems.push(...gateProblems(jobs[GATE]));
+
+  for (const [name, job] of Object.entries(jobs)) {
+    if (name === GATE) continue;
+    if (!map(job)) {
+      problems.push(`job ${name}: unsupported job shape`);
       continue;
     }
-    if (!needs[1].includes(GATE)) {
-      problems.push(
-        `${file}: job \`${job.name}\` declares \`needs: ${needs[1].trim()}\`, which does not include ${GATE}`,
-      );
+    const needs = typeof job.needs === 'string' ? [job.needs] : job.needs;
+    if (!Array.isArray(needs) || needs.some((need) => typeof need !== 'string') || !needs.includes(GATE)) {
+      problems.push(`job ${name}: needs must contain the actual fork-gate dependency`);
+    }
+    // `always()`/`failure()`/`!cancelled()` can run after refusal. Reject other
+    // expressions too until we can prove they require success, not by substring.
+    if ('if' in job && ![true, 'success()', '${{ success() }}'].includes(job.if)) {
+      problems.push(`job ${name}: unsupported if condition; must preserve the default success() gate`);
     }
   }
+  return { checked: true, problems };
 }
 
-// A coverage check that examined nothing would pass silently, and that is the
-// shape this whole file exists to prevent.
-if (checked.length === 0) {
-  console.error('coverage: no workflow triggers on pull_request, so this check examined nothing');
-  process.exit(1);
+export function checkDirectory(candidateRoot) {
+  const problems = [];
+  const checked = [];
+  try {
+    for (const dir of [join(candidateRoot, '.github'), join(candidateRoot, '.github', 'workflows')]) {
+      if (!lstatSync(dir).isDirectory()) throw new Error('workflow directories must not be symlinks');
+    }
+    const workflowDir = join(candidateRoot, '.github', 'workflows');
+    for (const file of readdirSync(workflowDir).filter((f) => /\.ya?ml$/.test(f)).sort()) {
+      try {
+        const path = join(workflowDir, file);
+        const stat = lstatSync(path);
+        if (!stat.isFile() || stat.size > 1024 * 1024) throw new Error('workflow must be a regular file of at most 1 MiB');
+        const result = checkWorkflow(readFileSync(path, 'utf8'));
+        if (result.checked) checked.push(file);
+        problems.push(...result.problems.map((problem) => `${file}: ${problem}`));
+      } catch (error) {
+        problems.push(`${file}: ${error.message}`);
+      }
+    }
+  } catch (error) {
+    problems.push(error.message);
+  }
+  if (!checked.length) problems.push('no pull-request workflow examined');
+  return { checked, problems };
 }
 
-if (problems.length > 0) {
-  for (const p of problems) console.error(`coverage: ${p}`);
-  process.exit(1);
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  if (process.argv.length > 3) throw new Error('usage: node check-fork-gate-coverage.mjs [candidate-root]');
+  const result = checkDirectory(resolve(process.argv[2] ?? root));
+  for (const problem of result.problems) console.error(`coverage: ${problem}`);
+  if (result.problems.length) process.exitCode = 1;
+  else for (const file of result.checked) console.log(`  ok  ${file} routes every job through ${GATE}`);
 }
-
-for (const file of checked) console.log(`  ok  ${file} routes every job through ${GATE}`);
