@@ -184,6 +184,42 @@ must recheck reply/ack state under the member lock and use durable claim/deliver
 recovery before any Discord send; repeating this read-only query alone would
 produce duplicate notices. Notice enablement continues to fail closed at boot.
 
+### Staff-only destination access boundary
+
+The future sender must not equate a channel name, configured snowflake, role
+label, or an `@everyone` deny with private visibility. Discord's effective
+permissions include member overwrites, role overwrites, Administrator and guild
+ownership. The notice contains a pseudonym and action link, so an additional
+reader is a disclosure even when the channel is conventionally called staff-only.
+
+`src/discord/rotaNoticeAccess.ts` provides a **read-only, fail-closed snapshot**
+for that boundary. The caller supplies the exact guild/destination and an explicit
+set of authorized Discord reader identities; the helper does not infer readers
+from staff roles or populate a deployment binding. Those identities must map to
+the accepted primary, Community Manager and President & COO contract, not a
+broader staff audience. The sending bot is the only additional permitted reader.
+It force-fetches the guild, roles, normal text channel and bot member, completes
+a full member fetch, and compares its size with stable before/after REST
+`approximateMemberCount` values. Missing counts, count skew, unknown effective
+permissions and partial/foreign member state cause refusal. The gateway-cached
+`memberCount` is not treated as REST-fresh evidence. Approximate counts and a
+completed fetch are consistency checks, **not atomic proof of exact membership**;
+large or changing guilds may be conservatively refused. Every permitted human
+must be present with View/Read History, and the bot needs View/Read History/Send.
+No credentials, raw reader identities, channel payloads or API error text are
+logged or persisted by the verifier. It never changes permissions or sends.
+An extra administrator, owner, or other bot with access causes refusal; do not
+silently widen the reader contract or rewrite guild permissions to make it pass.
+
+This snapshot is not delivery authorization by itself. Discord permission and
+membership changes are not atomic with a later send. The eventual sender must
+run the check immediately before each attempted send/recovery, retain the master
+and notice gates, and refuse uncertain results without a fallback destination.
+It also needs a durable claim, eligibility recheck and ambiguous-send recovery.
+A safe snapshot cannot establish that permissions will remain safe afterwards;
+ongoing access restriction and release proof remain operational requirements.
+The helper is not wired into runtime, and notice enablement still fails at boot.
+
 ## Remaining integration and release gates
 
 1. Wire the accepted **30-minute no-reply/no-acknowledgement fallback**, not
@@ -222,7 +258,8 @@ npm ci --include=dev
 npm run typecheck
 node --test test/unit.onboardingrota.test.ts test/unit.discordonboardingrota.test.ts \
   test/unit.rotawelcome.test.ts test/unit.rotaboot.test.ts test/unit.communityscorecard.test.ts \
-  test/unit.rotanoticestate.test.ts test/unit.rotaacknowledgement.test.ts
+  test/unit.rotanoticestate.test.ts test/unit.rotaacknowledgement.test.ts \
+  test/unit.rotanoticeaccess.test.ts
 ```
 
 Set `TWO_TEST_DATABASE_URL` to the disposable test database before the test
