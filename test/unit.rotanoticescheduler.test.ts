@@ -4,7 +4,7 @@ import { ROTA_NOTICE_TICK_MS, startRotaNoticeScheduler } from '../src/discord/ro
 import type { RotaNoticeDelivery, RotaNoticeOutcome } from '../src/discord/rotaNoticeDelivery.ts';
 
 function delivery(runDue: (now: string) => Promise<RotaNoticeOutcome[]>): RotaNoticeDelivery {
-  return { runDue } as unknown as RotaNoticeDelivery;
+  return { runDue, stop: () => {} } as unknown as RotaNoticeDelivery;
 }
 
 test('tick passes the clock through and returns outcomes', async () => {
@@ -50,6 +50,18 @@ test('overlapping ticks do not stack; failures resolve to an empty sweep', async
   } finally {
     failing.stop();
   }
+});
+
+test('stop forwards cancellation to in-flight delivery and refuses manual ticks', async () => {
+  let calls = 0;
+  let stops = 0;
+  const svc = delivery(async () => { calls++; return []; });
+  svc.stop = () => { stops++; };
+  const handle = startRotaNoticeScheduler(svc);
+  handle.stop();
+  assert.deepEqual(await handle.tick(), []);
+  assert.equal(stops, 1);
+  assert.equal(calls, 0);
 });
 
 test('default tick interval is one minute', () => {

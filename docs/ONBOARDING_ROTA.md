@@ -154,9 +154,14 @@ stop records remain honored for compatibility.
 `dueNotices(guildId, now, limit)` is a **read-only eligibility snapshot, not a send
 claim**. With measurement, notice and primary binding enabled, it returns at most
 100 original first-message facts at least 30 minutes old, excluding subjects
-with a persisted human reply or primary acknowledgement. The deadline is derived
-from the original fact timestamp, so later messages and restarts cannot reset
-it. The first eligible message starts this fallback independently of prompt
+with a persisted human reply or primary acknowledgement. The query joins the
+existing deterministic operational-audit delivery identity to omit delivered,
+quarantined and unexpired claims. Never-attempted work precedes retries, then the
+oldest attempted work is retried first, so a failed or delivered early subject
+cannot permanently consume a bounded batch. This is still a snapshot, not a
+claim; competing workers must win the existing token-fenced claim. The deadline
+is derived from the original fact timestamp, so later messages, retry ordering
+and restarts cannot reset it. The first eligible message starts this fallback independently of prompt
 exposure. No historical action or missing RSVP is manufactured.
 
 The published coverage label is **America/Chicago 18:00–22:00 daily**, not 24/7
@@ -203,9 +208,31 @@ configuration was changed in this slice. Existing rota-log reader limits remain.
 one deterministic `rota_notice` row per subject/action in the existing
 `operational_audit_log` claim machine, rechecks reply/ack state under the member
 lock (`confirmNoticeEligible`), and recovers ambiguous sends through the durable
-content marker instead of resending. Repeating the read-only query alone would
+content marker instead of resending. After access/history I/O, a final
+`withNoticeEligibility` check holds that same subject lock through POST, ordering
+the send against concurrent persisted reply/ack writes. Access census/history
+fetches occur outside that lock. The audit recovery cursor is committed before
+POST; a token-fenced lease renewal immediately before POST refuses stale workers.
+A database transaction/acknowledgement failure after POST remains ambiguous and
+retains recovery evidence rather than causing a blind resend. Repeating the read-only query alone would
 produce duplicate notices; the sender never does that. Notice enablement
 continues to fail closed at boot without the full binding.
+
+Recovery scans at most five pages of 100 messages, renewing the claim before
+each page and refusing renewal failure. Every page must have valid descending
+snowflakes, advancing cursors, known authors and non-partial messages in the
+exact guild/channel. Exactly one non-webhook bot-authored marker must be found
+in a complete recovery window. Missing/duplicate markers, malformed pages or an
+exhausted page budget quarantine the row without resending. New claims with no
+prior POST boundary fetch only the newest cursor; they do not walk old history.
+A changed durable guild/destination/action binding is quarantined, not redirected.
+
+The operational-audit kill switch is checked after claiming and at the final
+POST boundary; read errors hold delivery. Holding an ambiguous prior attempt
+preserves its recovery boundary. Only a claim that knows no POST began may clear
+its newly prepared boundary. Scheduler shutdown stops new ticks and prevents an
+in-flight pre-POST attempt from sending. An already-dispatched POST cannot be
+retracted; its durable boundary remains the recovery backstop.
 
 ### Staff-only destination access boundary
 
