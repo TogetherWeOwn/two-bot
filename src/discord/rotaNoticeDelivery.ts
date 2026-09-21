@@ -58,13 +58,11 @@ export class RotaNoticeDelivery {
     }
     const outcomes: RotaNoticeOutcome[] = [];
     for (const candidate of candidates) {
-      if (candidate.channelId !== this.config.noticeChannelId) {
-        // The candidate names its source channel; the notice always goes to
-        // the configured staff destination. Mismatch here means the snapshot
-        // predates a config change, not a second destination.
-        outcomes.push(await this.suppress(candidate, 'destination_changed'));
-        continue;
-      }
+      // The candidate's channelId is the newcomer's source/action channel; the
+      // notice always goes to the configured staff destination. The two are
+      // different ids in any real deployment, so no comparison here: the
+      // destination is fixed config, and deliverOne validates the candidate,
+      // rechecks persisted eligibility, and verifies access before sending.
       outcomes.push(await this.deliverOne(candidate, now));
     }
     return outcomes;

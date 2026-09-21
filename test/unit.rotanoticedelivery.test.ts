@@ -11,6 +11,7 @@ import { rotaNoticeEntryId } from '../src/discord/rotaNoticePayload.ts';
 // All ids below are synthetic fixtures, not real Discord snowflakes.
 const GUILD = '111111111111111111';
 const CHANNEL = '222222222222222222';
+const DESTINATION = '777777777777777777';
 const ACTION = '333333333333333333';
 const BOT = '444444444444444444';
 const PRIMARY = '555555555555555555';
@@ -91,10 +92,10 @@ function deps(overrides: Partial<RotaNoticeDeliveryDeps> = {}): RotaNoticeDelive
   };
 }
 
-function delivery(channel: any, overrideDeps: Partial<RotaNoticeDeliveryDeps> = {}) {
+function delivery(channel: any, overrideDeps: Partial<RotaNoticeDeliveryDeps> = {}, destination = CHANNEL) {
   const client: any = { user: { id: BOT, bot: true } };
   return new RotaNoticeDelivery(client,
-    { guildId: GUILD, noticeChannelId: CHANNEL, readerIds: [PRIMARY] },
+    { guildId: GUILD, noticeChannelId: destination, readerIds: [PRIMARY] },
     deps({ verifyAccess: async () => channel, ...overrideDeps }));
 }
 
@@ -130,6 +131,24 @@ test('due candidate is claimed, rechecked, and sent with suppressed mentions', a
   assert.equal(row?.deliveryState, 'delivered');
   assert.equal(row?.mirrorMessageId, (outcome as { messageId: string }).messageId);
   assert.equal(row?.mirrorChannelId, CHANNEL);
+});
+
+test('distinct source and staff destination still reaches the send path', async () => {
+  // Regression for the review finding on 274485e: candidate.channelId is the
+  // newcomer's source/action channel, noticeChannelId the staff destination.
+  // They differ in any real deployment; delivery must not suppress on that.
+  await enroll();
+  const { channel, sent } = fakeChannel();
+  const [outcome] = await delivery(channel, {}, DESTINATION).runDue(DUE);
+  assert.equal(outcome.status, 'sent');
+  assert.equal(sent.length, 1);
+  const memberId = rota.memberId(GUILD, SUBJECT);
+  const entryId = rotaNoticeEntryId(GUILD, memberId, ACTION);
+  const row = await store.get(entryId);
+  assert.equal(row?.deliveryState, 'delivered');
+  assert.equal(row?.mirrorChannelId, DESTINATION);
+  assert.equal(row?.event.destinationChannelId, DESTINATION);
+  assert.match(sent[0].content, new RegExp(`https://discord\\.com/channels/${GUILD}/${CHANNEL}/${ACTION}`));
 });
 
 test('second sweep after delivery reconciles without resending', async () => {
