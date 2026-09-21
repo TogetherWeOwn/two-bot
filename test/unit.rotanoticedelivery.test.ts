@@ -187,6 +187,28 @@ test('reply before the sweep suppresses the send at the snapshot', async () => {
   assert.equal(sent.length, 0);
 });
 
+test('no-prompt reply after a stale snapshot suppresses delivery across restart', async () => {
+  const subject = { guildId: GUILD, actorId: SUBJECT, pending: false };
+  await rota.rulesAccepted({ ...subject, occurredAt: FIRST, sourceCohort: 'unknown' });
+  await rota.message({ ...subject, occurredAt: FIRST, messageId: ACTION, channelId: CHANNEL, eligibleChannel: true });
+  const snapshot = await rota.dueNotices(GUILD, DUE);
+  assert.equal(snapshot.length, 1);
+  await rota.reply({ guildId: GUILD, actorId: PRIMARY, pending: false, subject,
+    occurredAt: '2026-09-01T23:10:00.000Z', messageId: 'reply',
+    channelId: CHANNEL, eligibleChannel: true, replyToMessageId: ACTION });
+  const restarted = new OnboardingRota(fixture.db, classifier, {
+    enabled: true, noticeEnabled: true, pseudonymKey: KEY, primaryActorId: PRIMARY,
+  });
+  const { channel, sent } = fakeChannel();
+  const [outcome] = await delivery(channel, { rota: {
+    dueNotices: async () => snapshot,
+    confirmNoticeEligible: restarted.confirmNoticeEligible.bind(restarted),
+  } }).runDue(DUE);
+  assert.equal(outcome.status, 'suppressed');
+  assert.equal(sent.length, 0);
+  assert.equal(await store.get(rotaNoticeEntryId(GUILD, restarted.memberId(GUILD, SUBJECT), ACTION)), null);
+});
+
 test('reply landing after the snapshot is caught by the lock-scoped recheck', async () => {
   await enroll();
   const memberId = rota.memberId(GUILD, SUBJECT);

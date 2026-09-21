@@ -56,8 +56,10 @@ test('seven durable milestones carry cohort, pseudonyms, raw clocks and no raw m
   await reply();
   await rota.message(message({ messageId: 'return', occurredAt: '2026-09-08T12:00:00.000Z' }));
   const actual = await rows();
-  assert.equal(actual.length, 7);
-  assert.deepEqual(actual.map(r => r.event_type).sort(), [...ONBOARDING_FACT_TYPES].sort());
+  assert.equal(actual.length, 8);
+  assert.equal(actual.filter(r => r.event_type === 'welcome_rota_replied').length, 1);
+  assert.deepEqual(actual.filter(r => r.event_type !== 'welcome_rota_replied').map(r => r.event_type).sort(),
+    [...ONBOARDING_FACT_TYPES].sort());
   for (const row of actual) {
     assert.equal(row.actor_id, rota.memberId(GUILD, subject.actorId));
     assert.equal(JSON.parse(row.metadata).sourceCohort, 'invite:fixture-campaign');
@@ -81,7 +83,9 @@ test('concurrent redelivery and restart retain one row per milestone and origina
   await enroll(subject, restarted);
   await restarted.rulesAccepted({ ...subject, occurredAt: REPLY, sourceCohort: 'different-source' });
   await restarted.message(message());
-  assert.equal((await rows()).length, 6);
+  const facts = await rows();
+  assert.equal(facts.length, 7);
+  assert.equal(facts.filter(r => r.event_type === 'welcome_rota_replied').length, 1);
   assert.ok((await rows()).every(r => JSON.parse(r.metadata).sourceCohort === 'invite:fixture-campaign'));
 });
 
@@ -115,7 +119,9 @@ test('only a later explicit reply by another eligible human in the action channe
   for (const exclusion of exclusions) await reply(exclusion);
   assert.equal((await rows()).length, 4);
   await reply();
-  assert.equal((await rows()).length, 6);
+  const facts = await rows();
+  assert.equal(facts.length, 7);
+  assert.equal(facts.filter(r => r.event_type === 'welcome_rota_replied').length, 1);
 });
 
 test('no gate or visible prompt is inferred; rejected and pre-gate messages do not advance', async () => {
@@ -130,7 +136,10 @@ test('no gate or visible prompt is inferred; rejected and pre-gate messages do n
   await rota.message(message({ channelId: 'other-human-room' }));
   assert.equal((await rows()).length, 3);
   await reply({ channelId: 'other-human-room' });
-  assert.equal((await rows()).length, 3);
+  const facts = await rows();
+  assert.equal(facts.length, 4);
+  assert.equal(facts[3].event_type, 'welcome_rota_replied');
+  assert.equal(facts.filter(r => /prompt_acted|human_reply|reply_latency/.test(r.event_type)).length, 0);
 });
 
 test('seven-day return window is [gate + 7 days, gate + 8 days) in UTC', async () => {
