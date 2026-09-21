@@ -1,4 +1,5 @@
 import type { Db } from '../store/db.ts';
+import type { OnboardingFactType } from './onboardingEvents.ts';
 import type {
   CommunityClassificationResult,
   CommunityClassifier,
@@ -20,7 +21,7 @@ export type AttendanceProof = 'host_checkin' | 'durable_checkin' | 'voice_600s' 
 
 export interface CommunityFactInput {
   guildId: string;
-  eventType: CommunityFactType;
+  eventType: CommunityFactType | OnboardingFactType;
   sourceEventId: string;
   actorId: string | null;
   occurredAt: string;
