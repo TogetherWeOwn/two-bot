@@ -7,10 +7,13 @@ The measurement core and **disabled-by-default runtime adapter** are wired in
 messages and explicit reply references feed the existing fact log. See
 [configuration](ONBOARDING_ROTA_CONFIG.md) for staging-only controls.
 
-There is still **no notice sender or scheduler**. Boot explicitly refuses
-measurement-on plus notice-on until that implementation exists. This changes no
-live configuration or member-facing copy. Local fixtures are not a staging
-Discord demonstration and do not release the measured-evaluation gate.
+The durable notice sender and scheduler are wired in `src/index.ts`, reusing the
+existing operational-audit claim machine (`src/discord/rotaNoticeDelivery.ts`,
+`src/discord/rotaNoticeScheduler.ts`, `src/discord/rotaNoticePayload.ts`).
+Boot refuses measurement-on plus notice-on until the channel, primary and
+explicit reader bindings are all present. This changes no live configuration or
+member-facing copy. Local fixtures are not a staging Discord demonstration and
+do not release the measured-evaluation gate.
 
 The source contracts are TOG-3531 and TOG-1965's `activation-package` §4/§8.3,
 with TOG-2347's accepted `coverage-binding` §3 governing the future notice.
@@ -179,10 +182,14 @@ inferred from another owner/admin setting. Notice-only off retains primary input
 Environment binding is a deployment responsibility; no live identity or
 configuration was changed in this slice. Existing rota-log reader limits remain.
 
-**Still not runtime-wired:** scheduler, delivery lease/outbox, or sender. A sender
-must recheck reply/ack state under the member lock and use durable claim/delivery
-recovery before any Discord send; repeating this read-only query alone would
-produce duplicate notices. Notice enablement continues to fail closed at boot.
+**Runtime-wired:** the 60-second non-overlapping scheduler
+(`src/discord/rotaNoticeScheduler.ts`) drives `RotaNoticeDelivery`, which stores
+one deterministic `rota_notice` row per subject/action in the existing
+`operational_audit_log` claim machine, rechecks reply/ack state under the member
+lock (`confirmNoticeEligible`), and recovers ambiguous sends through the durable
+content marker instead of resending. Repeating the read-only query alone would
+produce duplicate notices; the sender never does that. Notice enablement
+continues to fail closed at boot without the full binding.
 
 ### Staff-only destination access boundary
 
@@ -212,23 +219,24 @@ An extra administrator, owner, or other bot with access causes refusal; do not
 silently widen the reader contract or rewrite guild permissions to make it pass.
 
 This snapshot is not delivery authorization by itself. Discord permission and
-membership changes are not atomic with a later send. The eventual sender must
-run the check immediately before each attempted send/recovery, retain the master
-and notice gates, and refuse uncertain results without a fallback destination.
-It also needs a durable claim, eligibility recheck and ambiguous-send recovery.
-A safe snapshot cannot establish that permissions will remain safe afterwards;
-ongoing access restriction and release proof remain operational requirements.
-The helper is not wired into runtime, and notice enablement still fails at boot.
+membership changes are not atomic with a later send. The wired sender runs the
+check immediately before each attempted send/recovery, retains the master
+and notice gates, and refuses uncertain results without a fallback destination,
+backed by the durable claim, lock-scoped eligibility recheck and ambiguous-send
+recovery. A safe snapshot cannot establish that permissions will remain safe
+afterwards; ongoing access restriction and release proof remain operational
+requirements.
 
 ## Remaining integration and release gates
 
-1. Wire the accepted **30-minute no-reply/no-acknowledgement fallback**, not
-   an immediate first-message alert. Persist notice delivery/claim state across
-   restarts, bind the accepted primary in the target environment, and recheck eligibility
-   before sending. Verify staff-only effective access to the configured
-   `#updates-and-changes` destination; never fall back to a human channel or DM.
-   Use an explicit bot label and suppressed mentions. A notice cannot stop the
-   24-hour human-reply clock.
+1. The accepted **30-minute no-reply/no-acknowledgement fallback** is wired
+   (not an immediate first-message alert): notice delivery/claim state persists
+   across restarts in `operational_audit_log`, the accepted primary is bound in
+   the target environment, eligibility is rechecked under the member lock before
+   sending, and staff-only effective access to the configured
+   `#updates-and-changes` destination is verified per attempt with no human-channel
+   or DM fallback. The notice carries an explicit bot label and suppressed
+   mentions. A notice cannot stop the 24-hour human-reply clock.
 2. Demonstrate the seven events and labeled notice in the staging environment.
    Report synthetic fixtures separately from real eligible-member observations;
    never turn off staging classification to claim real-member activation.
@@ -241,13 +249,16 @@ Keep missing coverage visible in any report. Do not publish conversion success u
 
 ## Rollback
 
-Set `TWO_ONBOARDING_ROTA_MEASUREMENT=0` and restart to omit the observer entirely,
-leaving the accepted flow unchanged, without dropping facts, removing Rules
-Screening or changing the roleless structure. A stale notice flag cannot override
-master-off. Notices must remain off in this slice; enabling the unimplemented
-sender is a boot error rather than an apparent success. Do not revert the
-additive migration while derived rows exist; no data deletion is needed for
-rollback. Live/staging restart proof remains a separate release requirement.
+Set `TWO_ONBOARDING_ROTA_MEASUREMENT=0` and restart to omit the observer, delivery
+service and scheduler entirely, leaving the accepted flow unchanged, without
+dropping facts, removing Rules Screening or changing the roleless structure. A
+stale notice flag cannot override master-off. Stop notices only with
+`TWO_ONBOARDING_ROTA_NOTICE=0`: measurement and primary acknowledgement stay
+intact while the sender and scheduler stay off. Enabling notices without the
+full channel, primary and explicit reader binding is a boot error rather than an
+apparent success. Do not revert the additive migrations while derived rows
+exist; no data deletion is needed for rollback. Live/staging restart proof
+remains a separate release requirement.
 
 ## Focused verification
 
@@ -259,7 +270,8 @@ npm run typecheck
 node --test test/unit.onboardingrota.test.ts test/unit.discordonboardingrota.test.ts \
   test/unit.rotawelcome.test.ts test/unit.rotaboot.test.ts test/unit.communityscorecard.test.ts \
   test/unit.rotanoticestate.test.ts test/unit.rotaacknowledgement.test.ts \
-  test/unit.rotanoticeaccess.test.ts
+  test/unit.rotanoticeaccess.test.ts test/unit.rotanoticepayload.test.ts \
+  test/unit.rotanoticedelivery.test.ts test/unit.rotanoticescheduler.test.ts
 ```
 
 Set `TWO_TEST_DATABASE_URL` to the disposable test database before the test
