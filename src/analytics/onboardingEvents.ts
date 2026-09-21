@@ -10,3 +10,6 @@ export const ONBOARDING_FACT_TYPES = [
 ] as const;
 
 export type OnboardingFactType = (typeof ONBOARDING_FACT_TYPES)[number];
+
+/** Operations evidence, never an activation milestone or a raw activity stream. */
+export type RotaOperationalFactType = 'welcome_rota_acknowledged' | 'welcome_rota_replied';

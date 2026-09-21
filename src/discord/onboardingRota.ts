@@ -1,4 +1,4 @@
-import { MessageType, PermissionFlagsBits, type GuildMember, type Message } from 'discord.js';
+import { ChannelType, MessageType, PermissionFlagsBits, type ChatInputCommandInteraction, type GuildMember, type Message } from 'discord.js';
 import type { Db } from '../store/db.ts';
 import type { OnboardingRota, RotaActor } from '../analytics/onboardingRota.ts';
 import { log } from '../core/log.ts';
@@ -13,6 +13,7 @@ export interface RotaPrompt {
 
 export interface RotaObserverConfig {
   guildId: string;
+  primaryActorId?: string;
   staffRoleIds: ReadonlySet<string>;
   staffActorIds: ReadonlySet<string>;
   humanChannelIds: ReadonlySet<string>;
@@ -25,7 +26,7 @@ const STAFF_PERMISSIONS = PermissionFlagsBits.Administrator | PermissionFlagsBit
 /** Observations only: no sends, role writes, timers, or alternate onboarding flow. */
 export class DiscordOnboardingRota {
   private db: Db;
-  private rota: Pick<OnboardingRota, 'rulesAccepted' | 'promptShown' | 'message' | 'reply'>;
+  private rota: Pick<OnboardingRota, 'rulesAccepted' | 'promptShown' | 'message' | 'reply' | 'acknowledgePrimary'>;
   private config: RotaObserverConfig;
   /**
    * One chain per observed member, not one process-global chain: an unresolved
@@ -50,7 +51,7 @@ export class DiscordOnboardingRota {
         member.isCommunicationDisabled()) return null;
     return {
       guildId: member.guild.id, actorId: member.id, isBot: member.user.bot, pending: false,
-      isStaff: member.id === member.guild.ownerId || this.config.staffActorIds.has(member.id) ||
+      isStaff: member.id === member.guild.ownerId || member.id === this.config.primaryActorId || this.config.staffActorIds.has(member.id) ||
         member.roles.cache.some((role) => this.config.staffRoleIds.has(role.id)) ||
         member.permissions.any(STAFF_PERMISSIONS),
     };
@@ -110,6 +111,51 @@ export class DiscordOnboardingRota {
       ...actor, occurredAt, promptVariant: input.variant,
       messageId: input.message.id, channelId: input.actionChannelId,
     }));
+  }
+
+  /** Authenticated gateway interaction only; no caller-supplied actor or subject ids. */
+  async acknowledgePrimary(interaction: ChatInputCommandInteraction): Promise<boolean> {
+    if (!this.config.primaryActorId || !interaction.inGuild() ||
+        interaction.guildId !== this.config.guildId || !interaction.guild ||
+        interaction.guild.id !== this.config.guildId || interaction.user.bot ||
+        interaction.user.id !== this.config.primaryActorId) return false;
+    const link = interaction.options.getString('message-link', true);
+    const match = /^https:\/\/discord\.com\/channels\/(\d{17,20})\/(\d{17,20})\/(\d{17,20})$/.exec(link);
+    if (!match || match[1] !== this.config.guildId || !this.config.humanChannelIds.has(match[2])) return false;
+    const [, guildId, channelId, actionId] = match;
+    const occurredAt = new Date().toISOString();
+    // Resolve the authenticated subject before joining its chain. Serializing
+    // REST work on the primary would stall every acknowledgement they make;
+    // a global chain would also stall unrelated observations.
+    try {
+      const guild = interaction.guild;
+      const primaryMember = await guild.members.fetch({ user: interaction.user.id, force: true });
+      const primary = this.actor(primaryMember);
+      if (!primary || primary.isBot || primary.actorId !== this.config.primaryActorId) return false;
+      const channel = await guild.channels.fetch(channelId, { force: true });
+      if (!channel || channel.guild.id !== guildId || channel.id !== channelId ||
+          channel.type !== ChannelType.GuildText) return false;
+      const canAct = PermissionFlagsBits.ViewChannel | PermissionFlagsBits.SendMessages;
+      if (!channel.permissionsFor(primaryMember)?.has(canAct | PermissionFlagsBits.ReadMessageHistory)) return false;
+      const message = await channel.messages.fetch({ message: actionId, force: true });
+      if (message.partial || message.id !== actionId || message.guildId !== guildId || message.channelId !== channelId ||
+          message.author.bot !== false || message.webhookId || message.system) return false;
+      const subjectMember = await guild.members.fetch({ user: message.author.id, force: true });
+      const subject = this.actor(subjectMember);
+      if (!subject || subject.actorId !== message.author.id || !channel.permissionsFor(subjectMember)?.has(canAct)) return false;
+      let recorded = false;
+      // An observed action reserves this subject's chain at gateway receipt,
+      // before any inspection I/O. Wait behind it, not behind other members.
+      await this.enqueue(subject.actorId, async () => {
+        recorded = await this.rota.acknowledgePrimary({
+          ...primary, subject, actionId, channelId, occurredAt,
+        });
+      });
+      return recorded;
+    } catch {
+      log.error('onboarding_rota_observation_failed', { classification: 'measurement_gap' });
+      return false;
+    }
   }
 
   /** Reserve on receipt; await automod's acceptance inside the ordered queue. */
