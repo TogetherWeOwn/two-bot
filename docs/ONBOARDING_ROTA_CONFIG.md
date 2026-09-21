@@ -61,6 +61,10 @@ Still required:
    Discord: staff-only updates-and-changes, never a member-facing channel, DM or
    conversational reply. A syntactically valid configured id is **not** proof
    of private visibility. Do not silently fall back to another destination.
+   The read-only `rotaNoticeAccess` helper provides a fail-closed effective-reader
+   snapshot, but no reader deployment binding or sender integration exists yet.
+   It is not an atomic Discord permission/send guarantee; see the access boundary
+   and release limitations in [ONBOARDING_ROTA.md](ONBOARDING_ROTA.md).
 3. Use a bot-labeled, non-conversational notice. The notice never counts as the
    first human reply. No raw member handles in the durable rota facts.
 4. Demonstrate seven milestones, notice eligibility/delivery, and both rollback
