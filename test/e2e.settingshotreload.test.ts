@@ -424,7 +424,7 @@ test("an upsert's DO UPDATE arm is checked, not just its INSERT arm", async () =
   assert.equal(viaInsert.constraint, 'guild_settings_env_only_keys');
 });
 
-test('both refusals are VALID constraints, checked on every write', async () => {
+test('all settings refusals are VALID constraints, checked on every write', async () => {
   // `convalidated` is the half that can actually move: ADD CONSTRAINT ... NOT
   // VALID is accepted by Postgres and skips the scan of existing rows, so a
   // key already in the table when 0027 lands would stay. Mutation-checked -
@@ -452,8 +452,8 @@ test('both refusals are VALID constraints, checked on every write', async () => 
 
   assert.deepEqual(
     rows.map((r) => r.conname),
-    ['guild_settings_env_only_keys', 'guild_settings_no_internal_keys'],
-    'both CHECK constraints are present on the table',
+    ['guild_settings_env_only_keys', 'guild_settings_no_internal_keys', 'guild_settings_rota_env_only_keys'],
+    'all CHECK constraints are present on the table',
   );
   for (const r of rows) {
     assert.equal(r.convalidated, true, `${r.conname} is NOT VALID: existing rows were never checked`);

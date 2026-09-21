@@ -61,7 +61,7 @@ export type SettingClass = 'hot' | 'cold' | 'env_only';
 /**
  * Names that never reach `src/` through `process.env.X` or `env.X`, so the
  * TOG-3100 census grep cannot see them: they arrive as the fallback array of a
- * `readSecret()` call. All three are secrets, which is exactly the set you least
+ * `readSecret()` call. These are secrets, which is exactly the set you least
  * want a census to miss - two of them (`DISCORD_TOKEN`, the database URL) were
  * demonstrated storable in the TOG-3183 probe.
  */
@@ -69,6 +69,7 @@ export const SECRET_NAMES_NOT_IN_SRC_GREP = [
   'DISCORD_BOT_TOKEN', // src/core/config.ts:102
   'DISCORD_TOKEN', // src/core/config.ts:102
   'TWO_MODERATION_AUDIT_SECRET', // src/moderation/config.ts:36
+  'TWO_ONBOARDING_ROTA_PSEUDONYM_KEY', // src/analytics/onboardingRotaConfig.ts
 ] as const;
 
 /**
@@ -133,6 +134,12 @@ export const SETTING_CLASSES: Readonly<Record<string, SettingClass>> = {
   // Outside the namespace, inside the blast radius. See the file docblock.
   TWO_MODERATION: 'env_only', // src/internal/config.ts:83, co-gate on 9 verbs
   TWO_ONBOARDING_MODE: 'env_only', // src/index.ts:599 -> src/onboarding/mode.ts:9
+
+  // Staging-only collection and notice capabilities, never dashboard-settable.
+  // The loader is not wired to the runtime yet. These remain boot/env inputs.
+  TWO_ONBOARDING_ROTA_MEASUREMENT: 'env_only', // src/analytics/onboardingRotaConfig.ts
+  TWO_ONBOARDING_ROTA_NOTICE: 'env_only', // src/analytics/onboardingRotaConfig.ts
+  TWO_ONBOARDING_ROTA_PSEUDONYM_KEY: 'env_only', // dedicated HMAC credential
 
   // These do not switch verbs on; they decide who an already-enabled verb may
   // reach. Widening them from the web is the same escalation one step later.
