@@ -190,11 +190,13 @@ export class OperationalAuditStore {
     return row ? storedAudit(row) : null;
   }
 
+  /** Generic mirror queue only; rota notices are claimed by their guarded sender. */
   async claimPending(limit = 25, leaseMs = AUDIT_DELIVERY_LEASE_MS): Promise<StoredOperationalAudit[]> {
     const rows = await this.db
       .prepare(
         `${SELECT_AUDIT}
           WHERE mirror_channel_id IS NOT NULL
+            AND event_kind <> 'rota_notice'
             AND (delivery_state = 'pending'
               OR (delivery_state = 'delivering' AND delivery_lease_until < ?))
           ORDER BY CASE WHEN delivery_attempted_at IS NULL THEN 0 ELSE 1 END,
@@ -280,6 +282,7 @@ export class OperationalAuditStore {
     const rows = await this.db.prepare(
       `${SELECT_AUDIT}
         WHERE delivery_state = 'delivered'
+          AND event_kind <> 'rota_notice'
           AND mirror_channel_id IS NOT NULL
           AND mirror_message_id IS NOT NULL
           AND (mirror_checked_at IS NULL OR mirror_checked_at < ?)

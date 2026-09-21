@@ -572,6 +572,106 @@ test('audit-sink message tampering is stored but never remirrored', async () => 
   await db.close();
 });
 
+test('generic claim batches exclude pending and expired rota notices before the limit', async () => {
+  const db = await openDb();
+  try {
+    const store = new OperationalAuditStore(db);
+    const ids = ['rota-pending', 'rota-expired', 'rota-active'];
+    for (const entryId of ids) {
+      await store.record({ ...killSwitchEvent(1), entryId, kind: 'rota_notice' }, CHANNEL_A);
+    }
+    for (const entryId of ids.slice(1)) {
+      const claim = await store.claim(entryId);
+      await store.prepareDeliverySend(entryId, claim!.deliveryClaimToken!, '900000000000000001');
+    }
+    await db.prepare(`UPDATE operational_audit_log SET delivery_lease_until = '2000-01-01T00:00:00Z'
+      WHERE entry_id = ?`).run('rota-expired');
+    const before = await Promise.all(ids.map(id => store.get(id)));
+    const generic = killSwitchEvent(2);
+    await store.record(generic, CHANNEL_A);
+    assert.deepEqual((await store.claimPending(1)).map(row => row.event.entryId), [generic.entryId]);
+    assert.deepEqual(await Promise.all(ids.map(id => store.get(id))), before);
+    assert.ok(await store.claim('rota-pending'), 'the dedicated sender can still claim by identity');
+    assert.ok(await store.claim('rota-expired'), 'the dedicated sender can recover an expired claim');
+    assert.equal(await store.claim('rota-active'), null);
+  } finally { await db.close(); }
+});
+
+test('generic reconciliation excludes delivered rota notices before the limit', async () => {
+  const db = await openDb();
+  try {
+    const store = new OperationalAuditStore(db);
+    const rota = { ...killSwitchEvent(1), entryId: 'rota-delivered', kind: 'rota_notice' as const };
+    const generic = killSwitchEvent(2);
+    for (const event of [rota, generic]) {
+      await store.record(event, CHANNEL_A);
+      const claim = await store.claim(event.entryId);
+      await store.markDelivered(event.entryId, claim!.deliveryClaimToken!, `mirror-${event.entryId}`);
+    }
+    assert.deepEqual((await store.selectDeliveredForReconciliation(1)).map(row => row.event.entryId), [generic.entryId]);
+    assert.equal((await store.get(rota.entryId))?.mirrorCheckedAt, null);
+  } finally { await db.close(); }
+});
+
+test('generic retry sends and reconciles ordinary audit work without touching rota-owned rows', async () => {
+  const db = await openDb();
+  try {
+    const store = new OperationalAuditStore(db);
+    const pending = { ...killSwitchEvent(1), entryId: 'rota-pending', kind: 'rota_notice' as const };
+    const delivered = { ...pending, entryId: 'rota-delivered' };
+    const generic = killSwitchEvent(2);
+    await store.record(pending, CHANNEL_A);
+    await store.record(delivered, CHANNEL_A);
+    const claim = await store.claim(delivered.entryId);
+    await store.markDelivered(delivered.entryId, claim!.deliveryClaimToken!, 'rota-mirror');
+    await store.record(generic, CHANNEL_A);
+    const before = await Promise.all([pending, delivered].map(event => store.get(event.entryId)));
+    const sends: string[] = [];
+    const fetched: string[] = [];
+    const channel = {
+      ...auditChannel(async options => {
+        if (!options.message) return new Collection();
+        fetched.push(options.message);
+        return { id: options.message, author: { id: 'bot' }, editedTimestamp: null,
+          content: options.message === 'rota-mirror' ? 'rota-notice:rota-delivered' : formatAuditEvent(generic) };
+      }),
+      send: async (payload?: { content: string }) => {
+        sends.push(payload!.content);
+        return { id: '900000000000000501' };
+      },
+    };
+    const sink = makeOperationalAudit(auditClient(channel), {
+      guildId: GUILD, channels: { audit: CHANNEL_A, voice: null, moderation: null }, store,
+    });
+    assert.equal(await sink.retryPending(), 1);
+    assert.deepEqual(sends, [formatAuditEvent(generic)]);
+    assert.deepEqual(fetched, ['900000000000000501']);
+    assert.deepEqual(await Promise.all([pending, delivered].map(event => store.get(event.entryId))), before);
+    assert.equal((await store.get(generic.entryId))?.deliveryState, 'delivered');
+    assert.ok((await store.get(generic.entryId))?.mirrorCheckedAt);
+    await store.engageDeliveryHalt('test-operator');
+    assert.equal(await sink.retryPending(), 0);
+    assert.deepEqual(await Promise.all([pending, delivered].map(event => store.get(event.entryId))), before);
+  } finally { await db.close(); }
+});
+
+test('generic record refuses rota notices with or without durable storage', async () => {
+  const db = await openDb();
+  try {
+    const store = new OperationalAuditStore(db);
+    const { client, sends } = killSwitchChannel({ failCursorReads: () => false });
+    const event = { ...killSwitchEvent(1), entryId: 'rota-direct', kind: 'rota_notice' as const };
+    for (const backing of [store, null]) {
+      const sink = makeOperationalAudit(client, {
+        guildId: GUILD, channels: { audit: CHANNEL_A, voice: null, moderation: null }, store: backing,
+      });
+      assert.equal(await sink.record(event), false);
+    }
+    assert.equal(sends(), 0);
+    assert.equal(await store.get(event.entryId), null);
+  } finally { await db.close(); }
+});
+
 test('delivered audit mirrors are checked exactly and checkpointed when intact', async () => {
   const db = await openDb();
   const store = new OperationalAuditStore(db);
