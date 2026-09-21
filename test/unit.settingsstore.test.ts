@@ -108,6 +108,25 @@ test('the schema refuses TWO_INTERNAL_* too, with the TypeScript guard bypassed'
   );
 });
 
+for (const key of [
+  'TWO_ONBOARDING_ROTA_MEASUREMENT',
+  'TWO_ONBOARDING_ROTA_NOTICE',
+  'TWO_ONBOARDING_ROTA_PSEUDONYM_KEY',
+]) {
+  test(`rota settings refusal covers both the store and raw SQL: ${key}`, async () => {
+    await assert.rejects(() => store().set(GUILD, key, 'fixture', ADMIN), EnvOnlyKeyError);
+    await assert.rejects(
+      () => testDb.db.prepare(
+        `INSERT INTO guild_settings (guild_id, key, value, version, updated_by)
+         VALUES (?, ?, '"fixture"'::jsonb, nextval('guild_settings_version_seq'), ?)`,
+      ).run(GUILD, key, ADMIN),
+      /guild_settings_rota_env_only_keys/,
+    );
+    const rows = await testDb.db.prepare(`SELECT count(*)::int AS n FROM guild_settings_audit`).get<{ n: number }>();
+    assert.equal(rows?.n, 0, 'refused values must not reach the audit log either');
+  });
+}
+
 test('the underscore in the constraint is an escape, so ordinary keys are unaffected', async () => {
   // `LIKE 'TWO\_INTERNAL\_%'` - if those escapes were dropped, `_` would be a
   // single-character wildcard and TWO?INTERNAL? patterns would over-match. The

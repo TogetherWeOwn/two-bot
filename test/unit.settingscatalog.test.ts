@@ -126,7 +126,7 @@ test('the readSecret blind spot is real: those names are invisible to the census
   }
 });
 
-test('all three secrets the census cannot see are env_only', () => {
+test('all secrets the census cannot see are env_only', () => {
   for (const name of SECRET_NAMES_NOT_IN_SRC_GREP) {
     assert.equal(classifyKey(name), 'env_only', name);
     assert.equal(isEnvOnlyKey(name), true, name);
@@ -341,16 +341,22 @@ test('every hot-wired key has a Config field the reload line can name, and vice 
   );
 });
 
-test('TOG-3217: migration 0027 and the catalog refuse the same names', () => {
+test('TOG-3217: env-only constraints and the catalog refuse the same names', () => {
   // migrations/0027_guild_settings_env_only.sql says in its header that this
   // test exists and fails on divergence. Until TOG-3217 it did not - the claim
   // was true of nothing. The two lists are the application half and the schema
   // half of one rule, and a name added to the catalog but not the constraint is
   // refused by the handler and accepted by psql, which is precisely the case
   // the constraint was added for.
-  const sql = readFileSync('migrations/0027_guild_settings_env_only.sql', 'utf8');
-  const list = sql.slice(sql.indexOf('key NOT IN ('));
-  assert.ok(list.length > 0, 'the 0027 CHECK list is gone - repoint or delete this test');
+  const list = [
+    'migrations/0027_guild_settings_env_only.sql',
+    'migrations/0029_onboarding_rota_env_only.sql',
+  ].map((path) => {
+    const sql = readFileSync(path, 'utf8');
+    const start = sql.indexOf('key NOT IN (');
+    assert.ok(start >= 0, `${path}: the CHECK list is gone`);
+    return sql.slice(start);
+  }).join('\n');
   const inSql = [
     ...new Set(
       list
@@ -382,7 +388,7 @@ test('TOG-3217: migration 0027 and the catalog refuse the same names', () => {
   assert.deepEqual(
     inSql,
     inCatalog,
-    'migrations/0027_guild_settings_env_only.sql and SETTING_CLASSES disagree. ' +
+    'The env-only CHECK constraints and SETTING_CLASSES disagree. ' +
       'Both must list every env_only name outside the TWO_INTERNAL_ prefix: ' +
       `only in SQL [${inSql.filter((n) => !inCatalog.includes(n))}], ` +
       `only in the catalog [${inCatalog.filter((n) => !inSql.includes(n))}]`,
