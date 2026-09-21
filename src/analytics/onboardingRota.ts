@@ -244,6 +244,38 @@ export class OnboardingRota {
     });
   }
 
+  /**
+   * Lock-scoped send authorization, run under the existing subject lock. The
+   * read-only `dueNotices` snapshot is NOT a claim: a persisted human reply or
+   * primary acknowledgement that landed after the snapshot must still suppress
+   * the send. Returns the fixed original dueAt so concurrent workers and
+   * restarts share one deadline. Never writes; the caller owns durable claims.
+   */
+  async confirmNoticeEligible(
+    guildId: string, memberId: string, actionId: string, channelId: string, now: string,
+  ): Promise<{ dueAt: string } | null> {
+    if (!this.config.enabled || !this.config.noticeEnabled || !this.config.primaryActorId) return null;
+    if (!/^\d{17,20}$/.test(actionId) || !/^\d{17,20}$/.test(channelId) ||
+        !/^[0-9a-f]{64}$/.test(memberId)) return null;
+    const at = iso(now);
+    return this.locked(guildId, memberId, async (tx) => {
+      const first = await this.milestone(tx, guildId, memberId, 'onboarding_first_eligible_message');
+      if (!first) return null;
+      const action = JSON.parse(first.metadata);
+      if (action.actionId !== actionId || action.channelId !== channelId) return null;
+      if (Date.parse(at) < Date.parse(first.occurred_at) + NOTICE_DELAY_MS) return null;
+      const stop = await tx.prepare(
+        `SELECT 1 FROM community_facts AS stop
+          WHERE stop.idempotency_key IN (
+            'rota:' || ? || ':' || ? || ':onboarding_first_human_reply',
+            'rota:' || ? || ':' || ? || ':welcome_rota_acknowledged'
+          ) LIMIT 1`,
+      ).get(guildId, memberId, guildId, memberId);
+      if (stop) return null;
+      return { dueAt: new Date(Date.parse(first.occurred_at) + NOTICE_DELAY_MS).toISOString() };
+    });
+  }
+
   /** Explicit Discord reply reference only; unrelated channel chatter cannot stop the clock. */
   async reply(input: RotaMessage & { subject: RotaActor; replyToMessageId: string }): Promise<void> {
     if (!this.eligible(input, false) || !this.eligible(input.subject) ||
