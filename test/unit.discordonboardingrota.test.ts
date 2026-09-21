@@ -90,6 +90,17 @@ async function rows() {
 
 const settle = () => new Promise(resolve => setTimeout(resolve, 10));
 
+async function waitForRows(count: number, timeoutMs = 5000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if ((await rows()).length === count) return;
+    if (Date.now() > deadline) {
+      throw new Error(`timed out waiting for ${count} rows (have ${(await rows()).length})`);
+    }
+    await settle();
+  }
+}
+
 function gateway(rota: DiscordOnboardingRota | undefined = observer, automod?: BotDeps['automod']) {
   const bus = new EventEmitter();
   registerHandlers(bus as unknown as Client, {
@@ -105,7 +116,10 @@ function gateway(rota: DiscordOnboardingRota | undefined = observer, automod?: B
 test('runtime adapter emits seven facts, independent of raw scorecard capture; no raw member ids', async () => {
   await enroll();
   await observer.message(message());
+  // The staff reply hands its write to the subject's chain fire-and-forget, so
+  // the replier's promise can resolve before the reply rows land.
   await observer.message(reply());
+  await waitForRows(6);
   await observer.message(message(member(), { id: 'return', createdTimestamp: Date.parse(GATE) + 7 * 86_400_000 }));
   const actual = await rows();
   assert.deepEqual(actual.map(r => r.event_type).sort(), [...ONBOARDING_FACT_TYPES].sort());
@@ -238,7 +252,9 @@ test('reply must reference the action and freshly resolve an eligible different 
     } } },
   }));
   assert.equal(fetched, true);
-  assert.equal((await rows()).length, 6);
+  // Same fire-and-forget handoff as above: the qualifying reply write lands on
+  // the subject's chain after the replier's promise resolves.
+  await waitForRows(6);
 });
 
 test('failed observation is contained and later observations still run', async () => {
@@ -246,6 +262,46 @@ test('failed observation is contained and later observations still run', async (
   assert.equal((await rows()).length, 0);
   await enroll();
   assert.equal((await rows()).length, 2);
+});
+
+test('an unresolved join for member A never stalls unrelated member B', async () => {
+  // Head-of-line regression: one process-global chain let a stuck attribution
+  // for A block every observation for anyone else. Per-member chains isolate.
+  let releaseA!: (source: string) => void;
+  const sourceA = new Promise<string>(resolve => { releaseA = resolve; });
+  const joinA = observer.join(member('member-a'), sourceA, GATE);
+  const b = member('member-b');
+  await observer.join(b, Promise.resolve('web:one_click'), GATE);
+  await prompt(b);
+  await waitForRows(2);
+  assert.ok((await rows()).every(r => r.actor_id === core.memberId(GUILD, 'member-b')));
+  releaseA('web:one_click');
+  await joinA;
+  await waitForRows(3);
+});
+
+test('a stuck observation for one member never stops an unrelated automation event', async () => {
+  // Reproduces the exact-head probe: unresolved A join + accepted B message
+  // must still emit the automation event promptly, because the observer is
+  // fire-and-forget off the automation path, not awaited before it.
+  let releaseA!: (source: string) => void;
+  const sourceA = new Promise<string>(resolve => { releaseA = resolve; });
+  const joinA = observer.join(member('member-a'), sourceA, GATE);
+  const b = member('member-b');
+  await observer.join(b, Promise.resolve('web:one_click'), GATE);
+  await prompt(b);
+  const bus = gateway();
+  const done = new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('automation event stalled behind stuck observation')), 1000);
+    bus.once('automationMessageAccepted', () => { clearTimeout(timer); resolve(); });
+  });
+  bus.emit(Events.MessageCreate, message(b));
+  await done;
+  // B's own observation still lands even though the client no longer awaits it;
+  // drain it and A's tail so no rows leak into the next test's count.
+  await waitForRows(4);
+  releaseA('web:one_click');
+  await joinA;
 });
 
 test('gateway reserves join and gate before other listeners and preserves durable cohort', async () => {
@@ -288,7 +344,9 @@ test('gateway keeps a reply behind its action while automod acceptance is delaye
   assert.equal((await rows()).length, 2, 'neither action nor reply can overtake pending inspection');
   release({ matched: false });
   await done;
-  assert.equal((await rows()).length, 6);
+  // The reply write is handed to the subject's chain fire-and-forget, so the
+  // automation event can fire before the reply rows land.
+  await waitForRows(6);
 });
 
 test('gateway suppresses measurement for automod rejection and unclassified inspection failures', async () => {
@@ -308,7 +366,9 @@ test('gateway suppresses measurement for automod rejection and unclassified insp
   const done = new Promise<void>(resolve => { bus.once('automationMessageAccepted', resolve); });
   bus.emit(Events.MessageCreate, message());
   await done;
-  assert.equal((await rows()).length, 4);
+  // The client no longer awaits the observer before emitting, so the event can
+  // fire before the measurement rows land.
+  await waitForRows(4);
 });
 
 test('absent runtime observer preserves existing funnel with zero derived writes', async () => {
