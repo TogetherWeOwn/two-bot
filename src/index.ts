@@ -83,6 +83,9 @@ import {
 } from './automations/disable.ts';
 import { CommunityClassifier, loadCommunityClassifierConfig } from './analytics/communityClassifier.ts';
 import { CommunityFactStore } from './analytics/communityFacts.ts';
+import { OnboardingRota } from './analytics/onboardingRota.ts';
+import { loadOnboardingRotaConfig } from './analytics/onboardingRotaConfig.ts';
+import { DiscordOnboardingRota } from './discord/onboardingRota.ts';
 import {
   startCommunityScorecardJob,
   type CommunityScorecardJobHandle,
@@ -101,6 +104,10 @@ import { DiscordAnnouncements, XmlFeedReader, registerAnnouncementCommands, star
 // `liveCfg` below replaces this once the store is open. Read that, not this,
 // anywhere a value can change while the process runs.
 const cfg = loadConfig();
+const onboardingRotaCfg = loadOnboardingRotaConfig();
+if (onboardingRotaCfg.noticeEnabled) {
+  throw new Error('Onboarding rota notice sender is not implemented; set TWO_ONBOARDING_ROTA_NOTICE=0.');
+}
 const automationCfg = loadAutomationConfig();
 const processStartedAt = new Date().toISOString();
 const announcementsCfg = loadAnnouncementsConfig();
@@ -221,6 +228,22 @@ const handlers = new FunnelHandlers(store, leveling, communityFacts);
 
 const client = createClient(process.env.TWO_AUTOMOD === '1');
 const moderationCfg = loadModerationConfig();
+const onboardingRota = onboardingRotaCfg.enabled
+  ? new DiscordOnboardingRota(db, new OnboardingRota(db, communityClassifier, onboardingRotaCfg), {
+    guildId: onboardingRotaCfg.guildId,
+    staffRoleIds: new Set([
+      ...moderationCfg.protectedRoleIds,
+      ...(cfg.ticketStaffRoleId ? [cfg.ticketStaffRoleId] : []),
+    ]),
+    staffActorIds: new Set(moderationCfg.owenUserId ? [moderationCfg.owenUserId] : []),
+    humanChannelIds: new Set([
+      ...cfg.communityHumanChannelIds, ...cfg.communityWelcomeChannelIds,
+      ...(cfg.onboardingMode === 'session' && cfg.sessionLookingToPlayChannelId
+        ? [cfg.sessionLookingToPlayChannelId] : []),
+      ...(cfg.onboardingMode !== 'session' && cfg.anchorWelcomeChannelId ? [cfg.anchorWelcomeChannelId] : []),
+    ]),
+  })
+  : undefined;
 const moderationStore = new ModerationStore(db);
 // TOG-3190. Switching moderation off while a tempban's unban is still pending,
 // or a channel is still locked down, leaves nothing running to release them.
@@ -333,6 +356,7 @@ const joinRisk = containmentCfg.enabled
   : undefined;
 
 registerHandlers(client, {
+  onboardingRota,
   handlers,
   invites,
   community: communityFacts
@@ -573,6 +597,7 @@ if (cfg.guildId && announcementsCfg.enabled) {
 // there first would silently starve the other. DISCORD_ANCHOR_WELCOME_CHANNEL_ID
 // chooses which (TOG-93); with it unset this block behaves as it always has.
 const onboardingDeps = {
+  onboardingRota,
   recorder: new OnboardingRecorder(store),
   landingChannelIds: () => liveCfg.landingChannelIds,
   dryRun: cfg.onboardingDryRun,
@@ -584,6 +609,7 @@ const onboardingDeps = {
 // unregistered, selected back by unsetting TWO_ONBOARDING_MODE.
 if (cfg.onboardingMode === 'session') {
   registerSessionWelcome(client, {
+    onboardingRota,
     recorder: new SessionRecorder(store),
     guildId: cfg.guildId!,
     store,
@@ -602,6 +628,7 @@ if (cfg.onboardingMode === 'session') {
   });
 } else if (cfg.anchorWelcomeChannelId) {
   registerAnchorWelcome(client, {
+    onboardingRota,
     recorder: onboardingDeps.recorder,
     channelId: cfg.anchorWelcomeChannelId,
     dryRun: cfg.onboardingDryRun,
