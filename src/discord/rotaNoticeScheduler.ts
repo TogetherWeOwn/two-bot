@@ -27,11 +27,12 @@ export function startRotaNoticeScheduler(
 ): RotaNoticeSchedulerHandle {
   const intervalMs = opts.intervalMs ?? ROTA_NOTICE_TICK_MS;
   let running = false;
+  let stopped = false;
 
   const tick = async (): Promise<RotaNoticeOutcome[]> => {
     // Re-entrancy guard: a slow Discord call must not stack a second sweep
     // behind it. Ticks are cheap; skipping one is free.
-    if (running) return [];
+    if (running || stopped) return [];
     running = true;
     try {
       const outcomes = await delivery.runDue(opts.now?.() ?? new Date().toISOString());
@@ -50,7 +51,7 @@ export function startRotaNoticeScheduler(
   timer.unref();
 
   return {
-    stop: () => clearInterval(timer),
+    stop: () => { stopped = true; clearInterval(timer); delivery.stop(); },
     tick,
   };
 }

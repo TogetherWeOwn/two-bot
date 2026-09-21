@@ -1,4 +1,4 @@
-import type { Client, TextChannel } from 'discord.js';
+import type { Client, Message, TextChannel } from 'discord.js';
 import type { OnboardingRota, RotaNoticeCandidate } from '../analytics/onboardingRota.ts';
 import type { OperationalAuditStore } from '../audit/store.ts';
 import { deliveryNonce } from '../audit/store.ts';
@@ -14,7 +14,7 @@ export interface RotaNoticeDeliveryConfig {
 }
 
 export interface RotaNoticeDeliveryDeps {
-  rota: Pick<OnboardingRota, 'dueNotices' | 'confirmNoticeEligible'>;
+  rota: Pick<OnboardingRota, 'dueNotices' | 'confirmNoticeEligible' | 'withNoticeEligibility'>;
   store: Pick<OperationalAuditStore,
     'record' | 'claim' | 'prepareDeliverySend' | 'extendDeliveryLease' |
     'markDelivered' | 'markAcknowledgementFailed' | 'markDeliveryFailed' |
@@ -29,17 +29,15 @@ export type RotaNoticeOutcome =
   | { status: 'held'; entryId: string }
   | { status: 'failed'; entryId: string; classification: string };
 
-/**
- * Durable rota fallback-notice delivery over the existing operational-audit
- * claim machine. One deterministic entry id per subject/action; atomic claim
- * with lease/token ownership; lock-scoped eligibility recheck; fail-closed
- * ambiguous-send recovery through the durable content marker. No fallback
- * destination, no permission writes, no conversational reply.
- */
+const HISTORY_PAGE_LIMIT = 5;
+class UncertainHistory extends Error {}
+
+/** Durable, fail-closed delivery over the existing operational-audit claim machine. */
 export class RotaNoticeDelivery {
   private client: Client;
   private config: RotaNoticeDeliveryConfig;
   private deps: RotaNoticeDeliveryDeps;
+  private stopped = false;
 
   constructor(client: Client, config: RotaNoticeDeliveryConfig, deps: RotaNoticeDeliveryDeps) {
     this.client = client;
@@ -47,8 +45,11 @@ export class RotaNoticeDelivery {
     this.deps = deps;
   }
 
-  /** One bounded sweep: due candidates are claimed, rechecked, verified, sent. */
+  /** Prevent new POSTs, including work already waiting on access/history I/O. */
+  stop(): void { this.stopped = true; }
+
   async runDue(now: string, limit = 25): Promise<RotaNoticeOutcome[]> {
+    if (this.stopped) return [];
     let candidates: RotaNoticeCandidate[];
     try {
       candidates = await this.deps.rota.dueNotices(this.config.guildId, now, limit);
@@ -58,18 +59,11 @@ export class RotaNoticeDelivery {
     }
     const outcomes: RotaNoticeOutcome[] = [];
     for (const candidate of candidates) {
-      // The candidate's channelId is the newcomer's source/action channel; the
-      // notice always goes to the configured staff destination. The two are
-      // different ids in any real deployment, so no comparison here: the
-      // destination is fixed config, and deliverOne validates the candidate,
-      // rechecks persisted eligibility, and verifies access before sending.
+      if (this.stopped) break;
+      // Source/action channel and staff destination are deliberately distinct.
       outcomes.push(await this.deliverOne(candidate, now));
     }
     return outcomes;
-  }
-
-  private async suppress(candidate: RotaNoticeCandidate, reason: string): Promise<RotaNoticeOutcome> {
-    return { status: 'suppressed', entryId: rotaNoticeEntryId(this.config.guildId, candidate.memberId, candidate.actionId), reason };
   }
 
   private async deliverOne(candidate: RotaNoticeCandidate, now: string): Promise<RotaNoticeOutcome> {
@@ -80,20 +74,15 @@ export class RotaNoticeDelivery {
       });
     } catch {
       log.error('rota_notice_candidate_invalid', { classification: 'rota_notice_candidate_invalid' });
-      return this.suppress(candidate, 'candidate_invalid');
+      return { status: 'suppressed', entryId: rotaNoticeEntryId(this.config.guildId, candidate.memberId, candidate.actionId),
+        reason: 'candidate_invalid' };
     }
     const { entryId } = payload;
-
-    // Lock-scoped recheck under the subject lock: a reply or acknowledgement
-    // persisted after the read-only snapshot must still suppress the send.
     const confirmed = await this.deps.rota.confirmNoticeEligible(
       this.config.guildId, candidate.memberId, candidate.actionId, candidate.channelId, now,
     ).catch(() => null);
     if (!confirmed) return { status: 'suppressed', entryId, reason: 'no_longer_eligible' };
 
-    // Durable once-per-subject/action row. record() is idempotent by entry id:
-    // the first sweep creates the pending row, later sweeps reuse it, and the
-    // fixed dueAt comes from the original first-action fact, never the clock.
     try {
       await this.deps.store.record({
         entryId, kind: 'rota_notice', channel: 'audit', guildId: this.config.guildId,
@@ -108,8 +97,6 @@ export class RotaNoticeDelivery {
     }
     const claimed = await this.deps.store.claim(entryId).catch(() => null);
     if (!claimed?.deliveryClaimToken) {
-      // Another worker owns the claim (or the row is delivered/quarantined):
-      // exactly-once means this worker stops, it does not resend.
       const existing = await this.deps.store.get(entryId).catch(() => null);
       if (existing?.deliveryState === 'delivered' && existing.mirrorMessageId) {
         return { status: 'recovered', entryId, messageId: existing.mirrorMessageId };
@@ -117,30 +104,22 @@ export class RotaNoticeDelivery {
       return { status: 'suppressed', entryId, reason: 'claim_lost' };
     }
     const claimToken = claimed.deliveryClaimToken;
-
-    // Kill switch outranks everything downstream of the durable write.
-    let halted = false;
-    try {
-      halted = await this.deps.store.isDeliveryHalted();
-    } catch {
-      log.error('rota_notice_kill_switch_read_failed', { entryId, classification: 'rota_notice_kill_switch_read_failed' });
+    const recovering = claimed.deliverySearchBefore !== null;
+    // A restart with changed config must not redirect an existing notice or
+    // search a different channel and mistake absence there for non-delivery.
+    if (claimed.event.kind !== 'rota_notice' || claimed.event.guildId !== this.config.guildId ||
+        claimed.mirrorChannelId !== this.config.noticeChannelId ||
+        claimed.event.destinationChannelId !== this.config.noticeChannelId ||
+        claimed.event.sourceChannelId !== candidate.channelId || claimed.event.messageId !== candidate.actionId ||
+        claimed.event.targetId !== candidate.memberId) {
+      await this.quarantine(entryId, claimToken, 'delivery_binding_changed');
+      return { status: 'failed', entryId, classification: 'delivery_binding_changed' };
     }
-    if (halted) {
-      try {
-        await this.deps.store.holdDeliveryForHalt(entryId, claimToken);
-      } catch {
-        // Lease expiry is the backstop for a claim this process could not release.
-      }
-      return { status: 'held', entryId };
+    if (this.stopped || await this.halted(entryId)) {
+      return this.hold(entryId, claimToken, recovering);
     }
 
-    // Fresh effective-reader snapshot immediately before send. Non-atomic by
-    // construction; a refusal fails closed with no fallback destination.
-    const verify = this.deps.verifyAccess ?? verifyRotaNoticeAccess;
-    const channel = await verify(this.client, {
-      guildId: this.config.guildId, channelId: this.config.noticeChannelId,
-      allowedReaderIds: this.config.readerIds,
-    }).catch(() => null);
+    const channel = await this.channel();
     if (!channel) {
       await this.fail(entryId, claimToken, 'access_refused', false);
       return { status: 'failed', entryId, classification: 'access_refused' };
@@ -148,78 +127,90 @@ export class RotaNoticeDelivery {
 
     let messageId: string | null = null;
     let sendStarted = false;
-    let recovered = false;
     try {
-      const existing = await findNotice(channel, entryId, claimed.deliverySearchBefore, () =>
-        this.deps.store.extendDeliveryLease(entryId, claimToken).catch(() => undefined));
-      if (existing) {
-        // The durable marker proves an earlier POST landed: reconcile it,
-        // never resend. This covers both the ambiguous-POST retry and the
-        // crash-after-POST-before-ack recovery.
-        messageId = existing;
-        recovered = true;
-      } else if (claimed.deliverySearchBefore) {
-        // Recovery boundary is durable: the post may have succeeded. Missing
-        // marker is ambiguous forever; resending could duplicate. Fail closed.
-        await this.quarantine(entryId, claimToken, 'discord_marker_missing');
-        return { status: 'failed', entryId, classification: 'discord_marker_missing' };
-      } else {
-        const searchBefore = await newestMessageCursor(channel);
-        await this.deps.store.prepareDeliverySend(entryId, claimToken, searchBefore);
-        if (await this.halted(entryId)) {
-          try {
-            await this.deps.store.holdDeliveryForHalt(entryId, claimToken);
-          } catch {
-            // Lease expiry is the backstop.
-          }
-          return { status: 'held', entryId };
+      if (recovering) {
+        messageId = await findNotice(channel, entryId, claimed.deliverySearchBefore!, () =>
+          this.deps.store.extendDeliveryLease(entryId, claimToken));
+        if (!messageId) {
+          await this.quarantine(entryId, claimToken, 'discord_marker_missing');
+          return { status: 'failed', entryId, classification: 'discord_marker_missing' };
         }
-        sendStarted = true;
-        const message = await channel.send({
-          content: payload.content,
-          allowedMentions: { parse: [] },
-          nonce: claimed.deliveryNonce ?? deliveryNonce(entryId),
-          enforceNonce: true,
-        });
-        messageId = message.id;
+        if (this.stopped || await this.halted(entryId)) return this.hold(entryId, claimToken, true);
+        await this.deps.store.extendDeliveryLease(entryId, claimToken);
+      } else {
+        // No prior boundary means no earlier POST could have begun. Only
+        // recovery walks history; a fresh claim needs one durable cursor.
+        const searchBefore = await newestMessageCursor(channel);
+        const finalChannel = await this.channel();
+        if (!finalChannel) {
+          await this.fail(entryId, claimToken, 'access_refused', true);
+          return { status: 'failed', entryId, classification: 'access_refused' };
+        }
+        let held = false;
+        messageId = await this.deps.rota.withNoticeEligibility(
+          this.config.guildId, candidate.memberId, candidate.actionId, candidate.channelId, now,
+          async () => {
+            // The subject lock serializes this authorization/POST with human
+            // stop writes. No Discord inspection is done while holding it.
+            if (this.stopped) { held = true; return null; }
+            // Token-fenced lease renewal and recovery cursor persist before POST.
+            await this.deps.store.prepareDeliverySend(entryId, claimToken, searchBefore);
+            if (this.stopped || await this.halted(entryId)) { held = true; return null; }
+            await this.deps.store.extendDeliveryLease(entryId, claimToken);
+            if (this.stopped) { held = true; return null; }
+            sendStarted = true;
+            const message = await finalChannel.send({
+              content: payload.content, allowedMentions: { parse: [] },
+              nonce: claimed.deliveryNonce ?? deliveryNonce(entryId), enforceNonce: true,
+            });
+            if (!validSnowflake(message.id)) throw new Error('invalid_send_response');
+            return message.id;
+          },
+        );
+        if (!messageId) {
+          if (held) return this.hold(entryId, claimToken, false);
+          await this.fail(entryId, claimToken, 'no_longer_eligible', true);
+          return { status: 'suppressed', entryId, reason: 'no_longer_eligible' };
+        }
       }
     } catch (err) {
       if (sendStarted && isDefiniteRejection(err)) {
         await this.fail(entryId, claimToken, `discord_send_rejected_${errorStatus(err)}`, true);
         return { status: 'failed', entryId, classification: 'discord_send_rejected' };
       } else if (sendStarted) {
-        try {
-          await this.deps.store.markAcknowledgementFailed(entryId, claimToken);
-        } catch {
-          // Preserve the lease after an accepted send if the store is unavailable.
-        }
+        try { await this.deps.store.markAcknowledgementFailed(entryId, claimToken); } catch { /* Preserve lease. */ }
         log.error('rota_notice_post_ambiguous', { entryId, classification: 'discord_post_ambiguous' });
         return { status: 'failed', entryId, classification: 'discord_post_ambiguous' };
+      } else if (err instanceof UncertainHistory) {
+        await this.quarantine(entryId, claimToken, 'discord_history_uncertain');
+        return { status: 'failed', entryId, classification: 'discord_history_uncertain' };
       } else if (isDefiniteRejection(err)) {
         await this.quarantine(entryId, claimToken, `discord_fetch_rejected_${errorStatus(err)}`);
         return { status: 'failed', entryId, classification: 'discord_fetch_rejected' };
       }
-      await this.fail(entryId, claimToken, 'discord_send_failed', !claimed.deliverySearchBefore);
+      await this.fail(entryId, claimToken, 'discord_send_failed', !recovering);
       return { status: 'failed', entryId, classification: 'discord_send_failed' };
     }
 
     try {
-      await this.deps.store.markDelivered(entryId, claimToken, messageId!);
-      if (recovered) {
-        log.info('rota_notice_recovered', { entryId, channelId: this.config.noticeChannelId, messageId });
-        return { status: 'recovered', entryId, messageId: messageId! };
-      }
-      log.info('rota_notice_posted', { entryId, channelId: this.config.noticeChannelId, messageId });
-      return { status: 'sent', entryId, messageId: messageId! };
+      await this.deps.store.markDelivered(entryId, claimToken, messageId);
+      log.info(recovering ? 'rota_notice_recovered' : 'rota_notice_posted', {
+        entryId, channelId: this.config.noticeChannelId, messageId,
+      });
+      return { status: recovering ? 'recovered' : 'sent', entryId, messageId };
     } catch {
-      try {
-        await this.deps.store.markAcknowledgementFailed(entryId, claimToken);
-      } catch {
-        // Keep the lease for marker reconciliation on retry.
-      }
-      log.error('rota_notice_ack_failed', { entryId, messageId, classification: 'delivery_ack_failed' });
+      try { await this.deps.store.markAcknowledgementFailed(entryId, claimToken); } catch { /* Preserve lease. */ }
+      log.error('rota_notice_ack_failed', { entryId, classification: 'delivery_ack_failed' });
       return { status: 'failed', entryId, classification: 'delivery_ack_failed' };
     }
+  }
+
+  private async channel(): Promise<TextChannel | null> {
+    const verify = this.deps.verifyAccess ?? verifyRotaNoticeAccess;
+    const channel = await verify(this.client, {
+      guildId: this.config.guildId, channelId: this.config.noticeChannelId, allowedReaderIds: this.config.readerIds,
+    }).catch(() => null);
+    return channel?.id === this.config.noticeChannelId && channel.guild.id === this.config.guildId ? channel : null;
   }
 
   private async halted(entryId: string): Promise<boolean> {
@@ -227,61 +218,83 @@ export class RotaNoticeDelivery {
       return await this.deps.store.isDeliveryHalted();
     } catch {
       log.error('rota_notice_kill_switch_read_failed', { entryId, classification: 'rota_notice_kill_switch_read_failed' });
-      return false;
+      return true;
     }
   }
 
+  private async hold(entryId: string, claimToken: string, recovering: boolean): Promise<RotaNoticeOutcome> {
+    if (recovering) {
+      // holdDeliveryForHalt clears the boundary. That is safe only when this
+      // claim knows no POST began, never for an ambiguous previous attempt.
+      await this.fail(entryId, claimToken, 'audit_kill_switch_held', false);
+    } else {
+      try { await this.deps.store.holdDeliveryForHalt(entryId, claimToken); } catch { /* Lease expiry is the backstop. */ }
+    }
+    return { status: 'held', entryId };
+  }
+
   private async fail(entryId: string, claimToken: string, classification: string, clearSearchBefore: boolean): Promise<void> {
-    try {
-      await this.deps.store.markDeliveryFailed(entryId, claimToken, classification, clearSearchBefore);
-    } catch {
-      // Another worker may own the row now; the stale worker must not mutate it.
+    try { await this.deps.store.markDeliveryFailed(entryId, claimToken, classification, clearSearchBefore); } catch {
+      // A stale worker must not mutate a replacement claimant's state.
     }
     log.error('rota_notice_undeliverable', { entryId, classification });
   }
 
   private async quarantine(entryId: string, claimToken: string, classification: string): Promise<void> {
-    try {
-      await this.deps.store.quarantineDelivery(entryId, claimToken, classification);
-    } catch {
-      // Another worker may own the row now; the stale worker must not mutate it.
+    try { await this.deps.store.quarantineDelivery(entryId, claimToken, classification); } catch {
+      // A stale worker must not mutate a replacement claimant's state.
     }
     log.error('rota_notice_quarantined', { entryId, classification });
   }
 }
 
+function validSnowflake(id: unknown): id is string {
+  return typeof id === 'string' && /^\d{17,20}$/.test(id) && BigInt(id) <= 18_446_744_073_709_551_615n;
+}
+
+function validatePage(channel: TextChannel, rows: readonly Message[], limit: number, before?: string): void {
+  if (rows.length > limit) throw new UncertainHistory();
+  let previous = before;
+  for (const message of rows) {
+    if (!validSnowflake(message.id) || message.partial !== false || message.guildId !== channel.guild.id ||
+        message.channelId !== channel.id || !validSnowflake(message.author?.id) ||
+        typeof message.author.bot !== 'boolean' || typeof message.content !== 'string' ||
+        (previous !== undefined && BigInt(message.id) >= BigInt(previous))) throw new UncertainHistory();
+    previous = message.id;
+  }
+}
+
 async function newestMessageCursor(channel: TextChannel): Promise<string> {
   const messages = await channel.messages.fetch({ limit: 1, cache: false });
-  const newestId = messages.first()?.id;
-  return newestId ? (BigInt(newestId) + 1n).toString() : '0';
+  const rows = [...messages.values()];
+  validatePage(channel, rows, 1);
+  return rows.length ? (BigInt(rows[0].id) + 1n).toString() : '0';
 }
 
 async function findNotice(
-  channel: TextChannel,
-  entryId: string,
-  searchBefore: string | null,
-  renewLease?: () => Promise<unknown>,
+  channel: TextChannel, entryId: string, searchBefore: string, renewLease: () => Promise<unknown>,
 ): Promise<string | null> {
+  if (searchBefore !== '0' && !validSnowflake(searchBefore)) throw new UncertainHistory();
   let before: string | undefined;
-  let page = 0;
-  while (searchBefore || page < 5) {
-    await renewLease?.();
+  let found: string | null = null;
+  for (let page = 0; page < HISTORY_PAGE_LIMIT; page++) {
+    await renewLease();
     const messages = await channel.messages.fetch({ limit: 100, before, cache: false });
-    const match = messages.find(
-      (message) =>
-        (!searchBefore || BigInt(message.id) >= BigInt(searchBefore)) &&
-        message.author.id === channel.client.user?.id &&
-        hasRotaNoticeIdentity(message.content, entryId),
-    );
-    if (match) return match.id;
-    const oldestId = messages.last()?.id;
-    if (!oldestId) return null;
-    if (searchBefore && BigInt(oldestId) < BigInt(searchBefore)) return null;
-    if (messages.size < 100) return null;
-    before = oldestId;
-    page++;
+    const rows = [...messages.values()];
+    validatePage(channel, rows, 100, before);
+    for (const message of rows) {
+      if (BigInt(message.id) < BigInt(searchBefore)) return found;
+      if (message.author.id === channel.client.user?.id && message.author.bot && message.webhookId === null &&
+          message.system === false && hasRotaNoticeIdentity(message.content, entryId)) {
+        if (found) throw new UncertainHistory();
+        found = message.id;
+      }
+    }
+    if (rows.length < 100) return found;
+    before = rows[rows.length - 1].id;
   }
-  return null;
+  // Even one marker is insufficient if the remaining window was not checked.
+  throw new UncertainHistory();
 }
 
 function errorStatus(error: unknown): number | null {

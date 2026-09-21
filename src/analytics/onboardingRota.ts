@@ -220,6 +220,8 @@ export class OnboardingRota {
     const cutoff = new Date(Date.parse(at) - NOTICE_DELAY_MS).toISOString();
     const rows = await this.db.prepare(
       `SELECT first.actor_id, first.occurred_at, first.metadata FROM community_facts AS first
+        LEFT JOIN operational_audit_log AS delivery ON delivery.entry_id =
+          'rota-notice:' || first.guild_id || ':' || first.actor_id || ':' || (first.metadata::json->>'actionId')
         WHERE first.guild_id = ? AND first.event_type = 'onboarding_first_eligible_message'
           AND first.classification = 'eligible_human' AND first.occurred_at <= ?
           AND first.idempotency_key = 'rota:' || first.guild_id || ':' || first.actor_id || ':' || first.event_type
@@ -231,8 +233,11 @@ export class OnboardingRota {
                'rota:' || first.guild_id || ':' || first.actor_id || ':welcome_rota_acknowledged'
              )
           )
-        ORDER BY first.occurred_at, first.id LIMIT ?`,
-    ).all<Milestone & { actor_id: string }>(guildId, cutoff, limit);
+          AND (delivery.entry_id IS NULL OR (delivery.mirror_channel_id IS NOT NULL AND
+            (delivery.delivery_state = 'pending' OR
+              (delivery.delivery_state = 'delivering' AND delivery.delivery_lease_until < ?))))
+        ORDER BY delivery.delivery_attempted_at NULLS FIRST, first.occurred_at, first.id LIMIT ?`,
+    ).all<Milestone & { actor_id: string }>(guildId, cutoff, new Date().toISOString(), limit);
     return rows.map(row => {
       const action = JSON.parse(row.metadata);
       return {
@@ -255,6 +260,14 @@ export class OnboardingRota {
   async confirmNoticeEligible(
     guildId: string, memberId: string, actionId: string, channelId: string, now: string,
   ): Promise<{ dueAt: string } | null> {
+    return this.withNoticeEligibility(guildId, memberId, actionId, channelId, now, async eligible => eligible);
+  }
+
+  /** Serialize final authorization and POST with the subject's reply/ack writes. */
+  async withNoticeEligibility<T>(
+    guildId: string, memberId: string, actionId: string, channelId: string, now: string,
+    authorized: (eligible: { dueAt: string }) => Promise<T>,
+  ): Promise<T | null> {
     if (!this.config.enabled || !this.config.noticeEnabled || !this.config.primaryActorId) return null;
     if (!/^\d{17,20}$/.test(actionId) || !/^\d{17,20}$/.test(channelId) ||
         !/^[0-9a-f]{64}$/.test(memberId)) return null;
@@ -274,7 +287,7 @@ export class OnboardingRota {
           ) LIMIT 1`,
       ).get(guildId, memberId, guildId, memberId, guildId, memberId);
       if (stop) return null;
-      return { dueAt: new Date(Date.parse(first.occurred_at) + NOTICE_DELAY_MS).toISOString() };
+      return authorized({ dueAt: new Date(Date.parse(first.occurred_at) + NOTICE_DELAY_MS).toISOString() });
     });
   }
 

@@ -44,7 +44,7 @@ interface FakeChannelOpts {
 function fakeChannel(opts: FakeChannelOpts = {}) {
   const sent: Array<{ content: string; nonce: unknown; allowedMentions: unknown }> = [];
   const history = opts.history ?? [];
-  let seq = 900;
+  let seq = 900000000000000000n;
   const messages = {
     fetch: async (args: Record<string, unknown>) => {
       if (opts.failHistoryWith) {
@@ -64,6 +64,7 @@ function fakeChannel(opts: FakeChannelOpts = {}) {
   };
   const channel: any = {
     id: CHANNEL,
+    guild: { id: GUILD },
     client: { user: { id: BOT } },
     messages,
     send: async (payload: { content: string; nonce: unknown; allowedMentions: unknown }) => {
@@ -78,7 +79,9 @@ function fakeChannel(opts: FakeChannelOpts = {}) {
 }
 
 function collection(rows: Array<{ id: string; authorId: string; content: string }>) {
-  const map = new Map(rows.map((m) => [m.id, { id: m.id, author: { id: m.authorId }, content: m.content }]));
+  const sorted = [...rows].sort((a, b) => BigInt(a.id) > BigInt(b.id) ? -1 : 1);
+  const map = new Map(sorted.map((m) => [m.id, { id: m.id, author: { id: m.authorId, bot: m.authorId === BOT },
+    guildId: GUILD, channelId: CHANNEL, partial: false, webhookId: null, system: false, content: m.content }]));
   const col: any = new Collection(map);
   return col;
 }
@@ -139,6 +142,7 @@ test('distinct source and staff destination still reaches the send path', async 
   // They differ in any real deployment; delivery must not suppress on that.
   await enroll();
   const { channel, sent } = fakeChannel();
+  channel.id = DESTINATION;
   const [outcome] = await delivery(channel, {}, DESTINATION).runDue(DUE);
   assert.equal(outcome.status, 'sent');
   assert.equal(sent.length, 1);
@@ -158,11 +162,13 @@ test('second sweep after delivery reconciles without resending', async () => {
   const [first] = await svc.runDue(DUE);
   assert.equal(first.status, 'sent');
   const messageId = (first as { messageId: string }).messageId;
-  // The notice does not stop the clock: the candidate stays due, but the
-  // durable delivered row reconciles instead of resending.
-  const [second] = await svc.runDue('2026-09-01T23:50:00.000Z');
-  assert.equal(second.status, 'recovered');
-  assert.equal((second as { messageId: string }).messageId, messageId);
+  // Delivery retires queue work, not the human-reply measurement clock.
+  assert.deepEqual(await svc.runDue('2026-09-01T23:50:00.000Z'), []);
+  assert.equal((await store.get(first.entryId))?.mirrorMessageId, messageId);
+  const replyFacts = await fixture.db.prepare(
+    "SELECT count(*)::int AS n FROM community_facts WHERE event_type IN ('welcome_rota_replied', 'onboarding_first_human_reply')",
+  ).get<{ n: number }>();
+  assert.equal(replyFacts?.n, 0);
   assert.equal(sent.length, 1);
 });
 
@@ -203,6 +209,7 @@ test('no-prompt reply after a stale snapshot suppresses delivery across restart'
   const [outcome] = await delivery(channel, { rota: {
     dueNotices: async () => snapshot,
     confirmNoticeEligible: restarted.confirmNoticeEligible.bind(restarted),
+    withNoticeEligibility: restarted.withNoticeEligibility.bind(restarted),
   } }).runDue(DUE);
   assert.equal(outcome.status, 'suppressed');
   assert.equal(sent.length, 0);
@@ -276,7 +283,7 @@ test('ambiguous POST keeps the lease; retry after expiry recovers the sent marke
     // Discord accepted the POST but the response was lost: the marker lands
     // in history even though this call throws.
     send: (payload) => {
-      history.push({ id: '901', authorId: BOT, content: payload.content });
+      history.push({ id: '900000000000000001', authorId: BOT, content: payload.content });
       throw Object.assign(new Error('socket reset'), { status: null });
     },
   });
@@ -293,7 +300,7 @@ test('ambiguous POST keeps the lease; retry after expiry recovers the sent marke
   ).run(entryId);
   const [second] = await delivery(channel).runDue(DUE);
   assert.equal(second.status, 'recovered');
-  assert.equal((second as { messageId: string }).messageId, '901');
+  assert.equal((second as { messageId: string }).messageId, '900000000000000001');
   assert.equal(sent.length, 1, 'the retry reconciled the marker instead of resending');
 });
 
@@ -332,4 +339,297 @@ test('definite send rejection fails the delivery and clears the boundary', async
   const row = await store.get(rotaNoticeEntryId(GUILD, rota.memberId(GUILD, SUBJECT), ACTION));
   assert.equal(row?.deliveryState, 'pending');
   assert.equal(row?.deliverySearchBefore, null);
+});
+
+async function expireClaim(entryId: string) {
+  await fixture.db.prepare(
+    `UPDATE operational_audit_log SET delivery_lease_until = '2000-01-01T00:00:00.000Z' WHERE entry_id = ?`,
+  ).run(entryId);
+}
+
+async function stoppedByHuman(kind: 'reply' | 'ack') {
+  const subject = { guildId: GUILD, actorId: SUBJECT, pending: false };
+  const primary = { guildId: GUILD, actorId: PRIMARY, pending: false };
+  if (kind === 'ack') {
+    assert.equal(await rota.acknowledgePrimary({ ...primary, subject, occurredAt: DUE,
+      actionId: ACTION, channelId: CHANNEL }), true);
+  } else {
+    await rota.reply({ ...primary, subject, occurredAt: DUE, messageId: 'reply',
+      channelId: CHANNEL, eligibleChannel: true, replyToMessageId: ACTION });
+  }
+}
+
+for (const kind of ['reply', 'ack'] as const) {
+  test(`${kind} during access verification prevents POST at the final send check`, async () => {
+    await enroll();
+    const { channel, sent } = fakeChannel();
+    let checks = 0;
+    const svc = delivery(channel, { verifyAccess: async () => {
+      if (++checks === 1) await stoppedByHuman(kind);
+      return channel;
+    } });
+    assert.equal((await svc.runDue(DUE))[0].status, 'suppressed');
+    assert.equal(sent.length, 0);
+  });
+}
+
+for (const failAt of [1, 2]) {
+  test(`kill-switch read failure at check ${failAt} holds without POST`, async () => {
+    await enroll();
+    const { channel, sent } = fakeChannel();
+    const faulty = Object.create(store) as OperationalAuditStore;
+    let reads = 0;
+    faulty.isDeliveryHalted = async () => { if (++reads === failAt) throw new Error('unavailable'); return false; };
+    assert.equal((await delivery(channel, { store: faulty }).runDue(DUE))[0].status, 'held');
+    assert.equal(sent.length, 0);
+    const row = await store.get(rotaNoticeEntryId(GUILD, rota.memberId(GUILD, SUBJECT), ACTION));
+    assert.equal(row?.deliverySearchBefore, null, 'no POST was attempted in this claim');
+  });
+}
+
+test('access revoked during history work is refused before POST', async () => {
+  await enroll();
+  const { channel, sent } = fakeChannel();
+  let checks = 0;
+  const [outcome] = await delivery(channel, { verifyAccess: async () => ++checks === 1 ? channel : null }).runDue(DUE);
+  assert.equal(outcome.status, 'failed');
+  assert.equal(checks, 2);
+  assert.equal(sent.length, 0);
+});
+
+test('halt while recovering never clears an ambiguous previous POST boundary', async () => {
+  await enroll();
+  const { channel, sent, history } = fakeChannel({ send: () => { throw new Error('unknown outcome'); } });
+  const [first] = await delivery(channel).runDue(DUE);
+  const entryId = first.entryId;
+  const boundary = (await store.get(entryId))!.deliverySearchBefore;
+  assert.ok(boundary);
+  await expireClaim(entryId);
+  await store.engageDeliveryHalt('fixture');
+  assert.equal((await delivery(channel).runDue(DUE))[0].status, 'held');
+  assert.equal((await store.get(entryId))!.deliverySearchBefore, boundary);
+  await store.disengageDeliveryHalt();
+  history.length = 0;
+  assert.equal((await delivery(channel).runDue(DUE))[0].status, 'failed');
+  assert.equal(sent.length, 1, 'missing ambiguous marker must not cause a second POST');
+  assert.equal((await store.get(entryId))!.deliveryState, 'quarantined');
+});
+
+test('changed configured destination cannot redirect an existing durable notice', async () => {
+  await enroll();
+  const { channel, sent } = fakeChannel({ send: () => { throw new Error('unknown outcome'); } });
+  const [first] = await delivery(channel).runDue(DUE);
+  await expireClaim(first.entryId);
+  const other = fakeChannel(); other.channel.id = DESTINATION;
+  assert.equal((await delivery(other.channel, {}, DESTINATION).runDue(DUE))[0].status, 'failed');
+  assert.equal(other.sent.length, 0);
+  assert.equal(sent.length, 1);
+  assert.equal((await store.get(first.entryId))!.deliveryState, 'quarantined');
+});
+
+test('lost recovery lease stops history work instead of swallowing the refusal', async () => {
+  await enroll();
+  const { channel, sent } = fakeChannel({ send: () => { throw new Error('unknown outcome'); } });
+  const [first] = await delivery(channel).runDue(DUE);
+  await expireClaim(first.entryId);
+  let fetches = 0;
+  channel.messages.fetch = async () => { fetches++; return new Collection(); };
+  const stale = Object.create(store) as OperationalAuditStore;
+  stale.extendDeliveryLease = async () => { throw new Error('claim lost'); };
+  assert.equal((await delivery(channel, { store: stale }).runDue(DUE))[0].status, 'failed');
+  assert.equal(fetches, 0);
+  assert.equal(sent.length, 1);
+  assert.ok((await store.get(first.entryId))!.deliverySearchBefore);
+});
+
+test('recovery history budget is bounded and an incomplete scan is quarantined', async () => {
+  await enroll();
+  const { channel, sent } = fakeChannel({ send: () => { throw new Error('unknown outcome'); } });
+  const [first] = await delivery(channel).runDue(DUE);
+  await expireClaim(first.entryId);
+  let pages = 0;
+  channel.messages.fetch = async () => {
+    if (++pages > 6) throw new Error('test backstop for unbounded scan');
+    return collection(Array.from({ length: 100 }, (_,i) => ({
+      id: String(900000000000010000n - BigInt(pages * 100 + i)), authorId: PRIMARY, content: 'unrelated',
+    })));
+  };
+  assert.equal((await delivery(channel).runDue(DUE))[0].status, 'failed');
+  assert.equal(pages, 5);
+  assert.equal(sent.length, 1);
+  assert.equal((await store.get(first.entryId))!.deliveryState, 'quarantined');
+});
+
+test('delivered subjects cannot starve the next bounded batch', async () => {
+  await enroll();
+  const later = { guildId: GUILD, actorId: '888888888888888888', pending: false };
+  await rota.rulesAccepted({ ...later, occurredAt: FIRST, sourceCohort: 'unknown' });
+  await rota.message({ ...later, occurredAt: '2026-09-01T23:06:00.000Z',
+    messageId: '999999999999999999', channelId: CHANNEL, eligibleChannel: true });
+  const { channel, sent } = fakeChannel();
+  const svc = delivery(channel);
+  const now = '2026-09-01T23:40:00.000Z';
+  assert.equal((await svc.runDue(now, 1))[0].status, 'sent');
+  assert.equal((await svc.runDue(now, 1))[0].status, 'sent');
+  assert.equal(sent.length, 2);
+  assert.deepEqual(await svc.runDue(now, 1), []);
+});
+
+test('pending retry failures yield to never-attempted subjects', async () => {
+  await enroll();
+  const later = { guildId: GUILD, actorId: '888888888888888888', pending: false };
+  await rota.rulesAccepted({ ...later, occurredAt: FIRST, sourceCohort: 'unknown' });
+  await rota.message({ ...later, occurredAt: '2026-09-01T23:06:00.000Z',
+    messageId: '999999999999999999', channelId: CHANNEL, eligibleChannel: true });
+  const { channel } = fakeChannel();
+  const svc = delivery(channel, { verifyAccess: async () => null });
+  const now = '2026-09-01T23:40:00.000Z';
+  const [first] = await svc.runDue(now, 1);
+  const [second] = await svc.runDue(now, 1);
+  assert.notEqual(first.entryId, second.entryId);
+  assert.equal((await rota.dueNotices(GUILD, now)).length, 2, 'transient failures remain retryable');
+});
+
+test('stop during access work holds the active claim and refuses later sweeps', async () => {
+  await enroll();
+  const { channel, sent } = fakeChannel();
+  const svc = delivery(channel, { verifyAccess: async () => { svc.stop(); return channel; } });
+  assert.equal((await svc.runDue(DUE))[0].status, 'held');
+  assert.equal(sent.length, 0);
+  assert.deepEqual(await svc.runDue(DUE), []);
+});
+
+for (const config of [{ enabled: false, noticeEnabled: true }, { enabled: true, noticeEnabled: false }]) {
+  test(`final eligibility honors master=${config.enabled}, notice=${config.noticeEnabled}`, async () => {
+    await enroll();
+    const snapshot = await rota.dueNotices(GUILD, DUE);
+    const rolledBack = new OnboardingRota(fixture.db, classifier, { ...config, pseudonymKey: KEY, primaryActorId: PRIMARY });
+    const { channel, sent } = fakeChannel();
+    const [outcome] = await delivery(channel, { rota: {
+      dueNotices: async () => snapshot,
+      confirmNoticeEligible: rota.confirmNoticeEligible.bind(rota),
+      withNoticeEligibility: rolledBack.withNoticeEligibility.bind(rolledBack),
+    } }).runDue(DUE);
+    assert.equal(outcome.status, 'suppressed');
+    assert.equal(sent.length, 0);
+  });
+}
+
+test('lost claim after preparing POST cannot send or mutate the replacement owner', async () => {
+  await enroll();
+  const { channel, sent } = fakeChannel();
+  const stale = Object.create(store) as OperationalAuditStore;
+  let replacementToken: string | null = null;
+  stale.prepareDeliverySend = async (entryId, token, cursor) => {
+    await store.prepareDeliverySend(entryId, token, cursor);
+    await expireClaim(entryId);
+    replacementToken = (await store.claim(entryId))!.deliveryClaimToken;
+  };
+  const [outcome] = await delivery(channel, { store: stale }).runDue(DUE);
+  assert.equal(outcome.status, 'failed');
+  assert.equal(sent.length, 0);
+  const row = (await store.get(outcome.entryId))!;
+  assert.equal(row.deliveryClaimToken, replacementToken);
+  assert.equal(row.deliveryState, 'delivering');
+  assert.ok(row.deliverySearchBefore);
+});
+
+test('halt engaged while preparing POST is caught by the final switch read', async () => {
+  await enroll();
+  const { channel, sent } = fakeChannel();
+  const wrapped = Object.create(store) as OperationalAuditStore;
+  wrapped.prepareDeliverySend = async (entryId, token, cursor) => {
+    await store.prepareDeliverySend(entryId, token, cursor);
+    await store.engageDeliveryHalt('fixture');
+  };
+  const [outcome] = await delivery(channel, { store: wrapped }).runDue(DUE);
+  assert.equal(outcome.status, 'held');
+  assert.equal(sent.length, 0);
+  assert.equal((await store.get(outcome.entryId))!.deliverySearchBefore, null);
+});
+
+test('POST authorization holds the subject lock against a concurrent acknowledgement', { timeout: 5000 }, async () => {
+  await enroll();
+  let started!: () => void;
+  let release!: () => void;
+  const entered = new Promise<void>(resolve => { started = resolve; });
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const { channel, sent } = fakeChannel({ send: async () => {
+    started(); await gate; return { id: '900000000000000000' };
+  } });
+  const posting = delivery(channel).runDue(DUE);
+  let acknowledged = false;
+  let ack: Promise<void> | undefined;
+  try {
+    await entered;
+    ack = stoppedByHuman('ack').then(() => { acknowledged = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(acknowledged, false);
+  } finally {
+    release();
+    await ack;
+  }
+  assert.equal((await posting)[0].status, 'sent');
+  assert.equal(sent.length, 1);
+  assert.equal(acknowledged, true);
+});
+
+test('crash after POST before database acknowledgement recovers one marker', async () => {
+  await enroll();
+  const { channel, sent } = fakeChannel();
+  const faulty = Object.create(store) as OperationalAuditStore;
+  faulty.markDelivered = async () => { throw new Error('database acknowledgement lost'); };
+  const [first] = await delivery(channel, { store: faulty }).runDue(DUE);
+  assert.equal(first.status, 'failed');
+  await expireClaim(first.entryId);
+  assert.equal((await delivery(channel).runDue(DUE))[0].status, 'recovered');
+  assert.equal(sent.length, 1);
+});
+
+for (const mode of ['partial', 'foreign-channel', 'foreign-guild', 'duplicate-marker', 'repeated-page', 'invalid-id']) {
+  test(`uncertain ${mode} recovery history quarantines without resend`, async () => {
+    await enroll();
+    const { channel, sent } = fakeChannel({ send: () => { throw new Error('unknown outcome'); } });
+    const [first] = await delivery(channel).runDue(DUE);
+    await expireClaim(first.entryId);
+    const marker = `rota-notice:${first.entryId};`;
+    let fetches = 0;
+    channel.messages.fetch = async () => {
+      fetches++;
+      if (mode === 'repeated-page') {
+        return collection(Array.from({ length: 100 }, (_,i) => ({
+          id: String(900000000000010000n - BigInt(i)), authorId: PRIMARY, content: '',
+        })));
+      }
+      const rows = collection([{ id: '900000000000000001', authorId: BOT, content: marker }]);
+      if (mode === 'partial') rows.first().partial = true;
+      if (mode === 'foreign-channel') rows.first().channelId = DESTINATION;
+      if (mode === 'foreign-guild') rows.first().guildId = PRIMARY;
+      if (mode === 'invalid-id') rows.first().id = 'not-a-snowflake';
+      if (mode === 'duplicate-marker') rows.set('900000000000000000', { ...rows.first(), id: '900000000000000000' });
+      return rows;
+    };
+    assert.equal((await delivery(channel).runDue(DUE))[0].status, 'failed');
+    assert.equal((await store.get(first.entryId))!.deliveryState, 'quarantined');
+    assert.equal(sent.length, 1);
+    assert.ok(fetches <= 2);
+  });
+}
+
+test('a webhook or another author cannot impersonate a recovered bot marker', async () => {
+  await enroll();
+  const { channel, sent } = fakeChannel({ send: () => { throw new Error('unknown outcome'); } });
+  const [first] = await delivery(channel).runDue(DUE);
+  await expireClaim(first.entryId);
+  channel.messages.fetch = async () => {
+    const rows = collection([
+      { id: '900000000000000001', authorId: BOT, content: `rota-notice:${first.entryId};` },
+      { id: '900000000000000000', authorId: PRIMARY, content: `rota-notice:${first.entryId};` },
+    ]);
+    rows.first().webhookId = PRIMARY;
+    return rows;
+  };
+  assert.equal((await delivery(channel).runDue(DUE))[0].status, 'failed');
+  assert.equal(sent.length, 1);
+  assert.equal((await store.get(first.entryId))!.deliveryState, 'quarantined');
 });
