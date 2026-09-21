@@ -1,10 +1,15 @@
 # Onboarding rota configuration contract
 
-TOG-3531: boot-time configuration for the separately reviewed measurement core
-(PR #150). **The loader has no runtime caller yet.** Merging this slice neither
-collects member activity nor posts notices, and does not complete staging
-acceptance. This PR is independent of #150; migration 0029 adds a settings
-constraint without changing #150's migration 0028 or its review head.
+TOG-3531: boot-time configuration for the measurement core (PR #150), introduced
+independently in PR #151. The runtime integration now calls this loader at boot
+and constructs the observer only when measurement is explicitly enabled. It
+changes no deployment configuration and does not complete staging acceptance.
+Migration 0029 adds a settings constraint without changing migration 0028.
+
+**Notices are not implemented yet.** Boot refuses measurement-on plus notice-on
+rather than silently accepting an unwired sender. Measurement-on/notice-off is
+supported, and master-off still overrides a stale notice flag. See the
+[runtime observations and remaining gates](ONBOARDING_ROTA.md).
 
 ## Controls
 
@@ -32,26 +37,27 @@ The catalog, store-first filter and migration 0029 enforce that boundary.
 The existing 0027 constraint is preserved. No new table, dependency, surface or
 research-survey store is added.
 
-## Required runtime integration (not implemented here)
+## Runtime integration and remaining release work
 
-The eventual caller must:
+Implemented: the boot caller passes enabled/key to the existing rota service,
+never constructs the observer when disabled, and preserves the roleless flow.
+The gateway observes screening and successful existing prompt delivery rather
+than inferring them from configuration, with the core classifier unchanged.
 
-1. Pass enabled/key to the existing rota service; never construct a collector
-   when disabled. Keep the accepted roleless welcome flow unchanged.
-2. Record observed screening clearance and successful prompt delivery, not
-   inferred delivery from config; preserve core eligibility/exclusion rules.
-3. Persist the first-message deadline and primary acknowledgement. A notice is
+Still required:
+
+1. Persist the first-message deadline and primary acknowledgement. A notice is
    due only after **30 minutes without a human reply or primary acknowledgement**
    (accepted TOG-2347 coverage binding, revision 3). This is not an immediate
    first-message ping. The published coverage block is America/Chicago
    18:00–22:00 daily; the 24-hour human-reply target remains human-owned.
-4. Before every send, verify the actual guild and channel permissions against
+2. Before every send, verify the actual guild and channel permissions against
    Discord: staff-only updates-and-changes, never a member-facing channel, DM or
    conversational reply. A syntactically valid configured id is **not** proof
    of private visibility. Do not silently fall back to another destination.
-5. Use a bot-labeled, non-conversational notice. The notice never counts as the
+3. Use a bot-labeled, non-conversational notice. The notice never counts as the
    first human reply. No raw member handles in the durable rota facts.
-6. Demonstrate seven milestones, notice eligibility/delivery, and both rollback
+4. Demonstrate seven milestones, notice eligibility/delivery, and both rollback
    modes in staging before requesting any separate live-release change.
 
 ## Rollback once wired
