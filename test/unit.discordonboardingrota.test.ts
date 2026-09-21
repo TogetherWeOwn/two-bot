@@ -119,10 +119,11 @@ test('runtime adapter emits seven facts, independent of raw scorecard capture; n
   // The staff reply hands its write to the subject's chain fire-and-forget, so
   // the replier's promise can resolve before the reply rows land.
   await observer.message(reply());
-  await waitForRows(6);
+  await waitForRows(7);
+  assert.equal((await rows()).filter(r => r.event_type === 'welcome_rota_replied').length, 1);
   await observer.message(message(member(), { id: 'return', createdTimestamp: Date.parse(GATE) + 7 * 86_400_000 }));
   const actual = await rows();
-  assert.deepEqual(actual.map(r => r.event_type).sort(), [...ONBOARDING_FACT_TYPES].sort());
+  assert.deepEqual(actual.map(r => r.event_type).sort(), [...ONBOARDING_FACT_TYPES, 'welcome_rota_replied'].sort());
   assert.ok(actual.every(r => r.source === 'web:one_click'));
   assert.ok(actual.every(r => r.actor_id === core.memberId(GUILD, 'new-human')));
   assert.doesNotMatch(JSON.stringify(actual), /new-human|staff-primary/);
@@ -254,7 +255,8 @@ test('reply must reference the action and freshly resolve an eligible different 
   assert.equal(fetched, true);
   // Same fire-and-forget handoff as above: the qualifying reply write lands on
   // the subject's chain after the replier's promise resolves.
-  await waitForRows(6);
+  await waitForRows(7);
+  assert.equal((await rows()).filter(r => r.event_type === 'welcome_rota_replied').length, 1);
 });
 
 test('failed observation is contained and later observations still run', async () => {
@@ -346,7 +348,8 @@ test('gateway keeps a reply behind its action while automod acceptance is delaye
   await done;
   // The reply write is handed to the subject's chain fire-and-forget, so the
   // automation event can fire before the reply rows land.
-  await waitForRows(6);
+  await waitForRows(7);
+  assert.equal((await rows()).filter(r => r.event_type === 'welcome_rota_replied').length, 1);
 });
 
 test('gateway suppresses measurement for automod rejection and unclassified inspection failures', async () => {

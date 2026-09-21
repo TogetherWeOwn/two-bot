@@ -86,6 +86,9 @@ import { CommunityFactStore } from './analytics/communityFacts.ts';
 import { OnboardingRota } from './analytics/onboardingRota.ts';
 import { loadOnboardingRotaConfig } from './analytics/onboardingRotaConfig.ts';
 import { DiscordOnboardingRota } from './discord/onboardingRota.ts';
+import { ROTA_ACKNOWLEDGEMENT_COMMAND, registerRotaAcknowledgement } from './discord/rotaAcknowledgement.ts';
+import { RotaNoticeDelivery } from './discord/rotaNoticeDelivery.ts';
+import { startRotaNoticeScheduler } from './discord/rotaNoticeScheduler.ts';
 import {
   startCommunityScorecardJob,
   type CommunityScorecardJobHandle,
@@ -105,8 +108,12 @@ import { DiscordAnnouncements, XmlFeedReader, registerAnnouncementCommands, star
 // anywhere a value can change while the process runs.
 const cfg = loadConfig();
 const onboardingRotaCfg = loadOnboardingRotaConfig();
-if (onboardingRotaCfg.noticeEnabled) {
-  throw new Error('Onboarding rota notice sender is not implemented; set TWO_ONBOARDING_ROTA_NOTICE=0.');
+if (onboardingRotaCfg.enabled && onboardingRotaCfg.noticeEnabled &&
+    (!onboardingRotaCfg.noticeChannelId || !onboardingRotaCfg.primaryActorId || !onboardingRotaCfg.readerIds?.length)) {
+  throw new Error(
+    'Onboarding rota notices require DISCORD_STAFF_ALERT_CHANNEL_ID, ' +
+    'TWO_ONBOARDING_ROTA_PRIMARY_ACTOR_ID and TWO_ONBOARDING_ROTA_READER_IDS.',
+  );
 }
 const automationCfg = loadAutomationConfig();
 const processStartedAt = new Date().toISOString();
@@ -228,9 +235,15 @@ const handlers = new FunnelHandlers(store, leveling, communityFacts);
 
 const client = createClient(process.env.TWO_AUTOMOD === '1');
 const moderationCfg = loadModerationConfig();
-const onboardingRota = onboardingRotaCfg.enabled
-  ? new DiscordOnboardingRota(db, new OnboardingRota(db, communityClassifier, onboardingRotaCfg), {
-    guildId: onboardingRotaCfg.guildId,
+// Narrowed once: property access below stays on the enabled member.
+const rotaCfg = onboardingRotaCfg.enabled === true ? onboardingRotaCfg : undefined;
+const onboardingRotaCore = rotaCfg
+  ? new OnboardingRota(db, communityClassifier, rotaCfg)
+  : undefined;
+const onboardingRota = onboardingRotaCore && rotaCfg
+  ? new DiscordOnboardingRota(db, onboardingRotaCore, {
+    guildId: rotaCfg.guildId,
+    primaryActorId: rotaCfg.primaryActorId,
     staffRoleIds: new Set([
       ...moderationCfg.protectedRoleIds,
       ...(cfg.ticketStaffRoleId ? [cfg.ticketStaffRoleId] : []),
@@ -266,6 +279,7 @@ const moderationResolver = cfg.guildId && moderationCfg.enabled
       base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
     })
   : null;
+const operationalAuditStore = new OperationalAuditStore(db);
 const audit = makeOperationalAudit(client, {
   guildId: cfg.guildId,
   channels: {
@@ -273,8 +287,32 @@ const audit = makeOperationalAudit(client, {
     voice: cfg.voiceLogChannelId,
     moderation: cfg.moderationLogChannelId,
   },
-  store: new OperationalAuditStore(db),
+  store: operationalAuditStore,
 });
+// Staging-only rota fallback notices. The boot guard above guarantees the
+// channel, primary and reader bindings are all present when this constructs;
+// the delivery service rechecks gates, eligibility and effective-reader
+// access before every send. No fallback destination, no permission writes.
+const rotaNoticeDelivery = onboardingRotaCore && rotaCfg &&
+  rotaCfg.noticeEnabled && rotaCfg.noticeChannelId &&
+  rotaCfg.primaryActorId && rotaCfg.readerIds?.length
+  ? new RotaNoticeDelivery(client, {
+    guildId: rotaCfg.guildId,
+    noticeChannelId: rotaCfg.noticeChannelId,
+    readerIds: rotaCfg.readerIds,
+  }, { rota: onboardingRotaCore, store: operationalAuditStore })
+  : undefined;
+if (rotaNoticeDelivery && rotaCfg) {
+  log.info('rota_notice_delivery_enabled', {
+    guildId: rotaCfg.guildId,
+    noticeChannel: rotaCfg.noticeChannelId,
+  });
+} else {
+  log.info('rota_notice_delivery_disabled', {
+    reason: !rotaCfg ? 'measurement off'
+      : !rotaCfg.noticeEnabled ? 'notice off' : 'notice binding incomplete',
+  });
+}
 log.info('operational_audit_enabled', {
   guildId: cfg.guildId ?? 'all joined guilds (Discord mirrors disabled)',
   auditTarget: cfg.auditLogChannelId ?? 'durable/process log only',
@@ -518,6 +556,7 @@ if (cfg.guildId) {
     automations: automationStore,
     additionalBuiltins: [
       ...(communityFacts ? COMMUNITY_COMMAND_DATA : []),
+      ...(onboardingRotaCfg.enabled && onboardingRotaCfg.primaryActorId ? [ROTA_ACKNOWLEDGEMENT_COMMAND] : []),
       ...(automationCfg.enabled ? AUTOMATION_COMMAND_DATA : []),
       ...(announcementsCfg.enabled ? ANNOUNCEMENT_COMMAND_DATA : []),
       ...(moderationResolver && moderationService ? MODERATION_COMMAND_DATA : []),
@@ -563,6 +602,9 @@ if (cfg.guildId && automationCfg.enabled) {
   log.info('automations_disabled', { reason: 'TWO_AUTOMATIONS is not 1' });
 } else {
   log.info('automations_disabled', { reason: 'DISCORD_GUILD_ID is unset' });
+}
+if (onboardingRota && onboardingRotaCfg.enabled && onboardingRotaCfg.primaryActorId) {
+  registerRotaAcknowledgement(client, onboardingRotaCfg.guildId, onboardingRota);
 }
 commandRegistry?.register();
 
@@ -819,6 +861,11 @@ client.once('ready', auditRetry);
 const auditSweep = setInterval(auditRetry, 30_000);
 auditSweep.unref();
 
+// Rota fallback-notice ticker. Same non-overlapping shape as the automation
+// scheduler; the durable claim row (not the interval) is the queue, so a
+// missed tick or restart loses nothing.
+const rotaNoticeScheduler = rotaNoticeDelivery ? startRotaNoticeScheduler(rotaNoticeDelivery) : null;
+
 const moderationSweep = moderationService
   ? setInterval(() => {
       void moderationService.runDueUnbans().catch((err: unknown) => {
@@ -873,6 +920,7 @@ async function shutdown(signal: string) {
   clearInterval(sweep);
   automationScheduler?.stop();
   clearInterval(auditSweep);
+  rotaNoticeScheduler?.stop();
   feedPoller?.stop();
   if (moderationSweep) clearInterval(moderationSweep);
   presenceProbe?.stop();

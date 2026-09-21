@@ -429,6 +429,9 @@ export function makeOperationalAudit(client: Client, options: OperationalAuditOp
 
   return {
     async record(event) {
+      // Rota notices require their own eligibility, reader and recovery guards.
+      // Refuse before recording/claiming, including the no-store delivery path.
+      if (event.kind === 'rota_notice') return false;
       const sourceIsAuditSink = Boolean(event.sourceChannelId && configured.has(event.sourceChannelId));
       const requestedChannelId = sourceIsAuditSink ? null : channelFor(options.channels, event.channel);
       const mirrorChannelId =

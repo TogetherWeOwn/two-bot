@@ -55,15 +55,17 @@ just the same.
 ## Onboarding reply-rota measurements
 
 The measurement core described in [ONBOARDING_ROTA.md](ONBOARDING_ROTA.md) adds
-pseudonymous derived rows to `community_facts`. It is not yet connected to live
-gateway handlers. These rows contain a guild-separated keyed member pseudonym,
+pseudonymous derived rows to `community_facts`. The disabled-by-default runtime
+adapter observes the existing gateway flow. An explicitly bound primary can use
+the staging-only, ephemeral acknowledgement command; it stores no message body,
+handle or raw primary id. These rows contain a guild-separated keyed member pseudonym,
 source-cohort code, timestamps, action/channel IDs and a keyed responder
 pseudonym, never a public-message body or handle. The dedicated key is not stored
 in the database. Do not expose rota rows through public reporting views.
 
 Authorized rota-log readers are the accepted human primary, Community Manager
 and President & COO. An authorized erasure must also delete derived rows for the
-member pseudonym and any reply/latency rows containing that responder pseudonym;
+member pseudonym and any reply/latency/acknowledgement rows containing that responder pseudonym;
 see the measurement document for the key/guild scope. Disabling measurement is
 not erasure and does not rotate the pseudonym key.
 
