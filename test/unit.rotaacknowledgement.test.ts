@@ -188,12 +188,61 @@ test('ordered pending action is committed before command acknowledgement checks 
   const joined = observer.join(x.subject as never, source, '2026-09-01T12:00:00.000Z');
   const action = observer.message({ ...x.message, member: x.subject, createdTimestamp: Date.parse(FIRST),
     channel: { ...x.channel, isDMBased: () => false, isThread: () => false } } as never);
-  const acknowledged = observer.acknowledgePrimary(x.interaction);
-  assert.deepEqual(x.fetches, []);
+  let settled = false;
+  const acknowledged = observer.acknowledgePrimary(x.interaction).finally(() => { settled = true; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(settled, false, 'acknowledgement must wait for its subject action');
+  assert.deepEqual(await acks(), []);
   resolve('invite:campaign');
   await Promise.all([joined, action]);
   assert.equal(await acknowledged, true);
   assert.equal((await acks()).length, 1);
+});
+
+test('unrelated pending join does not stall primary acknowledgement', { timeout: 5000 }, async () => {
+  await enroll();
+  const x = input();
+  const unrelated = { ...x.subject, id: '666666666666666666',
+    user: { id: '666666666666666666', bot: false },
+    guild: { ...x.subject.guild, features: ['MEMBER_VERIFICATION_GATE_ENABLED'] } };
+  let release!: (source: string) => void;
+  const joined = observer.join(unrelated as never, new Promise(resolve => { release = resolve; }), FIRST);
+  try {
+    assert.equal(await observer.acknowledgePrimary(x.interaction), true);
+    assert.equal((await acks()).length, 1);
+  } finally {
+    release('invite:campaign');
+    await joined;
+  }
+});
+
+test('stalled acknowledgement fetch does not stall another command or observation', { timeout: 5000 }, async () => {
+  await enroll();
+  const slow = input();
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const fetchMessage = slow.channel.messages.fetch;
+  slow.channel.messages.fetch = async opts => { await held; return fetchMessage(opts); };
+  const pending = observer.acknowledgePrimary(slow.interaction);
+  try {
+    const other = input();
+    other.subject.id = '666666666666666666';
+    other.subject.user.id = other.subject.id;
+    other.message.id = '777777777777777777';
+    other.value.options.getString = () => LINK.replace(ACTION, other.message.id);
+    const actor = { guildId: GUILD, actorId: other.subject.id, pending: false };
+    await core.rulesAccepted({ ...actor, occurredAt: FIRST, sourceCohort: 'invite:campaign' });
+    await observer.message({ ...other.message, member: other.subject, createdTimestamp: Date.parse(FIRST),
+      channel: { ...other.channel, isDMBased: () => false, isThread: () => false } } as never);
+    assert.equal(await observer.acknowledgePrimary(other.interaction), true);
+    const rows = await acks();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].actor_id, core.memberId(GUILD, other.subject.id));
+  } finally {
+    release();
+    await pending;
+  }
+  assert.equal((await acks()).length, 2);
 });
 
 test('gateway routing ignores other commands/guilds; command is reserved and all feedback is ephemeral', async () => {

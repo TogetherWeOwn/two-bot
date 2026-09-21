@@ -337,9 +337,11 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
         ? 'human'
         : 'other';
     const inspection = inspectAutomod(msg, msg.createdTimestamp);
-    // Reserve arrival order before automod/funnel I/O can let a reply overtake
-    // its action. The observer writes only after a definite accepted result.
-    const measured = deps.onboardingRota?.message(msg, inspection);
+    // Reserve this subject's place before automod/funnel I/O can let a reply
+    // overtake its action. The observer writes only after a definite accepted
+    // result, and its chain never gates the automation event below: a stuck
+    // observation for one member must not stop unrelated automations.
+    void deps.onboardingRota?.message(msg, inspection);
     const automodRejected = await inspection;
     if (automodRejected) {
       // Automod-rejected messages still belong in raw ingestion and exact
@@ -373,10 +375,11 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
       occurredAt,
       onLevelUp: levelUpRoleHook(msg.member),
     });
-    await measured;
-    // Downstream message automations run only after automod accepts the event
-    // and the ordinary funnel/leveling path has completed. A private event keeps
-    // those listeners from racing the primary MessageCreate handler.
+    // Downstream message automations run once automod accepts the event and
+    // the ordinary funnel/leveling path has completed. The measurement observer
+    // is deliberately not awaited: it orders same-subject writes on its own
+    // per-subject chain and must never stall the automation event. A private
+    // event keeps those listeners from racing the primary MessageCreate handler.
     client.emit('automationMessageAccepted' as never, msg as never);
   });
 
