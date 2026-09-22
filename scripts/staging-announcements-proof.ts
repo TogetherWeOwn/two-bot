@@ -251,9 +251,9 @@ try {
   requireCheck('event.mapping', await internal.discordEventId(GUILD, eventKey) === report.eventId, 'cancelled identity remains mapped');
   const matchingEvents = (await get<Event[]>(`/guilds/${GUILD}/scheduled-events`)).filter(e => e.name.includes(marker));
   requireCheck('event.no-active-copy', matchingEvents.every(e => e.id === report.eventId && e.status === 4), 'no active replacement event for the proof marker');
-  const audit = await db.prepare('SELECT action, outcome, code, status, reason FROM internal_action_log WHERE key_id = ? ORDER BY created_at').all<{ action: string; outcome: string; code: string | null; status: number }>(keyId);
+  const audit = await db.prepare('SELECT action, outcome, code, status, reason FROM internal_action_log WHERE key_id = ? ORDER BY created_at').all<{ action: string; outcome: string; code: string | null; status: number; reason: string | null }>(keyId);
   const required = [['event.upsert', 'created'], ['event.upsert', 'updated'], ['event.cancel', 'cancelled'], ['event.cancel', 'replayed:cancelled']];
-  requireCheck('audit.internal', required.every(([action, outcome]) => audit.some(r => r.action === action && r.outcome === outcome && r.status === 200)) && audit.some(r => r.code === 'discord_rejected'), JSON.stringify(audit));
+  requireCheck('audit.internal', required.every(([action, outcome]) => audit.some(r => r.action === action && r.outcome === outcome && r.status === 200)) && audit.some(r => r.action === 'announcement.post' && r.code === 'discord_rejected' && r.reason === 'discord_403'), JSON.stringify(audit));
   const announcementAudit = await db.prepare('SELECT action, outcome FROM announcements_audit_log WHERE guild_id = ? ORDER BY created_at').all<{ action: string; outcome: string }>(GUILD);
   requireCheck('audit.announcements', ['event.rsvp', 'lfg.create', 'lfg.signup', 'lfg.close', 'feed.create', 'feed.poll', 'feed.remove'].every(action => announcementAudit.some(r => r.action === action)), JSON.stringify(announcementAudit));
   check('hierarchy.not-applicable', true, 'no member role assignment: LFG role labels are slots, not Discord roles; real channel permission denial covered separately');

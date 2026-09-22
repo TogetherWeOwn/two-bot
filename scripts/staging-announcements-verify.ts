@@ -53,11 +53,11 @@ export async function verifyAnnouncementsProof(path: string): Promise<void> {
     await pool.query(`SET LOCAL search_path TO "${report.schema}"`);
     const mapping = await pool.query('SELECT guild_id, event_key, discord_event_id FROM internal_discord_events');
     assert.deepEqual(mapping.rows, [{ guild_id: report.guildId, event_key: `TOG-3845:${report.runId}:event`, discord_event_id: report.eventId }]);
-    const audit = (await pool.query('SELECT action, outcome, code, status, created_at FROM internal_action_log WHERE key_id = $1', [`proof-${report.runId}`])).rows;
+    const audit = (await pool.query('SELECT action, outcome, code, status, reason, created_at FROM internal_action_log WHERE key_id = $1', [`proof-${report.runId}`])).rows;
     for (const [action, outcome] of [['announcement.post', 'posted'], ['announcement.post', 'replayed:posted'], ['event.upsert', 'created'], ['event.upsert', 'updated'], ['event.cancel', 'cancelled'], ['event.cancel', 'replayed:cancelled']]) {
       assert.ok(audit.some(r => r.action === action && r.outcome === outcome && r.status === 200), `missing durable audit: ${action}/${outcome}`);
     }
-    assert.ok(audit.some(r => r.action === 'announcement.post' && r.code === 'discord_rejected'), 'real permission refusal audit');
+    assert.ok(audit.some(r => r.action === 'announcement.post' && r.code === 'discord_rejected' && r.reason === 'discord_403'), 'real permission refusal audit');
     assert.ok(audit.some(r => r.action === 'event.cancel' && r.code === 'action_not_allowed'), 'unknown event refusal audit');
     assert.ok(audit.every(r => Date.parse(r.created_at) >= Date.parse(report.startedAt) && Date.parse(r.created_at) <= Date.parse(report.finishedAt)), 'audit must belong to this proof window');
     const actions = (await pool.query('SELECT action, outcome FROM announcements_audit_log WHERE guild_id = $1', [report.guildId])).rows;
