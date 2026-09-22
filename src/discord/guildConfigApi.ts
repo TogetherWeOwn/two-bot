@@ -15,6 +15,8 @@ export type GuildConfigApiOptions = {
   token: string;
   applicationId: string;
   guildId: string;
+  /** Explicit transport seam. When absent the global fetch is read at call time. */
+  fetchImpl?: typeof fetch;
 };
 
 function checkedTestBase(raw: string, name: string): string {
@@ -45,6 +47,7 @@ export class GuildConfigDiscordApi {
   readonly applicationId: string;
   readonly guildId: string;
   writes = 0;
+  private fetchImpl?: typeof fetch;
 
   constructor(options: GuildConfigApiOptions) {
     this.apiBase = checkedApiBase(options.apiBase);
@@ -52,11 +55,12 @@ export class GuildConfigDiscordApi {
     this.token = options.token;
     this.applicationId = options.applicationId;
     this.guildId = options.guildId;
+    this.fetchImpl = options.fetchImpl;
   }
 
   async request<T>(method: string, path: string, body?: unknown): Promise<ApiResult<T>> {
     for (let attempt = 0; attempt < 5; attempt++) {
-      const response = await fetch(`${this.apiBase}${path}`, {
+      const response = await (this.fetchImpl ?? fetch)(`${this.apiBase}${path}`, {
         method,
         headers: {
           Authorization: `Bot ${this.token}`,
@@ -147,7 +151,7 @@ export class GuildConfigDiscordApi {
   async captureEmojiImage(emoji: GuildConfigEmoji): Promise<string | undefined> {
     if (emoji.managed || !emoji.name) return undefined;
     const extension = emoji.animated ? 'gif' : 'png';
-    const response = await fetch(`${this.cdnBase}/emojis/${emoji.id}.${extension}`);
+    const response = await (this.fetchImpl ?? fetch)(`${this.cdnBase}/emojis/${emoji.id}.${extension}`);
     if (!response.ok) throw new Error(`Could not download emoji ${emoji.name}: HTTP ${response.status}.`);
     const contentType = response.headers.get('content-type')?.split(';', 1)[0] ?? `image/${extension}`;
     if (!contentType.startsWith('image/')) throw new Error(`Emoji ${emoji.name} returned non-image content type ${contentType}.`);

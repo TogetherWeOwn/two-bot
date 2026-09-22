@@ -8,6 +8,7 @@ import { InviteTracker } from './core/inviteTracker.ts';
 import { ExpectedJoins } from './core/expectedJoins.ts';
 import { FunnelHandlers } from './core/handlers.ts';
 import { createClient, registerHandlers } from './discord/client.ts';
+import { createRestartFetch } from './staging/restartRest.ts';
 import { registerOnboarding, registerGameSelect } from './discord/onboarding.ts';
 import { registerSessionWelcome } from './discord/sessionWelcome.ts';
 import { registerSelfRoles } from './discord/selfRoles.ts';
@@ -158,6 +159,9 @@ const communityClassifierCfg = loadCommunityClassifierConfig();
 if (stagingRestartArmed && !communityClassifierCfg.stagingGuildIds.has(TWO_STAGING_GUILD_ID)) {
   throw new Error('Staging restart containment requires explicit community staging-guild classification.');
 }
+// Construct before storage/network effects; unknown API bases refuse here.
+// Explicit injection covers application REST, not gateway/raw-socket egress.
+const stagingRestartFetch = stagingRestartArmed ? createRestartFetch(cfg.apiBase ?? undefined) : undefined;
 
 if (cfg.onboardingMode === 'session' && selfRolePanels.length) {
   throw new Error(
@@ -273,6 +277,10 @@ const handlers = stagingRestartArmed && stagingSyntheticActors
   : new FunnelHandlers(store, leveling, communityFacts);
 
 const client = createClient(process.env.TWO_AUTOMOD === '1');
+if (stagingRestartFetch) {
+  client.rest.options.makeRequest = stagingRestartFetch;
+  client.rest.options.retries = 0;
+}
 const moderationCfg = loadModerationConfig();
 // Narrowed once: property access below stays on the enabled member.
 const rotaCfg = onboardingRotaCfg.enabled === true ? onboardingRotaCfg : undefined;
@@ -310,12 +318,14 @@ await enforceModerationShutdownPreflight({
 const moderationDiscord = new ModerationDiscord({
   token: cfg.discordToken,
   base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+  fetchImpl: stagingRestartFetch,
 });
 const moderationResolver = !stagingRestartArmed && cfg.guildId && moderationCfg.enabled
   ? new RestModerationResolver({
       token: cfg.discordToken,
       botUserId: moderationCfg.owenUserId,
       base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+      fetchImpl: stagingRestartFetch,
     })
   : null;
 const operationalAuditStore = new OperationalAuditStore(db);
@@ -496,6 +506,7 @@ if (!stagingRestartArmed && containmentCfg.enabled && containmentCfg.guildId) {
     applicationId: STAGING_BOT_APPLICATION_ID,
     guildId: TWO_STAGING_GUILD_ID,
     apiBase: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+    fetchImpl: stagingRestartFetch,
   });
   await guildConfigApi.assertIdentity();
   const restore = containmentCfg.snapshotPath
@@ -510,6 +521,7 @@ if (!stagingRestartArmed && containmentCfg.enabled && containmentCfg.guildId) {
       token: cfg.discordToken,
       botUserId: containmentCfg.botUserId,
       base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+      fetchImpl: stagingRestartFetch,
     }),
     config: containmentCfg,
     announce: makeContainmentAnnouncer(
@@ -590,6 +602,7 @@ const automationStore = new AutomationStore(db);
 const automationDiscord = new AutomationDiscord({
   token: cfg.discordToken,
   base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+  fetchImpl: stagingRestartFetch,
 });
 const automationService = new AutomationService(automationStore, automationDiscord);
 
@@ -613,6 +626,7 @@ async function sweepDisabledAutomationCommands(guildId: string): Promise<void> {
     applicationId,
     guildId,
     base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+    fetchImpl: stagingRestartFetch,
   });
   try {
     const result = await removeDbBackedCommands(guildId, automationStore, registrar);
@@ -713,7 +727,7 @@ if (stagingRestartArmed) {
   const announcementsStore = new AnnouncementsStore(db);
   const announcementsService = new AnnouncementsService(
     announcementsStore,
-    new DiscordAnnouncements({ token: cfg.discordToken, base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined }),
+    new DiscordAnnouncements({ token: cfg.discordToken, base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined, fetchImpl: stagingRestartFetch }),
     new XmlFeedReader(),
   );
   registerAnnouncementCommands(client, {
@@ -811,6 +825,7 @@ if (stagingRestartArmed) {
   const selfRoleRest = new DiscordRest({
     token: cfg.discordToken,
     base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+    fetchImpl: stagingRestartFetch,
   });
   const [selfRoleRoles, selfRoleChannels] = await Promise.all([
     selfRoleRest.get<Array<{ id: string; name?: string; permissions: string }>>(`/guilds/${cfg.guildId}/roles`),
@@ -871,6 +886,7 @@ if (stagingRestartArmed) {
     discord: new DiscordActions({
       token: cfg.discordToken,
       base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+      fetchImpl: stagingRestartFetch,
     }),
     roleKeys: internalCfg.roleKeys,
     channelKeys: internalCfg.channelKeys,
@@ -914,6 +930,7 @@ if (stagingRestartArmed) {
     rest: new DiscordRest({
       token: cfg.discordToken,
       base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+      fetchImpl: stagingRestartFetch,
     }),
     guildId: cfg.guildId,
   });
@@ -934,6 +951,7 @@ if (stagingRestartArmed) {
     rest: new DiscordRest({
       token: cfg.discordToken,
       base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+      fetchImpl: stagingRestartFetch,
     }),
     guildId: cfg.guildId,
   });
@@ -954,6 +972,7 @@ if (stagingRestartArmed) {
     rest: new DiscordRest({
       token: cfg.discordToken,
       base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+      fetchImpl: stagingRestartFetch,
     }),
     guildId: cfg.guildId,
   });

@@ -187,3 +187,39 @@ ownership, an effective fail-closed transport boundary and deterministic cleanup
 The exact final head needs independent review, green CI and non-author merge.
 Local evidence and helper success grant none of those permissions; T1 actual
 restart and T2 real-member observation remain open.
+
+### Application REST backstop (not complete egress isolation)
+
+Contained boots install `createRestartFetch` into discord.js's actual
+`client.rest.options.makeRequest` transport and explicitly inject it into the
+entrypoint's raw HTTP clients. Normal boots keep their original transports and
+retry behavior. The policy permits only canonical, bodyless `GET` requests to
+`/api/v10/gateway/bot` and `/api/v10/users/@me` on `https://discord.com` (or the
+explicit loopback mock API used only by tests). Every other method/path/host,
+query, fragment or noncanonical spelling refuses before calling the delegate.
+Request/URL objects are refused rather than normalized. Method-override/host/
+cookie headers refuse; caller dispatcher/agent/redirect options are not forwarded.
+Native fetch uses `redirect: 'error'`; redirect responses also refuse. Errors are
+static and carry no underlying URL, credentials or payload. Mutation success is
+never synthesized.
+
+This deliberately does **not** permit arbitrary GETs: member lists, history,
+reference-message fetches, CDN captures and unrelated feed reads could ingest
+real-member data. The retained rota observer is unchanged; a reply/acknowledgement
+requiring those reads produces a measurement gap, not successful acceptance.
+Existing synthetic join/gate/message observations still exercise the real
+observer, classifier and core. This startup-only allowlist is not evidence that
+all original positive acceptance paths are executable.
+
+`test/unit.stagingrestartrest.test.ts` exercises the real discord.js REST client
+against a local server, proves allowed reads reach it, and proves registry,
+message, member-role and interaction writes do not. A local redirect target is
+never contacted. These are **local transport controls**, not actual staging T1.
+
+The policy is a cooperative application-layer backstop, not a hostile-code or
+OS sandbox: direct HTTP clients without injection, raw sockets, dependency-held
+transports, global undici dispatcher/proxy state, gateway URL/frames and competing
+bot processes still need separately enforced boundaries. In particular, gateway
+caching before the existing application event filter remains an ingestion gate;
+this REST work does not make that safe. No actual-staging execution is authorized
+by this checkpoint, and the draft PR must not be used as a launcher.

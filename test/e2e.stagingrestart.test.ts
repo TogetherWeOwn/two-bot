@@ -100,7 +100,8 @@ async function launch(db: TestDb, mode: Mode) {
   const mock = await startMockDiscord({ guildId: TWO_STAGING_GUILD_ID });
   const env = environment(mock, db, mode);
   const args = ['--require', './test/helpers/rotaProcessGuard.cjs',
-    '--import', './test/helpers/rotaProcessWitness.ts', 'src/index.ts'];
+    '--import', './test/helpers/rotaProcessWitness.ts',
+    '--import', './test/helpers/stagingRestartRestProbe.ts', 'src/index.ts'];
   let bot: ChildProcess;
   try {
     bot = spawn(process.execPath, args, { cwd: ROOT, env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
@@ -116,9 +117,11 @@ async function launch(db: TestDb, mode: Mode) {
   bot.stdout!.on('data', (data) => { log += String(data); });
   bot.stderr!.on('data', (data) => { log += String(data); });
   bot.on('error', (error) => { spawnError = error; });
-  bot.on('message', (message: Witness | { kind: 'egress-refused' }) => {
+  let restProbe: number | undefined;
+  bot.on('message', (message: Witness | { kind: 'egress-refused' } | { kind: 'rest-probe'; refused: number }) => {
     if (message.kind === 'egress-refused') refused++;
     else if (message.kind === 'witness') snapshots.set(message.id, message);
+    else if (message.kind === 'rest-probe') restProbe = message.refused;
   });
   const exited = new Promise<void>((res) => bot.once('close', () => res()));
   const running = () => {
@@ -128,6 +131,8 @@ async function launch(db: TestDb, mode: Mode) {
   };
   const snapshot = async () => {
     running();
+    await until(() => { running(); return restProbe !== undefined; }, 'installed REST transport probe');
+    assert.equal(restProbe, 8, 'all forbidden requests must refuse at the real entrypoint REST boundary');
     const id = ++sequence;
     bot.send({ command: 'snapshot', id });
     const result = await until(() => { running(); return snapshots.get(id); }, 'observer queue snapshot')
