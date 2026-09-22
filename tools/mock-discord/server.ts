@@ -51,6 +51,20 @@ export interface MockScheduledEvent {
   status: number;
 }
 
+/**
+ * The two capability fields of an Identify frame, and nothing else.
+ *
+ * A fixture must not become a token sink: `d.token`, `d.properties` and the
+ * rest of the frame are read and dropped. Only what the connection *asks
+ * Discord for* is retained, because that is the boundary tests assert on.
+ */
+export interface IdentifyCapability {
+  /** Raw `d.intents` bitfield, as sent. */
+  intents: number | null;
+  /** `d.presence.status`, or null when the frame carried no presence at all. */
+  presenceStatus: string | null;
+}
+
 export interface MockDiscord {
   port: number;
   apiBase: string;
@@ -74,6 +88,8 @@ export interface MockDiscord {
   captured: CapturedRequest[];
   /** Gateway opcode census only; never retain identify tokens or frame bodies. */
   gatewayOpcodes: number[];
+  /** Capability of every IDENTIFY seen on the socket, in order. Never tokens. */
+  identifies: IdentifyCapability[];
   /** Join behind the rules gate: present in the guild, unable to interact. */
   memberJoinPending(memberId: string, username: string, guildId?: string): void;
   /** Rules accepted - pending flips false. This is the real onboarding trigger. */
@@ -321,6 +337,7 @@ export async function startMockDiscord(
   const scheduledEvents: MockScheduledEvent[] = [];
   const captured: CapturedRequest[] = [];
   const gatewayOpcodes: number[] = [];
+  const identifies: IdentifyCapability[] = [];
   const lighting: Lighting = opts.lighting ?? 'dark';
   /** Roles the bot has granted per member, so PATCH member can echo them back. */
   const memberRoles = new Map<string, string[]>();
@@ -589,6 +606,14 @@ export async function startMockDiscord(
       }
 
       if (msg.op === 2) {
+        // Record the capability this connection asked for, and only that. The
+        // token and the rest of the frame are never read into the fixture.
+        const identify = msg.d as { intents?: unknown; presence?: { status?: unknown } } | undefined;
+        identifies.push({
+          intents: typeof identify?.intents === 'number' ? identify.intents : null,
+          presenceStatus: typeof identify?.presence?.status === 'string' ? identify.presence.status : null,
+        });
+
         // IDENTIFY -> READY, then GUILD_CREATE so the guild stops being unavailable.
         send(ws, {
           op: 0,
@@ -693,6 +718,7 @@ export async function startMockDiscord(
     },
     captured,
     gatewayOpcodes,
+    identifies,
 
     memberJoinPending(memberId, username, guildId = GUILD_ID) {
       dispatch('GUILD_MEMBER_ADD', {
