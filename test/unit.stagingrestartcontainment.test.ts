@@ -4,9 +4,9 @@
  * No network, no database, no token: every case exercises the pure
  * preflight/fixture-allowlist seam in `src/staging/restartContainment.ts`
  * plus the real-boot refusal ordering (containment refusal fires before
- * `datastore_open`). The full three-lifecycle process proof stays in
- * `test/e2e.rotaprocess.test.ts`; this file proves the gate that must hold
- * before any real staging execution.
+ * `datastore_open`). The contained three-lifecycle local process proof is in
+ * `test/e2e.stagingrestart.test.ts`; the normal-path harness remains in
+ * `test/e2e.rotaprocess.test.ts`. These checks do not authorize staging execution.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -174,49 +174,39 @@ test('funnel firewall drops real-member writes and passes synthetic actors', asy
   );
   const SYN = '900000000000007001';
   const REAL = '900000000000009999';
-  await firewall.onJoin({ guildId: 'g', memberId: REAL, isBot: false, source: 'gateway' });
-  await firewall.onGateCleared({ guildId: 'g', memberId: REAL, isBot: false });
-  await firewall.onMessage({ guildId: 'g', memberId: REAL, isBot: false, channelId: 'c' });
-  await firewall.onVoiceJoin({ guildId: 'g', memberId: REAL, isBot: false, channelId: 'c' });
-  await firewall.onVoiceLeave({ guildId: 'g', memberId: REAL, isBot: false, channelId: 'c' });
+  await firewall.onJoin({ guildId: STAGING, memberId: REAL, isBot: false, source: 'gateway' });
+  await firewall.onGateCleared({ guildId: STAGING, memberId: REAL, isBot: false });
+  await firewall.onMessage({ guildId: STAGING, memberId: REAL, isBot: false, channelId: 'c' });
+  await firewall.onVoiceJoin({ guildId: STAGING, memberId: REAL, isBot: false, channelId: 'c' });
+  await firewall.onVoiceLeave({ guildId: STAGING, memberId: REAL, isBot: false, channelId: 'c' });
   assert.equal(records.length, 0, 'real-member gateway writes never reach the store');
-  await firewall.onJoin({ guildId: 'g', memberId: SYN, isBot: false, source: 'gateway' });
-  await firewall.onGateCleared({ guildId: 'g', memberId: SYN, isBot: false });
+  await firewall.onJoin({ guildId: STAGING, memberId: SYN, isBot: false, source: 'gateway' });
+  await firewall.onGateCleared({ guildId: STAGING, memberId: SYN, isBot: false });
   assert.equal(records.length, 2, 'synthetic staging actors pass through');
   assert.deepEqual(records.map((r) => r.memberId), [SYN, SYN]);
 });
 
-test('audit member filter drops real-member rows, keeps synthetic and memberless', () => {
+test('contained audit drops memberless events and real-member leaves before consumers', async () => {
   const seen: string[] = [];
-  const fakeAudit = {
-    record: async (event: { entryId: string }) => { seen.push(event.entryId); return true; },
-    retryPending: async () => 0,
-  };
-  const synthetic = new Set(['900000000000007001']);
+  const leaves: string[] = [];
   const bus = new EventEmitter();
   registerHandlers(bus as unknown as Client, {
-    handlers: { onLeave: async () => ({}) } as unknown as FunnelHandlers,
+    handlers: { onLeave: async (_guild: string, member: string) => { leaves.push(member); return {}; } } as unknown as FunnelHandlers,
     invites: {} as unknown as InviteTracker,
-    audit: fakeAudit,
-    stagingAuditMemberFilter: (event) => {
-      const ids = [event.actorId, event.targetId].filter(
-        (id): id is string => typeof id === 'string' && id !== '',
-      );
-      if (!ids.length) return true;
-      return ids.every((id) => synthetic.has(id));
+    audit: {
+      record: async (event: { entryId: string }) => { seen.push(event.entryId); return true; },
+      retryPending: async () => 0,
     },
+    stagingRestart: { guildId: STAGING, syntheticActorIds: new Set(['900000000000007001']) },
   });
-  bus.emit(Events.Raw, { op: 0, t: 'MESSAGE_DELETE', s: 1, d: { guild_id: 'g', channel_id: 'c', id: 'm1' } }, 0);
-  bus.emit(Events.GuildMemberRemove, { guild: { id: 'g' }, id: '900000000000009999' });
-  return new Promise<void>((resolve, reject) => {
-    setTimeout(() => {
-      try {
-        assert.ok(seen.some((id) => id.startsWith('message-delete:')), `memberless raw event kept, saw ${JSON.stringify(seen)}`);
-        assert.ok(!seen.some((id) => id.includes('900000000000009999')), 'real-member leave dropped');
-        resolve();
-      } catch (err) { reject(err); }
-    }, 50);
-  });
+  bus.emit(Events.Raw, { op: 0, t: 'MESSAGE_DELETE', s: 1, d: { guild_id: STAGING, channel_id: 'c', id: 'm1' } }, 0);
+  bus.emit(Events.GuildMemberRemove, { guild: { id: STAGING }, id: '900000000000009999' });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.deepEqual(seen, [], 'unknown actor cannot certify safe audit metadata');
+  assert.deepEqual(leaves, [], 'real-member leave never reaches the funnel');
+  bus.emit(Events.GuildMemberRemove, { guild: { id: STAGING }, id: '900000000000007001' });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.deepEqual(leaves, ['900000000000007001'], 'synthetic positive control exercises the same listener');
 });
 
 const ROOT = resolve(import.meta.dirname, '..');
