@@ -97,9 +97,19 @@ async function killSwitch(): Promise<number> {
   // The BOT token does the removal, not the test account's: an account cannot
   // reliably kick itself, and this half must keep working after the user
   // credential has been revoked.
-  const botToken = readSecret('discord_token', ['DISCORD_TOKEN', 'TWO_STAGING_BOT_TOKEN']);
+  // Same env order as src/core/config.ts:112 and scripts/verify-grant.ts. The
+  // deployed host provisions DISCORD_BOT_TOKEN, so omitting it here would fail
+  // the kill switch on the one box where it is most likely to be needed.
+  const botToken = readSecret('discord_token', [
+    'DISCORD_BOT_TOKEN',
+    'DISCORD_TOKEN',
+    'TWO_STAGING_BOT_TOKEN',
+  ]);
   if (!botToken) {
-    console.error('--kill-switch needs the staging bot token (DISCORD_TOKEN) to remove the member.');
+    console.error(
+      '--kill-switch needs the staging bot token (DISCORD_BOT_TOKEN, or DISCORD_TOKEN) ' +
+        'to remove the member. See docs/SECRETS.md.',
+    );
     return 1;
   }
   const result = await tripKillSwitch({

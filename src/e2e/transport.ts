@@ -46,7 +46,21 @@ export interface HarnessTransport {
   joinVoice(channelId: string): Promise<Acted<void>>;
   leaveVoice(): Promise<Acted<void>>;
   /**
-   * Block until a gateway event satisfies `pred`, or `timeoutMs` elapses.
+   * Return the first gateway event satisfying `pred`, waiting up to
+   * `timeoutMs` if it has not arrived yet.
+   *
+   * IMPLEMENTATIONS MUST BUFFER. An implementation that starts listening when
+   * it is called - the literal reading of "block until" - is wrong here, and
+   * wrong in a way that accuses a healthy bot. The guard sleeps >= 2s before
+   * every action (`HarnessGuard.act`), and `guildMemberUpdate`, `channelCreate`
+   * and `voiceStateUpdate` all land well inside that window: by the time the
+   * flow asks, the event it is waiting for has usually already happened. So a
+   * transport must keep a rolling buffer of received events from the moment the
+   * session opens, scan it first, and only then wait. Proven, not theorised:
+   * the same join-screen flow fails `no guildMemberUpdate matched` on an
+   * unbuffered transport and passes on a buffered one. The offline tests cannot
+   * catch this - their fake reads a pre-populated map - which is exactly why the
+   * obligation is written here.
    *
    * A timeout is a FAILED ASSERTION, not an error: it means the bot did not do
    * the thing the flow exists to prove. Implementations report it as status
