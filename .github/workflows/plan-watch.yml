@@ -111,18 +111,26 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.sha || github.sha }}
           persist-credentials: false
-      # See ci.yml: an absent base policy loads this reviewed immutable copy,
-      # never the candidate's script and never an unconditional bootstrap pass.
-      - name: Load immutable bootstrap policy when absent at base
-        if: ${{ hashFiles('scripts/ci/refuse-fork-pr.sh') == '' }}
-        uses: actions/checkout@v5
-        with:
-          ref: ac9153f05cb888ff2cb23588e275ad53efc48433
-          persist-credentials: false
+      # The policy must already be on the base; no candidate-selected fallback.
       - name: Refuse fork pull requests
         env:
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: ./scripts/ci/refuse-fork-pr.sh
+      # Match ci.yml: only trusted policy code runs; candidate checkout is data.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install trusted workflow parser
+        run: npm ci --ignore-scripts --prefix scripts/ci
+      - name: Read candidate workflows
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
+          sparse-checkout: .github/workflows
+          persist-credentials: false
+      - name: Verify the fork gate against candidate wiring
+        run: ./scripts/ci/refuse-fork-pr.test.sh "$GITHUB_WORKSPACE/candidate"
 
   protection-available:
     needs: fork-gate

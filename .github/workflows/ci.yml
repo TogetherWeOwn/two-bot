@@ -35,15 +35,8 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.base.sha || github.sha }}
           persist-credentials: false
-      # The introduction PR's base has no policy yet. Pin the policy commit
-      # that is reviewed with this workflow, never a mutable PR ref. Missing
-      # policy is not permission to skip either refusal or coverage.
-      - name: Load immutable bootstrap policy when absent at base
-        if: ${{ hashFiles('scripts/ci/refuse-fork-pr.sh') == '' }}
-        uses: actions/checkout@v5
-        with:
-          ref: ac9153f05cb888ff2cb23588e275ad53efc48433
-          persist-credentials: false
+      # Policy lands independently on main before this workflow. A missing
+      # base policy fails closed; the candidate cannot select a bootstrap ref.
       - name: Refuse fork pull requests
         env:
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
