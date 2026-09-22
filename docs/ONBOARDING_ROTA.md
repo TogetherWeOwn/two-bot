@@ -313,6 +313,11 @@ remains a separate release requirement.
 
 ## Focused verification
 
+The [isolated process restart harness](ROTA_PROCESS_HARNESS.md) adds real-entrypoint
+local mock-Discord negative-scope evidence, a dispatch-removal mutation, and
+transport containment checks. It preserves staging exclusion and does not replace
+actual staging or positive notice-delivery acceptance.
+
 Against an isolated Postgres database:
 
 ```sh
