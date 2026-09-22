@@ -223,3 +223,47 @@ bot processes still need separately enforced boundaries. In particular, gateway
 caching before the existing application event filter remains an ingestion gate;
 this REST work does not make that safe. No actual-staging execution is authorized
 by this checkpoint, and the draft PR must not be used as a launcher.
+
+### Gateway forwarding seam (not installed in the entrypoint)
+
+`src/staging/restartGatewayStrategy.ts` implements the public
+`ClientOptions.ws.buildStrategy` contract with the same in-process
+`WebSocketShard` / `SimpleContextFetchingStrategy` primitives as the dependency's
+`SimpleShardingStrategy`. It does not patch private packet handlers, replace the
+Client, or change the rota observer/scheduler. Only a literal `true` from an
+explicit synchronous policy forwards an original dispatch object. False, thrown
+errors, and other return values do not forward it. Dependency debug strings are
+not forwarded, and transport error details are replaced with a static error.
+
+READY carries its payload on **two** public shard events: `ready` and `dispatch`.
+Both paths pass through the policy. Other protocol lifecycle notifications are
+forwarded explicitly. The underlying shard still decodes frames, handles its
+session (including the resume URL/sequence), and sends protocol traffic before
+this boundary. `send()` remains a delegate, **not** an outbound gateway guard.
+This is a pre-discord.js-consumer seam, not pre-socket filtering or a sandbox.
+
+`test/unit.stagingrestartgateway.test.ts` uses a real Client and the local mock
+WebSocket server. Positive member/message events reach raw listeners and caches;
+refused member/message events reach neither. Unknown, throwing-policy and truthy
+non-boolean controls are also refused. A separate real manager test refuses both
+READY paths and GUILD_CREATE, while showing that protocol READY can still be true:
+that state is not application readiness or successful staging acceptance.
+
+The fixture predicate accepts its mock handshake wholesale. It is **not a safe
+staging payload policy** and is not exported by application code. In particular,
+the mock's bot and owner IDs are not the actual staging binding. No identity
+checker was relaxed and no owner, role or permission state was synthesized.
+
+The seam remains **unwired** in `src/index.ts`; normal and contained entrypoints
+are unchanged at this checkpoint. Before wiring, implement and independently
+verify a fail-closed event/field/actor policy covering READY, GUILD_CREATE and
+nested actor-bearing fields. If the genuine handshake cannot satisfy the saved
+synthetic-only contract without changing semantic facts, report that exact
+blocker and leave real T1 open. Refusing a handshake must not be presented as a
+successful full-app restart. Lower-level egress, process exclusivity, immutable
+launch binding, cleanup/readiness integration and exact-head review remain gates.
+
+`@discordjs/ws` 1.2.3 and `@discordjs/collection` 2.1.1 are now explicit pinned
+imports of versions already present transitively. Node's standard library does
+not implement the discord.js shard strategy/context contract; these public
+primitives avoid duplicating the Discord protocol or using private hooks.
