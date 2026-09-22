@@ -98,6 +98,8 @@ export interface BotDeps {
    */
   moderationAuditSecret?: string | null;
   onboardingRota?: DiscordOnboardingRota;
+  /** Acceptance-only pre-dispatch boundary; never infer an actor from cached data. */
+  stagingRestart?: { guildId: string; syntheticActorIds: ReadonlySet<string> };
   /**
    * Fail-closed staging restart containment (TOG-3903). When set, drops the
    * real-member audit metadata writes (member_update, voice_*, message_*,
@@ -159,7 +161,11 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     handlers, invites, community, raid, expectedJoins, leveling, automod, joinRisk, audit, auditGuildId,
     moderationAuditSecret,
   } = deps;
-  const levelRoleWrites = deps.levelRoleWrites ?? true;
+  const contained = deps.stagingRestart;
+  const accepts = (guildId: string | null | undefined, actorId: string | null | undefined) =>
+    !contained || (guildId === contained.guildId && typeof actorId === 'string' &&
+      contained.syntheticActorIds.has(actorId));
+  const levelRoleWrites = !contained && (deps.levelRoleWrites ?? true);
 
   /**
    * The only place a level-up turns into a role write. Both the message and the
@@ -172,7 +178,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
       : undefined;
 
   const auditSafely = (event: Parameters<NonNullable<BotDeps['audit']>['record']>[0]) => {
-    if (!audit || (auditGuildId && event.guildId !== auditGuildId)) return;
+    if (contained || !audit || (auditGuildId && event.guildId !== auditGuildId)) return;
     if (deps.stagingAuditMemberFilter && !deps.stagingAuditMemberFilter(event)) return;
     void audit.record(event).catch(() => {
       log.error('operational_audit_failed', {
@@ -184,23 +190,27 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
 
   client.once(Events.ClientReady, async (c) => {
     log.info('ready', { user: c.user.tag, guilds: c.guilds.cache.size });
-    for (const guild of c.guilds.cache.values()) {
-      await snapshotInvites(guild, invites);
+    if (!contained) {
+      for (const guild of c.guilds.cache.values()) {
+        await snapshotInvites(guild, invites);
+      }
     }
   });
 
   client.on(Events.GuildMemberAdd, async (member) => {
+    if (!accepts(member.guild.id, member.id)) return;
     const observedAt = nowIso();
     const joining = (async () => {
       // Snapshot regardless of how this member arrived, so the counters stay
       // current for the next organic join. A one-click join consumes no invite,
       // so for it the diff legitimately shows nothing grew.
-      const grew = await snapshotInvites(member.guild, invites);
+      const grew = contained ? [] : await snapshotInvites(member.guild, invites);
 
       // The web path's expected join beats the invite diff: a code that grew in
-      // the same window belongs to some other join's event.
-      const expected = expectedJoins?.consume(member.guild.id, member.id) ?? null;
-      const source = expected ?? invites.attribute(grew, !!member.guild.vanityURLCode);
+      // the same window belongs to some other join's event. Contained runs have
+      // no invitation evidence: do not read real inviter rows or invent a cohort.
+      const expected = contained ? null : expectedJoins?.consume(member.guild.id, member.id) ?? null;
+      const source = contained ? 'unknown' : expected ?? invites.attribute(grew, !!member.guild.vanityURLCode);
       const inviterId =
         !expected && grew.length === 1 ? await invites.inviterFor(member.guild.id, grew[0]) : null;
       await handlers.onJoin({
@@ -233,7 +243,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
 
     // Burst check last, and never at the expense of the join record: an alert
     // that throws must not lose the event it was alerting about.
-    if (raid && !member.user?.bot) {
+    if (!contained && raid && !member.user?.bot) {
       try {
         const alert = raid.watch.observe(
           member.guild.id,
@@ -245,7 +255,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
         log.error('raid_watch_failed', { guildId: member.guild.id, err: String(err) });
       }
     }
-    if (joinRisk && !member.user?.bot) {
+    if (!contained && joinRisk && !member.user?.bot) {
       try {
         await joinRisk.observe(member, source);
       } catch (err) {
@@ -263,6 +273,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
   // registered at all when no landing channel is configured, and the funnel
   // number must not depend on whether we happen to be greeting people.
   client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
+    if (!accepts(newMember.guild.id, newMember.id)) return;
     if (oldMember.pending === true && newMember.pending === false) {
       void deps.onboardingRota?.gateCleared(newMember, nowIso());
     }
@@ -304,6 +315,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
   });
 
   client.on(Events.GuildMemberRemove, async (member) => {
+    if (!accepts(member.guild.id, member.id)) return;
     await handlers.onLeave(member.guild.id, member.id);
   });
 
@@ -317,7 +329,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     mentions: { users: { keys(): IterableIterator<string> } };
     attachments: { values(): IterableIterator<{ name: string | null }> };
   }, observedTimestamp: number): Promise<boolean | null> => {
-    if (!automod || !msg.guildId || msg.guildId !== automod.guildId || !msg.author) return false;
+    if (contained || !automod || !msg.guildId || msg.guildId !== automod.guildId || !msg.author) return false;
     try {
       const result = await automod.service.inspect({
         guildId: msg.guildId,
@@ -344,7 +356,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
   };
 
   client.on(Events.MessageCreate, async (msg) => {
-    if (!msg.guildId) return; // ignore DMs
+    if (!msg.guildId || !accepts(msg.guildId, msg.author?.id)) return; // ignore DMs and unbound actors
     const occurredAt = new Date(msg.createdTimestamp).toISOString();
     const channelClass = community?.welcomeChannelIds.has(msg.channelId)
       ? 'welcome'
@@ -395,16 +407,17 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     // is deliberately not awaited: it orders same-subject writes on its own
     // per-subject chain and must never stall the automation event. A private
     // event keeps those listeners from racing the primary MessageCreate handler.
-    client.emit('automationMessageAccepted' as never, msg as never);
+    if (!contained) client.emit('automationMessageAccepted' as never, msg as never);
   });
 
   client.on(Events.Raw, (packet, shardId) => {
+    if (contained) return;
     const event = rawMessageAuditEvent(packet as never, shardId);
     if (event) auditSafely(event);
   });
 
   client.on(Events.MessageUpdate, async (_oldMessage, newMessage) => {
-    if (!newMessage.guildId) return;
+    if (contained || !newMessage.guildId) return;
     try {
       const msg = newMessage.partial ? await newMessage.fetch() : newMessage;
       if (!msg.author) return;
@@ -426,6 +439,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     const guild = newState.guild ?? oldState.guild;
     if (!guild) return;
     const memberId = newState.id ?? oldState.id;
+    if (!accepts(guild.id, memberId)) return;
     const isBot = !!(newState.member ?? oldState.member)?.user?.bot;
 
     // One timestamp for both halves. On a move from A to B the end and the
@@ -483,10 +497,11 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
   });
 
   client.on(Events.InviteCreate, async (invite) => {
-    if (invite.guild) await snapshotInvites(invite.guild as Guild, invites);
+    if (!contained && invite.guild) await snapshotInvites(invite.guild as Guild, invites);
   });
 
   client.on(Events.GuildAuditLogEntryCreate, (entry, guild) => {
+    if (contained) return;
     const event = moderationAuditEvent(entry, guild.id, client.user?.id, moderationAuditSecret);
     if (event) auditSafely(event);
   });

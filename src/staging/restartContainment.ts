@@ -1,41 +1,16 @@
 /**
- * Fail-closed actual-staging rota restart containment (TOG-3903).
+ * Staging restart containment helpers (TOG-3903), not execution authorization.
  *
- * A staging-only, default-off gate for launching the REAL application
- * entrypoint (`src/index.ts`) against the actual staging gateway. When the
- * opt-in flag is absent or malformed the process refuses before any network
- * or datastore effect; when it is set the preflight runs before the
- * database is opened and returns fail-closed substitutions for every
- * unrelated Discord write path plus a human-ingestion firewall for the
- * funnel/rota observation paths.
+ * The opt-in preflight runs before storage opens. src/index.ts omits unrelated
+ * writers/jobs, and the gateway dispatcher filters before attribution, audit,
+ * or ordinary persistence. This funnel firewall is a second boundary. The
+ * real rota observer/classifier and scheduler are retained; notice delivery
+ * is stopped before its first sweep. No command or welcome write is exempt.
  *
- * Normal production behavior is unchanged: the module defaults to inert and
- * touches nothing unless the exact `TWO_STAGING_RESTART_CONTAINMENT=1`
- * opt-in plus a staging token, staging database, and disposable loopback
- * database checks all pass.
- *
- * What this contains (all Discord mutations EXCEPT the single command
- * registry publication and the ordinary session welcome, which stay live
- * under the existing guards):
- *   - rota + audit notice sends: `RotaNoticeDelivery.stop()` and
- *     `options.dryRun` on the operational audit mirror, applied at
- *     construction sites in `src/index.ts` — never a production default.
- *   - command registry writes/deletes beyond the single publication: the
- *     automations disable sweep runs only through the registry's existing
- *     `beforeFirstSync` hook; containment does not add a writer.
- *   - role changes: session onboarding mode already suppresses leveling
- *     role writes and forbids armed anti-nuke (`src/index.ts:141-147`);
- *     containment refuses any other combination.
- *   - member-facing DMs and unrelated sends: callers pass the returned
- *     `dryRun`-equivalent flags (raid/containment announcers log only,
- *     session goodbye returns early) — no global dry-run redefinition.
- *   - real human/member ingestion: `FunnelHandlers` subclass drops every
- *     gateway funnel write BEFORE it persists, except writes that identify
- *     a configured synthetic staging actor; unknown events/actors fail
- *     closed. The rota observer chain is intact — containment never
- *     monkeypatches it away; the firewall sits downstream in
- *     `OnboardingRota` so staging actors still traverse the unmodified
- *     classifier and `eligible()` checks.
+ * Default-off preserves normal production behavior. These application gates
+ * alone do NOT establish disposable-storage ownership, process exclusivity,
+ * a sanitized launch environment, or a transport boundary. Those acceptance
+ * prerequisites must be verified separately before actual staging execution.
  */
 
 import { applicationIdFromToken, LIVE_GUILD_ID, STAGING_BOT_APPLICATION_ID, TWO_STAGING_GUILD_ID } from './spec.ts';
@@ -120,6 +95,14 @@ export function checkStagingRestartPreflight(
   if (!stagingUrl) {
     return refuse('Staging restart containment requires TWO_STAGING_DATABASE_URL. Refusing to continue.');
   }
+  try {
+    const binding = new URL(stagingUrl);
+    if (!['postgres:', 'postgresql:'].includes(binding.protocol) || !binding.hostname || binding.pathname.length < 2) {
+      return refuse('Staging restart containment requires a valid staging database binding.');
+    }
+  } catch {
+    return refuse('Staging restart containment requires a valid staging database binding.');
+  }
   const url = controls.databaseUrl?.trim() ?? '';
   if (!/^postgres(ql)?:\/\//.test(url)) {
     return refuse('Staging restart containment requires a postgres TWO_DATABASE_URL. Refusing to continue.');
@@ -185,10 +168,8 @@ export function stagingRestartContainmentArmed(
  * the unmodified classifier and `eligible()` checks downstream. Unknown
  * events/actors fail closed (dropped, never written, never relabeled).
  *
- * Deliberately NOT a `FunnelHandlers` override of `onLeave`/`onInviteClick`:
- * the entrypoint has no `onLeave` call under containment (see
- * `containmentLeaveMode`), and `onInviteClick` is a redirect-service path,
- * not a gateway observation — leaving both unwired is the containment.
+ * Includes leave events. onInviteClick belongs to the separate redirect
+ * service, which this entrypoint never starts.
  */
 export class StagingRestartFunnelFirewall extends FunnelHandlers {
   private syntheticActorIds: ReadonlySet<string>;
@@ -203,32 +184,37 @@ export class StagingRestartFunnelFirewall extends FunnelHandlers {
     this.syntheticActorIds = syntheticActorIds;
   }
 
-  private synthetic(memberId: string): boolean {
-    return this.syntheticActorIds.has(memberId);
+  private synthetic(guildId: string, memberId: string): boolean {
+    return guildId === TWO_STAGING_GUILD_ID && this.syntheticActorIds.has(memberId);
+  }
+
+  override async onLeave(guildId: string, memberId: string, occurredAt?: string): Promise<FunnelEvent | null> {
+    if (!this.synthetic(guildId, memberId)) return null;
+    return super.onLeave(guildId, memberId, occurredAt);
   }
 
   override async onJoin(i: JoinInput): Promise<FunnelEvent | null> {
-    if (!this.synthetic(i.memberId)) return null;
+    if (!this.synthetic(i.guildId, i.memberId)) return null;
     return super.onJoin(i);
   }
 
   override async onGateCleared(i: GateClearedInput): Promise<FunnelEvent | null> {
-    if (!this.synthetic(i.memberId)) return null;
+    if (!this.synthetic(i.guildId, i.memberId)) return null;
     return super.onGateCleared(i);
   }
 
   override async onMessage(i: MessageInput): Promise<FunnelEvent | null> {
-    if (!this.synthetic(i.memberId)) return null;
+    if (!this.synthetic(i.guildId, i.memberId)) return null;
     return super.onMessage(i);
   }
 
   override async onVoiceJoin(i: VoiceInput): Promise<FunnelEvent | null> {
-    if (!this.synthetic(i.memberId)) return null;
+    if (!this.synthetic(i.guildId, i.memberId)) return null;
     return super.onVoiceJoin(i);
   }
 
   override async onVoiceLeave(i: VoiceInput): Promise<FunnelEvent | null> {
-    if (!this.synthetic(i.memberId)) return null;
+    if (!this.synthetic(i.guildId, i.memberId)) return null;
     return super.onVoiceLeave(i);
   }
 }
