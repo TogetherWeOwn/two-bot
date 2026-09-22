@@ -559,6 +559,7 @@ async function cleanupFixtures(api: DiscordBotApi, manifest: Manifest, manifestP
     );
     actions.push(`deleted fixture role ${id} or it was already absent`);
   }
+  manifest.discordWrites = [...new Set([...manifest.discordWrites, ...api.writes])];
   manifest.cleanup = { completedAt: new Date().toISOString(), actions };
   if (manifestPath) await updateManifest(manifestPath, manifest);
   return actions;
