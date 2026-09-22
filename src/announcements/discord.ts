@@ -73,6 +73,22 @@ export class DiscordAnnouncements implements AnnouncementDiscord {
     const message = Array.isArray(json) ? json.find((row) => String(row.nonce ?? '') === nonce) : null;
     return typeof message?.id === 'string' ? message.id : null;
   }
+
+  // https://docs.discord.com/developers/resources/guild-scheduled-event#get-guild-scheduled-event
+  async getScheduledEventStatus(guildId: string, eventId: string): Promise<number | null> {
+    const res = await this.fetchImpl(`${this.base}/guilds/${guildId}/scheduled-events/${eventId}`, {
+      headers: { Authorization: `Bot ${this.options.token}` },
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    if (res.status === 404) return null;
+    const json = await res.json().catch(() => null) as { status?: unknown } | null;
+    if (!res.ok) throw new Error(`Discord request failed: HTTP ${res.status}`);
+    const status = json?.status;
+    if (typeof status !== 'number' || !Number.isInteger(status) || status < 1 || status > 4) {
+      throw new Error('Discord returned an invalid scheduled event status.');
+    }
+    return status;
+  }
 }
 
 interface FeedFetcher {

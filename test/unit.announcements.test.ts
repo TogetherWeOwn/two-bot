@@ -3,7 +3,7 @@ import test, { after, beforeEach } from 'node:test';
 import { AnnouncementsService, normalizeFeedSource, parseRoleSpec, type FeedItem } from '../src/announcements/service.ts';
 import { loadAnnouncementsConfig } from '../src/announcements/config.ts';
 import { AnnouncementsStore, type FeedRelayRow } from '../src/announcements/store.ts';
-import { announcementCommandData, parseXmlFeed, XmlFeedReader } from '../src/announcements/discord.ts';
+import { announcementCommandData, DiscordAnnouncements, parseXmlFeed, XmlFeedReader } from '../src/announcements/discord.ts';
 import { assertPublicHostname, createPublicLookup, isPublicAddress, readLimitedText } from '../src/announcements/feedHttp.ts';
 import { openTestDb } from './helpers/testDb.ts';
 
@@ -18,6 +18,7 @@ class FakeDiscord {
   posts: Array<{ channelId: string; content: string; nonce?: string; components?: unknown[] }> = [];
   edits: Array<{ channelId: string; messageId: string; content: string; components?: unknown[] }> = [];
   nonceMessages = new Map<string, string>();
+  scheduledEventStatuses = new Map<string, number>([[EVENT, 1]]);
 
   async postMessage(channelId: string, content: string, options: { nonce?: string; components?: unknown[] } = {}) {
     this.posts.push({ channelId, content, ...options });
@@ -32,6 +33,10 @@ class FakeDiscord {
 
   async findMessageByNonce(_channelId: string, nonce: string) {
     return this.nonceMessages.get(nonce) ?? null;
+  }
+
+  async getScheduledEventStatus(_guildId: string, eventId: string) {
+    return this.scheduledEventStatuses.get(eventId) ?? null;
   }
 }
 
@@ -67,6 +72,59 @@ test('RSVP updates one durable attendance row and audits every response', async 
     `SELECT COUNT(*) AS total FROM announcements_audit_log WHERE action = 'event.rsvp'`,
   ).get<{ total: number }>();
   assert.equal(Number(count?.total), 2);
+});
+
+test('RSVP refuses missing and cancelled scheduled events before writing', async () => {
+  const discord = new FakeDiscord();
+  const cancelled = '1546451670500642998';
+  discord.scheduledEventStatuses.set(cancelled, 4);
+  const service = new AnnouncementsService(store, discord);
+
+  await assert.rejects(
+    service.rsvp({ guildId: GUILD, eventId: '1546451670500642997', userId: USER, status: 'going' }),
+    /No scheduled event with that id exists/,
+  );
+  await assert.rejects(
+    service.rsvp({ guildId: GUILD, eventId: cancelled, userId: USER, status: 'going' }),
+    /scheduled event is cancelled/,
+  );
+
+  const rows = await dbFixture.db.prepare(`SELECT COUNT(*) AS total FROM event_rsvps`).get<{ total: number }>();
+  const audits = await dbFixture.db.prepare(
+    `SELECT COUNT(*) AS total FROM announcements_audit_log WHERE action = 'event.rsvp'`,
+  ).get<{ total: number }>();
+  assert.equal(Number(rows?.total), 0);
+  assert.equal(Number(audits?.total), 0);
+});
+
+test('RSVP accepts an existing completed event when it is not cancelled', async () => {
+  const discord = new FakeDiscord();
+  discord.scheduledEventStatuses.set(EVENT, 3);
+  const service = new AnnouncementsService(store, discord);
+
+  assert.equal(await service.rsvp({ guildId: GUILD, eventId: EVENT, userId: USER, status: 'going' }), 'going');
+  assert.equal((await store.getRsvp(GUILD, EVENT, USER))?.status, 'going');
+});
+
+test('scheduled event lookup distinguishes Discord 404 from a cancelled event', async () => {
+  const requests: string[] = [];
+  const discord = new DiscordAnnouncements({
+    token: 'test-token',
+    base: 'https://discord.invalid',
+    fetchImpl: async (input) => {
+      const url = String(input);
+      requests.push(url);
+      if (url.endsWith('/1546451670500642997')) return new Response(null, { status: 404 });
+      return Response.json({ status: 4 });
+    },
+  });
+
+  assert.equal(await discord.getScheduledEventStatus(GUILD, '1546451670500642997'), null);
+  assert.equal(await discord.getScheduledEventStatus(GUILD, EVENT), 4);
+  assert.deepEqual(requests, [
+    `https://discord.invalid/guilds/${GUILD}/scheduled-events/1546451670500642997`,
+    `https://discord.invalid/guilds/${GUILD}/scheduled-events/${EVENT}`,
+  ]);
 });
 
 test('LFG role slots reject overflow and let a member move atomically', async () => {
