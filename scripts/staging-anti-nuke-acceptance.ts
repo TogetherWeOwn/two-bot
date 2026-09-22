@@ -36,6 +36,7 @@ import {
   ROLE_DELETE_AUDIT_ACTION,
   acceptanceLockKey,
   assertAcceptanceFences,
+  discordSnowflakeTimestamp,
   evaluateGatewayEvidence,
   evaluateJoinGatewayEvidence,
   fixtureRoleNames,
@@ -99,7 +100,7 @@ type Manifest = {
   roleIds: { capability: string | null; targets: string[] };
   capabilityAssigned: boolean;
   discordWrites: string[];
-  cleanup?: { completedAt: string; actions: string[] };
+  cleanup?: { completedAt: string; actions: string[]; recoveredRoleIds: string[] };
 };
 
 type CommonContext = {
@@ -111,6 +112,7 @@ type CommonContext = {
   deployedShaSource: string;
   guildId: string;
   dbUrl: string;
+  databaseFingerprint: string;
   owenToken: string;
   owen: DiscordBotApi;
   guildConfig: GuildConfigDiscordApi;
@@ -194,6 +196,8 @@ Required environment (values are never printed):
   DISCORD_STAGING_GUILD_ID=${TWO_STAGING_GUILD_ID}
   DISCORD_STAGING_BOT_TOKEN
   TWO_STAGING_DATABASE_URL
+  TWO_STAGING_DATABASE_HOST
+  TWO_STAGING_DATABASE_NAME
 
 preflight/drive additionally require:
   TWO_STAGING_ACTOR_APPLICATION_ID
@@ -294,7 +298,7 @@ function inspectFullVerifierConfig(): {
   return { ready: missing.length === 0, missing, auditSince, selfRolePanelConfigured, goodbyeChannelCount };
 }
 
-function databaseGuard(url: string): void {
+export function validateStagingDatabaseIdentity(url: string, expectedHost: string, expectedName: string): string {
   let parsed: URL;
   try {
     parsed = new URL(url);
@@ -302,8 +306,13 @@ function databaseGuard(url: string): void {
     throw new Error('TWO_STAGING_DATABASE_URL is not a URL.');
   }
   if (!['postgres:', 'postgresql:'].includes(parsed.protocol)) throw new Error('TWO_STAGING_DATABASE_URL must use Postgres.');
-  const name = parsed.pathname.split('/').filter(Boolean).at(-1) ?? '';
-  if (!/staging|test/i.test(name)) throw new Error(`Refusing non-staging database "${name}".`);
+  const name = decodeURIComponent(parsed.pathname.split('/').filter(Boolean).at(-1) ?? '');
+  if (parsed.hostname !== expectedHost || name !== expectedName) {
+    throw new Error('TWO_STAGING_DATABASE_URL does not match the exact TWO_STAGING_DATABASE_HOST/TWO_STAGING_DATABASE_NAME fence.');
+  }
+  return createHash('sha256')
+    .update(`${parsed.hostname}:${parsed.port || '5432'}/${name}`)
+    .digest('hex');
 }
 
 async function commonContext(requireActor: boolean): Promise<CommonContext & { actorApplicationId?: string; actorToken?: string; actor?: DiscordBotApi }> {
@@ -318,7 +327,11 @@ async function commonContext(requireActor: boolean): Promise<CommonContext & { a
   const deployedShaSource = requiredEnv('TWO_STAGING_DEPLOYED_SHA_SOURCE');
   const guildId = requiredEnv('DISCORD_STAGING_GUILD_ID');
   const dbUrl = requiredEnv('TWO_STAGING_DATABASE_URL');
-  databaseGuard(dbUrl);
+  const databaseFingerprint = validateStagingDatabaseIdentity(
+    dbUrl,
+    requiredEnv('TWO_STAGING_DATABASE_HOST'),
+    requiredEnv('TWO_STAGING_DATABASE_NAME'),
+  );
 
   const owenToken = readSecret('discord_staging_token', ['DISCORD_STAGING_BOT_TOKEN']);
   if (!owenToken) throw new Error('Missing DISCORD_STAGING_BOT_TOKEN.');
@@ -356,11 +369,15 @@ async function commonContext(requireActor: boolean): Promise<CommonContext & { a
     poolMax: 1,
     applicationName: `two-bot-tog-3787-${runId}`,
   });
-  const [lockHigh, lockLow] = acceptanceLockKey();
-  const lock = await db.prepare('SELECT pg_try_advisory_lock(?, ?) AS locked').get<{ locked: boolean }>(lockHigh, lockLow);
-  if (!lock?.locked) {
+  try {
+    const [lockHigh, lockLow] = acceptanceLockKey();
+    const lock = await db.prepare('SELECT pg_try_advisory_lock(?, ?) AS locked').get<{ locked: boolean }>(lockHigh, lockLow);
+    if (!lock?.locked) {
+      throw new Error('Another TOG-3787 acceptance job holds the staging advisory lock; exactly one E2E job is allowed.');
+    }
+  } catch (error) {
     await db.close();
-    throw new Error('Another TOG-3787 acceptance job holds the staging advisory lock; exactly one E2E job is allowed.');
+    throw error;
   }
 
   const base: CommonContext = {
@@ -372,6 +389,7 @@ async function commonContext(requireActor: boolean): Promise<CommonContext & { a
     deployedShaSource,
     guildId,
     dbUrl,
+    databaseFingerprint,
     owenToken,
     owen,
     guildConfig,
@@ -487,6 +505,7 @@ async function runPreflight(flags: Map<string, string | true>): Promise<void> {
         liveGuildContacted: false,
         maxRoleDeletes: ANTI_NUKE_ACCEPTANCE_MAX_ROLE_DELETES,
         e2eAdvisoryLock: true,
+        databaseFingerprint: context.databaseFingerprint,
       },
       actor,
       acceptedSnapshotHash: accepted.hash,
@@ -527,40 +546,67 @@ async function updateManifest(path: string, manifest: Manifest): Promise<void> {
 
 async function cleanupFixtures(api: DiscordBotApi, manifest: Manifest, manifestPath?: string): Promise<string[]> {
   const actions: string[] = [];
+  const recoveredRoleIds: string[] = [];
   const roles = await api.read<DiscordRole[]>(`/guilds/${manifest.guildId}/roles`);
   const byId = new Map(roles.map((role) => [role.id, role]));
-  const expectedNames = new Map<string, string>();
-  if (manifest.roleIds.capability) expectedNames.set(manifest.roleIds.capability, manifest.names.capability);
-  manifest.roleIds.targets.forEach((id, index) => expectedNames.set(id, manifest.names.targets[index] ?? ''));
-  for (const [id, expectedName] of expectedNames) {
-    const role = byId.get(id);
-    if (role && role.name !== expectedName) {
-      throw new Error(`Refusing cleanup: role ${id} is now named "${role.name}", expected run fixture "${expectedName}".`);
+  const startedAt = Date.parse(manifest.createdAt);
+  const expected = [
+    { kind: 'capability', name: manifest.names.capability, recordedId: manifest.roleIds.capability },
+    ...manifest.names.targets.map((name, index) => ({
+      kind: `target-${index + 1}`,
+      name,
+      recordedId: manifest.roleIds.targets[index] ?? null,
+    })),
+  ];
+  const cleanupRoles: Array<{ kind: string; id: string; name: string }> = [];
+
+  for (const fixture of expected) {
+    if (fixture.recordedId) {
+      const role = byId.get(fixture.recordedId);
+      if (role && role.name !== fixture.name) {
+        throw new Error(`Refusing cleanup: role ${fixture.recordedId} is now named "${role.name}", expected run fixture "${fixture.name}".`);
+      }
+      cleanupRoles.push({ kind: fixture.kind, id: fixture.recordedId, name: fixture.name });
+      continue;
+    }
+
+    // A process kill can land after Discord creates a role but before its ID is
+    // fsynced into the manifest. Recover only an exact expected name whose
+    // snowflake proves it was created during this run; never search by prefix.
+    const matches = roles.filter((role) =>
+      role.name === fixture.name
+      && discordSnowflakeTimestamp(role.id) >= startedAt - 5_000);
+    if (matches.length > 1) throw new Error(`Refusing cleanup: multiple post-start roles are named "${fixture.name}".`);
+    if (matches.length === 1) {
+      recoveredRoleIds.push(matches[0].id);
+      cleanupRoles.push({ kind: fixture.kind, id: matches[0].id, name: fixture.name });
+      actions.push(`recovered unpersisted fixture role ${matches[0].id} by exact name and post-start snowflake`);
     }
   }
 
-  if (manifest.roleIds.capability) {
+  const capability = cleanupRoles.find((role) => role.kind === 'capability');
+  if (capability) {
     await api.write<null>(
       'DELETE',
-      `/guilds/${manifest.guildId}/members/${manifest.actorApplicationId}/roles/${manifest.roleIds.capability}`,
+      `/guilds/${manifest.guildId}/members/${manifest.actorApplicationId}/roles/${capability.id}`,
       undefined,
       `TOG-3787 ${manifest.runId} cleanup remove capability`,
       [204, 404],
     );
-    actions.push(`removed capability role ${manifest.roleIds.capability} from actor or it was already absent`);
+    actions.push(`removed capability role ${capability.id} from actor or it was already absent`);
   }
-  for (const id of [...manifest.roleIds.targets, ...(manifest.roleIds.capability ? [manifest.roleIds.capability] : [])]) {
+  for (const fixture of cleanupRoles) {
     await api.write<null>(
       'DELETE',
-      `/guilds/${manifest.guildId}/roles/${id}`,
+      `/guilds/${manifest.guildId}/roles/${fixture.id}`,
       undefined,
       `TOG-3787 ${manifest.runId} cleanup delete fixture role`,
       [204, 404],
     );
-    actions.push(`deleted fixture role ${id} or it was already absent`);
+    actions.push(`deleted fixture role ${fixture.id} or it was already absent`);
   }
   manifest.discordWrites = [...new Set([...manifest.discordWrites, ...api.writes])];
-  manifest.cleanup = { completedAt: new Date().toISOString(), actions };
+  manifest.cleanup = { completedAt: new Date().toISOString(), actions, recoveredRoleIds };
   if (manifestPath) await updateManifest(manifestPath, manifest);
   return actions;
 }
@@ -615,14 +661,20 @@ async function runDrive(flags: Map<string, string | true>): Promise<void> {
   let gatewayEvidence: ReturnType<typeof evaluateGatewayEvidence> | null = null;
   let selectedAuditEntries: DiscordAuditEntry[] = [];
   let runRows: Awaited<ReturnType<typeof readRunRows>> = { containmentRows: [], incidents: [] };
-  const countsBefore = await tableCounts(context.db, context.guildId, context.actorApplicationId);
+  let countsBefore: Record<string, number> | null = null;
   try {
+    countsBefore = await tableCounts(context.db, context.guildId, context.actorApplicationId);
     if (!context.verifierConfig.ready) {
       throw new Error(`Full staging verifier inputs are incomplete: ${context.verifierConfig.missing.join(', ')}.`);
     }
     const actor = await actorPreflight(context);
     before = await context.guildConfig.capture();
     acceptedHash = acceptedSnapshot(snapshotPath, before).hash;
+    const fixtureNameSet = new Set([names.capability, ...names.targets]);
+    const existingFixtures = before.roles.filter((role) => fixtureNameSet.has(role.name));
+    if (existingFixtures.length > 0) {
+      throw new Error(`Run-specific fixture name already exists: ${existingFixtures.map((role) => role.name).join(', ')}.`);
+    }
 
     for (const name of names.targets) {
       const role = await createRole(context.owen, name, '0', `TOG-3787 ${context.runId} create delete fixture`);
@@ -727,14 +779,27 @@ async function runDrive(flags: Map<string, string | true>): Promise<void> {
     } catch (error) {
       cleanupError ??= error;
     }
-    const countsAfter = await tableCounts(context.db, context.guildId, context.actorApplicationId);
+    let countsAfter: Record<string, number> | null = null;
+    let evidenceCollectionError: unknown = null;
+    try {
+      countsAfter = await tableCounts(context.db, context.guildId, context.actorApplicationId);
+    } catch (error) {
+      evidenceCollectionError = error;
+    }
+    const preHash = before ? configHash(canonicalSnapshot(before)) : null;
+    const semanticRestored = preHash !== null && postHash === preHash && restoreOperations === 0;
+    const success = !driveError
+      && !cleanupError
+      && !evidenceCollectionError
+      && gatewayEvidence?.ok === true
+      && semanticRestored;
     const evidence = {
       version: 1,
       kind: 'two-staging-anti-nuke-gateway-acceptance',
       generatedAt: new Date().toISOString(),
       runId: context.runId,
-      classification: gatewayEvidence?.ok ? 'real_gateway_audit_receipt' : 'unproven',
-      success: !driveError && !cleanupError && gatewayEvidence?.ok === true && before !== null && postHash === configHash(canonicalSnapshot(before)),
+      classification: success ? 'real_gateway_audit_receipt' : 'unproven',
+      success,
       target: {
         requiredSha: ANTI_NUKE_ACCEPTANCE_TARGET_SHA,
         checkoutSha: context.targetSha,
@@ -750,12 +815,14 @@ async function runDrive(flags: Map<string, string | true>): Promise<void> {
         destructiveScenarioCount: manifest.roleIds.targets.length,
         maxDestructiveScenarioCount: ANTI_NUKE_ACCEPTANCE_MAX_ROLE_DELETES,
         e2eAdvisoryLock: true,
+        databaseFingerprint: context.databaseFingerprint,
       },
       expectation: expected,
       startedAt,
       acceptedSnapshotHash: acceptedHash || null,
-      preSemanticHash: before ? configHash(canonicalSnapshot(before)) : null,
+      preSemanticHash: preHash,
       postSemanticHash: postHash,
+      semanticRestored,
       restoreOperations,
       rowCounts: { before: countsBefore, after: countsAfter },
       fixtures: manifest,
@@ -765,11 +832,23 @@ async function runDrive(flags: Map<string, string | true>): Promise<void> {
       gatewayVerdict: gatewayEvidence,
       cleanup: { actions: cleanupActions, error: cleanupError instanceof Error ? cleanupError.message : cleanupError ? String(cleanupError) : null },
       error: driveError instanceof Error ? driveError.message : driveError ? String(driveError) : null,
+      evidenceCollectionError: evidenceCollectionError instanceof Error
+        ? evidenceCollectionError.message
+        : evidenceCollectionError
+          ? String(evidenceCollectionError)
+          : null,
+      provenance: {
+        driverDatabaseWrites: 0,
+        limitation: 'Correlation proves matching Discord audit and durable rows; operator custody of the staging database and deployment evidence remains part of the acceptance chain.',
+      },
       fullVerifierConfig: context.verifierConfig,
     };
-    atomicJson(outputPath, evidence);
-    console.log(JSON.stringify(evidence, null, 2));
-    await context.db.close();
+    try {
+      atomicJson(outputPath, evidence);
+      console.log(JSON.stringify(evidence, null, 2));
+    } finally {
+      await context.db.close();
+    }
     if (!evidence.success) process.exitCode = 1;
   }
 }
@@ -873,6 +952,7 @@ async function runVerifyJoin(flags: Map<string, string | true>): Promise<void> {
         liveGuildContacted: false,
         joinScenarioCount: 1,
         humanTokenAccepted: false,
+        databaseFingerprint: context.databaseFingerprint,
       },
       lowerBound: since,
       expectation: { bulkJoinWindow: expectedBulkWindow, flagged: expectedFlagged },
@@ -881,6 +961,10 @@ async function runVerifyJoin(flags: Map<string, string | true>): Promise<void> {
       riskRows,
       verdict,
       discordWrites: [],
+      provenance: {
+        driverDatabaseWrites: 0,
+        limitation: 'Correlation proves matching Discord membership and durable rows; operator custody of the staging database and deployment evidence remains part of the acceptance chain.',
+      },
     };
     atomicJson(outputPath, evidence);
     console.log(JSON.stringify(evidence, null, 2));

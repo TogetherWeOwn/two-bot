@@ -10,6 +10,7 @@ import {
   selectFixtureAuditEntries,
 } from '../src/staging/antiNukeAcceptance.ts';
 import { STAGING_BOT_APPLICATION_ID, TWO_STAGING_GUILD_ID } from '../src/staging/spec.ts';
+import { validateStagingDatabaseIdentity } from '../scripts/staging-anti-nuke-acceptance.ts';
 
 const ACTOR = '111111111111111111';
 const CAPABILITY = '222222222222222222';
@@ -49,6 +50,25 @@ test('hard fences pin the staging guild, Owen app, and exact acceptance SHA', ()
     targetSha: ANTI_NUKE_ACCEPTANCE_TARGET_SHA,
     deployedSha: '0000000000000000000000000000000000000000',
   }), /Staging deployment/);
+});
+
+test('database fence requires the exact staging host and database name', () => {
+  const fingerprint = validateStagingDatabaseIdentity(
+    'postgresql://user:password@staging-db.internal:5432/two_staging',
+    'staging-db.internal',
+    'two_staging',
+  );
+  assert.match(fingerprint, /^[a-f0-9]{64}$/);
+  assert.throws(() => validateStagingDatabaseIdentity(
+    'postgresql://user:password@production-db.internal:5432/two_staging',
+    'staging-db.internal',
+    'two_staging',
+  ), /exact TWO_STAGING_DATABASE_HOST/);
+  assert.throws(() => validateStagingDatabaseIdentity(
+    'postgresql://user:password@staging-db.internal:5432/production_test_copy',
+    'staging-db.internal',
+    'two_staging',
+  ), /exact TWO_STAGING_DATABASE_HOST/);
 });
 
 test('fixture names are attributable and bounded to two delete targets', () => {

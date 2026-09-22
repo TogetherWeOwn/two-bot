@@ -44,7 +44,9 @@ Official contracts used by the driver:
 | `TWO_STAGING_DEPLOYED_SHA_SOURCE` | URL or durable reference for the deployment evidence that reported the SHA. |
 | `DISCORD_STAGING_GUILD_ID` | Must be `1545644954272137297`. |
 | `TWO_STAGING_ACTOR_APPLICATION_ID` | Public ID of a staging-only disposable bot app, different from Owen. Required by `preflight` and `drive`. |
-| `TWO_STAGING_DATABASE_URL` | Staging/test Postgres database URL. |
+| `TWO_STAGING_DATABASE_URL` | Staging Postgres database URL. |
+| `TWO_STAGING_DATABASE_HOST` | Exact hostname expected in the staging URL; substring matching is not accepted. |
+| `TWO_STAGING_DATABASE_NAME` | Exact database name expected in the staging URL; substring matching is not accepted. |
 | accepted guild snapshot | Snapshot configured for the runtime's `TWO_ANTI_NUKE_SNAPSHOT_PATH`; supplied with `--snapshot`. |
 | `TWO_AUDIT_ACCEPTANCE_SINCE` | Fresh ISO lower bound immediately before the complete acceptance window. |
 | `TWO_SELF_ROLE_PANELS` | Non-empty, full button/select/reaction panel configuration consumed by `staging-verify.ts`. |
@@ -105,6 +107,8 @@ export TWO_STAGING_DEPLOYED_SHA="f5fd3e1d6d08847589d3bf48ebc0b0e198196e90"
 export TWO_STAGING_DEPLOYED_SHA_SOURCE="<deployment evidence URL or durable reference>"
 export DISCORD_STAGING_GUILD_ID="1545644954272137297"
 export TWO_STAGING_ACTOR_APPLICATION_ID="<staging-only bot application id>"
+export TWO_STAGING_DATABASE_HOST="<exact staging database hostname>"
+export TWO_STAGING_DATABASE_NAME="<exact staging database name>"
 export TWO_AUDIT_ACCEPTANCE_SINCE="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
 RUN_DIR="$PAPERCLIP_RUN_SCRATCH_DIR/$TWO_ACCEPTANCE_RUN_ID"
 mkdir -p "$RUN_DIR"
@@ -168,7 +172,7 @@ The only dangerous role the actor holds is the run-created Manage Roles capabili
 
 ## Interrupted-run rollback
 
-The manifest is updated after every fixture creation and assignment. Rollback never searches by prefix and never resets the guild; it addresses only the recorded IDs and first confirms any surviving role still has the expected run-specific name.
+The manifest is updated after every fixture creation and assignment. Rollback never searches by prefix and never resets the guild. It addresses recorded IDs and confirms any surviving role still has the expected run-specific name. If the process was killed after Discord created a role but before its ID was fsynced, cleanup may recover only one role with the exact planned name whose snowflake timestamp is after this manifest's start; any ambiguity refuses cleanup.
 
 ```bash
 npm run staging:anti-nuke -- \
@@ -179,11 +183,12 @@ npm run staging:anti-nuke -- \
 
 Rollback operations are narrowly enumerated:
 
-1. remove the recorded capability role from the recorded actor, if still assigned;
-2. delete the two recorded target roles, if still present;
-3. delete the recorded capability role, if still present.
+1. recover a missing manifest ID only by exact planned name plus post-start snowflake, if needed;
+2. remove the recorded/recovered capability role from the recorded actor, if still assigned;
+3. delete the two recorded/recovered target roles, if still present;
+4. delete the recorded/recovered capability role, if still present.
 
-If a recorded ID now has another name, cleanup refuses rather than deleting unknown state.
+If a recorded ID now has another name, or exact-name recovery is ambiguous, cleanup refuses rather than deleting unknown state.
 
 ## Real join observation
 
@@ -241,4 +246,4 @@ Register these artifacts together:
 - `staging-verify.txt` with its real exit code;
 - accepted snapshot reference and semantic pre/post hashes.
 
-Only `classification: real_gateway_audit_receipt` is destructive gateway evidence. Only `classification: real_gateway_join_correlated` is a real join observation. `classification: unproven`, injected rows, direct observer calls, or a throwing Discord stub are not substitutes.
+Only `classification: real_gateway_audit_receipt` with `success: true`, `semanticRestored: true`, zero restore operations, and no cleanup/evidence error is destructive gateway evidence. Only `classification: real_gateway_join_correlated` with `success: true` is a real join observation. Both are Discord-to-database correlations; custody of the staging database and the cited deployment evidence remains part of the proof chain. `classification: unproven`, injected rows, direct observer calls, or a throwing Discord stub are not substitutes.
