@@ -54,6 +54,7 @@ const FLAGS: Record<OverwriteFlag, bigint> = {
   Speak: PermissionFlagsBits.Speak,
   ManageChannels: PermissionFlagsBits.ManageChannels,
   MoveMembers: PermissionFlagsBits.MoveMembers,
+  ManageRoles: PermissionFlagsBits.ManageRoles,
 };
 
 function discordCode(err: unknown): number | null {

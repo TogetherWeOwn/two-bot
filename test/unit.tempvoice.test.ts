@@ -452,6 +452,25 @@ describe('permission preflight', () => {
     assert.deepEqual([...granted].sort(), [...TEMP_VOICE_REQUIRED_PERMISSIONS].sort());
   });
 
+  for (const permission of TEMP_VOICE_REQUIRED_PERMISSIONS) {
+    test(`missing ${permission} refuses before any create, move, or reservation`, async () => {
+      gateway.lackedPermissions = new Set([permission]);
+      const result = await join(service(), OWNER);
+      assert.equal(result.status, 'refused');
+      assert.match(result.status === 'refused' ? result.reason : '', new RegExp(permission));
+      assert.equal(gateway.createCalls, 0);
+      assert.deepEqual(gateway.moves, []);
+      assert.equal(await store.countForGuild(GUILD), 0);
+      assert.equal(await store.lastCreatedAt(GUILD, OWNER), null);
+    });
+  }
+
+  test('ManageRoles belongs only to the bot channel overwrite, not the owner', () => {
+    const botId = gateway.botUserId();
+    const overwrites = tempVoiceOverwrites(GUILD, botId, OWNER);
+    assert.deepEqual(overwrites.filter((spec) => spec.allow?.includes('ManageRoles')).map((spec) => spec.id), [botId]);
+  });
+
   test('names the missing permission rather than failing opaquely', async () => {
     gateway.lackedPermissions = new Set<OverwriteFlag>(['MoveMembers']);
     const result = await service().preflight(GUILD);
@@ -798,6 +817,25 @@ describe('owner controls', () => {
 });
 
 describe('anti-abuse under a race', () => {
+  test('different users cannot overbook the last guild slot', async () => {
+    const outcomes = await Promise.all(Array.from({ length: 12 }, (_, i) =>
+      store.reserveIfUnderCaps({
+        guildId: GUILD,
+        generatorId: GENERATOR,
+        categoryId: CATEGORY,
+        ownerId: `${OWNER}${i}`,
+        name: 'last guild slot',
+        createdAt: new Date(clock).toISOString(),
+        maxPerUser: 1,
+        maxPerGuild: 1,
+        cooldownSeconds: 0,
+      }),
+    ));
+    assert.equal(outcomes.filter((outcome) => outcome.ok).length, 1);
+    assert.equal(outcomes.filter((outcome) => !outcome.ok && outcome.reason === 'guild_cap').length, 11);
+    assert.equal(await store.countForGuild(GUILD), 1);
+  });
+
   test('two simultaneous joins cannot both win the last slot', async () => {
     const svc = service(config({ maxPerUser: 1 }));
     gateway.channels.get(GENERATOR)!.members.push(OWNER);
