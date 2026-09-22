@@ -69,9 +69,9 @@ These are proof-only transport settings, not changes to production retry policy.
 - Hierarchy is **not applicable** to these operations: LFG slot labels do not
   assign Discord member roles. Owner/admin bypass is not counted as permission
   proof. Other slices own actual role-hierarchy tests.
-- RSVP currently accepts a snowflake-shaped event ID without existence/status
-  validation. This proof uses an event created by the run; it does not claim
-  RSVP refusal on missing/cancelled events.
+- RSVP validates each snowflake-shaped event ID with Discord's live scheduled
+  event endpoint before writing. The proof checks that a missing event (404) and
+  the run's cancelled event are both refused without changing RSVP/audit state.
 - Scheduled-event updates/cancellation change that Discord event. There is no
   claim that previously posted announcement text is automatically rewritten,
   that followers get an additional notification, or that LFG closure is wired
