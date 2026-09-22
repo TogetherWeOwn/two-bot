@@ -120,7 +120,7 @@ async function launch(db: TestDb, mode: Mode, mutation = false, wrongGuild = fal
       await mock.close();
     }
     assert.equal(forced, false, `child required SIGKILL\n${log}`);
-    const invalidFlag = containment !== undefined && containment !== '0' && containment !== '1';
+    const invalidFlag = containment !== undefined && containment !== '' && containment !== '0' && containment !== '1';
     if (!wrongGuild && !invalidFlag) assert.equal(bot.exitCode, 0, `child shutdown must be clean\n${log}`);
     assert.throws(() => process.kill(bot.pid!, 0), { code: 'ESRCH' }, 'no leaked child process');
   };
@@ -244,7 +244,7 @@ test('wrong staging guild binding refuses real boot before database or Discord u
 test('invalid containment flags refuse boot before database or Discord use', { timeout: 60_000 }, async () => {
   const db = await openTestDb(`rota_capability_invalid_${process.pid}`);
   try {
-    for (const flag of ['true', '', 'yes', '2']) {
+    for (const flag of ['true', 'yes', '2']) {
       const harness = await launch(db, 'notice-off', false, false, flag);
       try {
         await until(() => harness.bot.exitCode !== null, 'invalid containment flag stops boot');
@@ -269,8 +269,8 @@ test('without the exact flag the identify capability is unchanged from productio
   const db = await openTestDb(`rota_capability_off_${process.pid}`);
   try {
     // Client construction treats non-'1' as inert; the full entrypoint separately
-    // rejects malformed flags. Only absent and explicit '0' may boot normally.
-    for (const [label, flag] of [['absent', undefined], ['"0"', '0']] as const) {
+    // rejects malformed flags. Absent, empty and explicit '0' boot normally.
+    for (const [label, flag] of [['absent', undefined], ['empty', ''], ['"0"', '0']] as const) {
       const harness = await launch(db, 'notice-off', false, false, flag);
       try {
         await until(() => {
