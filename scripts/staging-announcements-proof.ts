@@ -147,12 +147,12 @@ try {
     const result = await res.json() as { ok: boolean; result?: { event_id?: string; message_id?: string; outcome?: string }; error?: { code: string } };
     return { status: res.status, replay: res.headers.get('idempotent-replay') === 'true', ...result };
   }
-  const announce = { action: 'announcement.post', channel_key: 'proof', content: `${marker} event-announcement proof` };
+  const announce = { action: 'announcement.post', channel_key: 'proof', body: `${marker} event-announcement proof` };
   const posted = await signed(announce, 'post');
   if (posted.result?.message_id) remember(posted.result.message_id);
   requireCheck('announcement.post', posted.ok && !!posted.result?.message_id, `HTTP ${posted.status}`);
   const postedMessage = await get<Message>(`/channels/${report.channelId}/messages/${posted.result!.message_id}`);
-  requireCheck('announcement.readback', postedMessage.content === announce.content && ownsProofMessage(postedMessage, marker), 'same content and QA bot author');
+  requireCheck('announcement.readback', postedMessage.content === announce.body && ownsProofMessage(postedMessage, marker), 'same content and QA bot author');
   const postReplay = await signed(announce, 'post');
   requireCheck('announcement.replay', postReplay.replay && postReplay.result?.message_id === posted.result?.message_id, 'same idempotency key returns same message');
   const forbidden = await signed({ ...announce, channel_key: 'denied' }, 'denied');
