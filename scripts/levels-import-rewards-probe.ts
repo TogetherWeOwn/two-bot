@@ -9,7 +9,8 @@
  * in this script or in the module behind it, which is what makes "zero writes"
  * a property rather than a promise. The only database statement it issues is
  * the SELECT behind `roleRewards`, so the report can show the delta against
- * what is already stored. Pass --no-db to skip even that.
+ * what is already stored, and it opens the connection with migrations off so
+ * it cannot write schema either. Pass --no-db to skip even that.
  *
  * Roles come from a snapshot file rather than the network - the same shape
  * `audit/raw/roles.json` already has - so the probe is deterministic, runs
@@ -148,7 +149,16 @@ let storedRewards: LevelRoleReward[] | null = null;
 if (useDb) {
   const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
   if (!databaseUrl) throw new Error('TWO_DATABASE_URL is required. Pass --no-db to skip the delta.');
-  const db = await openDb(databaseUrl, { poolMax: Number(process.env.TWO_DB_POOL_MAX ?? 5) });
+  // skipMigrations, which no other script passes, is the point rather than an
+  // optimisation. openDb migrates by default, so a "read-only" probe would
+  // otherwise be able to create tables and rewrite schema on a database an
+  // operator pointed it at by accident - and "it wrote nothing" would be a
+  // claim about one table instead of about the connection. A probe that finds
+  // the schema missing should say so, not build it.
+  const db = await openDb(databaseUrl, {
+    poolMax: Number(process.env.TWO_DB_POOL_MAX ?? 5),
+    skipMigrations: true,
+  });
   try {
     storedRewards = await new LevelingService(db).roleRewards(guildId);
   } finally {
