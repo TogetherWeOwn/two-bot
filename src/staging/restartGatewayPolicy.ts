@@ -1,10 +1,10 @@
 /**
  * Bounded strict gateway ingress policy (TOG-3903 checkpoint).
  *
- * UNWIRED shape checkpoint: fixture success here does NOT establish genuine
- * handshake compatibility or owner membership against a live/mock gateway.
- * Integration remains a separate documented gate; do not wire this into the
- * strategy/dispatcher solely because the fixtures below admit.
+ * FIXTURE-ONLY readability/shape contract after the TOG-4007 decision. Do not
+ * wire this strict synthetic-owner/exact-key policy into actual-staging
+ * dispatch. restartGatewayAdmission separates identity/event admission from
+ * this contract; neither predicate is persistence consent or execution approval.
  *
  * Fail-closed allowlist for the staging restart seam. Admits only the narrow
  * metadata-safe subset needed for READY, GUILD_CREATE, GUILD_MEMBER_ADD,
