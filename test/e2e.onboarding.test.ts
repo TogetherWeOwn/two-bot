@@ -316,7 +316,11 @@ test(
       `channel_routed recorded.\n${botLog.join('')}`,
     );
 
-    const reply = ephemeralReplies(mock).at(-1) ?? '';
+    // routed() commits before editReply(); the row is not a delivery barrier.
+    const reply = await waitFor(
+      () => ephemeralReplies(mock).at(-1),
+      `the routing reply.\n${botLog.join('')}`,
+    );
     assert.match(
       reply,
       new RegExp(shooters.primaryChannelId!),
