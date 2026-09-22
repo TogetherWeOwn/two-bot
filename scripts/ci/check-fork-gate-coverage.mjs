@@ -6,6 +6,7 @@
 import { lstatSync, readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isDeepStrictEqual } from 'node:util';
 import { parseDocument, visit } from 'yaml';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -13,7 +14,16 @@ const GATE = 'fork-gate';
 const GUARD = './scripts/ci/refuse-fork-pr.sh';
 const BASE_REF = '${{ github.event.pull_request.base.sha || github.sha }}';
 const HEAD_REPO = '${{ github.event.pull_request.head.repo.full_name }}';
-const BOOTSTRAP_IF = "${{ hashFiles('scripts/ci/refuse-fork-pr.sh') == '' }}";
+const HEAD_REF = '${{ github.event.pull_request.head.sha || github.sha }}';
+const TAIL = [
+  { uses: 'actions/setup-node@v4', with: { 'node-version': '24' } },
+  { run: 'npm ci --ignore-scripts --prefix scripts/ci' },
+  {
+    uses: 'actions/checkout@v5',
+    with: { ref: HEAD_REF, path: 'candidate', 'sparse-checkout': '.github/workflows', 'persist-credentials': false },
+  },
+  { run: './scripts/ci/refuse-fork-pr.test.sh "$GITHUB_WORKSPACE/candidate"' },
+];
 const map = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 const keysWithin = (value, keys) => Object.keys(value).every((key) => keys.includes(key));
 
@@ -57,19 +67,30 @@ function gateProblems(gate) {
   }
   const steps = gate.steps;
   if (!checkout(steps[0], BASE_REF)) errors.push('fork-gate must first check out the trusted base with credentials disabled');
-  let guardIndex = 1;
-  if (steps[1]?.uses === 'actions/checkout@v5') {
-    const { if: condition, ...bootstrap } = steps[1];
-    if (condition !== BOOTSTRAP_IF || !/^[0-9a-f]{40}$/.test(bootstrap.with?.ref ?? '') ||
-        !checkout(bootstrap, bootstrap.with?.ref)) {
-      errors.push('bootstrap must use an immutable reviewed SHA only when the base guard is absent');
-    }
-    guardIndex = 2;
-  }
-  const guard = steps[guardIndex];
+  // Land these policy files independently before introducing the workflow.
+  // A candidate-selected bootstrap SHA is not a trust anchor, even if immutable.
+  // Once the policy is on main, the base checkout is the only policy source.
+  if (steps[1]?.uses === 'actions/checkout@v5') errors.push('bootstrap checkouts are forbidden; land policy on the base first');
+  const guard = steps[1];
   if (!map(guard) || !keysWithin(guard, ['name', 'env', 'run']) || typeof guard.run !== 'string' || guard.run.trim() !== GUARD ||
       !map(guard.env) || !keysWithin(guard.env, ['PR_HEAD_REPO']) || guard.env.PR_HEAD_REPO !== HEAD_REPO) {
     errors.push('fork-gate must run the trusted refusal unconditionally before any other steps');
+  }
+  // Validate the WHOLE tail, not just the refusal prefix. Exact shapes retain
+  // implicit success(), disallow shell/env/error overrides, and require the
+  // trusted checker to read candidate data without executing candidate code.
+  if (steps.length !== 2 + TAIL.length) errors.push('fork-gate must contain exactly the six trusted policy steps');
+  for (const [index, expected] of TAIL.entries()) {
+    const step = steps[index + 2];
+    if (!map(step)) {
+      errors.push(`fork-gate step ${index + 3}: missing trusted candidate-coverage step`);
+      continue;
+    }
+    const { name, ...actual } = step;
+    if (typeof actual.run === 'string') actual.run = actual.run.trim();
+    if (!isDeepStrictEqual(actual, expected)) {
+      errors.push(`fork-gate step ${index + 3}: must use the trusted candidate-coverage step with default success() and no overrides`);
+    }
   }
   return errors;
 }
