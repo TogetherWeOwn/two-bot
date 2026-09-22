@@ -118,6 +118,7 @@ try {
     postMessage: async (c, text, options) => remember(await discord.postMessage(c, text, options)),
     editMessage: (...args) => discord.editMessage(...args),
     findMessageByNonce: (...args) => discord.findMessageByNonce(...args),
+    getScheduledEventStatus: (...args) => discord.getScheduledEventStatus(...args),
   }, { read: async () => snapshot });
 
   const denied = await api<Channel>(`/guilds/${GUILD}/channels`, 'POST', {
@@ -193,6 +194,15 @@ try {
   async function dispatch(value: unknown) {
     for (const listener of bus.listeners('interactionCreate')) await listener(value);
   }
+  const missingEventId = (BigInt(Date.now()) << 22n).toString();
+  replies.length = 0;
+  await dispatch(interaction('rsvp', { 'event-id': missingEventId, status: 'going' }));
+  requireCheck(
+    'rsvp.unknown',
+    JSON.stringify(replies).includes('No scheduled event with that id exists') &&
+      await store.getRsvp(GUILD, missingEventId, APP) === null,
+    'live Discord 404 is refused before an RSVP row is written',
+  );
   for (const status of ['going', 'going', 'interested']) {
     await dispatch(interaction('rsvp', { 'event-id': report.eventId!, status }));
   }
@@ -242,6 +252,22 @@ try {
   requireCheck('event.cancel', cancelled.ok && cancelled.result?.event_id === report.eventId, `HTTP ${cancelled.status}`);
   const cancelledReadback = await get<Event>(`/guilds/${GUILD}/scheduled-events/${report.eventId}`);
   requireCheck('event.cancel-readback', cancelledReadback.status === 4, 'Discord reports CANCELED; mapping retained');
+  const rsvpAuditBefore = await db.prepare(
+    `SELECT COUNT(*) AS total FROM announcements_audit_log WHERE guild_id = ? AND action = 'event.rsvp'`,
+  ).get<{ total: number }>(GUILD);
+  replies.length = 0;
+  await dispatch(interaction('rsvp', { 'event-id': report.eventId!, status: 'going' }));
+  const rsvpAuditAfter = await db.prepare(
+    `SELECT COUNT(*) AS total FROM announcements_audit_log WHERE guild_id = ? AND action = 'event.rsvp'`,
+  ).get<{ total: number }>(GUILD);
+  const attendanceAfterCancellation = await service.attendance(GUILD, report.eventId!);
+  requireCheck(
+    'rsvp.cancelled',
+    JSON.stringify(replies).includes('scheduled event is cancelled') &&
+      attendanceAfterCancellation.going.length === 0 && attendanceAfterCancellation.interested.length === 1 &&
+      Number(rsvpAuditAfter?.total) === Number(rsvpAuditBefore?.total),
+    'live Discord CANCELED status is refused without changing the RSVP row or audit count',
+  );
   await server.close();
   server = await start();
   const replayed = await signed(cancellation, 'cancel');

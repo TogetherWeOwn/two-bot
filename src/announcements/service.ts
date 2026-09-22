@@ -16,6 +16,7 @@ export interface AnnouncementDiscord {
   postMessage(channelId: string, content: string, options?: { nonce?: string; components?: unknown[] }): Promise<string>;
   editMessage(channelId: string, messageId: string, content: string, components?: unknown[]): Promise<void>;
   findMessageByNonce?(channelId: string, nonce: string): Promise<string | null>;
+  getScheduledEventStatus(guildId: string, eventId: string): Promise<number | null>;
 }
 
 export interface FeedItem {
@@ -54,6 +55,9 @@ export class AnnouncementsService {
     now?: Date;
   }): Promise<RsvpStatus> {
     assertSnowflake(input.eventId, 'event id');
+    const eventStatus = await this.discord.getScheduledEventStatus(input.guildId, input.eventId);
+    if (eventStatus === null) throw new Error('No scheduled event with that id exists in this server.');
+    if (eventStatus === 4) throw new Error('That scheduled event is cancelled.');
     const now = (input.now ?? new Date()).toISOString();
     await this.store.putRsvp({ ...input, respondedAt: now });
     await this.store.audit({
