@@ -255,9 +255,9 @@ the mock's bot and owner IDs are not the actual staging binding. No identity
 checker was relaxed and no owner, role or permission state was synthesized.
 
 The seam remains **unwired** in `src/index.ts`; normal and contained entrypoints
-are unchanged at this checkpoint. Before wiring, implement and independently
-verify a fail-closed event/field/actor policy covering READY, GUILD_CREATE and
-nested actor-bearing fields. If the genuine handshake cannot satisfy the saved
+are unchanged at this checkpoint. A candidate strict policy is now implemented
+below; before wiring, independently verify that policy and establish genuine
+handshake compatibility under the saved synthetic-only contract. If the genuine handshake cannot satisfy the saved
 synthetic-only contract without changing semantic facts, report that exact
 blocker and leave real T1 open. Refusing a handshake must not be presented as a
 successful full-app restart. Lower-level egress, process exclusivity, immutable
@@ -267,3 +267,53 @@ launch binding, cleanup/readiness integration and exact-head review remain gates
 imports of versions already present transitively. Node's standard library does
 not implement the discord.js shard strategy/context contract; these public
 primitives avoid duplicating the Discord protocol or using private hooks.
+
+### Candidate strict gateway payload policy (not installed)
+
+`createRestartGatewayPolicy` in `src/staging/restartGatewayPolicy.ts` adds a
+bounded all-or-nothing predicate for the existing forwarding seam. Its guild and
+bot identities are the fixed staging constants, not configurable test overrides.
+The synthetic actor set is validated and copied at construction; membership is
+configuration, **not proof that an account is synthetic or authorized**. The
+external binding/attestation gates remain necessary.
+
+Only READY, GUILD_CREATE, GUILD_MEMBER_ADD/UPDATE/REMOVE and metadata-only
+MESSAGE_CREATE have schemas. Unknown events, unknown object keys and unsupported
+nested structures refuse the entire event. READY requires the staging bot and
+only the staging guild. GUILD_CREATE requires an allowlisted synthetic owner,
+only bound members, and no unimplemented actor-bearing collections. Member
+permission overwrites require bound actors; role bot tags require the staging
+bot. Mixed safe/unsafe guild data is not projected into a sanitized guild.
+Original owner, roles, permissions and membership are never rewritten.
+
+Messages require a bound synthetic author, an agreeing nested member user when
+present, empty content/mentions/embeds/attachments, and no non-null referenced
+message. Reply, acknowledgement, voice and interaction paths are deliberately
+not supported by this checkpoint. Their positive acceptance rows remain open;
+a narrower allowed schema does not replace the original acceptance contract.
+
+`test/unit.stagingrestartgatewaypolicy.test.ts` uses handcrafted payloads and no
+network. Passing those tests does not establish compatibility with genuine
+Discord input, integration with the real entrypoint, or any actual T1 evidence.
+The older transport suite still uses its explicitly fixture-only predicate.
+Neither fixture bot/owner defaults nor the real entrypoint were changed here.
+
+**Integration blocker:** no evidence establishes that the genuine staging
+handshake's owner, members and nested actor-bearing fields are wholly covered by
+the saved synthetic binding. An unbound owner/member must reject the whole guild;
+it cannot be relabelled synthetic, removed from the payload, or replaced with an
+invented owner to obtain readiness. This policy also intentionally refuses extra
+Discord fields and all resume URLs other than `wss://gateway.discord.gg`.
+Consequently it may reject legitimate Discord handshakes. No live payload was
+fetched to fill this gap and no positive full-app restart is claimed. The minimum
+next compatibility evidence is an authorized, privacy-preserving determination
+that the genuine handshake can meet these bounds unchanged; otherwise a revised
+technical prerequisite must return to the parent, not silently waive the bounds.
+
+This remains **post-decoding/post-session-retention**: rejecting a READY payload
+here does not prevent the underlying shard from retaining its session/resume URL
+or attempting protocol traffic. Lower-level gateway destination/egress controls
+are a separate prerequisite, as are exclusive process ownership, dependency and
+immutable-launch integrity, integrated readiness/cleanup, trusted storage CI,
+exact-head independent approval/green CI/non-author merge, and operational
+authorization. Actual staging execution remains prohibited.
