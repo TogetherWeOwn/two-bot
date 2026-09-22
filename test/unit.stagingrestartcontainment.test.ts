@@ -11,7 +11,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { resolve } from 'node:path';
+import { join, resolve } from 'node:path';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { EventEmitter } from 'node:events';
 import { Events, type Client } from 'discord.js';
 import {
@@ -131,16 +133,16 @@ test('a fully-bound staging preflight passes', () => {
   assert.equal(r.ok, true);
 });
 
-test('armed() reads the same gate from the environment', () => {
-  assert.equal(stagingRestartContainmentArmed({}), false);
-  assert.equal(stagingRestartContainmentArmed({ TWO_STAGING_RESTART_CONTAINMENT: '1' }), false);
-  assert.equal(stagingRestartContainmentArmed({
-    TWO_STAGING_RESTART_CONTAINMENT: '1',
+test('armed() uses effective credentials, never a conflicting plain env token', () => {
+  assert.equal(stagingRestartContainmentArmed({}, controls()), false);
+  assert.equal(stagingRestartContainmentArmed(env(), controls({ discordToken: '' })), false);
+  assert.equal(stagingRestartContainmentArmed(env(), controls()), true);
+  assert.equal(stagingRestartContainmentArmed(env({
     DISCORD_BOT_TOKEN: tokenFor(STAGING_BOT_APPLICATION_ID),
-    TWO_DATABASE_URL: LOOPBACK_DB,
-    TWO_STAGING_DATABASE_URL: STAGING_DB,
-    DISCORD_GUILD_ID: STAGING,
-  }), true);
+  }), controls({ discordToken: tokenFor(LIVE_BOT_APPLICATION_ID) })), false);
+  assert.equal(stagingRestartContainmentArmed(env({
+    DISCORD_BOT_TOKEN: tokenFor(LIVE_BOT_APPLICATION_ID),
+  }), controls()), true);
 });
 
 test('synthetic actor allowlist: empty is a closed firewall, malformed is a hard error', () => {
@@ -275,6 +277,39 @@ test('real boot with the flag set and live token refuses before datastore_open',
   assert.match(output, /staging bot|Nothing was contacted|staging_restart_containment/i);
   assert.doesNotMatch(output, /datastore_open/);
   assert.doesNotMatch(output, /Gxxxxx|yyyyyyyyyy/);
+});
+
+test('real boot refuses unsafe credential files even when plain env looks safe', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'staging-restart-credentials-'));
+  try {
+    for (const fixture of [
+      { token: tokenFor(LIVE_BOT_APPLICATION_ID), database: LOOPBACK_DB, reason: /staging bot token/ },
+      { token: tokenFor(STAGING_BOT_APPLICATION_ID), database: 'postgres://two@db.invalid:5432/two_staging', reason: /loopback database/ },
+    ]) {
+      writeFileSync(join(dir, 'discord_token'), fixture.token, { mode: 0o600 });
+      writeFileSync(join(dir, 'database_url'), fixture.database, { mode: 0o600 });
+      const result = spawnSync(process.execPath, ['src/index.ts'], {
+        cwd: ROOT, encoding: 'utf8', timeout: 15_000,
+        env: {
+          PATH: process.env.PATH,
+          CREDENTIALS_DIRECTORY: dir,
+          DISCORD_BOT_TOKEN: tokenFor(STAGING_BOT_APPLICATION_ID),
+          TWO_DATABASE_URL: LOOPBACK_DB,
+          TWO_STAGING_DATABASE_URL: STAGING_DB,
+          DISCORD_GUILD_ID: STAGING,
+          TWO_STAGING_RESTART_CONTAINMENT: '1',
+          TWO_ONBOARDING_MODE: 'legacy',
+        },
+      });
+      assert.equal(result.error, undefined);
+      assert.notEqual(result.status, 0);
+      const output = result.stdout + result.stderr;
+      assert.match(output, fixture.reason);
+      assert.doesNotMatch(output, /datastore_open|Gxxxxx|yyyyyyyyyy|db\.invalid/);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('real boot without the flag preserves normal production behavior', () => {

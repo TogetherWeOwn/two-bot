@@ -167,14 +167,12 @@ export function assertStagingRestartPreflight(
   if (!verdict.ok) throw new Error(verdict.reason);
 }
 
-/** Whether the containment seam is armed in this process. */
-export function stagingRestartContainmentArmed(env: NodeJS.ProcessEnv = process.env): boolean {
-  return checkStagingRestartPreflight(env, {
-    discordToken: env.DISCORD_BOT_TOKEN ?? env.DISCORD_TOKEN ?? '',
-    databaseUrl: env.TWO_DATABASE_URL ?? '',
-    stagingDatabaseUrl: env.TWO_STAGING_DATABASE_URL ?? '',
-    guildId: env.DISCORD_GUILD_ID ?? '',
-  }).ok;
+/** Check the effective credentials loaded by the entrypoint, not a second env snapshot. */
+export function stagingRestartContainmentArmed(
+  env: NodeJS.ProcessEnv,
+  controls: StagingRestartPreflightControls,
+): boolean {
+  return checkStagingRestartPreflight(env, controls).ok;
 }
 
 /**

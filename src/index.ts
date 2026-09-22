@@ -139,28 +139,18 @@ setLogLevel(cfg.logLevel);
 // announcers, funnel firewall, audit member filter) apply to this process
 // only; normal production defaults, roleless onboarding semantics, rota
 // eligibility, source-cohort handling and the 30-minute delay are unchanged.
-const stagingRestartArmed = stagingRestartContainmentArmed(process.env);
-if (stagingRestartArmed) {
-  // cfg.discordToken/cfg.databaseUrl read through the systemd-credential path
-  // (not plain process.env), so pass the loaded values: a staging run maps
-  // DISCORD_BOT_TOKEN/TWO_DATABASE_URL deliberately per docs/STAGING.md.
-  assertStagingRestartPreflight(process.env, {
-    discordToken: cfg.discordToken,
-    databaseUrl: cfg.databaseUrl,
-    stagingDatabaseUrl: process.env.TWO_STAGING_DATABASE_URL ?? null,
-    guildId: cfg.guildId,
-  });
+// Both verdicts use the same effective config, including systemd credentials.
+// A conflicting plain env value must never make a refused boot continue.
+const stagingRestartControls = {
+  discordToken: cfg.discordToken,
+  databaseUrl: cfg.databaseUrl,
+  stagingDatabaseUrl: process.env.TWO_STAGING_DATABASE_URL ?? null,
+  guildId: cfg.guildId,
+};
+const stagingRestartArmed = stagingRestartContainmentArmed(process.env, stagingRestartControls);
+if (process.env.TWO_STAGING_RESTART_CONTAINMENT === '1') {
+  assertStagingRestartPreflight(process.env, stagingRestartControls);
   log.info('staging_restart_containment_armed', { guildId: cfg.guildId });
-} else if (process.env[ 'TWO_STAGING_RESTART_CONTAINMENT' ] === '1') {
-  // The flag was set but the preflight did not pass: refuse here, before the
-  // session-mode guard, the database open, or the gateway is touched — and
-  // name the reason without ever logging a secret.
-  assertStagingRestartPreflight(process.env, {
-    discordToken: process.env.DISCORD_BOT_TOKEN ?? process.env.DISCORD_TOKEN ?? cfg.discordToken,
-    databaseUrl: process.env.TWO_DATABASE_URL ?? cfg.databaseUrl,
-    stagingDatabaseUrl: process.env.TWO_STAGING_DATABASE_URL ?? null,
-    guildId: cfg.guildId,
-  });
 }
 
 if (cfg.onboardingMode === 'session' && selfRolePanels.length) {
