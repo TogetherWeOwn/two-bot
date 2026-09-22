@@ -81,10 +81,10 @@ function parseDisabledControls(raw: string | undefined): ReadonlySet<TempVoiceCo
 
 /**
  * A disabled feature must never throw on a half-configured environment, so the
- * ids are only validated once TWO_TEMP_VOICE=1 has asked for them.
+ * ids are only validated once TEMP_VOICE_ENABLED=1 (or legacy TWO_TEMP_VOICE=1) asks for them.
  */
 export function loadTempVoiceConfig(env: NodeJS.ProcessEnv = process.env): TempVoiceConfig {
-  const enabled = env.TWO_TEMP_VOICE === '1';
+  const enabled = (env.TEMP_VOICE_ENABLED ?? env.TWO_TEMP_VOICE) === '1';
   if (!enabled) {
     return {
       enabled: false,
@@ -105,7 +105,7 @@ export function loadTempVoiceConfig(env: NodeJS.ProcessEnv = process.env): TempV
   const guildId = env.DISCORD_GUILD_ID?.trim();
   if (guildId !== TWO_STAGING_GUILD_ID) {
     throw new Error(
-      `TWO_TEMP_VOICE=1 is staging-only: expected guild ${TWO_STAGING_GUILD_ID}, ` +
+      `Temporary voice is staging-only: expected guild ${TWO_STAGING_GUILD_ID}, ` +
       `got ${guildId || 'unset'}. Live rollout requires a separately reviewed operator change.`,
     );
   }

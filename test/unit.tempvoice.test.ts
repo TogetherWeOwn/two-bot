@@ -230,6 +230,18 @@ after(async () => dbFixture.cleanup());
 // ---------------------------------------------------------------------------
 
 describe('config', () => {
+  test('canonical flag enables staging, refuses live, and overrides the legacy flag', () => {
+    const env = {
+      TEMP_VOICE_ENABLED: '1',
+      DISCORD_GUILD_ID: GUILD,
+      TWO_TEMP_VOICE_GENERATOR_CHANNEL_ID: GENERATOR,
+      TWO_TEMP_VOICE_CATEGORY_ID: CATEGORY,
+    };
+    assert.equal(loadTempVoiceConfig(env).enabled, true);
+    assert.throws(() => loadTempVoiceConfig({ ...env, DISCORD_GUILD_ID: '1468919436503318553' }), /staging-only/);
+    assert.equal(loadTempVoiceConfig({ ...env, TEMP_VOICE_ENABLED: '0', TWO_TEMP_VOICE: '1' }).enabled, false);
+  });
+
   test('is off, and silent, when TWO_TEMP_VOICE is unset', () => {
     const cfg = loadTempVoiceConfig({});
     assert.equal(cfg.enabled, false);
