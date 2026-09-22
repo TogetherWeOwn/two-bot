@@ -4,7 +4,10 @@ import { readFile } from 'node:fs/promises';
 import pg from 'pg';
 import { announcementsProofConfig, assertProofIdentity, parseAnnouncementsProof } from './staging-announcements-state.ts';
 
+import { proofDiscordFetch } from './staging-discord-fetch.ts';
+
 export async function verifyAnnouncementsProof(path: string): Promise<void> {
+  const discordFetch = proofDiscordFetch({ onRateLimit: ms => console.log(`WAIT Discord 429: ${ms}ms before bounded retry`) });
   const { token, dbUrl } = announcementsProofConfig(process.env);
   const report = parseAnnouncementsProof(JSON.parse(await readFile(path, 'utf8')));
   assert.ok(report.checks.every(c => c.pass), 'proof report contains failures');
@@ -21,7 +24,7 @@ export async function verifyAnnouncementsProof(path: string): Promise<void> {
   for (const name of required) assert.ok(report.checks.some(c => c.name === name && c.pass), `missing proof check: ${name}`);
   assert.ok(report.messageIds.length >= 3, 'announcement, LFG and feed delivery IDs are required');
   async function get<T>(path: string, expected = 200): Promise<T> {
-    const res = await fetch(`https://discord.com/api/v10${path}`, {
+    const res = await discordFetch(`https://discord.com/api/v10${path}`, {
       headers: { Authorization: `Bot ${token}` }, signal: AbortSignal.timeout(15_000), redirect: 'error',
     });
     assert.equal(res.status, expected, `Discord GET ${path}`);

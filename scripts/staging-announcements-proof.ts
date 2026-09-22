@@ -23,6 +23,9 @@ import { KeyRing, sign } from '../src/internal/signing.ts';
 import { STAGING_BOT_APPLICATION_ID as APP, TWO_STAGING_GUILD_ID as GUILD } from '../src/staging/spec.ts';
 import { announcementsProofConfig, assertProofIdentity, ownsProofMessage, proofSchema, type AnnouncementsProof } from './staging-announcements-state.ts';
 
+import { proofDiscordFetch } from './staging-discord-fetch.ts';
+
+const discordFetch = proofDiscordFetch({ onRateLimit: ms => console.log(`WAIT Discord 429: ${ms}ms before bounded retry`) });
 const { token, dbUrl } = announcementsProofConfig(process.env);
 const output = process.argv.find(a => a.startsWith('--output='))?.slice(9);
 if (!output) throw new Error('A new --output=<report.json> file is required.');
@@ -47,7 +50,7 @@ const requireCheck = (name: string, pass: boolean, detail: string) => {
 };
 // Do not serialize upstream response bodies/errors, which may include credentials.
 async function api<T>(path: string, method = 'GET', body?: unknown): Promise<{ status: number; body: T }> {
-  const res = await fetch(`https://discord.com/api/v10${path}`, {
+  const res = await discordFetch(`https://discord.com/api/v10${path}`, {
     method, headers: { Authorization: `Bot ${token}`, 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(15_000),
     redirect: 'error',
@@ -110,7 +113,7 @@ try {
   db = await openDb(dbUrl, { schema, poolMax: 2, applicationName: 'tog3845-announcements-proof' });
   const internal = new InternalActionStore(db);
   store = new AnnouncementsStore(db);
-  const discord = new DiscordAnnouncements({ token });
+  const discord = new DiscordAnnouncements({ token, fetchImpl: discordFetch });
   const service = new AnnouncementsService(store, {
     postMessage: async (c, text, options) => remember(await discord.postMessage(c, text, options)),
     editMessage: (...args) => discord.editMessage(...args),
@@ -126,7 +129,7 @@ try {
   });
   assert.equal(denied.status, 201);
   report.deniedChannelId = denied.body.id;
-  const rest = new DiscordActions({ token });
+  const rest = new DiscordActions({ token, fetchImpl: discordFetch, contentTimeoutMs: 15_000 });
   const start = () => startInternalActions({
     host: '127.0.0.1', port: 0, keys: new KeyRing([{ id: keyId, secret }]), guildId: GUILD,
     discord: rest, roleKeys: new Map(), channelKeys: new Map([['proof', report.channelId], ['denied', report.deniedChannelId!]]),

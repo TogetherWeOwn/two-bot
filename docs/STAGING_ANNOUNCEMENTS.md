@@ -39,6 +39,12 @@ migrating, rechecks remote identities, cancelled event, durable audit/mapping,
 empty active tables, and 404s for the owned deleted messages/channel. It does not
 rerun writes and does not replace the independent exact-SHA review.
 
+The proof transport honors explicit Discord 429 `retry_after` responses with
+at most two retries and a 30-second maximum advertised delay, still bounded by
+the caller's 15-second timeout. It never retries network/5xx errors or permission
+denials. The proof sets the internal client's content timeout to 15 seconds.
+These are proof-only transport settings, not changes to production retry policy.
+
 ## Coverage and limitations
 
 - Signed announcement posting, content readback, idempotency replay, unknown

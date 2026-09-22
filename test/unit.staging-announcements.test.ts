@@ -4,6 +4,35 @@ import { spawnSync } from 'node:child_process';
 import { announcementsProofConfig, assertProofIdentity, ownsProofMessage, parseAnnouncementsProof, proofSchema } from '../scripts/staging-announcements-state.ts';
 import { STAGING_BOT_APPLICATION_ID, TWO_STAGING_GUILD_ID, STAGING_SERVER_NAME, LIVE_BOT_APPLICATION_ID, LIVE_GUILD_ID } from '../src/staging/spec.ts';
 
+import { proofDiscordFetch } from '../scripts/staging-discord-fetch.ts';
+
+test('proof Discord transport retries only explicit bounded 429 responses', async () => {
+  let calls = 0;
+  const delays: number[] = [];
+  const request = proofDiscordFetch({
+    fetchImpl: async () => ++calls === 1 ? new Response('{"retry_after":0.5}', { status: 429 }) : new Response('{}'),
+    sleep: async ms => { delays.push(ms); },
+  });
+  assert.equal((await request('https://discord.com/api/v10/test')).status, 200);
+  assert.equal(calls, 2);
+  assert.deepEqual(delays, [750]);
+  for (const [status, body] of [[403, '{}'], [500, '{}'], [429, '{}'], [429, '{"retry_after":1000}']] as const) {
+    calls = 0;
+    const failure = proofDiscordFetch({ fetchImpl: async () => { calls++; return new Response(body, { status }); } });
+    assert.equal((await failure('https://discord.com/api/v10/test')).status, status);
+    assert.equal(calls, 1);
+  }
+  calls = 0;
+  const limited = proofDiscordFetch({
+    fetchImpl: async () => { calls++; return new Response('{"retry_after":0}', { status: 429 }); },
+    sleep: async () => {},
+  });
+  assert.equal((await limited('https://discord.com/api/v10/test')).status, 429);
+  assert.equal(calls, 3);
+  const aborted = proofDiscordFetch({ fetchImpl: async () => new Response('{"retry_after":1}', { status: 429 }) });
+  await assert.rejects(aborted('https://discord.com/api/v10/test', { signal: AbortSignal.abort() }), { name: 'AbortError' });
+});
+
 const token = (id: string) => `${Buffer.from(id).toString('base64')}.fixture.fixture`;
 const env = {
   DISCORD_STAGING_BOT_TOKEN: token(STAGING_BOT_APPLICATION_ID),
