@@ -297,6 +297,33 @@ most 1000.
 
 `result: { "outcome": "created" | "updated", "event_id": "…" }`.
 
+### `event.cancel` — opt-in, default off
+
+```json
+{ "action": "event.cancel", "event_key": "…" }
+```
+
+Requires the environment-only `TWO_INTERNAL_ALLOW_EVENT_CANCEL=1` capability
+and an `Idempotency-Key`. Shipping this action does not enable it on a running
+bot; staging authorization does not authorize live rollout.
+
+Only an event previously mapped by `event.upsert` in the endpoint's configured
+guild can be cancelled. Unknown keys return `action_not_allowed` without a
+Discord request. The caller cannot supply a Discord event ID to bypass that
+mapping. Discord receives `PATCH /guilds/{guild}/scheduled-events/{event}` with
+`{ "status": 4 }` (CANCELED), not a delete. Discord accepts this transition only
+for scheduled events; permission failures or invalid transitions are surfaced
+as `discord_rejected` and do not remove the mapping.
+
+The mapping is retained on success too: a delayed upsert must not recreate the
+cancelled event. To schedule a replacement, use a new `event_key`. Retrying the
+same cancellation with the same idempotency key replays the durable result,
+even after restart, without another Discord request. A fresh key is a new
+operation, not a replay, and Discord may reject a second cancellation.
+
+`result: { "outcome": "cancelled", "event_id": "…" }`. Success, rejection and
+replay use the existing `internal_action_log` audit trail.
+
 ### `guild.add_member` — **proposed, not yet approved**
 
 ```json

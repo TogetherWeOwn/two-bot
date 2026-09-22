@@ -88,7 +88,7 @@ if (!tokenCheck.ok) {
  * them would make an isolated run fail on preconditions it does not need.
  * Omitting the flag preserves the original full-sweep behavior exactly.
  */
-const KNOWN_CASES = ['goodbye', 'temp-voice'] as const;
+const KNOWN_CASES = ['goodbye', 'temp-voice', 'announcements'] as const;
 type VerifyCase = (typeof KNOWN_CASES)[number];
 const caseArgRaw = process.argv.find((a) => a.startsWith('--case='))?.slice('--case='.length);
 if (caseArgRaw !== undefined && !(KNOWN_CASES as readonly string[]).includes(caseArgRaw)) {
@@ -96,6 +96,25 @@ if (caseArgRaw !== undefined && !(KNOWN_CASES as readonly string[]).includes(cas
   process.exit(2);
 }
 const caseArg = caseArgRaw as VerifyCase | undefined;
+
+// This slice has its own strict identity/DB checks and read-only evidence
+// verifier. Do not require unrelated roles/channels or mutate during acceptance.
+if (caseArg === 'announcements') {
+  const proof = process.argv.find(a => a.startsWith('--proof='))?.slice(8);
+  if (!proof) {
+    console.error('announcements requires --proof=<report.json> from staging-announcements-proof.ts');
+    process.exit(2);
+  }
+  try {
+    const { verifyAnnouncementsProof } = await import('./staging-announcements-verify.ts');
+    await verifyAnnouncementsProof(proof);
+  } catch (error) {
+    // Do not expose arbitrary database/network errors or credential-bearing URLs.
+    console.error(`FAIL announcements verification (${error instanceof Error ? error.name : 'unknown error'}).`);
+    process.exit(1);
+  }
+  process.exit(0);
+}
 
 let auditSince = '';
 let stagingDbUrl = '';

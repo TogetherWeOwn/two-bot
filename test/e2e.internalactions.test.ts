@@ -95,6 +95,9 @@ function recordingDiscord(over: Partial<ActionDiscord> = {}) {
     async updateEvent(_g, id, i: ScheduledEventInput) {
       calls.push(`updateEvent:${id}:${i.name}`);
     },
+    async cancelEvent(_g, id) {
+      calls.push(`cancelEvent:${id}`);
+    },
     ...over,
   };
   return { client, calls };
@@ -1101,6 +1104,110 @@ test('event.upsert insists on exactly one of channel_key and location', async ()
   assert.equal(backwards.body.error?.code, 'malformed');
 
   assert.deepEqual(calls, [], 'nothing ambiguous reached Discord');
+});
+
+// --- event.cancel ------------------------------------------------------------
+
+test('event.cancel propagates cancellation and replays after restart without another Discord write', async () => {
+  const store = freshStore();
+  const srv = await startAgainstMock({ store });
+  const eventKey = newKey();
+  const created = await call(srv, { body: eventUpsert({ event_key: eventKey }), idempotencyKey: newKey() });
+  assert.equal(created.status, 200);
+  const eventId = created.body.result?.event_id;
+  const updated = await call(srv, {
+    body: eventUpsert({ event_key: eventKey, name: 'Moved before cancellation' }),
+    idempotencyKey: newKey(),
+  });
+  assert.equal(updated.status, 200);
+  const body = { action: 'event.cancel', event_key: eventKey };
+  const key = newKey();
+  const cancelled = await call(srv, { body, idempotencyKey: key });
+  assert.equal(cancelled.status, 200);
+  assert.deepEqual(cancelled.body.result, { outcome: 'cancelled', event_id: eventId });
+  assert.equal(await store.discordEventId(mock.guildId, eventKey), eventId, 'retain the mapping, never recreate on a late edit');
+
+  const restarted = await startAgainstMock({ store });
+  const replay = await call(restarted, { body, idempotencyKey: key });
+  assert.equal(replay.status, 200);
+  assert.equal(replay.replayed, true);
+  assert.deepEqual(replay.body.result, cancelled.body.result);
+  const patches = mock.captured.filter((c) => c.method === 'PATCH' && c.url.endsWith(`/scheduled-events/${eventId}`));
+  assert.equal(patches.length, 2, 'one update and one cancellation, not a second cancellation');
+  assert.deepEqual(patches[1].body, { status: 4 }, 'Discord cancellation, not event deletion');
+  await new Promise((r) => setTimeout(r, 50));
+  const rows = await testDb.db.prepare(
+    'SELECT action, outcome, status FROM internal_action_log WHERE request_id IN (?, ?) ORDER BY outcome',
+  ).all(cancelled.body.request_id, replay.body.request_id);
+  assert.deepEqual(rows, [
+    { action: 'event.cancel', outcome: 'cancelled', status: 200 },
+    { action: 'event.cancel', outcome: 'replayed:cancelled', status: 200 },
+  ]);
+});
+
+test('event.cancel refuses missing, unknown and other-guild keys without reaching Discord', async () => {
+  const { client, calls } = recordingDiscord();
+  const store = freshStore();
+  const srv = await start({ discord: client, store });
+  const eventKey = newKey();
+  await store.rememberDiscordEvent('900000000000008888', eventKey, '900000000000007777');
+  for (const event_key of [undefined, '', newKey(), eventKey]) {
+    const response = await call(srv, {
+      body: { action: 'event.cancel', event_key, event_id: '900000000000007777' },
+      idempotencyKey: newKey(),
+    });
+    assert.equal(response.body.error?.code, !event_key ? 'malformed' : 'action_not_allowed');
+  }
+  assert.deepEqual(calls, [], 'a raw event_id cannot bypass the guild-scoped mapping');
+});
+
+test('event.cancel requires its capability, durable store and idempotency key', async () => {
+  const { client, calls } = recordingDiscord();
+  const body = { action: 'event.cancel', event_key: newKey() };
+  const disabled = await start({ discord: client, enabled: new Set(['event.upsert']) });
+  const unavailable = await start({ discord: client, store: null });
+  for (const srv of [disabled, unavailable]) {
+    const response = await call(srv, { body, idempotencyKey: newKey() });
+    assert.equal(response.body.error?.code, 'action_not_allowed');
+  }
+  const enabled = await start({ discord: client });
+  const noKey = await call(enabled, { body });
+  assert.equal(noKey.status, 400);
+  assert.equal(noKey.body.error?.code, 'malformed');
+  assert.deepEqual(calls, []);
+});
+
+test('event.cancel permission denial keeps the mapping and records a typed rejection', async () => {
+  const store = freshStore();
+  const eventKey = newKey();
+  const eventId = '900000000000007777';
+  await store.rememberDiscordEvent(mock.guildId, eventKey, eventId);
+  const requests: { url: string; method: string; body: string }[] = [];
+  const srv = await start({
+    store,
+    discord: new DiscordActions({
+      token: 'mock-bot-token',
+      fetchImpl: async (url, options) => {
+        requests.push({ url: String(url), method: options!.method!, body: String(options!.body) });
+        return new Response('{}', { status: 403 });
+      },
+    }),
+  });
+  const response = await call(srv, {
+    body: { action: 'event.cancel', event_key: eventKey }, idempotencyKey: newKey(),
+  });
+  assert.equal(response.body.error?.code, 'discord_rejected');
+  assert.equal(response.body.error?.retryable, false);
+  assert.deepEqual(requests, [{
+    url: `https://discord.com/api/v10/guilds/${mock.guildId}/scheduled-events/${eventId}`,
+    method: 'PATCH', body: '{"status":4}',
+  }]);
+  assert.equal(await store.discordEventId(mock.guildId, eventKey), eventId);
+  await new Promise((r) => setTimeout(r, 50));
+  const row = await testDb.db.prepare(
+    'SELECT action, outcome, code FROM internal_action_log WHERE request_id = ?',
+  ).get(response.body.request_id);
+  assert.deepEqual(row, { action: 'event.cancel', outcome: 'rejected', code: 'discord_rejected' });
 });
 
 // --- the durable audit trail (§4) --------------------------------------------
