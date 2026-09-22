@@ -60,6 +60,17 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     minTests: 8,
     why: 'a HOT key reloading without a restart, and the schema-level refusal of every env-only key',
   },
+  {
+    // TOG-3481. Registered for the same reason as the suite above: this is the
+    // only place the reward probe's "writes nothing" property is enforced
+    // rather than asserted by reading the source, and it needs a real Postgres
+    // to install the trigger that enforces it. A run that quietly stopped
+    // including this file would leave that guarantee unverified and green.
+    // Measured 2026-09-22 against Postgres 17.11, at 7c1135b + this commit.
+    file: 'test/e2e.levelrewardprobe.test.ts',
+    minTests: 8,
+    why: 'the reward-role probe writing nothing, proved by a database that refuses the write',
+  },
 ];
 
 /**
