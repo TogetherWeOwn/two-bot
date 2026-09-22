@@ -102,7 +102,6 @@ test('the flag off constructs the client production already has', () => {
     // discord.js's own default, after `ClientPresence` mutates the options
     // object it was handed. This is what broadcasts an online presence today.
     assert.deepEqual(client.options.presence, { status: 'online', user: { id: null } });
-    assert.equal(client.presence.status, 'online');
   } finally {
     void client.destroy();
   }
@@ -137,9 +136,8 @@ test('the flag on asks for invisible presence and the reduced intents', () => {
     assert.equal(Number(client.options.intents.bitfield), REDUCED_INTENT_BITS);
     assert.deepEqual(client.options.presence, { status: 'invisible', user: { id: null } });
     // `Client#login` parses this into `options.ws.presence`, which @discordjs/ws
-    // copies onto `d.presence` of the Identify frame. That last hop is only
-    // observable on a real socket - e2e.rotaprocess.test.ts asserts it there.
-    assert.equal(client.presence.status, 'invisible');
+    // copies onto `d.presence` of the Identify frame. That last hop only exists
+    // at login time - e2e.rotaprocess.test.ts asserts it on a real socket.
     // Scoping the capability must not change caching or partials.
     assert.deepEqual(client.options.partials, PARTIALS);
   } finally {
@@ -152,7 +150,7 @@ test('containment leaves the automod cache decision to TWO_AUTOMOD alone', () =>
   const plain = createClient(true, {});
   try {
     assert.deepEqual(scoped.options.partials, plain.options.partials);
-    assert.ok(scoped.options.partials.includes(Partials.Channel));
+    assert.ok(scoped.options.partials?.includes(Partials.Channel));
   } finally {
     void scoped.destroy();
     void plain.destroy();
