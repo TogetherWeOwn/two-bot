@@ -276,6 +276,37 @@ async function assertNegativeScope(db: TestDb, mock: MockDiscord) {
   assert.equal(mock.captured.length, 0, 'zero Discord mutations under containment');
 }
 
+/** TOG-4011 capability assertions, using the TOG-3903 bound containment fixture.
+ * The ordinary rota process fixture cannot boot the containment flag: its guild
+ * and credential are intentionally unbound and it expects forbidden welcomes.
+ * Observe the actual socket, never a constructed ClientOptions object.
+ */
+test('containment scopes the identify capability while the rota keeps observing', { timeout: 60_000 }, async () => {
+  const db = await openTestDb(`staging_capability_${process.pid}`);
+  try {
+    const harness = await launch(db, 'notice-off');
+    try {
+      const witness = await exerciseSynthetic(harness, db, SYNTHETIC);
+      assert.equal(harness.mock.identifies.length, 1, 'exactly one identify on the socket');
+      const [identify] = harness.mock.identifies;
+      assert.equal(identify.presenceStatus, 'invisible');
+      assert.equal(identify.intents, 643);
+      assert.notEqual(identify.intents, 34503);
+      assert.equal(identify.intents! & 2, 2, 'GuildMembers must stay');
+      for (const [name, bit] of [
+        ['MessageContent', 32768], ['GuildModeration', 4],
+        ['GuildInvites', 64], ['GuildMessageReactions', 1024],
+      ] as const) assert.equal(identify.intents! & bit, 0, `${name} must be clear on the identify frame`);
+      assertContainedObserver(witness);
+      assert.match(harness.output(), /"reason":"notice off"/);
+      assert.equal(witness.completed['delivery.runDue'] ?? 0, 0);
+      await assertNegativeScope(db, harness.mock);
+      assert.equal(harness.refusals(), 0, 'all traffic stayed on fixture endpoints');
+    } finally { await harness.close(); }
+    assert.doesNotMatch(harness.output(), /onboarding_rota_observation_failed|unhandled_rejection/);
+  } finally { await db.cleanup(); }
+});
+
 test('staging restart containment restarts notice-on -> notice-off -> master-off with zero mutations',
   { timeout: 300_000 }, async () => {
     const db = await openTestDb(`staging_restart_${process.pid}`);
