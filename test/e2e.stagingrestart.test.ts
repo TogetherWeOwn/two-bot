@@ -19,6 +19,7 @@ import { resolve } from 'node:path';
 import { startMockDiscord, type MockDiscord } from '../tools/mock-discord/server.ts';
 import { openTestDb, TEST_PG_URL, type TestDb } from './helpers/testDb.ts';
 import { STAGING_BOT_APPLICATION_ID, TWO_STAGING_GUILD_ID } from '../src/staging/spec.ts';
+import { buildRestartEnvironment } from '../src/staging/restartPreparation.ts';
 
 // Refuse before openTestDb can create/drop a schema, not merely at bot boot.
 const databaseUrl = new URL(TEST_PG_URL);
@@ -76,33 +77,23 @@ async function until<T>(read: () => T | Promise<T>, what: string, timeout = 15_0
 function environment(mock: MockDiscord, db: TestDb, mode: Mode): NodeJS.ProcessEnv {
   // This opt-in test URL must identify a disposable local database. Never use
   // TWO_DATABASE_URL from the invoking shell or inherit its env/secret files.
-  return {
-    DISCORD_TOKEN: STAGING_TOKEN,
-    DISCORD_API_BASE: mock.apiBase,
-    DISCORD_GUILD_ID: TWO_STAGING_GUILD_ID,
-    DISCORD_STAGING_GUILD_ID: TWO_STAGING_GUILD_ID,
-    DISCORD_LANDING_CHANNEL_IDS: mock.textChannelId,
-    DISCORD_SESSION_LOOKING_TO_PLAY_CHANNEL_ID: mock.textChannelId,
-    DISCORD_SESSION_LOBBY_VOICE_CHANNEL_ID: mock.voiceChannelId,
-    TWO_ONBOARDING_MODE: 'session',
-    TWO_COMMUNITY_HUMAN_CHANNEL_IDS: mock.textChannelId,
-    TWO_COMMUNITY_STAGING_GUILD_IDS: TWO_STAGING_GUILD_ID,
-    TWO_STAGING_RESTART_CONTAINMENT: '1',
-    TWO_STAGING_RESTART_SYNTHETIC_ACTORS: SYNTHETIC_ACTORS.join(','),
-    TWO_STAGING_DATABASE_URL: STAGING_DECOY_URL,
-    TWO_ONBOARDING_ROTA_MEASUREMENT: mode === 'master-off' ? '0' : '1',
-    TWO_ONBOARDING_ROTA_NOTICE: mode === 'notice-off' ? '0' : '1',
-    // Master-off keeps malformed stale rota-dependent settings (the master
-    // switch must work despite them) while independent containment/classifier
-    // settings above stay valid.
-    TWO_ONBOARDING_ROTA_PSEUDONYM_KEY: mode === 'master-off' ? 'bad' : 'synthetic-local-rota-key-not-a-secret-3878',
-    TWO_ONBOARDING_ROTA_PRIMARY_ACTOR_ID: mode === 'master-off' ? 'bad' : PRIMARY,
-    TWO_ONBOARDING_ROTA_READER_IDS: mode === 'master-off' ? 'bad,bad' : READERS,
-    DISCORD_STAFF_ALERT_CHANNEL_ID: mode === 'master-off' ? 'bad' : mock.textChannelId,
-    TWO_DATABASE_URL: TEST_PG_URL,
-    PGOPTIONS: `-c search_path=${db.schema}`,
-    LOG_LEVEL: 'debug',
-  };
+  const env = buildRestartEnvironment({
+    mode,
+    discordToken: STAGING_TOKEN,
+    databaseUrl: TEST_PG_URL,
+    stagingDatabaseUrl: STAGING_DECOY_URL,
+    schema: db.schema,
+    syntheticActorIds: SYNTHETIC_ACTORS.join(','),
+    textChannelId: mock.textChannelId,
+    voiceChannelId: mock.voiceChannelId,
+    // Master-off ignores stale rota dependencies, not independent safety gates.
+    pseudonymKey: mode === 'master-off' ? 'bad' : 'synthetic-local-rota-key-not-a-secret-3878',
+    primaryActorId: mode === 'master-off' ? 'bad' : PRIMARY,
+    readerIds: mode === 'master-off' ? 'bad,bad' : READERS,
+    noticeChannelId: mode === 'master-off' ? 'bad' : mock.textChannelId,
+  });
+  // Fixture-only override behind rotaProcessGuard, never a launcher input.
+  return { ...env, DISCORD_API_BASE: mock.apiBase, LOG_LEVEL: 'debug' };
 }
 
 async function launch(db: TestDb, mode: Mode) {

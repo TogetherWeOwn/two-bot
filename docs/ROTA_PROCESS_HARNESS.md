@@ -92,3 +92,45 @@ hostile native code**. The test does not prove real Discord credentials,
 permissions, TLS, delivery recovery, positive measurement, or real-member
 eligibility. Positive delivery behavior remains separate unit evidence; actual
 staging acceptance stays blocked on its approved binding and exclusions.
+
+## Contained restart preparation (TOG-3903; execution prohibited)
+
+`test/e2e.stagingrestart.test.ts` is a separate **local injected/mock** regression
+for the opt-in containment path. Unlike the normal-mode harness above, it
+requires **zero Discord mutations**, no welcome or `promptShown`, no command
+publication or disabled-command response, and no audit rows. Three explicitly
+allowlisted synthetic actors exercise fresh join/gate/message/leave observations
+across notice-on, notice-off and master-off. The real observer, classifier and
+scheduler remain in place; whole-schema and exact subject/guild censuses reject
+unbound actors. This does not fill an actual Discord-origin T1 row.
+
+`src/staging/restartPreparation.ts` supplies two preparation helpers, not a
+launcher or a new runtime:
+
+- `buildRestartEnvironment` constructs a frozen, exact child-environment allowlist from
+  explicit typed bindings. It never inherits the calling environment or copies
+  extra properties. Credential directories, token aliases, proxies, Node preload
+  options, API overrides, HOME/PATH, and unrelated feature controls are omitted.
+  Only a validated private-schema name becomes `PGOPTIONS`; URL/schema syntax
+  alone is **not** ownership evidence. Existing preflight and rota loaders run
+  before the result is returned, with static errors that do not echo input.
+  Master-off still ignores stale rota-dependent settings while independent
+  containment/classification gates stay active. The local contained E2E uses
+  this helper, then adds its fixture-only API override behind the loopback guard.
+- `assertRestartSource` requires a full 40-character commit ID, matching HEAD,
+  unchanged index and tracked file bytes, and no additional files (including
+  ignored `.env` files) outside `.git` and `node_modules`. It refuses symlinks and
+  submodules. Direct blob hashes detect changes hidden by `assume-unchanged` or
+  `skip-worktree`. This Linux helper uses `/usr/bin/git` without inherited Git
+  configuration environment. It does not attest the installed dependencies or
+  approval/merge status. Its result is a **point-in-time** source check, not an
+  immutable execution sandbox; a future launcher must close the check/use gap.
+
+Focused preparation regressions are in
+`test/unit.stagingrestartpreparation.test.ts`. No actual-staging launch command
+is supplied. Before such a command can exist, the implementation must also prove
+owned disposable PostgreSQL/private-schema storage, locked dependency integrity,
+exclusive bot-process ownership, an effective fail-closed transport boundary,
+and deterministic cleanup. The exact final head needs independent review, green
+CI and non-author merge. Local evidence and helper success grant none of those
+permissions; T1 actual restart and T2 real-member observation remain open.
