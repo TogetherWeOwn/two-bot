@@ -32,6 +32,7 @@
  * | `TWO_INTERNAL_ROLE_KEYS` | Extra `role-key:snowflake` pairs beyond the self-assignable set. |
  * | `TWO_INTERNAL_CHANNEL_KEYS` | `channel-key:snowflake` pairs. Empty by default, and `announcement.post` can address nothing without it. |
  * | `TWO_INTERNAL_ALLOW_ADD_MEMBER` | `1` to enable `guild.add_member`. **Requires the CEO's sign-off (TOG-44).** |
+ * | `TWO_INTERNAL_ALLOW_EVENT_CANCEL` | `1` to enable cancellation of mapped scheduled events. Default off; staging proof does not authorize live enablement. |
  * | `TWO_INTERNAL_ALLOW_AUTOMATIONS` | `1` to enable non-destructive `automations.import` and `automations.export`. Default off pending allowlist approval. |
  * | `TWO_INTERNAL_ALLOW_AUTOMATIONS_OVERWRITE` | `1` to permit destructive imports. Requires the base automations flag too. |
  * | `TWO_INTERNAL_ALLOW_SETTINGS` | `1` to enable `settings.get` and `settings.set`. Default off pending the CEO's allowlist sign-off (TOG-3101). |
@@ -82,6 +83,7 @@ export function loadInternalActionsConfig(env: NodeJS.ProcessEnv = process.env):
   // address, so an unconfigured bot refuses every post by key lookup.
   const enabled = new Set<ActionName>(['role.assign', 'announcement.post', 'event.upsert']);
   if (env.TWO_INTERNAL_ALLOW_ADD_MEMBER === '1') enabled.add('guild.add_member');
+  if (env.TWO_INTERNAL_ALLOW_EVENT_CANCEL === '1') enabled.add('event.cancel');
   // These verbs widen the website key's fixed allowlist, so merely shipping the
   // implementation must not enable them. The flag is the approval record and
   // defaults off. Destructive overwrite is checked separately at action time.

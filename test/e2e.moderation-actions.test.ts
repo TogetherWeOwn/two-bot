@@ -31,6 +31,7 @@ after(async () => {
 const noopDiscord: ActionDiscord = {
   async memberRoles() { return []; }, async addRole() {}, async addMember() { return 'added'; },
   async postMessage() { return 'message'; }, async createEvent() { return 'event'; }, async updateEvent() {},
+  async cancelEvent() {},
 };
 
 function fixture(targetOver: Partial<Awaited<ReturnType<ModerationResolver['target']>>> = {}) {

@@ -44,6 +44,8 @@ export interface ActionDiscord {
   createEvent(guildId: string, input: ScheduledEventInput): Promise<string>;
   /** Modify an existing scheduled event in place. */
   updateEvent(guildId: string, eventId: string, input: ScheduledEventInput): Promise<void>;
+  /** Cancel a scheduled event without deleting its identity. */
+  cancelEvent(guildId: string, eventId: string): Promise<void>;
 }
 
 /** GUILD_ONLY. The only privacy level Discord accepts for a guild event. */
@@ -188,6 +190,16 @@ export class DiscordActions implements ActionDiscord {
       'PATCH',
       `/guilds/${guildId}/scheduled-events/${eventId}`,
       scheduledEventBody(input),
+      this.contentTimeout,
+    );
+    throwForStatus(res);
+  }
+
+  async cancelEvent(guildId: string, eventId: string): Promise<void> {
+    const res = await this.call(
+      'PATCH',
+      `/guilds/${guildId}/scheduled-events/${eventId}`,
+      { status: 4 }, // CANCELED; Discord permits this transition only from SCHEDULED.
       this.contentTimeout,
     );
     throwForStatus(res);
