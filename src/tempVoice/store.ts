@@ -63,10 +63,9 @@ export class TempVoiceStore {
    * Claim a slot and write the row BEFORE the Discord create call, so a crash
    * mid-create leaves a dangling reservation rather than an unowned channel.
    *
-   * The caps are enforced inside the transaction, under a per-user advisory
-   * lock, because checking a count and then inserting is a check-then-act race:
-   * two joins 3 ms apart both read `0 < 1` and both create a channel. Moving
-   * the check earlier does not fix that - only an atomic claim does.
+   * Serialize reservations per guild: different owners still compete for the
+   * same guild cap. This also serializes the per-user cap and cooldown check.
+   * A per-user lock alone lets two users both claim the last guild slot.
    */
   async reserveIfUnderCaps(input: {
     guildId: string;
@@ -81,7 +80,7 @@ export class TempVoiceStore {
   }): Promise<{ ok: true; row: TempVoiceRow } | { ok: false; reason: TempVoiceRefusal }> {
     return this.db.transaction(async (tx) => {
       await tx.prepare(`SELECT pg_advisory_xact_lock(hashtextextended(?, 0))`)
-        .get(`tempvoice:${input.guildId}:${input.ownerId}`);
+        .get(`tempvoice:${input.guildId}`);
 
       const mine = await tx.prepare(
         `SELECT COUNT(*) AS total FROM temp_voice_channels WHERE guild_id = ? AND owner_id = ?`,

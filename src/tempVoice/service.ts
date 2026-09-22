@@ -27,7 +27,7 @@ export const UNKNOWN_CHANNEL_CODE = 10003;
 /** Discord: Missing Permissions. Always a server-setup fault, never transient. */
 export const MISSING_PERMISSIONS_CODE = 50013;
 
-export type OverwriteFlag = 'ViewChannel' | 'Connect' | 'Speak' | 'ManageChannels' | 'MoveMembers';
+export type OverwriteFlag = 'ViewChannel' | 'Connect' | 'Speak' | 'ManageChannels' | 'MoveMembers' | 'ManageRoles';
 
 /**
  * Every permission `overwritesFor` hands out, which is the same thing as every
@@ -44,6 +44,7 @@ export const TEMP_VOICE_REQUIRED_PERMISSIONS: readonly OverwriteFlag[] = [
   'Speak',
   'ManageChannels',
   'MoveMembers',
+  'ManageRoles',
 ];
 
 /**
@@ -141,7 +142,8 @@ export function tempVoiceOverwrites(guildId: string, botId: string, ownerId: str
     // Public by default. `lock` denies Connect for @everyone; `hide` denies
     // ViewChannel. Both are per-channel edits of this same overwrite.
     { id: guildId, type: 'role', allow: ['ViewChannel', 'Connect', 'Speak'] },
-    { id: botId, type: 'member', allow: ['ViewChannel', 'Connect', 'ManageChannels', 'MoveMembers'] },
+    // Only the bot needs ManageRoles to edit channel overwrites for controls.
+    { id: botId, type: 'member', allow: ['ViewChannel', 'Connect', 'ManageChannels', 'MoveMembers', 'ManageRoles'] },
     { id: ownerId, type: 'member', allow: ['ViewChannel', 'Connect', 'Speak', 'ManageChannels', 'MoveMembers'] },
   ];
 }
@@ -225,6 +227,16 @@ export class TempVoiceService {
   async onGeneratorJoin(input: { guildId: string; userId: string; username: string }): Promise<CreateOutcome> {
     if (!this.config.enabled) return { status: 'skipped' };
 
+    // Boot logging alone cannot stop a broken generator. Recheck effective
+    // category permissions before reserving a slot or making any mutation.
+    const { missing } = await this.preflight(input.guildId);
+    if (missing.length) {
+      return {
+        status: 'refused',
+        reason: `Ask a server admin to grant these permissions to the bot on the voice category: ${missing.join(', ')}.`,
+      };
+    }
+
     const createdAt = this.iso();
     const mine = await this.store.countForOwner(input.guildId, input.userId);
     const total = await this.store.countForGuild(input.guildId);
@@ -235,7 +247,7 @@ export class TempVoiceService {
     });
 
     // The claim enforces every cap atomically and writes the row, all before a
-    // single Discord call. Anti-abuse that runs after the create is not
+    // single Discord mutation. Anti-abuse that runs after the create is not
     // anti-abuse, it is cleanup.
     const claim = await this.store.reserveIfUnderCaps({
       guildId: input.guildId,
