@@ -134,7 +134,9 @@ Focused preparation regressions are in
 `src/staging/restartStorage.ts` creates a fresh local PostgreSQL cluster. Its only
 inputs are an existing canonical owner-only scratch directory and a trusted,
 preinstalled PostgreSQL binary directory. It never adopts a supplied URL, existing
-PGDATA or PID, downloads tooling, or reads ambient PostgreSQL/credential settings.
+PGDATA or PID, downloads tooling, or trusts ambient PostgreSQL/credential settings.
+It refuses any ambient `PG*` variables before initialization and immediately before
+every driver connection (the driver otherwise falls back for empty options).
 Initialization and the foreground server use an explicit minimal environment;
 secrets do not appear in arguments, logs or nested errors.
 

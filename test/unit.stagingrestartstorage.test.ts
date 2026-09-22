@@ -38,9 +38,24 @@ for (const invalid of ['relative', 'symlink', 'readable', 'missing', 'bin-symlin
   });
 }
 
+test('ambient PostgreSQL controls refuse before creating or starting anything', async () => {
+  const f = await fixture();
+  const before = process.env.PGOPTIONS;
+  try {
+    process.env.PGOPTIONS = '-c search_path=public';
+    await assert.rejects(createRestartStorage({ scratchDirectory: f.scratch, postgresBinDirectory: f.bin }),
+      { message: 'Staging restart storage refused (setup); details withheld.' });
+    assert.deepEqual(await readdir(f.scratch), []);
+  } finally {
+    if (before === undefined) delete process.env.PGOPTIONS;
+    else process.env.PGOPTIONS = before;
+    await f.close();
+  }
+});
+
 test('initialization failure removes only its own directory and does not inherit child environment', async () => {
   const f = await fixture();
-  const names = ['PGDATA', 'PGHOST', 'LD_PRELOAD', 'NODE_OPTIONS', 'CREDENTIALS_DIRECTORY'];
+  const names = ['LD_PRELOAD', 'NODE_OPTIONS', 'CREDENTIALS_DIRECTORY'];
   const before = Object.fromEntries(names.map((key) => [key, process.env[key]]));
   try {
     await writeFile(join(f.scratch, 'sentinel'), 'pre-existing caller data');

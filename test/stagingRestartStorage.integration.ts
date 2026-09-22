@@ -71,6 +71,21 @@ test('owned storage supports real migrations/web contract across three connectio
   } finally { await f.close(); }
 });
 
+test('ambient startup options added after creation cannot reach a lease connection', { timeout: 30_000 }, async () => {
+  const f = await fixture();
+  const previous = process.env.PGOPTIONS;
+  try {
+    process.env.PGOPTIONS = '-c search_path=public';
+    await assert.rejects(f.storage.bindings(), { message: 'Staging restart storage refused (lease verification); details withheld.' });
+    delete process.env.PGOPTIONS;
+    await f.storage.bindings();
+  } finally {
+    if (previous === undefined) delete process.env.PGOPTIONS;
+    else process.env.PGOPTIONS = previous;
+    await f.close();
+  }
+});
+
 test('missing owned schema is refused on reacquisition, never replaced by public', { timeout: 30_000 }, async () => {
   const f = await fixture();
   try {

@@ -30,6 +30,13 @@ export interface OwnedRestartStorage {
 const error = (stage: string) => new Error(`Staging restart storage refused (${stage}); details withheld.`);
 const childEnv = Object.freeze({ PATH: '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' });
 
+function refuseAmbientPostgres(): void {
+  // node-postgres falls back to PG* for falsy options, including empty strings.
+  // Reject before effects and immediately before each synchronous construction;
+  // do not mutate the caller's environment or trust a bootstrap startup option.
+  if (Object.keys(process.env).some((key) => key.startsWith('PG'))) throw error('ambient PostgreSQL controls');
+}
+
 async function privateDirectory(path: string): Promise<void> {
   const stat = await lstat(path);
   if (!isAbsolute(path) || resolve(path) !== path || await realpath(path) !== path ||
@@ -69,8 +76,9 @@ async function stop(child: ChildProcess, lifecycle: ReturnType<typeof observe>):
   if (await wait(10_000)) return;
   child.kill('SIGQUIT');
   if (!await wait(5_000) && !lifecycle.ended() && child.exitCode === null && child.signalCode === null && child.pid) {
-    // The child is our own detached process-group leader, never an adopted PID.
-    try { process.kill(-child.pid, 'SIGKILL'); } catch { /* verify close below */ }
+    // Use the retained ChildProcess handle, not a raw PID/process-group signal.
+    // Escalation is failed evidence, never a successful acceptance shutdown.
+    child.kill('SIGKILL');
     if (!await wait(5_000)) throw error('cleanup incomplete');
   }
   throw error('forced shutdown');
@@ -115,6 +123,7 @@ export async function createRestartStorage(options: RestartStorageOptions): Prom
     return closing;
   };
   try {
+    refuseAmbientPostgres();
     await privateDirectory(options.scratchDirectory);
     const bin = options.postgresBinDirectory;
     if (!isAbsolute(bin) || await realpath(bin) !== bin) throw error('binaries');
@@ -158,6 +167,7 @@ export async function createRestartStorage(options: RestartStorageOptions): Prom
       if (closed || !child?.pid || lifecycle?.ended() || child.exitCode !== null || child.signalCode !== null) throw error('child not running');
     };
     const connect = async (db: string, host = socket, user = 'restart_admin', pass = '') => {
+      refuseAmbientPostgres();
       const client = new pg.Client({ host, port, database: db, user, password: pass,
         ssl: false, connectionTimeoutMillis: 1_000, query_timeout: 3_000,
         options: '', application_name: 'staging-restart-storage' });
