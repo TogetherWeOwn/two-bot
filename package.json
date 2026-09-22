@@ -14,6 +14,7 @@
     "test:unit": "node --test test/unit.*.test.ts",
     "test:e2e": "node --test test/e2e.*.test.ts",
     "test:postgres": "node scripts/require-suites.ts",
+    "test:restart-storage": "node --test test/stagingRestartStorage.integration.ts test/stagingRestartStorage.entrypoint.ts",
     "typecheck": "tsc --noEmit",
     "funnel": "node scripts/funnel.ts",
     "gate": "node scripts/gate-report.ts",

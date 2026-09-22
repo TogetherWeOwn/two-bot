@@ -127,10 +127,61 @@ launcher or a new runtime:
   immutable execution sandbox; a future launcher must close the check/use gap.
 
 Focused preparation regressions are in
-`test/unit.stagingrestartpreparation.test.ts`. No actual-staging launch command
-is supplied. Before such a command can exist, the implementation must also prove
-owned disposable PostgreSQL/private-schema storage, locked dependency integrity,
-exclusive bot-process ownership, an effective fail-closed transport boundary,
-and deterministic cleanup. The exact final head needs independent review, green
-CI and non-author merge. Local evidence and helper success grant none of those
-permissions; T1 actual restart and T2 real-member observation remain open.
+`test/unit.stagingrestartpreparation.test.ts`.
+
+### Owned storage preparation
+
+`src/staging/restartStorage.ts` creates a fresh local PostgreSQL cluster. Its only
+inputs are an existing canonical owner-only scratch directory and a trusted,
+preinstalled PostgreSQL binary directory. It never adopts a supplied URL, existing
+PGDATA or PID, downloads tooling, or reads ambient PostgreSQL/credential settings.
+Initialization and the foreground server use an explicit minimal environment;
+secrets do not appear in arguments, logs or nested errors.
+
+Before SQL mutation it verifies the spawned child against `postmaster.pid` and
+server `data_directory` over its owner-only Unix socket. Each `bindings()` call
+rechecks that identity and authenticates the generated TCP credential. HBA allows
+only the generated role/database on IPv4 loopback; administrator access is local
+socket only. The generated role owns the private bot and web-contract schemas,
+has no superuser/CREATEDB/CREATEROLE/replication/BYPASSRLS attributes, and cannot
+write to `public`. It has CONNECT and CREATE **on this generated database only**:
+the unchanged web contract's `CREATE SCHEMA IF NOT EXISTS` needs database CREATE
+even when the schema already exists. The role search path contains only its
+private schema, so a missing schema cannot fall back to public.
+
+The returned bindings contain a generated password: pass them directly into the
+environment builder, never print or serialize them. Stop application children
+before `close()`. Cleanup stops only the owned child, awaits its close, verifies
+the directory's ownership and original inode, and removes only that directory.
+A failed cleanup can be retried; a forced shutdown remains an evidence failure.
+The helper is not a hostile same-UID sandbox or a process supervisor that survives
+its own abrupt termination. A future runner still needs integrated signal handling
+and cleanup proof.
+
+`test/unit.stagingrestartstorage.test.ts` covers preflight refusal, environment
+non-inheritance and failed-init cleanup. Real tooling tests are explicit:
+
+```sh
+# TWO_TEST_POSTGRES_BIN names trusted local initdb/postgres binaries.
+# TMPDIR must be a short, private run-owned path (Unix socket path limit).
+npm run test:restart-storage
+```
+
+This command creates its own clusters; it never adopts `TWO_TEST_DATABASE_URL`.
+It fails, rather than skips, if tooling is absent. It verifies actual migrations
+and web-contract setup over three connections, restricted credentials, missing
+schema/identity refusal and retryable cleanup. A wrapper also runs the existing
+three-process contained restart E2E against owned storage: the existing fixture
+creates its test schema inside the generated database, while the direct migration
+test separately exercises the lease's default schema. Gateway frames remain
+**locally injected/mock**, not actual Discord-origin observations.
+
+The tooling suite is **not yet part of the service-DB CI test glob**; passing
+`test:postgres` alone does not prove this lifecycle. CI provisioning/required
+coverage of trusted binaries is still a prerequisite for the final review.
+No actual-staging launch command is supplied. Before one can exist, the runner
+must integrate this lease with locked dependency integrity, exclusive bot-process
+ownership, an effective fail-closed transport boundary and deterministic cleanup.
+The exact final head needs independent review, green CI and non-author merge.
+Local evidence and helper success grant none of those permissions; T1 actual
+restart and T2 real-member observation remain open.
