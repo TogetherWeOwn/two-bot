@@ -35,6 +35,18 @@ async function until<T>(read: () => T | Promise<T>, what: string, timeout = 15_0
   throw new Error(`timed out: ${what}`);
 }
 
+/**
+ * Identify capability of the connection `src/index.ts` actually opens, by
+ * intent name. Pinned as literals so a rename cannot move the boundary.
+ */
+const MAIN_INTENT_BITS = 34503;
+const REDUCED_INTENT_BITS = 643;
+const MESSAGE_CONTENT_BIT = 32768;
+const GUILD_MODERATION_BIT = 4;
+const GUILD_INVITES_BIT = 64;
+const GUILD_MESSAGE_REACTIONS_BIT = 1024;
+const GUILD_MEMBERS_BIT = 2;
+
 function environment(mock: MockDiscord, db: TestDb, mode: Mode): NodeJS.ProcessEnv {
   // This opt-in test URL must identify a disposable local database. Never use
   // TWO_DATABASE_URL from the invoking shell or inherit its env/secret files.
@@ -61,10 +73,11 @@ function environment(mock: MockDiscord, db: TestDb, mode: Mode): NodeJS.ProcessE
   };
 }
 
-async function launch(db: TestDb, mode: Mode, mutation = false, wrongGuild = false) {
+async function launch(db: TestDb, mode: Mode, mutation = false, wrongGuild = false, containment?: string) {
   const mock = await startMockDiscord({ guildId: GUILD });
   const env = environment(mock, db, mode);
   if (wrongGuild) env.DISCORD_STAGING_GUILD_ID = '900000000000007999';
+  if (containment !== undefined) env.TWO_STAGING_RESTART_CONTAINMENT = containment;
   const args = ['--require', './test/helpers/rotaProcessGuard.cjs'];
   if (mutation) args.push('--import', './test/helpers/rotaNoDispatchMutation.ts');
   args.push('--import', './test/helpers/rotaProcessWitness.ts', 'src/index.ts');
@@ -225,6 +238,109 @@ test('wrong staging guild binding refuses real boot before database or Discord u
       assert.match(harness.output(), /Onboarding rota is staging-only/);
       assert.doesNotMatch(harness.output(), /datastore_open/);
       assert.equal(harness.mock.captured.length, 0);
+    } finally { await harness.close(); }
+  } finally { await db.cleanup(); }
+});
+
+/**
+ * TOG-4011. The capability a contained restart asks Discord for, read off the
+ * real Identify frame the real process sent over a real socket - not off the
+ * constructed options, which is the assertion that would not have caught a
+ * broken presence chain in discord.js.
+ *
+ * `identifies` is the fixture's capability census: intents and presence status
+ * only. The token on that frame is never retained.
+ */
+test('containment scopes the identify capability while the rota keeps observing', { timeout: 60_000 }, async () => {
+  const db = await openTestDb(`rota_capability_${process.pid}`);
+  try {
+    const harness = await launch(db, 'notice-off', false, false, '1');
+    try {
+      const member = '900000000000007030';
+      const witness = await exercise(harness, db, member);
+
+      assert.equal(harness.mock.identifies.length, 1, 'exactly one identify on the socket');
+      const [identify] = harness.mock.identifies;
+
+      // Criterion 1: presence, and only the status field.
+      assert.equal(identify.presenceStatus, 'invisible');
+
+      // Criterion 2: the number, not a comment.
+      assert.equal(identify.intents, REDUCED_INTENT_BITS);
+      assert.notEqual(identify.intents, MAIN_INTENT_BITS);
+      assert.equal(identify.intents! & GUILD_MEMBERS_BIT, GUILD_MEMBERS_BIT, 'GuildMembers must stay');
+      for (const [name, bit] of [
+        ['MessageContent', MESSAGE_CONTENT_BIT],
+        ['GuildModeration', GUILD_MODERATION_BIT],
+        ['GuildInvites', GUILD_INVITES_BIT],
+        ['GuildMessageReactions', GUILD_MESSAGE_REACTIONS_BIT],
+      ] as const) {
+        assert.equal(identify.intents! & bit, 0, `${name} must be clear on the identify frame`);
+      }
+
+      // Criterion 4: the rota observer and the scheduler are still registered
+      // and their events still fire - a narrower connection is not a quieter
+      // measurement. Nothing is swallowed on the way.
+      assertObserver(witness);
+      assert.match(harness.output(), /"reason":"notice off"/);
+      assert.equal(witness.completed['delivery.runDue'] ?? 0, 0);
+      await assertNegativeScope(db, harness.mock, member);
+      assert.equal(harness.refusals(), 0, 'all traffic stayed on fixture endpoints');
+    } finally {
+      await harness.close();
+    }
+    assert.doesNotMatch(harness.output(), /onboarding_rota_observation_failed|unhandled_rejection/);
+  } finally {
+    await db.cleanup();
+  }
+});
+
+/**
+ * The negative half. Without this the invisible/643 assertions above could be
+ * passing for any reason at all - including the fixture reading a field that
+ * was always there.
+ */
+test('without the exact flag the identify capability is unchanged from production', { timeout: 60_000 }, async () => {
+  const db = await openTestDb(`rota_capability_off_${process.pid}`);
+  try {
+    // 'true' is the value most likely to be set by mistake. It must be inert.
+    for (const [label, flag] of [['absent', undefined], ['"true"', 'true']] as const) {
+      const harness = await launch(db, 'notice-off', false, false, flag);
+      try {
+        await until(() => {
+          harness.running();
+          return harness.mock.identifies.length > 0;
+        }, `identify with the flag ${label}\n${harness.output()}`);
+        const [identify] = harness.mock.identifies;
+        assert.equal(identify.intents, MAIN_INTENT_BITS, `flag ${label} changed the intents`);
+        assert.equal(identify.presenceStatus, 'online', `flag ${label} changed the presence`);
+      } finally {
+        await harness.close();
+      }
+    }
+  } finally {
+    await db.cleanup();
+  }
+});
+
+/**
+ * Criterion 4's other half: a refusal under containment fails loudly. The
+ * staging-guild binding check is the refusal the rota already has; the flag
+ * must not turn it into a silent drop or a fabricated success.
+ */
+test('a refusal under containment still exits nonzero before any Discord use', { timeout: 30_000 }, async () => {
+  const db = await openTestDb(`rota_capability_refuse_${process.pid}`);
+  try {
+    const harness = await launch(db, 'notice-off', false, true, '1');
+    try {
+      await until(() => harness.bot.exitCode !== null, 'contained wrong binding stops boot');
+      await harness.exited;
+      assert.notEqual(harness.bot.exitCode, 0, 'a refusal must exit nonzero');
+      assert.match(harness.output(), /Onboarding rota is staging-only/);
+      assert.doesNotMatch(harness.output(), /datastore_open/);
+      assert.equal(harness.mock.captured.length, 0);
+      // Refused before login, so the scoped connection was never opened either.
+      assert.equal(harness.mock.identifies.length, 0);
     } finally { await harness.close(); }
   } finally { await db.cleanup(); }
 });

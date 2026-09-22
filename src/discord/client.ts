@@ -1,5 +1,14 @@
 import { createHash } from 'node:crypto';
-import { Client, GatewayIntentBits, Events, Options, Partials, type Guild, type GuildMember } from 'discord.js';
+import {
+  Client,
+  Events,
+  GatewayIntentBits,
+  Options,
+  Partials,
+  PresenceUpdateStatus,
+  type Guild,
+  type GuildMember,
+} from 'discord.js';
 import { nowIso } from '../core/events.ts';
 import type { FunnelHandlers } from '../core/handlers.ts';
 import type { InviteTracker, InviteState } from '../core/inviteTracker.ts';
@@ -52,9 +61,45 @@ export const INTENTS = intents();
 /** Required for reaction removals and old panel messages absent from cache. */
 export const PARTIALS = [Partials.Message, Partials.Reaction, Partials.User];
 
+/**
+ * Exact opt-in value for a capability-scoped staging restart connection
+ * (TOG-4011). Deliberately the same variable the restart containment preflight
+ * reads, so one flag describes one run. Anything other than `'1'` - including
+ * `'true'` - is inert, and production never sets it.
+ */
+export const STAGING_RESTART_CONTAINMENT_FLAG = 'TWO_STAGING_RESTART_CONTAINMENT';
+
+/**
+ * What a contained staging restart is allowed to ask Discord for.
+ *
+ * Containment at the library surface is not reachable: `@discordjs/ws` exposes
+ * no socket factory, so shard-internal opcodes never pass through a strategy we
+ * own. The boundary that *is* ours is the Identify frame - the capability the
+ * connection requests in the first place.
+ *
+ *   Guilds           - without it no guild event arrives at all
+ *   GuildMembers     - GUILD_MEMBER_ADD; the join is the rota's clock start
+ *   GuildMessages    - the first human reply the rota measures
+ *   GuildVoiceStates - voice session boundaries the funnel already records
+ *
+ * Dropped because a restart measurement never reads them: MessageContent (the
+ * privileged one), GuildModeration, GuildInvites, GuildMessageReactions.
+ */
+const REDUCED_INTENTS = [
+  GatewayIntentBits.Guilds,
+  GatewayIntentBits.GuildMembers,
+  GatewayIntentBits.GuildMessages,
+  GatewayIntentBits.GuildVoiceStates,
+];
+
+/** True only for the exact opt-in value. Default-off keeps production intact. */
+export function capabilityScoped(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env[STAGING_RESTART_CONTAINMENT_FLAG] === '1';
+}
+
 /** Message content is already required by tickets/automod on current main. */
-export function intentsFor(_env: NodeJS.ProcessEnv = process.env): GatewayIntentBits[] {
-  return [...INTENTS];
+export function intentsFor(env: NodeJS.ProcessEnv = process.env): GatewayIntentBits[] {
+  return capabilityScoped(env) ? [...REDUCED_INTENTS] : [...INTENTS];
 }
 
 export interface BotDeps {
@@ -100,9 +145,12 @@ export interface BotDeps {
   onboardingRota?: DiscordOnboardingRota;
 }
 
-export function createClient(automodEnabled = process.env.TWO_AUTOMOD === '1'): Client {
+export function createClient(
+  automodEnabled = process.env.TWO_AUTOMOD === '1',
+  env: NodeJS.ProcessEnv = process.env,
+): Client {
   return new Client({
-    intents: intentsFor(),
+    intents: intentsFor(env),
     partials: automodEnabled
       ? [...new Set([...PARTIALS, Partials.Channel])]
       : PARTIALS,
@@ -111,6 +159,17 @@ export function createClient(automodEnabled = process.env.TWO_AUTOMOD === '1'): 
           // Message content must not survive the event handler in discord.js's
           // default 200-message-per-channel cache.
           makeCache: Options.cacheWithLimits({ MessageManager: 0 }),
+        }
+      : {}),
+    ...(capabilityScoped(env)
+      ? {
+          // Announcing "online" to a live member list is itself an effect. This
+          // is the only presence we ever set: `PresenceUpdateStatus.Invisible`
+          // reaches `d.presence` on the Identify frame, so the contained run is
+          // never visible in the sidebar. Omitted when the flag is off, which
+          // leaves discord.js's `presence: {}` default - i.e. online - exactly
+          // as production has it.
+          presence: { status: PresenceUpdateStatus.Invisible },
         }
       : {}),
   });
