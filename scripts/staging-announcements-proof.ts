@@ -186,7 +186,7 @@ try {
   const replies: unknown[] = [];
   const interaction = (name: string, values: Record<string, string>, permitted = true) => ({
     inGuild: () => true, guildId: GUILD, channelId: report.channelId, user: { id: APP },
-    isStringSelectMenu: () => false, isChatInputCommand: () => true, commandName: name,
+    isStringSelectMenu: () => false, isChatInputCommand: () => true, isRepliable: () => true, commandName: name,
     memberPermissions: { has: () => permitted }, options: { getString: (key: string) => values[key] },
     reply: async (body: unknown) => { replies.push(body); }, replied: false, deferred: false,
   });
@@ -251,7 +251,7 @@ try {
   requireCheck('event.mapping', await internal.discordEventId(GUILD, eventKey) === report.eventId, 'cancelled identity remains mapped');
   const matchingEvents = (await get<Event[]>(`/guilds/${GUILD}/scheduled-events`)).filter(e => e.name.includes(marker));
   requireCheck('event.no-active-copy', matchingEvents.every(e => e.id === report.eventId && e.status === 4), 'no active replacement event for the proof marker');
-  const audit = await db.prepare('SELECT action, outcome, code, status FROM internal_action_log WHERE key_id = ? ORDER BY created_at').all<{ action: string; outcome: string; code: string | null; status: number }>(keyId);
+  const audit = await db.prepare('SELECT action, outcome, code, status, reason FROM internal_action_log WHERE key_id = ? ORDER BY created_at').all<{ action: string; outcome: string; code: string | null; status: number }>(keyId);
   const required = [['event.upsert', 'created'], ['event.upsert', 'updated'], ['event.cancel', 'cancelled'], ['event.cancel', 'replayed:cancelled']];
   requireCheck('audit.internal', required.every(([action, outcome]) => audit.some(r => r.action === action && r.outcome === outcome && r.status === 200)) && audit.some(r => r.code === 'discord_rejected'), JSON.stringify(audit));
   const announcementAudit = await db.prepare('SELECT action, outcome FROM announcements_audit_log WHERE guild_id = ? ORDER BY created_at').all<{ action: string; outcome: string }>(GUILD);
