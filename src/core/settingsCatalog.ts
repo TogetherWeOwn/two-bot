@@ -162,6 +162,20 @@ export const SETTING_CLASSES: Readonly<Record<string, SettingClass>> = {
   TWO_ANNOUNCEMENTS: 'cold', // command data at src/index.ts:435, poller at :467
   TWO_AUTOMATIONS: 'cold', // command data at src/index.ts:434, registration at :441
   TWO_TEXT_COMMANDS: 'cold', // derived from TWO_AUTOMATIONS at src/automations/config.ts:24
+  // Captured once by loadTempVoiceConfig (src/tempVoice/config.ts), not hot-reloaded.
+  TEMP_VOICE_ENABLED: 'cold',
+  TWO_TEMP_VOICE: 'cold',
+  TWO_TEMP_VOICE_GENERATOR_CHANNEL_ID: 'cold',
+  TWO_TEMP_VOICE_CATEGORY_ID: 'cold',
+  TWO_TEMP_VOICE_PROTECTED_CHANNEL_IDS: 'cold',
+  TWO_TEMP_VOICE_EMPTY_GRACE_SECONDS: 'cold',
+  TWO_TEMP_VOICE_SWEEP_SECONDS: 'cold',
+  TWO_TEMP_VOICE_MAX_PER_USER: 'cold',
+  TWO_TEMP_VOICE_MAX_PER_GUILD: 'cold',
+  TWO_TEMP_VOICE_CREATE_COOLDOWN_SECONDS: 'cold',
+  TWO_TEMP_VOICE_NAME_TEMPLATE: 'cold',
+  TWO_TEMP_VOICE_PANEL_CHANNEL_ID: 'cold',
+  TWO_TEMP_VOICE_DISABLED_CONTROLS: 'cold',
   TWO_ANTI_NUKE: 'cold', // JoinRiskScorer built at src/index.ts:308, listeners at :336
   TWO_ANTI_NUKE_DRY_RUN: 'cold', // same construction, and guarded at src/index.ts:120
   TWO_COMMUNITY_SCORECARD: 'cold', // fact store at src/index.ts:212, job at :689
