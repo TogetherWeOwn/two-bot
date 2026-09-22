@@ -124,6 +124,7 @@ export const SETTING_CLASSES: Readonly<Record<string, SettingClass>> = {
   TWO_INTERNAL_ALLOW_ADD_MEMBER: 'env_only',
   TWO_INTERNAL_ALLOW_AUTOMATIONS: 'env_only',
   TWO_INTERNAL_ALLOW_AUTOMATIONS_OVERWRITE: 'env_only',
+  TWO_INTERNAL_ALLOW_EVENT_CANCEL: 'env_only',
   TWO_INTERNAL_ALLOW_MODERATION: 'env_only',
   TWO_INTERNAL_ALLOW_SETTINGS: 'env_only',
   TWO_INTERNAL_BIND_HOST: 'env_only',
