@@ -1,7 +1,7 @@
-/** Pre-consumer gateway seam, NOT a complete staging ingress policy.
- * Not installed by src/index.ts until a separately tested binding/payload policy
- * exists. The shard still decodes frames and maintains its protocol session;
- * refusal here prevents forwarding to discord.js raw listeners and caches.
+/** Pre-consumer gateway seam, NOT a complete staging transport sandbox.
+ * Not installed by src/index.ts until binding/handshake compatibility is proven.
+ * Real shards still decode frames and generate protocol traffic; the public
+ * context pins destinations, and application-initiated sends are denied.
  */
 import { Collection } from '@discordjs/collection';
 import {
@@ -12,6 +12,7 @@ import {
   type IShardingStrategy,
   type WebSocketManager,
 } from '@discordjs/ws';
+import { createRestartGatewayContext, restartGatewayEndpoint } from './restartGatewayContext.ts';
 
 /** Trusted synchronous policy. Only literal true permits the ORIGINAL payload.
  * Unknown events/fields/actors must be refused by the eventual policy. Never
@@ -19,10 +20,11 @@ import {
  */
 export type RestartGatewayPolicy = (type: string, data: unknown) => boolean;
 
-export function restartGatewayStrategy(policy: RestartGatewayPolicy):
+export function restartGatewayStrategy(policy: RestartGatewayPolicy, endpoint?: string):
   (manager: WebSocketManager) => IShardingStrategy {
   if (typeof policy !== 'function') throw new Error('Staging gateway policy required.');
-  return (manager) => new RestartGatewayStrategy(manager, policy);
+  const pinned = restartGatewayEndpoint(endpoint);
+  return (manager) => new RestartGatewayStrategy(manager, policy, pinned);
 }
 
 /** Uses the same public shards/context as SimpleShardingStrategy, in-process.
@@ -32,10 +34,13 @@ class RestartGatewayStrategy implements IShardingStrategy {
   private readonly shards = new Collection<number, WebSocketShard>();
   private readonly manager: WebSocketManager;
   private readonly policy: RestartGatewayPolicy;
+  private readonly endpoint: string;
+  private context?: ReturnType<typeof createRestartGatewayContext>;
 
-  constructor(manager: WebSocketManager, policy: RestartGatewayPolicy) {
+  constructor(manager: WebSocketManager, policy: RestartGatewayPolicy, endpoint: string) {
     this.manager = manager;
     this.policy = policy;
+    this.endpoint = endpoint;
   }
 
   private accepts(type: string, data: unknown): boolean {
@@ -44,12 +49,14 @@ class RestartGatewayStrategy implements IShardingStrategy {
   }
 
   async spawn(shardIds: number[]): Promise<void> {
-    if (this.shards.size || new Set(shardIds).size !== shardIds.length) {
+    if (this.shards.size || shardIds.length !== 1 || shardIds[0] !== 0) {
       throw new Error('Staging gateway shard ownership refused.');
     }
     const options = await managerToFetchingStrategyOptions(this.manager);
+    const context = createRestartGatewayContext(new SimpleContextFetchingStrategy(this.manager, options), this.endpoint);
+    this.context = context;
     for (const shardId of shardIds) {
-      const shard = new WebSocketShard(new SimpleContextFetchingStrategy(this.manager, options), shardId);
+      const shard = new WebSocketShard(context, shardId);
       const events = WebSocketShardEvents;
       shard.on(events.Dispatch, ({ data }) => {
         if (this.accepts(data.t, data.d)) this.manager.emit(events.Dispatch, { data, shardId });
@@ -73,6 +80,10 @@ class RestartGatewayStrategy implements IShardingStrategy {
   }
 
   async connect(): Promise<void> {
+    if (!this.context) throw new Error('Staging gateway context unavailable.');
+    // ws starts internalConnect detached. Reject an already-poisoned session on
+    // this awaited path instead of leaving connect waiting forever for READY.
+    await this.context.retrieveSessionInfo(0);
     await Promise.all([...this.shards.values()].map((shard) => shard.connect()));
   }
 
@@ -81,11 +92,11 @@ class RestartGatewayStrategy implements IShardingStrategy {
     this.shards.clear();
   }
 
-  async send(shardId: number, payload: Parameters<IShardingStrategy['send']>[1]): Promise<void> {
-    const shard = this.shards.get(shardId);
-    if (!shard) throw new Error('Staging gateway shard unavailable.');
-    // This seam is ingress-only. Outbound gateway policy remains a separate gate.
-    await shard.send(payload);
+  async send(_shardId: number, _payload: Parameters<IShardingStrategy['send']>[1]): Promise<void> {
+    // No app-originated frame is needed for passive restarts. Shard-generated
+    // identify/resume/heartbeats do NOT flow through this public send method.
+    // Refuse even opcodes 1/2/6 here; do not fabricate successful sends.
+    throw new Error('Staging gateway outbound refused.');
   }
 
   async fetchStatus(): Promise<Awaited<ReturnType<IShardingStrategy['fetchStatus']>>> {

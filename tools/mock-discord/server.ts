@@ -72,6 +72,8 @@ export interface MockDiscord {
   // --- onboarding (TWO-7) ---------------------------------------------------
   /** Every non-GET the bot made. Assert on what it actually sent. */
   captured: CapturedRequest[];
+  /** Gateway opcode census only; never retain identify tokens or frame bodies. */
+  gatewayOpcodes: number[];
   /** Join behind the rules gate: present in the guild, unable to interact. */
   memberJoinPending(memberId: string, username: string, guildId?: string): void;
   /** Rules accepted - pending flips false. This is the real onboarding trigger. */
@@ -318,6 +320,7 @@ export async function startMockDiscord(
   const invites: MockInvite[] = [{ code: 'twodev01', uses: 5, inviterId: '900000000000000099' }];
   const scheduledEvents: MockScheduledEvent[] = [];
   const captured: CapturedRequest[] = [];
+  const gatewayOpcodes: number[] = [];
   const lighting: Lighting = opts.lighting ?? 'dark';
   /** Roles the bot has granted per member, so PATCH member can echo them back. */
   const memberRoles = new Map<string, string[]>();
@@ -579,6 +582,7 @@ export async function startMockDiscord(
         return;
       }
 
+      gatewayOpcodes.push(msg.op);
       if (msg.op === 1) {
         send(ws, { op: 11, d: null, s: null, t: null }); // heartbeat ack
         return;
@@ -688,6 +692,7 @@ export async function startMockDiscord(
       });
     },
     captured,
+    gatewayOpcodes,
 
     memberJoinPending(memberId, username, guildId = GUILD_ID) {
       dispatch('GUILD_MEMBER_ADD', {

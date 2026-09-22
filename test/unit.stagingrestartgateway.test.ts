@@ -48,7 +48,7 @@ test('real Client refuses dispatch before raw listeners and member/user/message 
       const allowed = fixturePolicy(type, data);
       if (allowed) admitted.push(data);
       return allowed;
-    }) },
+    }, `ws://127.0.0.1:${mock.port}/gw`) },
   });
   const raw: string[] = [];
   client.on(Events.Raw, (packet) => { raw.push(packet.t); received.push(packet.d); });
@@ -109,7 +109,7 @@ test('READY refuses on both public paths while protocol connection and cleanup r
       checked.push(type);
       if (type === 'BARRIER') reachedBarrier();
       return false;
-    }),
+    }, `ws://127.0.0.1:${mock.port}/gw`),
   });
   manager.on(WebSocketShardEvents.Ready, () => { forwarded.push('ready'); });
   manager.on(WebSocketShardEvents.Dispatch, () => { forwarded.push('dispatch'); });
