@@ -98,6 +98,20 @@ export interface BotDeps {
    */
   moderationAuditSecret?: string | null;
   onboardingRota?: DiscordOnboardingRota;
+  /**
+   * Fail-closed staging restart containment (TOG-3903). When set, drops the
+   * real-member audit metadata writes (member_update, voice_*, message_*,
+   * moderation_action) BEFORE the durable store insert, while leaving the
+   * ephemeral `log.info('operational_audit', …)` line intact. Rota notices
+   * are already refused at `record()`; the registry duty roster of
+   * `member_update` rows is what would otherwise ingest every real member.
+   * Production default is undefined (no filtering).
+   */
+  stagingAuditMemberFilter?: (event: {
+    kind: string;
+    actorId?: string | null;
+    targetId?: string | null;
+  }) => boolean;
 }
 
 export function createClient(automodEnabled = process.env.TWO_AUTOMOD === '1'): Client {
@@ -159,6 +173,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
 
   const auditSafely = (event: Parameters<NonNullable<BotDeps['audit']>['record']>[0]) => {
     if (!audit || (auditGuildId && event.guildId !== auditGuildId)) return;
+    if (deps.stagingAuditMemberFilter && !deps.stagingAuditMemberFilter(event)) return;
     void audit.record(event).catch(() => {
       log.error('operational_audit_failed', {
         entryId: event.entryId,
