@@ -219,6 +219,8 @@ async function exerciseNegative(harness: Awaited<ReturnType<typeof launch>>) {
       id: String(1545644954272137400n + BigInt(index)),
       application_id: '900000000000000002', // mock gateway bot identity
       type: 2, token: 'mock-interaction-token', version: 1,
+      entitlements: [], authorizing_integration_owners: {},
+      app_permissions: '0', locale: 'en-US',
       guild_id: TWO_STAGING_GUILD_ID, channel_id: mock.textChannelId,
       channel: { id: mock.textChannelId, type: 0 },
       data: { id: String(1545644954272137500n + BigInt(index)), name, type: 1, options: [] },
