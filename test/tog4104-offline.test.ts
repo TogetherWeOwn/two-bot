@@ -16,6 +16,34 @@ test('TOG-4104 shipped proof, recovery and operator wrapper fixtures', async () 
     fileURLToPath(new URL('./tog4104-settingspoof-offline.test.mjs', import.meta.url)),
     fileURLToPath(new URL('./tog4104-wrapper-offline.test.mjs', import.meta.url)),
   ], { timeout: 120_000, env });
-  assert.match(stdout, /^# tests [1-9][0-9]*$/m, 'fixture runner must actually discover tests');
+  // Node counts an empty test file as a passing test. Assert the named cases,
+  // not just a positive total, so emptied/removed fixture files cannot go green.
+  const expected = [
+    ...['both absent', 'both stored', 'key stored, mate absent', 'key absent, mate stored']
+      .map((name) => `exact restore: ${name}`),
+    'assertion failure after a confirmed write still restores both exact pre-states',
+    ...['socket', '500', 'timeout'].map((loss) =>
+      `ambiguous ${loss} after commit reconciles same idempotency key and restores`),
+    'pre-action rate limit gets one bounded backoff without a duplicate mutation',
+    'restore failure stays nonzero with encrypted journal; recovery restores exact values',
+    'SIGKILL during applied write is recovered from the shipped encrypted journal',
+    'old ambiguous intent refuses replay before the unfenced 60-second takeover boundary',
+    'concurrent mate drift before mutation is not overwritten',
+    'concurrent writer before cleanup is not silently overwritten or reported PASS',
+    'cache lag cannot turn a presence-only read into a successful roundtrip',
+    ...['wrong app', 'wrong runtime', 'missing runtime', 'missing source', 'wrong guild',
+      'missing guild', 'missing flag', 'malformed signing key', 'no exclusive window',
+      'public endpoint', 'URL credentials'].map((name) => `${name} refuses before mutation`),
+    'malformed stored value refuses rather than writes an unreviewed recovery value',
+    'redirect is not followed with signing headers',
+    'unwired settings endpoint refuses before mutation with an explicit HOLD reason',
+    ...['run', 'recover'].map((mode) => `wrapper holds ${mode} before any Docker operation`),
+    ...['wrong runtime', 'wrong container', 'stopped container']
+      .map((name) => `wrapper refuses ${name} before copying or executing`),
+    'wrapper rejects dirty packet even with approved SHA',
+    'wrapper requires explicit writer exclusion and full pinned source',
+  ];
+  const passed = [...stdout.matchAll(/^ok \d+ - (.+)$/gm)].map((match) => match[1]);
+  assert.deepEqual(passed.sort(), expected.sort(), 'all named fixture cases must execute');
   assert.match(stdout, /^# skipped 0$/m, 'all discovered fixtures must run');
 });

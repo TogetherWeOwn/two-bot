@@ -15,23 +15,9 @@ ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 # Refuse edited/mismatched packet bytes, not just a claimed commit in an env var.
 git -C "$ROOT" diff --quiet "$SOURCE" -- ops/tog-4104 || refuse
 [[ -z "$(git -C "$ROOT" ls-files --others --exclude-standard -- ops/tog-4104)" ]] || refuse
-IDENTITY="$(docker inspect --format '{{.Id}}|{{.Name}}|{{.Config.Image}}|{{.State.Running}}|{{.Image}}' "$C")"
-IFS='|' read -r ID NAME IMAGE RUNNING DIGEST <<< "$IDENTITY"
-[[ "$ID" =~ ^[a-f0-9]{64}$ && "$NAME" == "/$C" && "$RUNNING" == true && "$IMAGE" == *":$RUNTIME" && "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]] || refuse
-# This is an operator assertion, not a distributed lock. Maintain the externally
-# exclusive writer window until verified cleanup; see RUNBOOK.md for HOLD cases.
-sleep 20
-TARGET="/tmp/tog-4104-proof-$SOURCE.mjs"
-# Address the immutable ID, never a name that could be reassigned mid-run.
-docker cp "$ROOT/ops/tog-4104/settings-signed-proof.mjs" "$ID:$TARGET"
-# Recheck the exact image/container before invocation; no keys ever cross here.
-[[ "$(docker inspect --format '{{.Id}}|{{.Name}}|{{.Config.Image}}|{{.State.Running}}|{{.Image}}' "$ID")" == "$IDENTITY" ]] || refuse
-printf 'runtime-container: %s\nruntime-image: %s\nproof-source: %s\n' "$ID" "$DIGEST" "$SOURCE"
-docker exec \
-  -e "STAGING_APP_UUID=$APP" \
-  -e "PROOF_RUNTIME_REVISION=$RUNTIME" \
-  -e "PROOF_SOURCE_SHA=$SOURCE" \
-  -e 'PROOF_EXCLUSIVE_WINDOW=staging-writers-quiesced' \
-  -e 'PROOF_STATE_DIR=/tmp/tog-4104-private' \
-  -e 'INTERNAL_ACTIONS_URL=http://127.0.0.1:8787' \
-  "$ID" node "$TARGET" "$MODE"
+# This exact source never passes settings to startInternalActions. Both settings
+# actions are denied even with flags enabled. No deployable replacement has been
+# reviewed/pinned by this packet. Do not turn this HOLD into an override flag.
+printf 'HOLD: runtime %s has no internal settings wiring; container %s is not invoked.\n' "$RUNTIME" "$C" >&2
+printf '%s\n' 'Separately authorized wiring, image provenance and a freshly reviewed runtime pin are required; see SOURCE_IDENTITY.md.' >&2
+exit 2

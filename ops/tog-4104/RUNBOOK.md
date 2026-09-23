@@ -1,193 +1,137 @@
-# Staging signed settings proof — corrected packet
+# Staging signed settings proof — HOLD packet
 
-Preparation/offline verification only. **Not authorized for host use until the
-exact head is independently approved, CI is green, a different agent merges,
-and the Director reconciles this packet onto [TOG-3706](/TOG/issues/TOG-3706).**
-That remains the sole host execution card. No new Operator card, deployment,
-restart, flag write, database provisioning, credential or permission change.
+**HOLD: the measured runtime cannot serve settings.get/settings.set.** At
+`f5fd3e1d6d08847589d3bf48ebc0b0e198196e90`, startup omits the settings service
+from `startInternalActions`. Both actions therefore return `action_not_allowed`,
+even with both flags enabled. See [SOURCE_IDENTITY.md](SOURCE_IDENTITY.md) for
+exact source citations, the integration witness and the minimal required change.
+The previous packet's positive runtime-readiness conclusion was wrong.
 
-## Identity and boundaries
+This PR is preparation/offline verification only. Its review or merge **does not
+remove this HOLD**. `run-proof.sh` validates its source/preconditions then exits 2
+with HOLD before **any** Docker operation, for both `run` and `recover`. There is
+no override flag. Do not invoke the engine directly to bypass this gate.
 
-| Pin | Accepted identity |
+[TOG-3706](/TOG/issues/TOG-3706) remains the sole host execution card. No duplicate
+Operator card, deployment, restart, flag write, database provisioning, credential
+or permission change is authorized. The existing flags remain at 1. No host run
+or setting change was performed by this packet's author.
+
+## Measured identity — not an executable target
+
+| Pin | Recorded identity |
 |---|---|
 | App | `uy4d9ndeygjcem6lgayhxgub` |
 | Exact container | `bot-uy4d9ndeygjcem6lgayhxgub` |
 | Guild | `1545644954272137297` (TWO Staging) |
-| Runtime revision | `f5fd3e1d6d08847589d3bf48ebc0b0e198196e90` |
-| Proof source | Full, independently approved PR head; supplied separately to wrapper |
-| Keys | `TWO_RAID_JOIN_THRESHOLD`, `TWO_RAID_WINDOW_SECONDS` |
-| Temporary fixture | Numeric strings `7`, `42`, respectively |
+| Rejected runtime | `f5fd3e1d6d08847589d3bf48ebc0b0e198196e90` |
+| Proof source | Independently reviewed full head, separate from runtime |
+| Candidate keys | `TWO_RAID_JOIN_THRESHOLD`, `TWO_RAID_WINDOW_SECONDS` |
+| Offline fixture | Numeric strings `7`, `42`, respectively |
 
-The fixture is a valid positive raid threshold/window, not a fabricated channel
-ID. Both keys are hot-wired at the accepted runtime. These are **two sequential
-writes, not an atomic pair**. No joins/raid exercises may occur during the proof;
-otherwise changing the live thresholds could alter moderation behavior. A stored
-pre-value must be an integer number or digit string in 1..3600; another existing
-shape produces REFUSED without mutation. Recovery preserves JSON type and exact
-string (including leading zeroes), not merely its numeric interpretation.
+An image tag is operator-measured metadata, not attestation of installed bytes.
+Do not replace the runtime pin with current main, an ancestor or a sibling, and
+do not deploy merely to make this probe pass.
 
-The source comparison and build limitations are in [SOURCE_IDENTITY.md](SOURCE_IDENTITY.md).
-The image tag is operator-measured revision metadata, **not an attestation of
-compiled bytes**. The wrapper records the immutable image ID as additional
-receipt evidence. Changed container/image/tag or uncertain source provenance is
-HOLD; do not substitute current main or redeploy to make the check pass.
+## Prerequisites for a separately authorized runnable packet
 
-## Mandatory exclusive writer window
+1. Review the bounded startup wiring change: pass the initialized settings store
+   to the internal-action server and integration-test the actual startup options,
+   null/unavailable-store denial, signed actions, audit and cache readback.
+2. Separately authorize the exact source/build and reconcile image digest,
+   installed source/dependencies and staging app/container/guild provenance on
+   the existing host chain. This packet supplies **no replacement runtime SHA**.
+3. Revise and independently review the runtime pin and operator wrapper together.
+   A future wrapper must inspect the exact running staging container/image,
+   record image ID, and copy/exec through the immutable container ID; no mutable
+   name race, secret transfer or flags in rollback. Do not remove the HOLD alone.
+4. Establish exclusive staging writers and no joins, including recovery; wait at
+   least 20 seconds after quiescence for the default 15-second cache poll before
+   capture. No dashboard saves, other clients, direct DB writers, second bot
+   process or in-flight save may remain. The API has no CAS/distributed lock.
+5. Fresh exact-head Code Reviewer approval, green required CI, distinct non-author
+   merge and Director reconciliation are required before authorized host use.
 
-The live handler has **no compare-and-set or distributed writer lock** and its
-reads are cached. The local journal lock serializes this probe only. Read guards
-are drift detectors, not atomic concurrency control.
+The future exclusivity assertion is not a lock. Read guards do not cover the
+check/set race, cached invisible changes or ABA. If writer exclusion cannot be
+established, HOLD. Supporting concurrent writers needs a separately reviewed
+conditional-write contract, not an optimistic claim from these fixtures.
 
-Before starting, the operator must establish and record a window with **no other
-settings writers**: no dashboard saves, other internal clients, direct database
-writers or second bot process sharing these settings; no in-flight save remains.
-Keep this exclusion (and the no-joins condition) until cleanup or recovery is
-verified. The wrapper waits 20 seconds after the operator's assertion, allowing
-the 15-second cache poll to settle before capture. It does not stop services or
-change permissions to establish exclusion for you.
+## Retained executable engine — offline verification, not a host command
 
-**If that exclusion cannot be established, HOLD: do not set the assertion.** A
-read-before-write cannot protect against a concurrent write between the check
-and set, an ABA change, or an unobserved cached change. Supporting an online
-concurrent-writer proof would require a separately reviewed, deployed conditional
-settings-write/version contract; this packet does not authorize that runtime
-change. Do not claim the fixture tests prove atomic concurrency safety.
+`settings-signed-proof.mjs` retains the signed proof/recovery implementation so
+its safety behavior can be exercised offline. Fixture servers deliberately
+provide a settings service; they are **not** replicas of measured startup. The
+source integration test separately witnesses that measured startup is unwired.
+A denied initial get exits 2 with `failure: runtime.settings-unavailable`, without
+mutation. No live roundtrip or live rollback is claimed.
 
-## Run (operator only)
+If a separately reviewed runtime eventually enables the service, the retained
+contract is:
 
-Use a private checkout containing the approved head object. `PROOF_HEAD` must be
-copied from the fresh exact-SHA review record, not a moving branch or current
-main. The following block is Bash and syntax-checked; the placeholder must be
-replaced with the reviewed full 40-character SHA. Fetching/checking out this
-packet is source preparation, **not a bot deployment**.
+- Preflight refuses wrong/missing app, runtime, guild, proof source, keys, flags,
+  writer assertion, malformed pre-state, URL credentials, redirects or a
+  non-literal-loopback endpoint. Keys remain in the container environment.
+- Capture both actual stored values and JSON types; get never reads environment
+  fallback. Stored values must be digit strings or integers in 1..3600. Exact
+  strings (including leading zeroes) survive restoration. Only prior absence
+  permits null/unset. No audit SQL or latest-old_value heuristic is safe.
+- Fixtures `7`/`42` are valid bounded raid settings, not fabricated channel IDs.
+  They are **two sequential writes**, not an atomic pair; no joins may occur.
+- Signed controls assert settings get/set, environment-only/unclassified/action
+  allowlist 403 and malformed-signature/tampered-body/unknown-key-ID 401. Exact
+  readback allows 20 seconds for the cache; presence alone cannot pass.
+- Before each attempted write, fsync an authenticated encrypted journal (0700
+  directory, 0600 file, AES-256-GCM key context-derived from the existing signing
+  key). Signing material is never persisted. Finally cleanup uses signed set for
+  normal audit/version/timestamp/delete invalidation and verifies exact pre-state.
+- Applied write + response loss uses the same body/operation ID and fresh nonce.
+  Any uncertainty keeps PROOF FAIL even if cleanup succeeds. Matching readback
+  alone cannot prove that a delayed original write will not still land.
+- Pending intents older than 45 seconds, or a backward clock, refuse automatic
+  replay before the runtime's unfenced 60-second claim takeover. This is not an
+  exactly-once guarantee. Old pending intents require receiver-side completion
+  reconciliation; no fresh ID, journal edit or blind restore is permitted.
+- The `recover` engine mode loads the original encrypted pre-state and operation
+  IDs. It refuses a live/reused PID, source/endpoint mismatch, tampered journal or
+  observed writer drift. Successful recovery emits RECOVERED, never PROOF PASS.
+  A confirmed written checkpoint can be restored later; an old ambiguous pending
+  checkpoint cannot automatically be recovered. The host wrapper remains HOLD.
 
-```bash
-set -euo pipefail
-PROOF_HEAD='<independently-reviewed-full-head-sha>'
-[[ "$PROOF_HEAD" =~ ^[a-f0-9]{40}$ ]] || exit 2
-git fetch origin "$PROOF_HEAD"
-git switch --detach "$PROOF_HEAD"
-# Set this ONLY after establishing the exclusive window described above.
-export PROOF_EXCLUSIVE_WINDOW=staging-writers-quiesced
-bash ops/tog-4104/run-proof.sh run "$PROOF_HEAD"
-```
+If an earlier manually invoked engine left a journal, preserve it and the
+exclusive window; do not run this held wrapper as a purported recovery, delete
+state, recreate the container, rotate/reorder keys or blind-unset. Record a
+redacted failure on the existing host card for a bounded reconciliation decision.
+Never print/copy values, signatures, response bodies or journal plaintext. Never
+run with `set -x` or upload the private journal directory.
 
-`run-proof.sh` verifies the full commit and packet bytes, exact container name,
-running state, image tag revision and image ID; then copies only the proof code
-and invokes it by immutable container ID, not a replaceable name. The proof refuses missing/wrong guild,
-app/runtime/source, missing keys or flags, URL credentials, redirects, non-literal
-loopback and malformed/unsupported pre-state. The signing key stays in the
-existing container environment. Nothing prints it, any signature, request body,
-response body, journal plaintext or setting value. Never run under `set -x` or
-upload the private journal directory.
+## Receipt interpretation and remaining gaps
 
-Signed controls assert environment-only/unclassified-setting/action allowlist
-403, malformed-signature/tampered-body/unknown-key-ID 401. The actual get/set
-roundtrip asserts exact stored fixture values, allowing up to 20 seconds for the
-15-second settings cache poll. Presence alone is never a passing assertion.
+The wrapper's exit 2 / HOLD is the only supported operator outcome for this
+packet, **not** successful cleanup or staging acceptance. Engine fixtures check:
 
-Both pre-states are captured before writing. Each attempted mutation has a saved
-idempotency key and durable encrypted intent. `finally` restores every attempted
-key, using the captured value for a stored row and null **only for proven prior
-absence**. Every restored state is read back and compared exactly. Restoration
-uses the signed `settings.set` path, so its normal transaction, audit,
-`nextval('guild_settings_version_seq')`/timestamp for saves, and delete/count
-invalidation for absence remain intact. **Do not use the previous packet's audit
-SQL or select the latest old_value: that can restore the fixture rather than the
-pre-run state.** No database edits are needed by this packet.
+- `0 PROOF PASS`: offline signed controls and exact cleanup passed.
+- `0 RECOVERED`: offline rollback verified, not proof acceptance.
+- `1 PROOF FAIL`: assertion/interruption/uncertainty/cleanup failure.
+- `2 REFUSED`: this invocation has not attempted mutation; any older outstanding
+  recovery state still needs resolution.
 
-## Executable rollback / interrupted-run recovery
-
-The container-local `/tmp/tog-4104-private` directory is owner-only (0700). Its
-journal is 0600, AES-256-GCM authenticated/encrypted using a context-separated key
-derived in memory from the existing signing key. Only these two non-secret numeric
-settings and request identities are journaled; the signing key is never stored.
-Atomic rename and fsync precede writes. Do not delete the directory or recreate
-the container while recovery is pending. Do not rotate/reorder the signing key.
-
-For socket loss/timeout or invalid write response, the probe makes one bounded
-same-body/same-idempotency-key reconciliation attempt. A fresh nonce is signed;
-there is no fresh operation ID. Cleanup cannot begin for an uncertain write until
-a completed result is obtained; matching readback alone is not proof that a late
-write cannot still land. Cleanup may make another bounded reconciliation attempt.
-Any response uncertainty keeps the original run **PROOF FAIL**, even when cleanup
-succeeds. There is no background retry loop. Explicit pre-action `429 rate_limited`
-gets one 1.1-second backoff with a fresh nonce; polling is every two seconds to
-respect the live 20-token burst / one-token-per-second refill.
-
-**Lease boundary:** the live idempotency store allows unfenced takeover of an
-in-flight claim at 60 seconds. A completed result is retained, but an unfinished
-claim is not an exactly-once guarantee. The journal timestamps each write intent;
-the executable refuses automatic reconciliation once its age reaches 45 seconds
-(or the clock moves backward), leaving a 15-second margin. `failure:
-write.reconciliation-expired` means HOLD for reconciliation of receiver-side
-completion and the saved pre-state, not a fresh ID, journal edit, or blind retry.
-This packet deliberately does not supply automatic recovery of an old ambiguous
-in-flight request. A confirmed `written` checkpoint can still be restored later;
-an old `writePending` or `restorePending` checkpoint cannot be replayed safely by
-this tool. Machine/DB stalls and loss of the exclusive window also require HOLD.
-
-If output says `recovery-required`, keep the exclusive window and use the exact
-same reviewed source and unchanged container/key. This is rollback, not a new
-proof. It loads the authenticated pre-run journal rather than capturing the
-fixture as a new baseline:
-
-```bash
-set -euo pipefail
-PROOF_HEAD='<same-independently-reviewed-full-head-sha>'
-[[ "$PROOF_HEAD" =~ ^[a-f0-9]{40}$ ]] || exit 2
-export PROOF_EXCLUSIVE_WINDOW=staging-writers-quiesced
-bash ops/tog-4104/run-proof.sh recover "$PROOF_HEAD"
-```
-
-Recovery refuses a still-running probe (PID lock), wrong source/endpoint or
-unreadable/tampered journal. After a killed process, it removes the stale lock
-only when that PID demonstrably no longer exists. A reused/live PID produces
-HOLD, not an automatic kill. It settles recorded pending writes using their
-original idempotency IDs, then restores exact pre-state and verifies both keys.
-It emits `RECOVERED`, **never PROOF PASS**. A new normal run cannot overwrite an
-outstanding journal. Do not launch recovery while an original run is still live.
-
-If readback detects another writer's value, the probe stops without overwriting
-that value. If idempotency outcome stays uncertain, the journal is missing, the
-container was replaced, the key changed, or recovery still fails: **HOLD, no
-manual blind overwrite/unset and no new proof**. Record the redacted failure on
-the existing host card for a bounded reconciliation decision. Retain the
-journal; do not export/decrypt it into a ticket. Keep flags at 1; they predate this
-packet and are never changed by its run or rollback.
-
-## Exit codes and redacted evidence
-
-- `0 PROOF PASS`: signed positive/negative controls and exact cleanup passed.
-- `0 RECOVERED`: rollback verified only; not live staging acceptance.
-- `1 PROOF FAIL`: assertion, interruption, response uncertainty or cleanup failed.
-- `2 REFUSED`: this invocation has not attempted a mutation; an older pending
-  recovery may still exist. A refusal is not permission to discard that journal.
-
-Post the wrapper's image ID/proof-source lines and the probe's single JSON receipt
-on [TOG-3706](/TOG/issues/TOG-3706), plus the exclusive-window start/end timestamps.
-The receipt carries runtime, proof source, each key's prior presence,
-`cleanup: exact-prestate-verified | recovery-required | not-started`, uncertainty
-and verdict; no settings values, signatures or key IDs. The merged packet/test
-links are evidence of preparation only. Parent acceptance and the product-capacity
-gate remain blocked pending authorized live execution and remaining evidence.
-
-## Remaining acceptance gaps
-
-- HMAC failure is **not** website non-admin authorization denial. Obtain the
-  staging website non-admin route/contract test evidence separately.
-- A store roundtrip does not prove Discord behavior, website UX or full-runtime
-  equivalence. Cache-aware equality is tested; not deployment reproducibility.
-- Exclusive writer control is an operator precondition, not supplied by this API.
-- No host/live run was performed by the packet author. Offline tests use HTTP
-  fixtures with actual stored values and execute this exact probe and recovery.
+Engine receipts carry runtime/proof source, prior row presence, cleanup outcome,
+uncertainty and safe failure code, never values/signatures/key IDs. Full runtime
+or deployed-byte equivalence is not established. HMAC 401 is **not** website
+non-admin authorization denial; that needs separate staging website route/contract
+evidence. [TOG-3469](/TOG/issues/TOG-3469) acceptance and
+[TOG-4092](/TOG/issues/TOG-4092) capacity gate remain unchanged.
 
 ## Offline verification
 
 ```bash
 node --check ops/tog-4104/settings-signed-proof.mjs
 bash -n ops/tog-4104/run-proof.sh
-node --test test/tog4104-settingspoof-offline.test.mjs
-node --test test/tog4104-wrapper-offline.test.mjs
-node --test test/tog4104-offline.test.ts
+node --test test/tog4104-offline.test.ts test/tog4104-discovery.test.ts test/tog4104-runtime-wiring.test.ts
 ```
+
+The CI entrypoint requires every expected named executable case, not a positive
+Node test count (empty files count as passing tests). Its negative mutations run
+the unchanged entrypoint against empty files and unrelated named cases; both
+must fail. No fixture success removes the runtime HOLD.

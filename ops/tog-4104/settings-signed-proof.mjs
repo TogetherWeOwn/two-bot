@@ -138,6 +138,7 @@ async function send(body, { idem, badSignature = false, badBody = false, unknown
 }
 async function read(i) {
   const r = await send({ action: 'settings.get', key: KEYS[i] });
+  check(!(r.status === 403 && r.json?.error?.code === 'action_not_allowed'), 'runtime.settings-unavailable');
   check(r.status === 200 && r.json?.ok === true && r.json.result?.key === KEYS[i], 'read.contract');
   const { source, value } = r.json.result;
   check(source === 'unset' && value === null || source === 'store' && validValue(value), 'read.state');

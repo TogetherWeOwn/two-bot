@@ -1,13 +1,16 @@
-# Source identity: bounded settings proof, not runtime equivalence
+# Source identity: HOLD — measured startup has no settings wiring
 
-This is Git-object evidence, rechecked during the correction of
-[TOG-4104](/TOG/issues/TOG-4104). The operator's 2026-09-23 02:17Z receipt identifies
-the image revision; no agent inspected or executed in that container. Proof code
-and accepted runtime are independently pinned by `run-proof.sh`.
+This is Git-object evidence, rechecked after the adverse review in
+[TOG-4144](/TOG/issues/TOG-4144). The operator's 2026-09-23 02:17Z receipt identifies
+the image revision; no agent inspected or executed in that container. **The
+previous packet incorrectly treated identical handler blobs as evidence that the
+measured startup could serve settings actions. It cannot.** Proof source and
+measured runtime remain separate pins; `run-proof.sh` exits HOLD before Docker.
+No replacement runtime is accepted or authorized by this packet.
 
 ## Revision topology
 
-- Accepted runtime `f5fd3e1d6d08847589d3bf48ebc0b0e198196e90`, tree
+- Measured, non-executable runtime `f5fd3e1d6d08847589d3bf48ebc0b0e198196e90`, tree
   `010a591ac1580a9a822c07d272389eb9b6de8bf9`.
 - Prior reviewed merge `910c91c510913f40a5e8bb4603d59554583a0e15`, tree
   `d34533223b2ddc1212cc0706d44cb655d453b046`.
@@ -36,7 +39,8 @@ done
 
 ## Identical source surfaces
 
-These blobs/trees are identical at both accepted runtime and prior review:
+These blobs/trees are identical at both measured runtime and prior review.
+They do not establish that startup injects the service these handlers require:
 
 | Path | Full Git object ID |
 |---|---|
@@ -63,16 +67,64 @@ Canonical input is five fields joined by literal LF, without a trailing LF:
 `POST`, `/internal/actions`, timestamp, nonce, SHA256 of actual raw request bytes.
 Malformed-present signature, tampered body and unknown key ID all map to 401.
 
-**Important correction to the first packet:** `settingsGet` returns the actual
-stored JSON value, or `{source: "unset", value: null}`; it never reads through to
-the environment. `SettingsStore.get` reads its cache. `set` writes a DB transaction
-with audit and version/count invalidation but does not synchronously refresh
-that cache. Default poll is 15 seconds. The revised executable captures exact
-values, polls for exact readback, and restores through this same signed API.
+**Handler contract, unreachable through measured startup:** with a supplied
+settings service, `settingsGet` returns the actual stored JSON value, or
+`{source: "unset", value: null}`; it never reads through to the environment.
+`SettingsStore.get` reads its cache. `set` writes a DB transaction with audit and
+version/count invalidation but does not synchronously refresh that cache. Default
+poll is 15 seconds. Offline fixtures exercise capture/readback/restoration against
+that contract; they do not demonstrate runtime reachability. The measured server
+instead refuses the first get before the probe attempts any mutation.
 
 The DB layer is `src/store`, not `src/db`. `db.ts`, `driver.ts`, `migrate.ts`,
 `postgresDriver.ts` and the other unchanged store files were compared; the only
 store-tree delta is `webRoleCheck.ts` (temp-voice table classification).
+
+## Decisive startup integration: HOLD
+
+At the exact measured revision:
+
+- `src/index.ts:170-171` constructs `SettingsStore(db)` and awaits `settings.load()`;
+  `:181-196` connects live configuration and starts polling. The service exists.
+- `src/index.ts:743-765` passes a durable action store and enabled actions to
+  `startInternalActions`, but **does not pass `settings`**. The previously reviewed
+  revision has the same omission at `src/index.ts:685-707`.
+- `src/internal/server.ts:303-305` evaluates `opts.settings ?? null` and passes it
+  to `assertAllowed`. `src/internal/actions.ts:235-239` rejects both settings verbs
+  with `action_not_allowed` / `action_needs_settings` when that port is missing.
+- `TWO_INTERNAL_ALLOW_SETTINGS=1` only enables the verb names; it cannot supply
+  this missing dependency. More flag writes or DB provisioning cannot fix it.
+
+`test/tog4104-runtime-wiring.test.ts` evaluates the **actual startup call**, server
+null-default/gate and action authorization code extracted from this Git revision.
+Seven byte-exact excerpts, file blob IDs and source line ranges are committed in
+`test/fixtures/tog4104-runtime-source.json` so shallow/offline CI can run them.
+Constructors are stubbed, both verbs are enabled and a settings sentinel is in
+scope. The evaluated startup still omits it; both verbs reject. A test-only
+insertion of `settings,` into that same call changes the gate result, and null
+settings/disabled actions/missing durable store still refuse. This is a targeted
+startup-options integration witness, **not** full app/HTTP/DB bootstrap evidence.
+
+Recheck excerpt provenance against the pinned object, never a moving checkout:
+
+```bash
+node ops/tog-4104/verify-runtime-source.mjs
+node --test test/tog4104-runtime-wiring.test.ts
+```
+
+The minimal separately authorized source change is to pass the already-loaded
+`settings` instance beside `store: new InternalActionStore(db)` in the startup
+options. It activates the data path when the existing settings flag is enabled,
+so it needs a bounded implementation review and real integration tests before
+separately authorized deployment. Do **not** feed a store snapshot into
+`loadInternalActionsConfig`: signing/auth/allowlist configuration must remain
+environment-only. No runtime source change is applied by this packet.
+
+There is **no approved replacement source/image SHA** here. A subsequent packet
+must identify the reviewed wiring commit, reconcile built/installed source and
+immutable image identity, repin the runtime separately from proof source, and
+receive fresh approval on the existing host chain. Merging this HOLD packet
+alone does not make the measured revision runnable.
 
 ## Transitive differences that constrain the conclusion
 
@@ -84,7 +136,7 @@ numstat totals +3306/-2151. Full path manifest is reproduced by the command abov
 |---|---|---|---|
 | `src/core/settingsCatalog.ts` | `dca8f67259eb7e812f6f93e4ddf70b403fec6861` | `dfae4752e04d6c55d31c3cc9b552e920d5e68998` | Live adds 12 env-only temp-voice keys; only raid pair hot-wired |
 | `src/core/config.ts` | `ca2d5a350cdd6105dc95e13d64aa5e0ef5c4a23d` | `5436ca30ff0302e932fcb6532acc5071622441e5` | Reviewed additionally hot-wires landing/automod, not selected by proof |
-| `src/index.ts` | `45775ab4d39d25c7e18277dc4e6945b46e8c0ee1` | `291a007121e6b7d07fce7d63c7b5782ee3615b3b` | Live adds staging temp-voice services; raid liveCfg thunks present at both |
+| `src/index.ts` | `45775ab4d39d25c7e18277dc4e6945b46e8c0ee1` | `291a007121e6b7d07fce7d63c7b5782ee3615b3b` | Both omit settings from internal startup (blocking); live additionally adds staging temp-voice services |
 | `src/discord/commandNames.ts` | `0b4835b3d838ecbe45f0d8aa5f2f790f8637702e` | `615bae6707e469416f2254e72b9daabb58622ca7` | Imported by actions; temp-voice command additions, not settings handler |
 | `package.json` | `485725d386a6519e56c3dcdb404c34d822bff51d` | `8512f5c129a6aa66889db5ec69752b782d9bf053` | Two snowflake-check script entries differ; dependency/devDependency objects identical |
 | `docs/INTERNAL_ACTIONS.md` | `b4555910c50556adb7d08ec96140a9675d368730` | `22294942d9ca86b738f13d5f1d1e037edb8066f2` | Reviewed includes allowlist approval prose; no wire change |
@@ -94,8 +146,9 @@ onboarding/sessionWelcome/live-cleanup, the staging temp-voice check, ops/script
 CI and tests. `0028_temp_voice.sql` adds three temp-voice tables and adjusts
 `BOT_TABLES`; it does not replace the settings/audit schema. `src/staging` and
 `src/store` as whole trees are **different**, even though the selected staging
-pins and DB driver are identical. Startup and unrelated service behavior are
-outside this proof's claim, not certified equivalent.
+pins and DB driver are identical. The startup call is essential to this proof
+and fails the integration witness above; unrelated services are not certified
+equivalent.
 
 The selected `TWO_RAID_JOIN_THRESHOLD`/`TWO_RAID_WINDOW_SECONDS` entries and
 `HOT_WIRED_FIELDS` mappings are present at both revisions; `RaidWatch` consumes
@@ -115,11 +168,10 @@ Do not call the entire settings test surface identical.
 - `Dockerfile` uses floating `node:24-bookworm-slim`, `WORKDIR /app`, `USER node`,
   `CMD ["node","src/index.ts"]`. Matching Dockerfile/lockfile does not attest base
   image digest, installed modules, build context, local edits or mounted overlays.
-- `run-proof.sh` enforces the measured revision in exact-container image metadata,
-  captures immutable image ID, and refuses drift. It does not prove deployed bytes
-  from ancestry, a tag or a label. If the operator cannot trust that image/source
-  mapping, HOLD for verified image provenance (or a separately reviewed pinned
-  rebuild of the accepted source), not blind deployment of main.
+- `run-proof.sh` refuses this measured revision before any Docker operation. A
+  rebuild of this same unwired source does not fix it. HOLD pending separately
+  authorized startup wiring **and** verified image provenance, not deployment of
+  main, a pin substitution or removal of the HOLD alone.
 - The live write contract has no CAS. Mandatory external writer exclusion and
   interrupted-run recovery limitations are explicit in [RUNBOOK.md](RUNBOOK.md).
 - No full-runtime equivalence, website non-admin denial or live acceptance is

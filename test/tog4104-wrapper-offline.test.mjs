@@ -49,16 +49,14 @@ esac
 }
 
 for (const mode of ['run', 'recover']) {
-  test(`wrapper verifies source/runtime and invokes ${mode} only inside exact staging container`, async (t) => {
+  test(`wrapper holds ${mode} before any Docker operation`, async (t) => {
     const f = await fixture(t);
     const r = await f.run({}, f.sha, mode);
-    assert.equal(r.code, 0, r.stderr);
-    const calls = await f.calls();
-    assert.equal(calls.split('\n').filter((s) => s.startsWith('inspect ')).length, 2);
-    assert.ok(calls.includes(`${container} node /tmp/tog-4104-proof-${f.sha}.mjs ${mode}`));
-    assert.ok(!calls.includes(`bot-${APP} node`), 'do not execute by mutable container name');
-    assert.ok(!calls.includes('TWO_INTERNAL_KEYS='), 'never transfer signing material');
-    assert.ok(r.stdout.includes(`runtime-image: ${image}`));
+    assert.equal(r.code, 2, r.stderr);
+    assert.match(r.stderr, /HOLD: runtime .* has no internal settings wiring/);
+    assert.ok(r.stderr.includes(RUNTIME));
+    assert.equal(await f.calls(), '', 'not even Docker inspection is authorized by this held packet');
+    assert.equal(r.stdout, '');
   });
 }
 for (const [name, identity] of [

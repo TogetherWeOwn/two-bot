@@ -256,6 +256,15 @@ test('malformed stored value refuses rather than writes an unreviewed recovery v
   assert.equal(r.code, 2); assert.equal(f.writes.length, 0);
 });
 
+test('unwired settings endpoint refuses before mutation with an explicit HOLD reason', async (t) => {
+  const f = await fixture(t, {}, { get({ deny }) {
+    deny(403, 'action_not_allowed'); return true;
+  } });
+  const r = await f.run();
+  assert.equal(r.code, 2); assert.equal(r.receipt.failure, 'runtime.settings-unavailable');
+  assert.equal(r.receipt.cleanup, 'not-started'); assert.equal(f.writes.length, 0);
+});
+
 test('redirect is not followed with signing headers', async (t) => {
   let requests = 0;
   const f = await fixture(t, {}, { get({ res }) {
