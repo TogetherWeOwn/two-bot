@@ -1,0 +1,11 @@
+{
+  "name": "two-bot-ci-postgres-bin",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CI-only native PostgreSQL for the Linux x64 owned-storage test job",
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "dependencies": {
+    "@embedded-postgres/linux-x64": "18.4.0-beta.17"
+  }
+}

@@ -320,6 +320,21 @@ test('an env-only key cannot become a row at all, even with the TypeScript bypas
   );
 });
 
+test('staging restart safety controls cannot be inserted through SQL or settings.set', async () => {
+  const store = new SettingsStore(testDb.db);
+  for (const key of ['TWO_STAGING_RESTART_CONTAINMENT', 'TWO_STAGING_RESTART_SYNTHETIC_ACTORS']) {
+    await assert.rejects(() => store.set(GUILD, key, '1', ADMIN));
+    await assert.rejects(() => rawInsert(key, '1'), (err: { code?: string; constraint?: string }) => {
+      assert.equal(err.code, '23514');
+      assert.equal(err.constraint, 'guild_settings_staging_restart_env_only');
+      return true;
+    });
+  }
+  await rawInsert('TWO_RAID_JOIN_THRESHOLD', '3');
+  await store.load();
+  assert.equal(store.get(GUILD, 'TWO_RAID_JOIN_THRESHOLD'), '3', 'legal writes still work');
+});
+
 test('a key the schema allows but the catalog has never heard of is still dropped on read', async () => {
   // The constraint can only list names somebody thought of. A key invented
   // after migration 0027 gets past it, so the read side has to be fail-closed
@@ -375,6 +390,8 @@ test('an UPDATE cannot rename a legal row into an env-only key', async () => {
     ['TWO_INTERNAL_ALLOW_MODERATION', 'guild_settings_no_internal_keys'],
     ['TWO_MODERATION', 'guild_settings_env_only_keys'],
     ['DISCORD_TOKEN', 'guild_settings_env_only_keys'],
+    ['TWO_STAGING_RESTART_CONTAINMENT', 'guild_settings_staging_restart_env_only'],
+    ['TWO_STAGING_RESTART_SYNTHETIC_ACTORS', 'guild_settings_staging_restart_env_only'],
   ] as const) {
     const err = await refusal(() => rename(key));
     assert.equal(err.code, '23514', `UPDATE to ${key} was not refused`);
@@ -453,7 +470,8 @@ test('all settings refusals are VALID constraints, checked on every write', asyn
   assert.deepEqual(
     rows.map((r) => r.conname),
     ['guild_settings_env_only_keys', 'guild_settings_no_internal_keys', 'guild_settings_rota_env_only_keys',
-      'guild_settings_rota_primary_env_only', 'guild_settings_rota_readers_env_only'],
+      'guild_settings_rota_primary_env_only', 'guild_settings_rota_readers_env_only',
+      'guild_settings_staging_restart_env_only'],
     'all CHECK constraints are present on the table',
   );
   for (const r of rows) {
