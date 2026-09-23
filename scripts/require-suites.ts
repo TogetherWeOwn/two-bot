@@ -65,6 +65,17 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     minTests: 1,
     why: 'real entrypoint containment across three restarts, zero Discord mutations and pre-persistence actor filtering',
   },
+  {
+    // TOG-4230. The startup-to-handler wiring this card repairs: the tripwire
+    // evaluates the actual startInternalActions call in src/index.ts, and the
+    // round trip proves signed settings.set persists, audits, refreshes and
+    // reaches the consumer over isolated Postgres. Deleting the file must red
+    // the build rather than silently unpin the wiring.
+    // Measured 2026-09-23 against Postgres 18.1, at 826c390 + this commit.
+    file: 'test/e2e.settingsstartup.test.ts',
+    minTests: 8,
+    why: 'the settings-service startup injection and the signed settings round trip, or the TOG-4104 gap re-opens unnoticed',
+  },
 ];
 
 /**
