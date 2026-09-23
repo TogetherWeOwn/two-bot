@@ -86,6 +86,16 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Needs neither node nor the database, so it runs before both and a PR
+      # that hardcodes a guild id fails in seconds instead of after `npm ci`.
+      # The count in src/ may only go down; scripts/ci/check-src-snowflakes.sh
+      # explains why that is the rule (TOG-3103).
+      - run: ./scripts/ci/check-src-snowflakes.sh
+
+      # The ratchet is only worth its line in the workflow if it still refuses
+      # things, so its own mutation cases run alongside it.
+      - run: ./scripts/ci/check-src-snowflakes.test.sh
+
       # Five runners share one host, so Docker assigns an unused host port
       # instead of every job fighting over 5432. Set the database URLs at
       # runtime so every later step reads the mapped port.

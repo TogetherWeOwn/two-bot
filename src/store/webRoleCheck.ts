@@ -25,6 +25,20 @@ const DENIED = new Set([
   '3F000', // invalid_schema_name - USAGE was never granted
 ]);
 
+/**
+ * The same list, minus the one refusal the caller can switch off.
+ *
+ * `default_transaction_read_only` is a session GUC. `SET default_transaction_read_only = off`
+ * is one statement and any role may issue it, so a write that came back 25006
+ * was refused by a setting the writer controls, not by a grant. That is a fine
+ * belt, but it is not the boundary, and TOG-3100 asks for the boundary: the
+ * config store now decides how the bot behaves at the next poll, and "the
+ * website cannot write it" has to survive a caller who simply turned the belt
+ * off. Every write probe below therefore clears the read-only default first and
+ * requires a privilege refusal.
+ */
+const DENIED_WITHOUT_READ_ONLY = new Set([...DENIED].filter((c) => c !== '25006'));
+
 export interface CheckResult {
   name: string;
   ok: boolean;
@@ -125,6 +139,17 @@ export const BOT_TABLES = [
   'feed_relays',
   'feed_deliveries',
   'announcements_audit_log',
+  // 0026 — the config store (TOG-3100). The most consequential write target on
+  // this list: a row here changes how the bot behaves at the next poll, so a
+  // website role that could write one would be configuring the bot rather than
+  // reading from it. The audit table is append-only even to the bot, and must
+  // not be reachable at all - otherwise the record of who changed what is
+  // editable by the party it exists to hold to account.
+  'guild_settings',
+  'guild_settings_audit',
+  // 0027 — the audit-mirror kill switch (TOG-3187). One operational row that
+  // says who halted sends and when; an operator control, never website data.
+  'audit_kill_switch',
 ];
 
 function ident(schema: string, name: string): string {
@@ -163,6 +188,46 @@ async function mustFail(client: pg.Client, name: string, sql: string): Promise<C
     detail: DENIED.has(r.code)
       ? `refused (${r.code})`
       : `failed with ${r.code}, which is not a refusal: ${r.message}`,
+  };
+}
+
+/**
+ * A write that must be refused by privilege, with the read-only default out of
+ * the way.
+ *
+ * `SET TRANSACTION READ WRITE` is the caller doing what any caller can do. If
+ * it will not take, this probe cannot measure a grant, and it says so rather
+ * than reporting the 25006 it would then collect - a check that passes because
+ * the thing it was supposed to bypass was still in place is the vacuous shape
+ * this whole file exists to avoid.
+ */
+async function mustFailOnPrivilege(client: pg.Client, name: string, sql: string): Promise<CheckResult> {
+  await attempt(client, 'BEGIN');
+  const readWrite = await attempt(client, 'SET TRANSACTION READ WRITE');
+  const r = readWrite.ok ? await attempt(client, sql) : null;
+  await attempt(client, 'ROLLBACK');
+
+  if (!readWrite.ok) {
+    return {
+      name,
+      ok: false,
+      detail:
+        `could not clear the read-only default (${readWrite.code}), so this probe ` +
+        `cannot tell a grant from a session setting`,
+    };
+  }
+  if (r!.ok) {
+    return { name, ok: false, detail: 'SUCCEEDED once the read-only default was cleared' };
+  }
+  const denied = DENIED_WITHOUT_READ_ONLY.has(r!.code);
+  return {
+    name,
+    ok: denied,
+    detail: denied
+      ? `refused (${r!.code}) with the session read-write`
+      : r!.code === '25006'
+        ? 'refused only by the read-only default, which any caller can switch off'
+        : `failed with ${r!.code}, which is not a refusal: ${r!.message}`,
   };
 }
 
@@ -243,22 +308,75 @@ export async function runWebRoleChecks(
   // "not auto-updatable" whatever the grants said - a check that passes because
   // of how the view is shaped tells you nothing about who is allowed to write.
   out.push(
-    await mustFail(
+    await mustFailOnPrivilege(
       client,
       'cannot write to a contract view',
       `INSERT INTO ${ident(webSchema, 'upcoming_events')} (event_id, name, starts_at) VALUES ('probe', 'probe', '2030-01-01T00:00:00.000Z')`,
     ),
   );
   out.push(
-    await mustFail(
+    await mustFailOnPrivilege(
       client,
       "cannot write to the bot's tables",
       `INSERT INTO ${ident(botSchema, 'guild_counters')} (guild_id) VALUES ('probe')`,
     ),
   );
-  out.push(await mustFail(client, 'cannot create a table', `CREATE TABLE web_role_probe (id int)`));
+  // guild_settings gets its own named probe rather than riding on the
+  // guild_counters one above. TOG-3100 made this table the thing that decides
+  // how the bot behaves at the next 15s poll, so "the website role cannot write
+  // the bot's tables" stops being a tidiness claim and becomes the boundary
+  // between the dashboard asking the bot to change and the dashboard changing
+  // it directly. docs/WEBSITE_CONTRACT.md asserts 35/35 denials, but that is a
+  // document; this is the measurement, and it names the table it measured.
+  //
+  // UPDATE and DELETE get their own probes rather than being assumed from the
+  // INSERT. They are separate privileges in Postgres, and for this table they
+  // are the more interesting ones: changing an existing setting, or deleting a
+  // row to hand a key back to whatever the environment says, both reconfigure
+  // the bot without ever inserting anything.
   out.push(
-    await mustFail(client, 'cannot create a table in the web schema', `CREATE TABLE ${ident(webSchema, 'probe')} (id int)`),
+    await mustFailOnPrivilege(
+      client,
+      'cannot write the config store',
+      `INSERT INTO ${ident(botSchema, 'guild_settings')} (guild_id, key, value, version, updated_by) VALUES ('probe', 'TWO_RAID_JOIN_THRESHOLD', '"1"'::jsonb, 1, 'probe')`,
+    ),
+  );
+  out.push(
+    await mustFailOnPrivilege(
+      client,
+      'cannot change an existing setting',
+      `UPDATE ${ident(botSchema, 'guild_settings')} SET value = '"1"'::jsonb`,
+    ),
+  );
+  out.push(
+    await mustFailOnPrivilege(
+      client,
+      'cannot delete a setting back to the environment value',
+      `DELETE FROM ${ident(botSchema, 'guild_settings')}`,
+    ),
+  );
+  out.push(
+    await mustFailOnPrivilege(
+      client,
+      'cannot write the config audit trail',
+      `INSERT INTO ${ident(botSchema, 'guild_settings_audit')} (guild_id, key, new_value, actor) VALUES ('probe', 'TWO_RAID_JOIN_THRESHOLD', '"1"'::jsonb, 'probe')`,
+    ),
+  );
+  // The version sequence is a separate object with its own grants, and a
+  // settings row is only visible to the other processes once its version is
+  // ahead of theirs. Nothing here depends on it being denied - the table writes
+  // are already refused - but a role that could burn versions could make every
+  // bot in the fleet refetch the whole table on every poll.
+  out.push(
+    await mustFailOnPrivilege(
+      client,
+      'cannot advance the settings version sequence',
+      `SELECT nextval('${botSchema.replace(/'/g, "''")}.guild_settings_version_seq')`,
+    ),
+  );
+  out.push(await mustFailOnPrivilege(client, 'cannot create a table', `CREATE TABLE web_role_probe (id int)`));
+  out.push(
+    await mustFailOnPrivilege(client, 'cannot create a table in the web schema', `CREATE TABLE ${ident(webSchema, 'probe')} (id int)`),
   );
 
   // --- the census ---------------------------------------------------------

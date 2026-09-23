@@ -6,6 +6,23 @@
  * runs exactly as it does today, with no listener and no open port. Off is the
  * default, and turning it on is a deliberate act.
  *
+ * **That is now a security property, not just a convenience (TOG-3183).** Since
+ * TOG-3100, `loadConfig()` reads the settings store first and the environment
+ * second. This function must never do the same. Its `env` parameter exists for
+ * tests and defaults to `process.env`; threading a `SettingsStore` snapshot
+ * into it would mean a row in `guild_settings` could decide which verbs the
+ * website is allowed to invoke - the privilege-escalation primitive ADR
+ * TOG-3093 §2.4 exists to prevent. `TWO_MODERATION` is the concrete case: it
+ * co-gates nine moderation verbs below and carries no `TWO_INTERNAL_` prefix,
+ * so the prefix refusal never covered it.
+ *
+ * Both halves are defended. The catalog refuses to store these names at all
+ * (`src/core/settingsCatalog.ts`, plus the CHECK constraints in migrations 0026
+ * and 0027), and `test/unit.internalconfig.envonly.test.ts` fails if this
+ * function is ever handed a non-environment source. Either alone would hold
+ * today; the pair survives one of them being refactored away by somebody who
+ * did not read this comment.
+ *
  * | Variable | Meaning |
  * |---|---|
  * | `TWO_INTERNAL_ACTIONS` | `1` to run the listener at all. |
@@ -15,8 +32,18 @@
  * | `TWO_INTERNAL_ROLE_KEYS` | Extra `role-key:snowflake` pairs beyond the self-assignable set. |
  * | `TWO_INTERNAL_CHANNEL_KEYS` | `channel-key:snowflake` pairs. Empty by default, and `announcement.post` can address nothing without it. |
  * | `TWO_INTERNAL_ALLOW_ADD_MEMBER` | `1` to enable `guild.add_member`. **Requires the CEO's sign-off (TOG-44).** |
+ * | `TWO_INTERNAL_ALLOW_EVENT_CANCEL` | `1` to enable cancellation of mapped scheduled events. Default off; staging proof does not authorize live enablement. |
  * | `TWO_INTERNAL_ALLOW_AUTOMATIONS` | `1` to enable non-destructive `automations.import` and `automations.export`. Default off pending allowlist approval. |
  * | `TWO_INTERNAL_ALLOW_AUTOMATIONS_OVERWRITE` | `1` to permit destructive imports. Requires the base automations flag too. |
+ * | `TWO_INTERNAL_ALLOW_SETTINGS` | `1` to enable `settings.get` and `settings.set`. Default off pending the CEO's allowlist sign-off (TOG-3101). |
+ *
+ * Every `TWO_INTERNAL_*` variable on this page is read from the environment
+ * and from nowhere else. They are not settings and they must never become
+ * settings: they are the switches that decide what the *website* may make the
+ * bot do, so a website that could change them could grant itself the rest of
+ * the allowlist. `settings.set` refuses the whole namespace - in the handler
+ * (src/internal/actions.ts), in the store (src/core/settings.ts), and in the
+ * schema (migrations/0026_guild_settings.sql).
  */
 import { parseKeys, type SigningKey } from './signing.ts';
 import { buildRoleKeys, buildChannelKeys, type ActionName } from './actions.ts';
@@ -56,12 +83,21 @@ export function loadInternalActionsConfig(env: NodeJS.ProcessEnv = process.env):
   // address, so an unconfigured bot refuses every post by key lookup.
   const enabled = new Set<ActionName>(['role.assign', 'announcement.post', 'event.upsert']);
   if (env.TWO_INTERNAL_ALLOW_ADD_MEMBER === '1') enabled.add('guild.add_member');
+  if (env.TWO_INTERNAL_ALLOW_EVENT_CANCEL === '1') enabled.add('event.cancel');
   // These verbs widen the website key's fixed allowlist, so merely shipping the
   // implementation must not enable them. The flag is the approval record and
   // defaults off. Destructive overwrite is checked separately at action time.
   if (env.TWO_INTERNAL_ALLOW_AUTOMATIONS === '1') {
     enabled.add('automations.import');
     enabled.add('automations.export');
+  }
+  // The admin dashboard's read and write path (TOG-3093 slice 2). Same
+  // arrangement as the two above and for the same reason: shipping the
+  // implementation must not widen the allowlist. The flag is the record of the
+  // CEO's sign-off, not a convenience, and it defaults off.
+  if (env.TWO_INTERNAL_ALLOW_SETTINGS === '1') {
+    enabled.add('settings.get');
+    enabled.add('settings.set');
   }
   if (env.TWO_INTERNAL_ALLOW_MODERATION === '1' && env.TWO_MODERATION === '1') {
     for (const action of [

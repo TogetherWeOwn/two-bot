@@ -144,7 +144,22 @@ test('the welcome lands in the anchor room, once, and says the one thing', { tim
 
   assert.ok(post.content.includes('Sunday Squad'), post.content);
   assert.ok(post.content.includes(`<@${NEWBIE}>`), 'the member is not mentioned');
-  assert.match(post.content, /<t:\d{10}:R>/, 'no relative timestamp');
+  // TWO-66 §5.3 has two voices and this suite runs on a live clock: far from
+  // the event the welcome names the next occurrence with a relative timestamp;
+  // inside the two-hour window (or while the event is live) it says the event
+  // is happening right now and carries no timestamp. Assert whichever voice
+  // came out, not the calendar. (TOG-3642: every run inside the Sunday
+  // 18:00-21:00 ET window failed here on the live copy.)
+  if (post.content.includes('happening right now')) {
+    assert.match(
+      post.content,
+      /is happening right now in <#\d+> — Fall Guys, for about another hour\./,
+      'not the spec\'s near-event copy',
+    );
+    assert.doesNotMatch(post.content, /<t:\d+:R>/, 'the live copy names no occurrence');
+  } else {
+    assert.match(post.content, /Next one is <t:\d{10}:R>\./, 'no relative timestamp');
+  }
   // A computed date, not a written one - the whole point of item 1.
   assert.doesNotMatch(post.content, /\b20(2[6-9]|3\d)\b/, 'a literal year reached the message');
 
@@ -183,10 +198,19 @@ test('a second member gets their own welcome', { timeout: 90_000 }, async (t) =>
   assert.equal(posts.length, 2);
   assert.ok(posts[0].content.includes(`<@${NEWBIE}>`));
   assert.ok(posts[1].content.includes(`<@${OTHER}>`));
-  // Same event, so the same timestamp - the date is a property of the series,
-  // not of who happened to arrive.
-  const stamps = posts.map((p) => /<t:(\d+):R>/.exec(p.content)?.[1]);
-  assert.equal(stamps[0], stamps[1]);
+  // Same event, so the same date - the date is a property of the series, not
+  // of who happened to arrive. In the near-event voice there is no timestamp
+  // (TOG-3642), so the equality holds on the whole middle paragraph instead;
+  // comparing bare undefined would pass vacuously.
+  if (posts[0].content.includes('happening right now')) {
+    assert.ok(posts[1].content.includes('happening right now'), 'mixed voices for one event');
+    const middle = (c: string) => c.split('\n\n')[1];
+    assert.equal(middle(posts[1].content), middle(posts[0].content), 'same live event, different copy');
+  } else {
+    const stamps = posts.map((p) => /<t:(\d+):R>/.exec(p.content)?.[1]);
+    assert.ok(stamps[0], 'no relative timestamp');
+    assert.equal(stamps[0], stamps[1]);
+  }
 
   assert.equal(await countEvents(reader, 'onboarding_prompted'), 2);
   assert.equal(await countEvents(reader, 'channel_routed'), 2);

@@ -62,6 +62,9 @@ const TABLES = [
   'level_import_runs',
   'member_levels',
   'operational_audit_log',
+  // TOG-3187 kill switch: a row left engaged by one fixture would silently
+  // halt every later audit delivery in the same file's schema.
+  'audit_kill_switch',
   // TOG-1642 moderation state. Same treatment as any other test data: the
   // moderation suites and the backup round trip seed these directly, and a
   // leftover row from one fixture would collide with the next one's PKs.
@@ -95,6 +98,11 @@ const TABLES = [
   'automod_processed_messages',
   'self_role_audit',
   'self_role_panel_claims',
+  // TOG-3101 config store. guild_settings_audit is append-only by trigger, but
+  // TRUNCATE does not fire row triggers, which is why the reset still works and
+  // a stray UPDATE/DELETE still does not.
+  'guild_settings',
+  'guild_settings_audit',
 ];
 
 export interface TestDb {

@@ -95,6 +95,9 @@ function recordingDiscord(over: Partial<ActionDiscord> = {}) {
     async updateEvent(_g, id, i: ScheduledEventInput) {
       calls.push(`updateEvent:${id}:${i.name}`);
     },
+    async cancelEvent(_g, id) {
+      calls.push(`cancelEvent:${id}`);
+    },
     ...over,
   };
   return { client, calls };
@@ -116,6 +119,41 @@ async function start(over: Partial<InternalServerOptions> = {}): Promise<Interna
   });
   servers.push(srv);
   return srv;
+}
+
+/**
+ * Block until the audit rows for `requestIds` exist, or fail saying which did
+ * not arrive.
+ *
+ * `finish()` in src/internal/server.ts writes the audit row *after* the
+ * response has been flushed, so a call that has already returned 200 is not yet
+ * a row in `internal_action_log`. Every assertion about the trail has to wait
+ * for that write, and a fixed `setTimeout` is a bet on how long an INSERT takes
+ * on the busiest runner we own. The suite has lost that bet (run 35769098589).
+ *
+ * Polling the condition the tests actually depend on costs nothing when the row
+ * is already there - which is the normal case - and only waits when it is not.
+ * The deadline is generous on purpose: it is not a timing budget, it is what
+ * turns a wedged write into a readable failure instead of a hang.
+ *
+ * It matters most for the tests that assert an ABSENCE. A wait that is too
+ * short does not red those, it makes them pass against an empty table.
+ */
+async function awaitAuditRows(requestIds: string[], timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  const holes = `(${requestIds.map(() => '?').join(', ')})`;
+  for (;;) {
+    const rows = await testDb.db
+      .prepare(`SELECT request_id FROM internal_action_log WHERE request_id IN ${holes}`)
+      .all<{ request_id: string }>(...requestIds);
+    if (rows.length >= requestIds.length) return;
+    const missing = requestIds.filter((id) => !rows.some((r) => r.request_id === id));
+    assert.ok(
+      Date.now() < deadline,
+      `no audit row after ${timeoutMs}ms for: ${missing.join(', ')}`,
+    );
+    await new Promise((r) => setTimeout(r, 5));
+  }
 }
 
 /** A server wired to the real REST client, pointed at tools/mock-discord. */
@@ -399,24 +437,46 @@ test('missing auth headers are unauthorized, not a 500', async () => {
 test('a timestamp outside the window is stale, in both directions', async () => {
   const { client, calls } = recordingDiscord();
   const srv = await start({ discord: client });
-  const now = Math.floor(Date.now() / 1000);
 
-  for (const ts of [now - 121, now + 121]) {
-    const res = await call(srv, { body: roleAssign, timestamp: String(ts) });
-    assert.equal(res.status, 401, `timestamp ${ts - now}s`);
-    assert.equal(res.body.error?.code, 'stale_request');
-    assert.equal(res.body.error?.retryable, false);
-  }
-  // And a timestamp inside the window is fine.
+  // Every timestamp here is stamped immediately before its own call, and
+  // rounded in the direction that cannot lend the request freshness it has not
+  // got. The window is checked when the request is SERVED, so each offset has
+  // to survive the flight time, not just the instant it was written.
   //
-  // 110 rather than 119. `now` is stamped before the two rejected calls above,
-  // and the window is checked when the request is SERVED - so the headroom
-  // here is 120s minus however long this test has been running. At 119 that is
-  // one second, and two round trips through a real database ahead of this line
-  // are enough to age the timestamp out and fail a test that is not about
-  // timing at all. The boundary itself is already pinned by the ±121s
-  // rejections above; this call only needs to be inside it.
-  const ok = await call(srv, { body: roleAssign, timestamp: String(now - 110) });
+  // For a FUTURE timestamp that means `Math.ceil`. `Math.floor` under-reports
+  // the current second by up to 999ms, and the endpoint spends that donated
+  // headroom on the caller: stamped at ...56.999Z, "+121s" is really +120.001s,
+  // and 11ms of flight makes it a valid +119.995s. That is not a hypothetical -
+  // it is how this assertion went red in CI run 35773034206 (200, not 401). The
+  // exact edge is pinned deterministically, at every sub-second phase, by
+  // "the skew edge does not move with the sub-second phase of the clock" in
+  // test/unit.internalauth.test.ts; what this test proves is that the endpoint
+  // really rejects over HTTP, with the typed error the website reads.
+  //
+  // A past timestamp only gets staler while it is in flight, so `Math.floor` is
+  // the safe rounding there.
+  const stale: ReadonlyArray<readonly [string, () => number]> = [
+    ['121s in the past', () => Math.floor(Date.now() / 1000) - 121],
+    ['121s in the future', () => Math.ceil(Date.now() / 1000) + 121],
+  ];
+  for (const [what, stamp] of stale) {
+    const sentAt = Date.now();
+    const res = await call(srv, { body: roleAssign, timestamp: String(stamp()) });
+    // The budget in the message is the one thing that could still make this
+    // wrong: a full second between stamping the header and the skew check.
+    const detail = `${what}, served ${Date.now() - sentAt}ms after stamping`;
+    assert.equal(res.status, 401, detail);
+    assert.equal(res.body.error?.code, 'stale_request', detail);
+    assert.equal(res.body.error?.retryable, false, detail);
+  }
+
+  // And a timestamp inside the window is fine. 110 rather than 119: this one is
+  // stamped fresh too, but it still has to survive its own round trip through a
+  // real database, and the boundary is not what this line is for.
+  const ok = await call(srv, {
+    body: roleAssign,
+    timestamp: String(Math.floor(Date.now() / 1000) - 110),
+  });
   assert.equal(ok.status, 200);
   assert.deepEqual(calls, ['memberRoles', `addRole:${ROLE_ID}`]);
 });
@@ -1103,6 +1163,110 @@ test('event.upsert insists on exactly one of channel_key and location', async ()
   assert.deepEqual(calls, [], 'nothing ambiguous reached Discord');
 });
 
+// --- event.cancel ------------------------------------------------------------
+
+test('event.cancel propagates cancellation and replays after restart without another Discord write', async () => {
+  const store = freshStore();
+  const srv = await startAgainstMock({ store });
+  const eventKey = newKey();
+  const created = await call(srv, { body: eventUpsert({ event_key: eventKey }), idempotencyKey: newKey() });
+  assert.equal(created.status, 200);
+  const eventId = created.body.result?.event_id;
+  const updated = await call(srv, {
+    body: eventUpsert({ event_key: eventKey, name: 'Moved before cancellation' }),
+    idempotencyKey: newKey(),
+  });
+  assert.equal(updated.status, 200);
+  const body = { action: 'event.cancel', event_key: eventKey };
+  const key = newKey();
+  const cancelled = await call(srv, { body, idempotencyKey: key });
+  assert.equal(cancelled.status, 200);
+  assert.deepEqual(cancelled.body.result, { outcome: 'cancelled', event_id: eventId });
+  assert.equal(await store.discordEventId(mock.guildId, eventKey), eventId, 'retain the mapping, never recreate on a late edit');
+
+  const restarted = await startAgainstMock({ store });
+  const replay = await call(restarted, { body, idempotencyKey: key });
+  assert.equal(replay.status, 200);
+  assert.equal(replay.replayed, true);
+  assert.deepEqual(replay.body.result, cancelled.body.result);
+  const patches = mock.captured.filter((c) => c.method === 'PATCH' && c.url.endsWith(`/scheduled-events/${eventId}`));
+  assert.equal(patches.length, 2, 'one update and one cancellation, not a second cancellation');
+  assert.deepEqual(patches[1].body, { status: 4 }, 'Discord cancellation, not event deletion');
+  await awaitAuditRows([cancelled.body.request_id, replay.body.request_id]);
+  const rows = await testDb.db.prepare(
+    'SELECT action, outcome, status FROM internal_action_log WHERE request_id IN (?, ?) ORDER BY outcome',
+  ).all(cancelled.body.request_id, replay.body.request_id);
+  assert.deepEqual(rows, [
+    { action: 'event.cancel', outcome: 'cancelled', status: 200 },
+    { action: 'event.cancel', outcome: 'replayed:cancelled', status: 200 },
+  ]);
+});
+
+test('event.cancel refuses missing, unknown and other-guild keys without reaching Discord', async () => {
+  const { client, calls } = recordingDiscord();
+  const store = freshStore();
+  const srv = await start({ discord: client, store });
+  const eventKey = newKey();
+  await store.rememberDiscordEvent('900000000000008888', eventKey, '900000000000007777');
+  for (const event_key of [undefined, '', newKey(), eventKey]) {
+    const response = await call(srv, {
+      body: { action: 'event.cancel', event_key, event_id: '900000000000007777' },
+      idempotencyKey: newKey(),
+    });
+    assert.equal(response.body.error?.code, !event_key ? 'malformed' : 'action_not_allowed');
+  }
+  assert.deepEqual(calls, [], 'a raw event_id cannot bypass the guild-scoped mapping');
+});
+
+test('event.cancel requires its capability, durable store and idempotency key', async () => {
+  const { client, calls } = recordingDiscord();
+  const body = { action: 'event.cancel', event_key: newKey() };
+  const disabled = await start({ discord: client, enabled: new Set(['event.upsert']) });
+  const unavailable = await start({ discord: client, store: null });
+  for (const srv of [disabled, unavailable]) {
+    const response = await call(srv, { body, idempotencyKey: newKey() });
+    assert.equal(response.body.error?.code, 'action_not_allowed');
+  }
+  const enabled = await start({ discord: client });
+  const noKey = await call(enabled, { body });
+  assert.equal(noKey.status, 400);
+  assert.equal(noKey.body.error?.code, 'malformed');
+  assert.deepEqual(calls, []);
+});
+
+test('event.cancel permission denial keeps the mapping and records a typed rejection', async () => {
+  const store = freshStore();
+  const eventKey = newKey();
+  const eventId = '900000000000007777';
+  await store.rememberDiscordEvent(mock.guildId, eventKey, eventId);
+  const requests: { url: string; method: string; body: string }[] = [];
+  const srv = await start({
+    store,
+    discord: new DiscordActions({
+      token: 'mock-bot-token',
+      fetchImpl: async (url, options) => {
+        requests.push({ url: String(url), method: options!.method!, body: String(options!.body) });
+        return new Response('{}', { status: 403 });
+      },
+    }),
+  });
+  const response = await call(srv, {
+    body: { action: 'event.cancel', event_key: eventKey }, idempotencyKey: newKey(),
+  });
+  assert.equal(response.body.error?.code, 'discord_rejected');
+  assert.equal(response.body.error?.retryable, false);
+  assert.deepEqual(requests, [{
+    url: `https://discord.com/api/v10/guilds/${mock.guildId}/scheduled-events/${eventId}`,
+    method: 'PATCH', body: '{"status":4}',
+  }]);
+  assert.equal(await store.discordEventId(mock.guildId, eventKey), eventId);
+  await awaitAuditRows([response.body.request_id]);
+  const row = await testDb.db.prepare(
+    'SELECT action, outcome, code FROM internal_action_log WHERE request_id = ?',
+  ).get(response.body.request_id);
+  assert.deepEqual(row, { action: 'event.cancel', outcome: 'rejected', code: 'discord_rejected' });
+});
+
 // --- the durable audit trail (§4) --------------------------------------------
 
 test('every request lands in the audit trail, accepted or rejected', async () => {
@@ -1112,7 +1276,7 @@ test('every request lands in the audit trail, accepted or rejected', async () =>
   const ok = await call(srv, { body: roleAssign });
   const bad = await call(srv, { body: roleAssign, secret: OTHER_SECRET });
   // The audit write happens after the response is flushed.
-  await new Promise((r) => setTimeout(r, 50));
+  await awaitAuditRows([ok.body.request_id, bad.body.request_id]);
 
   const rows = await testDb.db
     .prepare(`SELECT * FROM internal_action_log WHERE request_id IN (?, ?)`)
@@ -1143,7 +1307,7 @@ test('the audit trail records an idempotent replay as a replay', async () => {
 
   await call(srv, { body: announcement(), idempotencyKey: key });
   const retry = await call(srv, { body: announcement(), idempotencyKey: key });
-  await new Promise((r) => setTimeout(r, 50));
+  await awaitAuditRows([retry.body.request_id]);
 
   const row = await testDb.db
     .prepare(`SELECT * FROM internal_action_log WHERE request_id = ?`)
@@ -1162,9 +1326,12 @@ test('no request body ever reaches the database', async () => {
   const srv = await start({ store });
   const secretish = 'oauth-token-do-not-store-me';
 
-  await call(srv, { body: announcement(secretish), idempotencyKey: newKey() });
-  await call(srv, { body: addMember(secretish), idempotencyKey: newKey() });
-  await new Promise((r) => setTimeout(r, 50));
+  const posted = await call(srv, { body: announcement(secretish), idempotencyKey: newKey() });
+  const added = await call(srv, { body: addMember(secretish), idempotencyKey: newKey() });
+  // Wait for the rows to exist before asserting on what is NOT in them. An
+  // absence asserted against a table the writes have not reached yet is not an
+  // assertion at all.
+  await awaitAuditRows([posted.body.request_id, added.body.request_id]);
 
   for (const table of ['internal_action_log', 'internal_idempotency', 'internal_nonces']) {
     const rows = await testDb.db.prepare(`SELECT * FROM ${table}`).all<Record<string, unknown>>();

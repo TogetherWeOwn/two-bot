@@ -5,7 +5,8 @@ export type OperationalAuditKind =
   | 'voice_join'
   | 'voice_leave'
   | 'voice_move'
-  | 'moderation_action';
+  | 'moderation_action'
+  | 'rota_notice';
 
 export type AuditChannel = 'audit' | 'voice' | 'moderation';
 

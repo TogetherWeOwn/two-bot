@@ -17,9 +17,18 @@
 
 export interface RaidWatchOptions {
   /** How wide the sliding window is. */
-  windowSeconds?: number;
-  /** Joins inside the window that constitute a burst. */
-  threshold?: number;
+  windowSeconds?: number | (() => number);
+  /**
+   * Joins inside the window that constitute a burst.
+   *
+   * A function is read on every join rather than captured at construction,
+   * which is what makes this key hot (TOG-3100): the settings store refreshes
+   * its snapshot every 15s and the next join uses the new number, with no
+   * restart. Passing a plain number keeps the old behaviour, which is what the
+   * replay scan and every test want - a threshold that changed halfway through
+   * a replay would make the result unreproducible.
+   */
+  threshold?: number | (() => number);
   /** Minimum gap between alerts for one ongoing burst, so a long raid is not a pager storm. */
   cooldownSeconds?: number;
   /** Cap on IDs carried in one alert. The rest are counted, not listed. */
@@ -67,9 +76,16 @@ interface Recent {
   at: number;
 }
 
+/** A fixed number and a live reader, behind one signature. */
+function liveNumber(v: number | (() => number) | undefined, fallback: number): () => number {
+  if (typeof v === 'function') return v;
+  const fixed = v ?? fallback;
+  return () => fixed;
+}
+
 export class RaidWatch {
-  private readonly windowMs: number;
-  private readonly threshold: number;
+  private readonly readWindowSeconds: () => number;
+  private readonly readThreshold: () => number;
   private readonly cooldownMs: number;
   private readonly maxIds: number;
   /** Per guild: joins still inside the window, oldest first. */
@@ -78,10 +94,25 @@ export class RaidWatch {
   private lastAlertAt = new Map<string, number>();
 
   constructor(o: RaidWatchOptions = {}) {
-    this.windowMs = (o.windowSeconds ?? DEFAULTS.windowSeconds) * 1000;
-    this.threshold = o.threshold ?? DEFAULTS.threshold;
+    this.readWindowSeconds = liveNumber(o.windowSeconds, DEFAULTS.windowSeconds);
+    this.readThreshold = liveNumber(o.threshold, DEFAULTS.threshold);
     this.cooldownMs = (o.cooldownSeconds ?? DEFAULTS.cooldownSeconds) * 1000;
     this.maxIds = o.maxIds ?? DEFAULTS.maxIds;
+  }
+
+  /**
+   * Read once per join, not once per process.
+   *
+   * Both are read at the top of observe() and used consistently for the rest of
+   * that call, so a poll landing mid-observe cannot make one join be judged
+   * against two different windows.
+   */
+  private get windowMs(): number {
+    return this.readWindowSeconds() * 1000;
+  }
+
+  private get threshold(): number {
+    return this.readThreshold();
   }
 
   /**
@@ -94,17 +125,23 @@ export class RaidWatch {
    * rather than the clock, which keeps a replay of history honest.
    */
   observe(guildId: string, memberId: string, at: number): RaidAlert | null {
+    // Read both once, here. They can change under us between calls now, and an
+    // alert that pruned against one window but reported another would be a
+    // quietly wrong number in the only message anyone reads during a raid.
+    const windowMs = this.windowMs;
+    const threshold = this.threshold;
+
     const list = this.recent.get(guildId) ?? [];
     if (list.some((r) => r.memberId === memberId)) return null;
 
     list.push({ memberId, at });
     list.sort((a, b) => a.at - b.at);
     const newest = list[list.length - 1].at;
-    const cutoff = newest - this.windowMs;
+    const cutoff = newest - windowMs;
     const live = list.filter((r) => r.at > cutoff);
     this.recent.set(guildId, live);
 
-    if (live.length < this.threshold) return null;
+    if (live.length < threshold) return null;
 
     const last = this.lastAlertAt.get(guildId);
     const repeat = last !== undefined;
@@ -115,7 +152,7 @@ export class RaidWatch {
     return {
       guildId,
       count: live.length,
-      windowSeconds: this.windowMs / 1000,
+      windowSeconds: windowMs / 1000,
       firstJoinAt: new Date(live[0].at).toISOString(),
       lastJoinAt: new Date(newest).toISOString(),
       spanSeconds: Math.round((newest - live[0].at) / 1000),

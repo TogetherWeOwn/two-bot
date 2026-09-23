@@ -43,6 +43,7 @@ import {
   stagingInviteUrl,
 } from '../src/staging/spec.ts';
 import { evaluateHierarchy, type PartialRole } from '../src/staging/provision.ts';
+import { evaluateTempVoiceStructure } from '../src/staging/tempVoiceCheck.ts';
 import {
   findSelfRoleDisallowedPermission,
   findSelfRoleUnsafeChannelGrant,
@@ -79,23 +80,65 @@ if (!tokenCheck.ok) {
   process.exit(2);
 }
 
-const auditSince = process.env.TWO_AUDIT_ACCEPTANCE_SINCE;
-if (!auditSince || !Number.isFinite(Date.parse(auditSince))) {
-  console.error(
-    '\nMissing or invalid TWO_AUDIT_ACCEPTANCE_SINCE. Set it to the ISO timestamp immediately before ' +
-      'driving the controlled audit scenarios so old staging rows cannot produce a false PASS.\n',
-  );
+/**
+ * `--case=<name>` isolates one parity slice instead of running the full
+ * sweep. Added for TOG-3477: `goodbye` and `temp-voice` are staging-only
+ * checks that need neither the audit database nor a driven scenario window,
+ * so requiring `TWO_AUDIT_ACCEPTANCE_SINCE` / `TWO_STAGING_DATABASE_URL` for
+ * them would make an isolated run fail on preconditions it does not need.
+ * Omitting the flag preserves the original full-sweep behavior exactly.
+ */
+const KNOWN_CASES = ['goodbye', 'temp-voice', 'announcements'] as const;
+type VerifyCase = (typeof KNOWN_CASES)[number];
+const caseArgRaw = process.argv.find((a) => a.startsWith('--case='))?.slice('--case='.length);
+if (caseArgRaw !== undefined && !(KNOWN_CASES as readonly string[]).includes(caseArgRaw)) {
+  console.error(`\nUnknown --case=${caseArgRaw}. Known cases: ${KNOWN_CASES.join(', ')}\n`);
   process.exit(2);
 }
-const stagingDbUrl = process.env.TWO_STAGING_DATABASE_URL?.trim();
-if (!stagingDbUrl || !/^postgres(ql)?:\/\//.test(stagingDbUrl)) {
-  console.error('\nMissing TWO_STAGING_DATABASE_URL (must be the Postgres staging database).\n');
-  process.exit(2);
+const caseArg = caseArgRaw as VerifyCase | undefined;
+
+// This slice has its own strict identity/DB checks and read-only evidence
+// verifier. Do not require unrelated roles/channels or mutate during acceptance.
+if (caseArg === 'announcements') {
+  const proof = process.argv.find(a => a.startsWith('--proof='))?.slice(8);
+  if (!proof) {
+    console.error('announcements requires --proof=<report.json> from staging-announcements-proof.ts');
+    process.exit(2);
+  }
+  try {
+    const { verifyAnnouncementsProof } = await import('./staging-announcements-verify.ts');
+    await verifyAnnouncementsProof(proof);
+  } catch (error) {
+    // Do not expose arbitrary database/network errors or credential-bearing URLs.
+    console.error(`FAIL announcements verification (${error instanceof Error ? error.name : 'unknown error'}).`);
+    process.exit(1);
+  }
+  process.exit(0);
 }
-const stagingDbName = new URL(stagingDbUrl).pathname.split('/').filter(Boolean).at(-1) ?? '';
-if (!/staging|test/i.test(stagingDbName)) {
-  console.error(`\nRefusing audit acceptance against non-staging database "${stagingDbName}".\n`);
-  process.exit(2);
+
+let auditSince = '';
+let stagingDbUrl = '';
+if (!caseArg) {
+  const since = process.env.TWO_AUDIT_ACCEPTANCE_SINCE;
+  if (!since || !Number.isFinite(Date.parse(since))) {
+    console.error(
+      '\nMissing or invalid TWO_AUDIT_ACCEPTANCE_SINCE. Set it to the ISO timestamp immediately before ' +
+        'driving the controlled audit scenarios so old staging rows cannot produce a false PASS.\n',
+    );
+    process.exit(2);
+  }
+  auditSince = since;
+  const dbUrl = process.env.TWO_STAGING_DATABASE_URL?.trim();
+  if (!dbUrl || !/^postgres(ql)?:\/\//.test(dbUrl)) {
+    console.error('\nMissing TWO_STAGING_DATABASE_URL (must be the Postgres staging database).\n');
+    process.exit(2);
+  }
+  stagingDbUrl = dbUrl;
+  const stagingDbName = new URL(stagingDbUrl).pathname.split('/').filter(Boolean).at(-1) ?? '';
+  if (!/staging|test/i.test(stagingDbName)) {
+    console.error(`\nRefusing audit acceptance against non-staging database "${stagingDbName}".\n`);
+    process.exit(2);
+  }
 }
 
 let guildId: string;
@@ -109,14 +152,45 @@ try {
 let fails = 0;
 let warns = 0;
 const pass = (m: string, d = '') => console.log(`  PASS  ${m}${d && `  ${d}`}`);
-let stagingChannels: Array<{ id: string; name: string; type: number; permission_overwrites?: Array<{ id: string; type: number; allow: string; deny: string }> }> = [];
+let stagingChannels: Array<{
+  id: string;
+  name: string;
+  type: number;
+  parent_id?: string | null;
+  permission_overwrites?: Array<{ id: string; type: number; allow: string; deny: string }>;
+}> = [];
 let acceptedAuditChannelIds = { audit: null, voice: null, moderation: null } as Record<'audit' | 'voice' | 'moderation', string | null>;
 const warn = (m: string, d = '') => (warns++, console.log(`  WARN  ${m}${d && `  ${d}`}`));
 const fail = (m: string, d = '') => (fails++, console.log(`  FAIL  ${m}${d && `  ${d}`}`));
 
-async function api<T>(path: string): Promise<{ status: number; body: T | null }> {
-  const res = await fetch(`${API}${path}`, { headers: { Authorization: `Bot ${token}` } });
-  return { status: res.status, body: (await res.json().catch(() => null)) as T | null };
+const apiTimeoutMs = (() => {
+  const raw = Number(process.env.API_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 10_000;
+})();
+
+async function api<T>(
+  path: string,
+  init: { method?: string; body?: unknown } = {},
+): Promise<{ status: number; body: T | null }> {
+  const res = await fetch(`${API}${path}`, {
+    method: init.method ?? 'GET',
+    headers: {
+      Authorization: `Bot ${token}`,
+      ...(init.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+    },
+    body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
+    signal: AbortSignal.timeout(apiTimeoutMs),
+  });
+  const text = await res.text();
+  let body: T | null = null;
+  if (text) {
+    try {
+      body = JSON.parse(text) as T;
+    } catch {
+      body = null;
+    }
+  }
+  return { status: res.status, body };
 }
 
 console.log('\nTWO staging server check\n');
@@ -186,6 +260,7 @@ const channels = await api<
     id: string;
     name: string;
     type: number;
+    parent_id?: string | null;
     permission_overwrites?: Array<{ id: string; type: number; allow: string; deny: string }>;
   }>
 >(`/guilds/${guildId}/channels`);
@@ -286,6 +361,10 @@ if (weOwnIt) {
   warn('could not resolve the bot\'s effective permissions', `HTTP ${self.status}`);
 }
 
+// Sections 6-7 and the self-role panel audit below are full-sweep-only: they
+// are unrelated to the goodbye/temp-voice slices and would otherwise demand
+// TWO_SELF_ROLE_PANELS etc. from an isolated --case run that has no use for them.
+if (!caseArg) {
 // 6. Audit-log access - anti-nuke cannot identify executors without it.
 const audit = await api<unknown>(`/guilds/${guildId}/audit-logs?limit=1`);
 if (audit.status === 200) pass('View Audit Log works', 'destructive executors are observable');
@@ -409,6 +488,212 @@ if (!panelRaw.trim()) {
     fail('TWO_SELF_ROLE_PANELS is invalid', String(err));
   }
 }
+} // end full-sweep-only sections 6-7
+
+// 8. Session goodbye path (TOG-1644/TOG-1654, gap closed by TOG-3314). The
+// welcome half already has a staging walkthrough (TOG-1264); the goodbye half
+// - registerSessionWelcome's GuildMemberRemove handler in
+// src/discord/sessionWelcome.ts - had none. `botCanPost` there resolves the
+// first channel in DISCORD_GOODBYE_CHANNEL_IDS the bot can actually post in
+// and silently no-ops if none qualify, exactly like the role-hierarchy check
+// above: a wrong number, not a crash. This reproduces that same
+// resolve-first-postable walk against the real permission grid so a
+// misconfigured or over-locked-down goodbye channel fails loudly here instead
+// of only in a member's absence going unremarked. Isolated behind
+// --case=goodbye (TOG-3477) so a targeted run of just this slice does not
+// also pay for the full sweep's unrelated preconditions.
+if (!caseArg || caseArg === 'goodbye') {
+console.log('\nSession goodbye path\n');
+const goodbyeChannelIds = (process.env.DISCORD_GOODBYE_CHANNEL_IDS || '')
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
+if (!goodbyeChannelIds.length) {
+  fail('DISCORD_GOODBYE_CHANNEL_IDS is empty', 'session_goodbye_dry_run/session_goodbye_posted can never fire');
+} else {
+  const everyoneId = guildId;
+  const botRoleIds = new Set((self.body as { roles?: string[] } | null)?.roles ?? []);
+  const channelById = new Map(stagingChannels.map((c) => [c.id, c]));
+  const VIEW_CHANNEL = 1n << 10n;
+  const SEND_MESSAGES = 1n << 11n;
+  let resolved: { id: string; name: string } | null = null;
+  for (const id of goodbyeChannelIds) {
+    const channel = channelById.get(id);
+    if (!channel) {
+      fail(`goodbye channel ${id} does not exist`, 'DISCORD_GOODBYE_CHANNEL_IDS names a channel not in the guild');
+      continue;
+    }
+    if (weOwnIt) {
+      // Same bypass as section 5: an owner-bot skips overwrite resolution
+      // entirely, so there is nothing to compute here.
+      resolved = resolved ?? { id: channel.id, name: channel.name };
+      continue;
+    }
+    const overwrites = channel.permission_overwrites ?? [];
+    const byKey = new Map(overwrites.map((o) => [`${o.type}:${o.id}`, o]));
+    let perms = 0n;
+    for (const r of allRoles) {
+      if (botRoleIds.has(r.id) || r.id === guildId) {
+        perms |= BigInt((r as unknown as { permissions: string }).permissions ?? '0');
+      }
+    }
+    const everyoneOw = byKey.get(`0:${everyoneId}`);
+    if (everyoneOw) perms = (perms & ~BigInt(everyoneOw.deny)) | BigInt(everyoneOw.allow);
+    let roleAllow = 0n;
+    let roleDeny = 0n;
+    for (const r of allRoles) {
+      if (!botRoleIds.has(r.id)) continue;
+      const ow = byKey.get(`0:${r.id}`);
+      if (ow) {
+        roleAllow |= BigInt(ow.allow);
+        roleDeny |= BigInt(ow.deny);
+      }
+    }
+    perms = (perms & ~roleDeny) | roleAllow;
+    const memberOw = byKey.get(`1:${botId}`);
+    if (memberOw) perms = (perms & ~BigInt(memberOw.deny)) | BigInt(memberOw.allow);
+    if ((perms & (VIEW_CHANNEL | SEND_MESSAGES)) === (VIEW_CHANNEL | SEND_MESSAGES)) {
+      resolved = resolved ?? { id: channel.id, name: channel.name };
+    }
+  }
+  if (resolved) {
+    pass(
+      `goodbye resolves to #${resolved.name}`,
+      `first postable channel in [${goodbyeChannelIds.join(', ')}], matching botCanPost's own walk order`,
+    );
+  } else {
+    fail(
+      'no goodbye channel is postable',
+      `checked [${goodbyeChannelIds.join(', ')}] - GuildMemberRemove will return early and post nothing`,
+    );
+  }
+
+  // Evidence half: proves an actual send, not just the precondition above.
+  // Opt-in via TWO_GOODBYE_VERIFY_SINCE because it requires a real member to
+  // have left staging since that timestamp - staging-verify runs without a
+  // fresh departure to check must not FAIL on this, only report it as
+  // unproven.
+  const goodbyeSince = process.env.TWO_GOODBYE_VERIFY_SINCE?.trim();
+  if (!goodbyeSince) {
+    console.log(
+      '        Not checked this run: set TWO_GOODBYE_VERIFY_SINCE=<ISO timestamp> to a moment ' +
+        'immediately before a real member leaves/is kicked from TWO Staging, then re-run to confirm ' +
+        'the actual send (not just that the channel is postable).',
+    );
+  } else if (!Number.isFinite(Date.parse(goodbyeSince))) {
+    fail('TWO_GOODBYE_VERIFY_SINCE is not a valid ISO timestamp', goodbyeSince);
+  } else if (!resolved) {
+    fail('cannot verify a goodbye send', 'no channel resolved above to read messages from');
+  } else {
+    const query = new URLSearchParams({ limit: '50' });
+    const history = await api<Array<{ id: string; content: string; timestamp: string; author: { id: string; bot?: boolean } }>>(
+      `/channels/${resolved.id}/messages?${query}`,
+    );
+    if (history.status !== 200 || !history.body) {
+      fail('could not read the goodbye channel history', `HTTP ${history.status}`);
+    } else {
+      const sent = history.body.find(
+        (m) =>
+          m.author.id === botId &&
+          Date.parse(m.timestamp) >= Date.parse(goodbyeSince) &&
+          /left the server/.test(m.content) &&
+          /stay on the books/.test(m.content) &&
+          !/<@/.test(m.content),
+      );
+      if (sent) {
+        pass(
+          'a real goodbye message was posted',
+          `message ${sent.id} in #${resolved.name} at ${sent.timestamp}, pings nobody`,
+        );
+      } else {
+        fail(
+          'no goodbye message found since TWO_GOODBYE_VERIFY_SINCE',
+          `checked #${resolved.name} for a bot message matching goodbyeText() after ${goodbyeSince}`,
+        );
+      }
+    }
+  }
+}
+} // end --case=goodbye
+
+// 9. Temp-voice join-to-create structure (TOG-3471/TOG-3052 staging slice,
+// harness gap closed by TOG-3477). The feature is not deployed to staging as
+// this harness lands, so this proves the harness itself: that a generator
+// voice channel exists, sits under its category, and - when the bot holds
+// Manage Channels - that a channel can actually be created under that
+// category and deleted again, the same create/destroy pair the real service
+// performs on join and on empty. Structural gaps FAIL; the create/delete
+// probe is opt-in (it mutates the guild) and WARNs when skipped rather than
+// silently passing on a permission the invite may not carry yet.
+if (!caseArg || caseArg === 'temp-voice') {
+console.log('\nTemp-voice join-to-create path\n');
+const tempVoiceCategoryId = process.env.TWO_TEMP_VOICE_CATEGORY_ID?.trim();
+const tempVoiceGeneratorId = process.env.TWO_TEMP_VOICE_GENERATOR_CHANNEL_ID?.trim();
+if (!tempVoiceCategoryId || !tempVoiceGeneratorId) {
+  fail(
+    'TWO_TEMP_VOICE_CATEGORY_ID / TWO_TEMP_VOICE_GENERATOR_CHANNEL_ID is unset',
+    'temp-voice create-on-join can never fire without both ids',
+  );
+} else {
+  const structure = evaluateTempVoiceStructure(stagingChannels, {
+    categoryId: tempVoiceCategoryId,
+    generatorChannelId: tempVoiceGeneratorId,
+  });
+  if (structure.ok) {
+    pass('temp-voice generator is configured', `generator ${tempVoiceGeneratorId} under category ${tempVoiceCategoryId}`);
+  } else {
+    for (const issue of structure.issues) fail('temp-voice structure', issue);
+  }
+
+  const MANAGE_CHANNELS = 1n << 4n;
+  const selfMask = (() => {
+    let mask = 0n;
+    const held = new Set((self.body as { roles?: string[] } | null)?.roles ?? []);
+    for (const r of allRoles) {
+      if (held.has(r.id) || r.id === guildId) {
+        mask |= BigInt((r as unknown as { permissions: string }).permissions ?? '0');
+      }
+    }
+    return mask;
+  })();
+  const canManageChannels = weOwnIt || Boolean(selfMask & MANAGE_CHANNELS);
+
+  if (process.env.TWO_TEMP_VOICE_VERIFY_LIFECYCLE !== '1') {
+    console.log(
+      '        Not checked this run: set TWO_TEMP_VOICE_VERIFY_LIFECYCLE=1 to create and delete a ' +
+        'throwaway voice channel under the category, proving create-on-join and auto-delete-when-empty ' +
+        'are both mechanically possible (not just that the generator exists).',
+    );
+  } else if (!structure.ok) {
+    fail('cannot run the create/delete lifecycle probe', 'the structural check above failed first');
+  } else if (!canManageChannels) {
+    warn(
+      'skipping the create/delete lifecycle probe',
+      'bot lacks Manage Channels; re-authorize with it before parity acceptance',
+    );
+  } else {
+    const probeName = `tog-3477-verify-${Date.now()}`;
+    const created = await api<{ id: string; name: string }>(`/guilds/${guildId}/channels`, {
+      method: 'POST',
+      body: { name: probeName, type: 2, parent_id: tempVoiceCategoryId },
+    });
+    if (created.status !== 201 || !created.body?.id) {
+      fail('could not create a probe voice channel', `HTTP ${created.status}`);
+    } else {
+      pass('probe voice channel created', `#${created.body.name} (${created.body.id}), simulating create-on-join`);
+      const deleted = await api<unknown>(`/channels/${created.body.id}`, { method: 'DELETE' });
+      if (deleted.status === 200 || deleted.status === 204) {
+        pass('probe voice channel deleted', 'simulating auto-delete-when-empty');
+      } else {
+        fail(
+          'could not delete the probe voice channel',
+          `HTTP ${deleted.status}; channel ${created.body.id} may need manual cleanup`,
+        );
+      }
+    }
+  }
+}
+} // end --case=temp-voice
 
 async function discordMarkerMessageIds(channelId: string, entryId: string, since: string): Promise<string[]> {
   const matches: string[] = [];
@@ -433,6 +718,7 @@ async function discordMarkerMessageIds(channelId: string, entryId: string, since
 // 7. Reconcile the controlled live scenarios against the staging database.
 // The explicit lower bound prevents yesterday's evidence hiding a dead gateway
 // listener today.
+if (!caseArg) {
 console.log('\nAudit parity acceptance\n');
 let auditDb;
 try {
@@ -505,6 +791,7 @@ console.log('  - remove Send Messages from one log channel and prove the durable
 console.log('  - attempt a protected/higher-role moderation target and prove refusal is mirrored');
 console.log('  - run moderation.slowmode with a reversible value and prove the bot-executed Discord audit entry is correlated');
 console.log('  - inspect payloads for absence of message content, usernames, nicknames and mentions');
+} // end full-sweep-only audit parity acceptance
 
 console.log(`\n${fails} fail, ${warns} warn\n`);
 process.exit(fails ? 1 : 0);

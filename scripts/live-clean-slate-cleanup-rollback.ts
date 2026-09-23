@@ -15,6 +15,11 @@ import {
   assertLatestCheckpoint,
   type Channel,
   type CleanupManifest,
+  driftComparableChannel,
+  driftComparableChannels,
+  driftComparableGuild,
+  driftExcludedIds,
+  driftSemanticHash,
   guildReferenceBlock,
   type JsonObject,
   inFlightDriftIsOurs,
@@ -198,12 +203,19 @@ function nonChannelSemantic(
   // comparison below get exactly the same canonicalization. A local copy is how the
   // sorted-`guild.features` fix first showed up here: the pre-snapshot side was
   // canonical, this side was raw, and every rollback read it as live guild drift.
+  //
+  // This is the ninth live-vs-live comparison and the second that does not run through
+  // `driftSemanticHash`, so — like the untouched-channel walk below — it needs the volatile
+  // projection applied by hand, here and on the pre-snapshot side at `snapshotNonChannel`.
+  // It is the guild-side gate a lapsing boost would reach: rollback's preflight, which is the
+  // recovery path for a torn apply and so the one run that has to work after something has
+  // already gone wrong.
   const { channels: _channels, ...nonChannel } = semanticSnapshot({
     version: 1,
     generatedAt: '',
     applicationId: LIVE_BOT_APPLICATION_ID,
     guildId,
-    guild: currentGuild,
+    guild: driftComparableGuild(currentGuild),
     roles: currentRoles,
     channels: [],
     members: rawMembers.map((member) => ({
@@ -233,7 +245,12 @@ function nonChannelSemantic(
   return nonChannel;
 }
 
-const snapshotSemantic = semanticSnapshot(snapshot);
+// The pre-snapshot side of the comparison at `Rollback preflight found non-channel drift`.
+// `driftComparableGuild` here is the other half of the one in `nonChannelSemantic`: one-sided
+// it would refuse every rollback outright rather than only on a boost change. The stored-hash
+// verification above is deliberately *not* built from this — it re-derives the raw
+// `semanticSnapshot(snapshot)` itself, so what the plan signature covers is unaffected.
+const snapshotSemantic = semanticSnapshot({ ...snapshot, guild: driftComparableGuild(snapshot.guild) });
 const { channels: _snapshotChannels, ...snapshotNonChannel } = snapshotSemantic;
 
 const [me, guilds, guild, roles, currentMembers, integrations, application, welcome, onboarding, screening] = await Promise.all([
@@ -249,11 +266,22 @@ const [me, guilds, guild, roles, currentMembers, integrations, application, welc
   api<JsonObject>('GET', `/guilds/${guildId}/member-verification`),
 ]);
 if (me.id !== LIVE_BOT_APPLICATION_ID || application.id !== LIVE_BOT_APPLICATION_ID || !guilds.some((item) => item.id === guildId) || guild.name !== LIVE_GUILD_NAME) die(1, 'Rollback identity preflight failed.');
-if (stable(nonChannelSemantic(guild, roles, currentMembers, integrations, welcome, onboarding, screening)) !== stable(snapshotNonChannel)) die(1, 'Rollback preflight found non-channel drift from the pre-snapshot.');
+if (stable(nonChannelSemantic(guild, roles, currentMembers, integrations, welcome, onboarding, screening)) !== stable(snapshotNonChannel)) die(1, `Rollback preflight found non-channel drift from the pre-snapshot. This gate fails closed by design: a refusal is the intended path, not evidence the guild is corrupt. Name the fields with: node scripts/live-cleanup-drift-diff.ts ${JSON.stringify(resolve(manifest.snapshotPath))} <a fresh capture>/snapshot/pre.json — it prints one "guild field drift:" line per field. A field that moved with nobody acting on the guild belongs in DRIFT_VOLATILE_GUILD_FIELDS (src/redesign/live-cleanup.ts); add it and re-run. Anything an administrator really changed must keep refusing.`);
 const botMember = currentMembers.find((member) => member.user?.id === LIVE_BOT_APPLICATION_ID && member.user.bot);
 if (!botMember || !roles.some((role) => botMember.roles?.includes(role.id) && (BigInt(role.permissions) & ADMINISTRATOR) !== 0n)) die(1, 'Rollback preflight: Owen does not have Administrator.');
 const preRollbackChannels = await mustGet<Channel[]>(`/guilds/${guildId}/channels`, 'Read rollback channel preflight');
-if (stable(preRollbackChannels.map((channel) => channel.id).sort()) !== stable(snapshot.channels.map((channel) => channel.id).sort())) die(1, 'Rollback preflight channel/category inventory drifted from the pre-snapshot.');
+// Auto-voice ephemeral children are dropped from both sides of every inventory and hash
+// comparison in this script, exactly as they are in apply — see `isDriftExcluded`. Rollback
+// is the recovery path for a torn apply, so leaving it churn-sensitive meant the one run
+// that has to work after something went wrong was the one a filling lobby could refuse
+// (TOG-3141, M3) or strand half-done (M4). A reviewed ID can never be dropped, so nothing
+// this script writes or restores leaves the comparison.
+for (const id of driftExcludedIds(preRollbackChannels)) {
+  console.log(`  TOLERATED ${id} ${preRollbackChannels.find((channel) => channel.id === id)?.name ?? '?'} — auto-voice ephemeral child, excluded from the rollback comparison`);
+}
+const comparablePreRollback = driftComparableChannels(preRollbackChannels);
+const comparableSnapshotChannels = driftComparableChannels(snapshot.channels);
+if (stable(comparablePreRollback.map((channel) => channel.id).sort()) !== stable(comparableSnapshotChannels.map((channel) => channel.id).sort())) die(1, 'Rollback preflight channel/category inventory drifted from the pre-snapshot.');
 const preRollbackById = new Map(preRollbackChannels.map((channel) => [channel.id, channel]));
 function operationState(operation: CleanupManifest['operations'][number], channels: Map<string, Channel>): 'applied' | 'inverse' | 'parent_inverse' | 'mixed' | 'drifted' {
   const expectedApplied = stable(normalizeOverwrites(operation.write.permission_overwrites));
@@ -328,13 +356,21 @@ for (const operation of manifest.operations) {
     die(1, `Rollback preflight operation ${operation.id} drifted from both applied and inverse state.`);
   }
 }
-for (const current of preRollbackChannels) {
+for (const current of comparablePreRollback) {
   const operation = manifest.operations.find((item) => item.objectId === current.id || item.objectId === current.parent_id);
   if (operation) continue;
+  // Safe by the inventory equality above, which is now taken over the same filtered list
+  // this loop walks — an unfiltered walk here would dereference `undefined` for a channel
+  // the filter had let through on only one side.
   const original = snapshot.channels.find((channel) => channel.id === current.id)!;
-  const currentShape = { ...current, permission_overwrites: normalizeOverwrites(current.permission_overwrites, `Live read of untouched channel ${current.id}`) };
-  const originalShape = { ...original, permission_overwrites: normalizeOverwrites(original.permission_overwrites, `Pre-snapshot channel ${original.id}`) };
-  if (stable(currentShape) !== stable(originalShape)) die(1, `Rollback preflight untouched channel ${current.id} drifted from the pre-snapshot.`);
+  // The eighth live-vs-live comparison, and the only one that does not run through
+  // `driftSemanticHash` — it compares whole channel bodies one at a time, so it needs the same
+  // volatile-field exclusion applied to both sides. Without it a message landing in any
+  // untouched channel between apply and rollback shuts the recovery path for a torn apply,
+  // which is the one run that has to work after something has already gone wrong.
+  const currentShape = driftComparableChannel({ ...current, permission_overwrites: normalizeOverwrites(current.permission_overwrites, `Live read of untouched channel ${current.id}`) });
+  const originalShape = driftComparableChannel({ ...original, permission_overwrites: normalizeOverwrites(original.permission_overwrites, `Pre-snapshot channel ${original.id}`) });
+  if (stable(currentShape) !== stable(originalShape)) die(1, `Rollback preflight untouched channel ${current.id} drifted from the pre-snapshot. As above, this fails closed on purpose. Run scripts/live-cleanup-drift-diff.ts against ${JSON.stringify(resolve(manifest.snapshotPath))} and a fresh capture: a "channel field drift:" line for a field nobody edited belongs in DRIFT_VOLATILE_CHANNEL_FIELDS, and a real edit must keep refusing.`);
 }
 manifest.status = 'rolling_back';
 checkpoint(manifestPath, manifest);
@@ -416,8 +452,8 @@ const [postGuild, postRoles, postMembers, postIntegrations, postWelcome, postOnb
   api<JsonObject>('GET', `/guilds/${guildId}/member-verification`),
   mustGet<Channel[]>(`/guilds/${guildId}/channels`, 'Read post-rollback channels'),
 ]);
-const currentChannelIds = currentChannels.map((channel) => channel.id).sort();
-if (stable(currentChannelIds) !== stable(snapshot.channels.map((channel) => channel.id).sort())) die(1, 'Post-rollback channel/category inventory differs from the pre-snapshot.');
+const currentChannelIds = driftComparableChannels(currentChannels).map((channel) => channel.id).sort();
+if (stable(currentChannelIds) !== stable(comparableSnapshotChannels.map((channel) => channel.id).sort())) die(1, 'Post-rollback channel/category inventory differs from the pre-snapshot.');
 const restored = {
   version: 1 as const,
   generatedAt: snapshot.generatedAt,
@@ -452,8 +488,9 @@ const restored = {
     guildReferences: guildReferenceBlock(postGuild),
   },
 };
-const restoredHash = sha256(semanticSnapshot(restored));
-if (restoredHash !== snapshot.semanticHash) die(1, `Post-rollback semantic hash mismatch: expected ${snapshot.semanticHash}, got ${restoredHash}.`);
+const restoredHash = driftSemanticHash(restored);
+const expectedRestoredHash = driftSemanticHash(snapshot);
+if (restoredHash !== expectedRestoredHash) die(1, `Post-rollback semantic hash mismatch: expected ${expectedRestoredHash}, got ${restoredHash}.`);
 manifest.status = 'rolled_back';
 checkpoint(manifestPath, manifest);
 console.log(`Rollback complete: ${manifestPath}`);

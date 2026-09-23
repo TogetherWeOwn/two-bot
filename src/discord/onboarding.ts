@@ -31,6 +31,7 @@ import {
   type StringSelectMenuInteraction,
 } from 'discord.js';
 import { log } from '../core/log.ts';
+import type { DiscordOnboardingRota } from './onboardingRota.ts';
 import {
   OnboardingRecorder,
   currentGameKeys,
@@ -47,10 +48,15 @@ export const GAME_SELECT_ID = 'two:onboarding:games';
 
 export interface OnboardingDeps {
   recorder: OnboardingRecorder;
-  /** Channels the welcome post may go to. First one the bot can post in wins. */
-  landingChannelIds: string[];
+  /**
+   * Channels the welcome post may go to. First one the bot can post in wins.
+   * A thunk rather than a plain array so a settings-store reload (TOG-3536)
+   * is visible to the next member without a restart.
+   */
+  landingChannelIds: () => string[];
   /** When true, assign no roles and post nothing. Used by preflight. */
   dryRun?: boolean;
+  onboardingRota?: Pick<DiscordOnboardingRota, 'promptShown'>;
 }
 
 // --- picker construction ----------------------------------------------------
@@ -126,7 +132,7 @@ function channelLink(guildId: string, channelId: string): string {
 // --- wiring -----------------------------------------------------------------
 
 export function registerOnboarding(client: Client, deps: OnboardingDeps): void {
-  const { recorder, landingChannelIds } = deps;
+  const { recorder } = deps;
 
   /** Post the welcome + picker for a member who has cleared the rules gate. */
   async function promptMember(member: GuildMember): Promise<void> {
@@ -141,6 +147,7 @@ export function registerOnboarding(client: Client, deps: OnboardingDeps): void {
       return;
     }
 
+    const landingChannelIds = deps.landingChannelIds();
     const target = landingChannelIds.map((id) => botCanPost(client, id)).find(Boolean);
     if (!target) {
       // Loud, because it means every new member is silently getting nothing.
@@ -154,10 +161,13 @@ export function registerOnboarding(client: Client, deps: OnboardingDeps): void {
     }
 
     try {
-      await target.send({
+      const message = await target.send({
         content: welcomeText(`<@${member.id}>`),
         components: [buildGameSelect()],
         allowedMentions: { users: [member.id] },
+      });
+      void deps.onboardingRota?.promptShown({
+        member, message, variant: 'legacy', actionChannelId: INTRO_CHANNEL_ID,
       });
       await recorder.prompted(member.guild.id, member.id, target.id);
     } catch (err) {

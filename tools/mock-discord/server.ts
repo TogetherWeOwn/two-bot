@@ -19,14 +19,12 @@ import { GAME_PICKS, GAME_HUB_CHANNEL_ID, GATED_CATEGORIES, GUILD_ID as TWO_GUIL
 import { LOOKING_TO_PLAY_CHANNEL_ID, LOBBY_VOICE_CHANNEL_ID } from '../../src/onboarding/session.ts';
 
 /**
- * The mock guild uses TWO's real ids. Not cosmetic: the onboarding catalog is
- * a table of real role and channel ids, so a mock with invented ids would test
- * a flow that cannot exist. Nothing here talks to discord.com - the bot under
- * test is pointed at this process via DISCORD_API_BASE.
+ * Defaults use TWO's catalog ids so onboarding role/channel routing stays
+ * realistic. A fixture may override the guild identity (including @everyone)
+ * without changing that catalog. The bot connects via DISCORD_API_BASE;
+ * process-level tests must separately contain other outbound transports.
  */
-const GUILD_ID = TWO_GUILD_ID;
 const BOT_ID = '900000000000000002';
-const EVERYONE_ROLE = GUILD_ID; // @everyone role id == guild id, as on real Discord
 const TEXT_CHANNEL = '1045943373007171674'; // 💬〢general - the real landing channel
 const VOICE_CHANNEL = '900000000000000011';
 const MEMBER_ROLE = '1078755185423286372'; // the real "Member" role
@@ -54,6 +52,20 @@ export interface MockScheduledEvent {
   status: number;
 }
 
+/**
+ * The two capability fields of an Identify frame, and nothing else.
+ *
+ * A fixture must not become a token sink: `d.token`, `d.properties` and the
+ * rest of the frame are read and dropped. Only what the connection *asks
+ * Discord for* is retained, because that is the boundary tests assert on.
+ */
+export interface IdentifyCapability {
+  /** Raw `d.intents` bitfield, as sent. */
+  intents: number | null;
+  /** `d.presence.status`, or null when the frame carried no presence at all. */
+  presenceStatus: string | null;
+}
+
 export interface MockDiscord {
   port: number;
   apiBase: string;
@@ -75,6 +87,8 @@ export interface MockDiscord {
   // --- onboarding (TWO-7) ---------------------------------------------------
   /** Every non-GET the bot made. Assert on what it actually sent. */
   captured: CapturedRequest[];
+  /** Capability of every IDENTIFY seen on the socket, in order. Never tokens. */
+  identifies: IdentifyCapability[];
   /** Join behind the rules gate: present in the guild, unable to interact. */
   memberJoinPending(memberId: string, username: string, guildId?: string): void;
   /** Rules accepted - pending flips false. This is the real onboarding trigger. */
@@ -116,10 +130,10 @@ function rolePayload(id: string, name: string, position: number, permissions = '
  * role below the bot's role, so role-hierarchy failures show up here rather
  * than in production.
  */
-function rolesPayload() {
+function rolesPayload(guildId: string) {
   return [
     // @everyone with VIEW_CHANNEL and SEND_MESSAGES, as on the real server.
-    rolePayload(EVERYONE_ROLE, '@everyone', 0, String(VIEW_CHANNEL | (1n << 11n))),
+    rolePayload(guildId, '@everyone', 0, String(VIEW_CHANNEL | (1n << 11n))),
     rolePayload(BOT_ROLE, 'Owen', 105, String(1n << 28n)), // MANAGE_ROLES
     rolePayload(MEMBER_ROLE, 'Member', 106),
     ...GAME_PICKS.map((p, i) => rolePayload(p.roleId, p.roleName, 10 + i)),
@@ -145,8 +159,8 @@ function rolesPayload() {
  */
 export type Lighting = 'dark' | 'categories-only' | 'lit';
 
-function channelsPayload(lighting: Lighting) {
-  const deny = [{ id: EVERYONE_ROLE, type: 0, allow: '0', deny: String(VIEW_CHANNEL) }];
+function channelsPayload(lighting: Lighting, GUILD_ID: string) {
+  const deny = [{ id: GUILD_ID, type: 0, allow: '0', deny: String(VIEW_CHANNEL) }];
   const granted = (roleId: string) => [
     ...deny,
     { id: roleId, type: 0, allow: String(VIEW_CHANNEL), deny: '0' },
@@ -230,7 +244,7 @@ function channelsPayload(lighting: Lighting) {
   ];
 }
 
-function guildPayload(lighting: Lighting = 'dark') {
+function guildPayload(lighting: Lighting, GUILD_ID: string) {
   return {
     id: GUILD_ID,
     name: 'TWO Dev',
@@ -264,8 +278,8 @@ function guildPayload(lighting: Lighting = 'dark') {
     features: [],
     emojis: [],
     stickers: [],
-    roles: rolesPayload(),
-    channels: channelsPayload(lighting),
+    roles: rolesPayload(GUILD_ID),
+    channels: channelsPayload(lighting, GUILD_ID),
     threads: [],
     // The bot itself has to be in the member list, otherwise guild.members.me
     // is null and every permission check the bot makes returns nothing.
@@ -313,11 +327,15 @@ function userPayload(id: string, username: string, bot = false) {
 }
 
 export async function startMockDiscord(
-  opts: { lighting?: Lighting } = {},
+  opts: { lighting?: Lighting; guildId?: string } = {},
 ): Promise<MockDiscord> {
+  // Instance-local: fixtures can exercise staging exclusions without changing
+  // the production catalog, or another concurrently running mock's identity.
+  const GUILD_ID = opts.guildId ?? TWO_GUILD_ID;
   const invites: MockInvite[] = [{ code: 'twodev01', uses: 5, inviterId: '900000000000000099' }];
   const scheduledEvents: MockScheduledEvent[] = [];
   const captured: CapturedRequest[] = [];
+  const identifies: IdentifyCapability[] = [];
   const lighting: Lighting = opts.lighting ?? 'dark';
   /** Roles the bot has granted per member, so PATCH member can echo them back. */
   const memberRoles = new Map<string, string[]>();
@@ -585,6 +603,14 @@ export async function startMockDiscord(
       }
 
       if (msg.op === 2) {
+        // Record the capability this connection asked for, and only that. The
+        // token and the rest of the frame are never read into the fixture.
+        const identify = msg.d as { intents?: unknown; presence?: { status?: unknown } } | undefined;
+        identifies.push({
+          intents: typeof identify?.intents === 'number' ? identify.intents : null,
+          presenceStatus: typeof identify?.presence?.status === 'string' ? identify.presence.status : null,
+        });
+
         // IDENTIFY -> READY, then GUILD_CREATE so the guild stops being unavailable.
         send(ws, {
           op: 0,
@@ -601,7 +627,7 @@ export async function startMockDiscord(
           },
         });
         setTimeout(() => {
-          send(ws, { op: 0, s: ++seq, t: 'GUILD_CREATE', d: guildPayload(lighting) });
+          send(ws, { op: 0, s: ++seq, t: 'GUILD_CREATE', d: guildPayload(lighting, GUILD_ID) });
           readyResolve?.();
         }, 30);
       }
@@ -688,6 +714,7 @@ export async function startMockDiscord(
       });
     },
     captured,
+    identifies,
 
     memberJoinPending(memberId, username, guildId = GUILD_ID) {
       dispatch('GUILD_MEMBER_ADD', {

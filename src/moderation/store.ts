@@ -5,17 +5,6 @@ function iso(ms: number): string {
   return new Date(ms).toISOString();
 }
 
-/**
- * How long a claimed moderation idempotency row (or a `running` unban job) is
- * honoured before another process may take it over.
- *
- * Same reasoning as CLAIM_STALE_SECONDS in internal/store.ts: a crash between
- * claim and result must not pin the key forever, and the window is far outside
- * any moderation verb's own budget. At-most-once inside a living process; a
- * bounded, logged window across a crash.
- */
-export const MODERATION_CLAIM_STALE_SECONDS = 60;
-
 export interface ModerationAuditRow {
   requestId: string;
   guildId: string;
@@ -55,17 +44,45 @@ export interface LockdownRecord {
   reason: string;
 }
 
+/**
+ * Scheduled-unban states that still owe a real member their release.
+ *
+ * `staged` counts: the row is written before the Discord ban, so a staged row
+ * may or may not have a ban behind it, and the only safe reading is "somebody
+ * might be banned with nothing scheduled to release them". `running` counts for
+ * the same reason - a claim that timed out may have an unban that never landed.
+ * `done`, `cancelled` and `superseded` are finished and owe nobody anything.
+ */
+export const OUTSTANDING_UNBAN_STATES = ['staged', 'pending', 'running'] as const;
+
+/** Hard-coded identifiers, not user input: one source of truth for both. */
+const OUTSTANDING_UNBAN_STATE_SQL = OUTSTANDING_UNBAN_STATES.map((s) => `'${s}'`).join(', ');
+
+export interface OutstandingUnban {
+  requestId: string;
+  guildId: string;
+  userId: string;
+  state: string;
+  executeAt: string;
+  reason: string;
+}
+
+export interface OutstandingLockdown {
+  channelId: string;
+  guildId: string;
+  reason: string;
+  lockedAt: string;
+}
+
 export class ModerationStore {
   private db: Db;
   private now: () => number;
-  private claimStaleMs: number;
   private memberQueues = new Map<string, Promise<void>>();
   private channelQueues = new Map<string, Promise<void>>();
 
-  constructor(db: Db, now: () => number = Date.now, claimStaleSeconds = MODERATION_CLAIM_STALE_SECONDS) {
+  constructor(db: Db, now: () => number = Date.now) {
     this.db = db;
     this.now = now;
-    this.claimStaleMs = claimStaleSeconds * 1000;
   }
 
   async serializeMember<T>(guildId: string, userId: string, fn: () => Promise<T>): Promise<T> {
@@ -287,8 +304,9 @@ export class ModerationStore {
   }
 
   /**
-   * Atomically move due `pending` jobs (and `running` jobs whose claim went
-   * stale) into `running`, returning exactly the rows this caller won.
+   * Atomically move due `pending` jobs into `running`, returning exactly the
+   * rows this caller won. `running` rows are never reclaimed, however old
+   * their claim is - see the note on the candidate query below.
    *
    * The old SELECT-then-act let two overlapping `runDueUnbans()` sweeps
    * process the same job - a double unban and a double audit row
@@ -396,6 +414,77 @@ export class ModerationStore {
   /** Delete recovery state only after Discord accepted the exact restoration. */
   async clearLockdown(channelId: string): Promise<void> {
     await this.db.prepare(`DELETE FROM moderation_lockdowns WHERE channel_id = ?`).run(channelId);
+  }
+
+  // --- outstanding state (TOG-3190 shutdown preflight) ---------------------
+  //
+  // Read-only, and deliberately from this database rather than from Discord.
+  // "Is anybody still waiting on us?" answered by a REST call would answer
+  // "nobody" whenever the call failed, and that answer lets the disable
+  // through - exactly the case the preflight exists to catch.
+  //
+  // Counts come from COUNT(*) and are always exact; the id lists are capped so
+  // one pathological guild cannot turn a refusal message into a megabyte. A
+  // capped list reports `truncated` rather than quietly showing fewer.
+
+  async countOutstandingUnbans(): Promise<number> {
+    const row = await this.db.prepare(
+      `SELECT COUNT(*) AS count FROM moderation_scheduled_unbans
+        WHERE state IN (${OUTSTANDING_UNBAN_STATE_SQL})`,
+    ).get<{ count: number | string }>();
+    return Number(row?.count ?? 0);
+  }
+
+  async listOutstandingUnbans(limit = 500): Promise<OutstandingUnban[]> {
+    const rows = await this.db.prepare(
+      `SELECT request_id, guild_id, user_id, state, execute_at, reason
+         FROM moderation_scheduled_unbans
+        WHERE state IN (${OUTSTANDING_UNBAN_STATE_SQL})
+        ORDER BY execute_at ASC, request_id ASC
+        LIMIT ?`,
+    ).all<{
+      request_id: string;
+      guild_id: string;
+      user_id: string;
+      state: string;
+      execute_at: string;
+      reason: string;
+    }>(limit);
+    return rows.map((row) => ({
+      requestId: row.request_id,
+      guildId: row.guild_id,
+      userId: row.user_id,
+      state: row.state,
+      executeAt: row.execute_at,
+      reason: row.reason,
+    }));
+  }
+
+  /**
+   * Every row in `moderation_lockdowns` is an active lockdown: `unlock` deletes
+   * the row only after Discord accepted the exact restoration, so a surviving
+   * row means a channel is still denied `SendMessages` by us.
+   */
+  async countActiveLockdowns(): Promise<number> {
+    const row = await this.db.prepare(
+      'SELECT COUNT(*) AS count FROM moderation_lockdowns',
+    ).get<{ count: number | string }>();
+    return Number(row?.count ?? 0);
+  }
+
+  async listActiveLockdowns(limit = 500): Promise<OutstandingLockdown[]> {
+    const rows = await this.db.prepare(
+      `SELECT channel_id, guild_id, reason, locked_at
+         FROM moderation_lockdowns
+        ORDER BY locked_at ASC, channel_id ASC
+        LIMIT ?`,
+    ).all<{ channel_id: string; guild_id: string; reason: string; locked_at: string }>(limit);
+    return rows.map((row) => ({
+      channelId: row.channel_id,
+      guildId: row.guild_id,
+      reason: row.reason,
+      lockedAt: row.locked_at,
+    }));
   }
 }
 

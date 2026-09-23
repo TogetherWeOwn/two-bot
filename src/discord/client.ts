@@ -1,5 +1,14 @@
 import { createHash } from 'node:crypto';
-import { Client, GatewayIntentBits, Events, Options, Partials, type Guild, type GuildMember } from 'discord.js';
+import {
+  Client,
+  Events,
+  GatewayIntentBits,
+  Options,
+  Partials,
+  PresenceUpdateStatus,
+  type Guild,
+  type GuildMember,
+} from 'discord.js';
 import { nowIso } from '../core/events.ts';
 import type { FunnelHandlers } from '../core/handlers.ts';
 import type { InviteTracker, InviteState } from '../core/inviteTracker.ts';
@@ -14,6 +23,7 @@ import { AutomodProcessingError } from '../automod/types.ts';
 import type { JoinRiskScorer } from '../moderation/containment.ts';
 import type { AuditSink } from '../audit/service.ts';
 import { moderationAuditEvent, rawMessageAuditEvent } from '../audit/discordEvents.ts';
+import type { DiscordOnboardingRota } from './onboardingRota.ts';
 
 /**
  * Intents we ask Discord for, and why. Keep this list minimal - each one is a
@@ -51,9 +61,45 @@ export const INTENTS = intents();
 /** Required for reaction removals and old panel messages absent from cache. */
 export const PARTIALS = [Partials.Message, Partials.Reaction, Partials.User];
 
+/**
+ * Exact opt-in value for a capability-scoped staging restart connection
+ * (TOG-4011). Deliberately the same variable the restart containment preflight
+ * reads, so one flag describes one run. Anything other than `'1'` - including
+ * `'true'` - is inert, and production never sets it.
+ */
+export const STAGING_RESTART_CONTAINMENT_FLAG = 'TWO_STAGING_RESTART_CONTAINMENT';
+
+/**
+ * What a contained staging restart is allowed to ask Discord for.
+ *
+ * Containment at the library surface is not reachable: `@discordjs/ws` exposes
+ * no socket factory, so shard-internal opcodes never pass through a strategy we
+ * own. The boundary that *is* ours is the Identify frame - the capability the
+ * connection requests in the first place.
+ *
+ *   Guilds           - without it no guild event arrives at all
+ *   GuildMembers     - GUILD_MEMBER_ADD; the join is the rota's clock start
+ *   GuildMessages    - the first human reply the rota measures
+ *   GuildVoiceStates - voice session boundaries the funnel already records
+ *
+ * Dropped because a restart measurement never reads them: MessageContent (the
+ * privileged one), GuildModeration, GuildInvites, GuildMessageReactions.
+ */
+const REDUCED_INTENTS = [
+  GatewayIntentBits.Guilds,
+  GatewayIntentBits.GuildMembers,
+  GatewayIntentBits.GuildMessages,
+  GatewayIntentBits.GuildVoiceStates,
+];
+
+/** True only for the exact opt-in value. Default-off keeps production intact. */
+export function capabilityScoped(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env[STAGING_RESTART_CONTAINMENT_FLAG] === '1';
+}
+
 /** Message content is already required by tickets/automod on current main. */
-export function intentsFor(_env: NodeJS.ProcessEnv = process.env): GatewayIntentBits[] {
-  return [...INTENTS];
+export function intentsFor(env: NodeJS.ProcessEnv = process.env): GatewayIntentBits[] {
+  return capabilityScoped(env) ? [...REDUCED_INTENTS] : [...INTENTS];
 }
 
 export interface BotDeps {
@@ -96,11 +142,15 @@ export interface BotDeps {
    * `parseModerationAuditReason` refuses to verify without it.
    */
   moderationAuditSecret?: string | null;
+  onboardingRota?: DiscordOnboardingRota;
 }
 
-export function createClient(automodEnabled = process.env.TWO_AUTOMOD === '1'): Client {
+export function createClient(
+  automodEnabled = process.env.TWO_AUTOMOD === '1',
+  env: NodeJS.ProcessEnv = process.env,
+): Client {
   return new Client({
-    intents: intentsFor(),
+    intents: intentsFor(env),
     partials: automodEnabled
       ? [...new Set([...PARTIALS, Partials.Channel])]
       : PARTIALS,
@@ -109,6 +159,17 @@ export function createClient(automodEnabled = process.env.TWO_AUTOMOD === '1'): 
           // Message content must not survive the event handler in discord.js's
           // default 200-message-per-channel cache.
           makeCache: Options.cacheWithLimits({ MessageManager: 0 }),
+        }
+      : {}),
+    ...(capabilityScoped(env)
+      ? {
+          // Announcing "online" to a live member list is itself an effect. This
+          // is the only presence we ever set: `PresenceUpdateStatus.Invisible`
+          // reaches `d.presence` on the Identify frame, so the contained run is
+          // never visible in the sidebar. Omitted when the flag is off, which
+          // leaves discord.js's `presence: {}` default - i.e. online - exactly
+          // as production has it.
+          presence: { status: PresenceUpdateStatus.Invisible },
         }
       : {}),
   });
@@ -173,27 +234,33 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
   });
 
   client.on(Events.GuildMemberAdd, async (member) => {
-    // Snapshot regardless of how this member arrived, so the counters stay
-    // current for the next organic join. A one-click join consumes no invite,
-    // so for it the diff legitimately shows nothing grew.
-    const grew = await snapshotInvites(member.guild, invites);
+    const observedAt = nowIso();
+    const joining = (async () => {
+      // Snapshot regardless of how this member arrived, so the counters stay
+      // current for the next organic join. A one-click join consumes no invite,
+      // so for it the diff legitimately shows nothing grew.
+      const grew = await snapshotInvites(member.guild, invites);
 
-    // A join guild.add_member announced seconds ago (§7). The note beats the
-    // invite diff: this member provably came through the web path, and any
-    // code that grew in the same window belongs to some other join's event.
-    const expected = expectedJoins?.consume(member.guild.id, member.id) ?? null;
-    const source = expected ?? invites.attribute(grew, !!member.guild.vanityURLCode);
-    const inviterId =
-      !expected && grew.length === 1 ? await invites.inviterFor(member.guild.id, grew[0]) : null;
-    await handlers.onJoin({
-      guildId: member.guild.id,
-      memberId: member.id,
-      isBot: !!member.user?.bot,
-      source,
-      inviterId,
-      occurredAt: member.joinedAt?.toISOString(),
-      sourceEventId: `${member.guild.id}:${member.id}:${member.joinedAt?.toISOString() ?? 'observed'}`,
-    });
+      // The web path's expected join beats the invite diff: a code that grew in
+      // the same window belongs to some other join's event.
+      const expected = expectedJoins?.consume(member.guild.id, member.id) ?? null;
+      const source = expected ?? invites.attribute(grew, !!member.guild.vanityURLCode);
+      const inviterId =
+        !expected && grew.length === 1 ? await invites.inviterFor(member.guild.id, grew[0]) : null;
+      await handlers.onJoin({
+        guildId: member.guild.id,
+        memberId: member.id,
+        isBot: !!member.user?.bot,
+        source,
+        inviterId,
+        occurredAt: member.joinedAt?.toISOString(),
+        sourceEventId: `${member.guild.id}:${member.id}:${member.joinedAt?.toISOString() ?? 'observed'}`,
+      });
+      return source;
+    })();
+    // Reserve before the first await; the welcome listener runs concurrently.
+    void deps.onboardingRota?.join(member, joining, observedAt);
+    const source = await joining;
 
     // Someone who arrives with the gate already cleared - they accepted the
     // rules on the invite screen before the join landed - converted instantly.
@@ -240,6 +307,9 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
   // registered at all when no landing channel is configured, and the funnel
   // number must not depend on whether we happen to be greeting people.
   client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
+    if (oldMember.pending === true && newMember.pending === false) {
+      void deps.onboardingRota?.gateCleared(newMember, nowIso());
+    }
     if (oldMember.pending && !newMember.pending) {
       await handlers.onGateCleared({
         guildId: newMember.guild.id,
@@ -290,7 +360,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     content: string;
     mentions: { users: { keys(): IterableIterator<string> } };
     attachments: { values(): IterableIterator<{ name: string | null }> };
-  }, observedTimestamp: number): Promise<boolean> => {
+  }, observedTimestamp: number): Promise<boolean | null> => {
     if (!automod || !msg.guildId || msg.guildId !== automod.guildId || !msg.author) return false;
     try {
       const result = await automod.service.inspect({
@@ -313,7 +383,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
         messageId: msg.id,
         err: String(err),
       });
-      return err instanceof AutomodProcessingError && err.matched;
+      return err instanceof AutomodProcessingError && err.matched ? true : null;
     }
   };
 
@@ -325,7 +395,14 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
       : community?.humanChannelIds.has(msg.channelId)
         ? 'human'
         : 'other';
-    if (await inspectAutomod(msg, msg.createdTimestamp)) {
+    const inspection = inspectAutomod(msg, msg.createdTimestamp);
+    // Reserve this subject's place before automod/funnel I/O can let a reply
+    // overtake its action. The observer writes only after a definite accepted
+    // result, and its chain never gates the automation event below: a stuck
+    // observation for one member must not stop unrelated automations.
+    void deps.onboardingRota?.message(msg, inspection);
+    const automodRejected = await inspection;
+    if (automodRejected) {
       // Automod-rejected messages still belong in raw ingestion and exact
       // reconciliation, but they must not award XP or advance funnel activity.
       // Keep this call behind the scorecard feature seam: existing handler
@@ -357,9 +434,11 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
       occurredAt,
       onLevelUp: levelUpRoleHook(msg.member),
     });
-    // Downstream message automations run only after automod accepts the event
-    // and the ordinary funnel/leveling path has completed. A private event keeps
-    // those listeners from racing the primary MessageCreate handler.
+    // Downstream message automations run once automod accepts the event and
+    // the ordinary funnel/leveling path has completed. The measurement observer
+    // is deliberately not awaited: it orders same-subject writes on its own
+    // per-subject chain and must never stall the automation event. A private
+    // event keeps those listeners from racing the primary MessageCreate handler.
     client.emit('automationMessageAccepted' as never, msg as never);
   });
 

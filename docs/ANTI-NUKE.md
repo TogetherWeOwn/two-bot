@@ -35,6 +35,8 @@ TWO_ANTI_NUKE_SNAPSHOT_PATH=/var/backups/two-bot/guild-config/accepted.json
 
 Start dry-run, prove audit delivery and the refusal paths, then switch dry-run off only for the staging quarantine drill. The application needs View Audit Log and Manage Roles; `npm run staging:verify` attempts the audit-log read directly.
 
+For the repeatable exact-SHA gateway driver, staging-only actor requirements, bounded role-delete scenarios, per-run evidence, and fixture-scoped rollback, follow [`STAGING_ANTI_NUKE_ACCEPTANCE.md`](STAGING_ANTI_NUKE_ACCEPTANCE.md). Its default command is read-only; Discord writes require `drive --apply` and existing staging live-fire authorization.
+
 Quarantine removes the executor's dangerous roles, which is a member-role write, so it cannot coexist with `TWO_ONBOARDING_MODE=session` — that mode's contract is zero role writes anywhere, not just on the onboarding path. Startup refuses the armed combination outright rather than failing at the first incident, when the write would already be the response to a live raid. The dry run stops before `quarantine()`, so `session` + `TWO_ANTI_NUKE=1` + `TWO_ANTI_NUKE_DRY_RUN=1` (alerts only) still boots. To run the quarantine drill, take the guild out of session mode first.
 
 ## Restore procedure

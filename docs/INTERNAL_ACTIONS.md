@@ -1,6 +1,6 @@
 # The internal actions endpoint
 
-**Status: `v0.5` — the endpoint is complete and tested (TOG-44), and join
+**Status: `v0.6` — the endpoint is complete and tested (TOG-44), and join
 attribution for one-click joins is built (TOG-464). Nothing on this page is
 specification any more.**
 
@@ -14,6 +14,14 @@ TOG-1648 also implements `automations.import` and `automations.export`, but
 `overwrite: true` imports require the additional
 `TWO_INTERNAL_ALLOW_AUTOMATIONS_OVERWRITE=1` capability. Shipping the code
 alone grants every existing signing key nothing new.
+
+TOG-3101 adds `settings.get` and `settings.set` on the same terms: built,
+tested, and the CEO has approved widening the allowlist with them (TOG-3101,
+2026-09-17, conditions below) — but the two verbs stay inert until
+`TWO_INTERNAL_ALLOW_SETTINGS=1` is actually set, which has not happened yet in
+any environment. Neither verb can read or write a `TWO_INTERNAL_*` key —
+including the flag that enables them — because an action that can widen its
+own allowlist would end the trust model described below. See §3.
 
 The pieces that were waiting on Postgres landed with TOG-37 and are now in
 `src/internal/store.ts` and `migrations/0002_internal_actions.sql`: the durable
@@ -40,8 +48,15 @@ cannot kick, cannot ban, cannot change permissions, because there is no verb
 for it here.
 
 **The allowlist does not widen without the CEO's sign-off.** That is not my
-call to make and it is written into TOG-44. A new action means a comment on
-TOG-44, an approval, and a line in the changelog at the bottom of this file.
+call to make and it is written into TOG-44. A new action means an approval and
+a line in the changelog at the bottom of this file.
+
+TOG-44 is `done` as of `v0.3`, and commenting on a closed card reopens it — so
+for TOG-3101 the sign-off request was raised as an interaction on the card
+proposing the new action instead, with a comment on TOG-44 afterward for the
+back-reference only (not to resume it). Route it the same way for the next
+widening: ask on the card that proposes the action, not on TOG-44, unless a
+future TOG-44 is itself open.
 
 For the avoidance of doubt: **`announcement.post` and `event.upsert` going live
 in `v0.3` did not widen the allowlist.** Both were named in the original scope
@@ -181,6 +196,8 @@ it is there for logging and for showing "already posted" rather than "posted".
 | `guild.add_member` | **built and tested, switched off — awaiting CEO sign-off** (TOG-57) | natural — Discord returns 204 if already a member | Create Instant Invite |
 | `automations.import` | **built and tested, switched off — awaiting allowlist approval** | **needs key**; max import is the guild's remaining command budget | None directly; changes definitions only |
 | `automations.export` | **built and tested, switched off — awaiting allowlist approval** | natural — read-only | None |
+| `settings.get` | **built and tested, switched off — awaiting CEO sign-off** (TOG-3101) | natural — read-only | None |
+| `settings.set` | **built and tested, switched off — awaiting CEO sign-off** (TOG-3101) | **needs key** — a repeat is a second audit row and a silent revert of anything saved in between | None directly; changes stored config only |
 
 `guild.add_member` only answers when `TWO_INTERNAL_ALLOW_ADD_MEMBER=1`, and
 that flag is the record of the CEO's decision rather than a convenience. With
@@ -280,6 +297,33 @@ most 1000.
 
 `result: { "outcome": "created" | "updated", "event_id": "…" }`.
 
+### `event.cancel` — opt-in, default off
+
+```json
+{ "action": "event.cancel", "event_key": "…" }
+```
+
+Requires the environment-only `TWO_INTERNAL_ALLOW_EVENT_CANCEL=1` capability
+and an `Idempotency-Key`. Shipping this action does not enable it on a running
+bot; staging authorization does not authorize live rollout.
+
+Only an event previously mapped by `event.upsert` in the endpoint's configured
+guild can be cancelled. Unknown keys return `action_not_allowed` without a
+Discord request. The caller cannot supply a Discord event ID to bypass that
+mapping. Discord receives `PATCH /guilds/{guild}/scheduled-events/{event}` with
+`{ "status": 4 }` (CANCELED), not a delete. Discord accepts this transition only
+for scheduled events; permission failures or invalid transitions are surfaced
+as `discord_rejected` and do not remove the mapping.
+
+The mapping is retained on success too: a delayed upsert must not recreate the
+cancelled event. To schedule a replacement, use a new `event_key`. Retrying the
+same cancellation with the same idempotency key replays the durable result,
+even after restart, without another Discord request. A fresh key is a new
+operation, not a replay, and Discord may reject a second cancellation.
+
+`result: { "outcome": "cancelled", "event_id": "…" }`. Success, rejection and
+replay use the existing `internal_action_log` audit trail.
+
 ### `guild.add_member` — **proposed, not yet approved**
 
 ```json
@@ -318,6 +362,66 @@ person:**
   a failing test does not.
 
 **Timeouts — fast failure, not a durable one.** Agreed, and specified in §5.
+
+### `settings.get` / `settings.set` — **proposed, not yet approved**
+
+```json
+{ "action": "settings.get", "key": "TWO_AUTOMOD_ENABLED" }
+{ "action": "settings.set", "key": "TWO_AUTOMOD_ENABLED", "value": true,
+  "updated_by": "111111111111111111" }
+```
+
+The two verbs the admin dashboard (TOG-3093) is built on. A setting lives in
+`guild_settings`; the environment stays the permanent fallback, so a key with
+no row reads from `process.env` exactly as it did before, and the undo path for
+the whole programme is "stop writing rows".
+
+`result: { "key": "…", "value": …, "source": "store" | "unset" }` for the read,
+and `{ "key": "…", "outcome": "saved" | "unset" }` for the write. **The write
+does not echo the value back** — the result is what gets stored and replayed,
+and a replayed echo of a value that has since changed reads as current.
+
+`updated_by` is the Discord user id of the admin who made the change. It is
+**passed by the caller and recorded verbatim, never inferred** from the signing
+key: the key says which service called, and that is not the same question as
+which person decided. It lands in `guild_settings.updated_by` and in a
+`guild_settings_audit` row, and the audit table is append-only by trigger — the
+process that writes it cannot edit or erase it. A write with no `updated_by` is
+a `malformed`, not an anonymous save.
+
+`value: null` deletes the row and hands the key back to the environment. That
+is the documented undo, so it audits like any other change. Omitting `value`
+entirely is a `malformed`: unsetting a key and forgetting to send one are
+different intentions and the endpoint will not guess.
+
+**`settings.set` refuses any key matching `TWO_INTERNAL_*`, and so does
+`settings.get`.** Those are the switches that decide what the website may make
+the bot do. An action that can set them can widen its own allowlist, which
+destroys the property this whole page rests on — that a compromised website can
+do exactly the things on the allowlist and nothing else. A read is refused for
+the same reason in reverse: `TWO_INTERNAL_KEYS` is a shared secret, and a verb
+that could read it out is an exfiltration primitive. `settings.get` therefore
+answers from the config store **only** and never reads through to
+`process.env`.
+
+That one rule is enforced three times over, deliberately:
+
+1. In the handler (`requireSettingsKey` in `src/internal/actions.ts`), before
+   the store is touched at all.
+2. In the store (`assertStorableKey` in `src/core/settings.ts`), before any SQL
+   is issued.
+3. In the schema — `CHECK (key NOT LIKE 'TWO\_INTERNAL\_%')` in
+   `migrations/0026_guild_settings.sql`, which holds even for a writer that
+   never goes through TypeScript.
+
+It is a **prefix** rule rather than a list of the gates that exist today, so
+the next capability flag somebody adds is covered without their having to
+remember this page. Each of the three has its own test, and the handler's is
+written against a settings port that enforces nothing — otherwise it would be
+testing the store's refusal and reporting it as the handler's.
+
+Both verbs are off unless `TWO_INTERNAL_ALLOW_SETTINGS=1`, and that flag is the
+record of the CEO's decision, not a convenience.
 
 ---
 
@@ -571,6 +675,7 @@ and opens no port.
 | `TWO_INTERNAL_ALLOW_ADD_MEMBER` | `1` to enable `guild.add_member`. **Requires the CEO's sign-off.** |
 | `TWO_INTERNAL_ALLOW_AUTOMATIONS` | `1` to enable non-destructive `automations.import` and `automations.export`. **Default off; set only after allowlist approval.** |
 | `TWO_INTERNAL_ALLOW_AUTOMATIONS_OVERWRITE` | `1` to permit `overwrite: true` imports. Has no effect unless the base automations flag is also on. |
+| `TWO_INTERNAL_ALLOW_SETTINGS` | `1` to enable `settings.get` and `settings.set`. **Requires the CEO's sign-off.** Neither verb can reach a `TWO_INTERNAL_*` key, including this one. |
 
 `DISCORD_GUILD_ID` is required when the endpoint is on — the actions act on one
 guild, and guessing which is not a thing this should do.
@@ -587,7 +692,10 @@ the replay guard is running in process memory and a restart re-opens a
 
 Tests: `test/unit.internalauth.test.ts` (signature, skew, replay, buckets, bind
 guard, error table), `test/unit.internalstore.test.ts` (nonce expiry, claim
-takeover, the sweep — everything with a clock in it), and
+takeover, the sweep — everything with a clock in it),
+`test/unit.internalsettings.test.ts` (the settings handlers against a store
+that enforces nothing), `test/unit.settingsstore.test.ts` (the store and the
+CHECK constraint, against real Postgres), and
 `test/e2e.internalactions.test.ts` (the §10 list over real HTTP, against
 `tools/mock-discord`).
 
@@ -597,6 +705,7 @@ takeover, the sweep — everything with a clock in it), and
 
 | Version | Date | Change |
 |---|---|---|
+| `v0.6` | 2026-09-17 | TOG-3101: `settings.get` and `settings.set` implemented behind `TWO_INTERNAL_ALLOW_SETTINGS`, default off. **The CEO approved widening the allowlist with these two verbs on 2026-09-17** (TOG-3101, interaction `99e9e289`), on conditions: the three-layer `TWO_INTERNAL_*` refusal and its mutation-checked tests stay; capability gates and signing keys stay env-only; the flag flips on staging first, production only after a posted 15s-pickup proof. The request was raised on TOG-3101 rather than as a comment on TOG-44, because TOG-44 is closed and commenting on it would reopen a completed card — see the amendment to the sign-off paragraph above. Both verbs refuse `TWO_INTERNAL_*` keys in the handler, in the store and in the schema, and `settings.get` never reads through to `process.env`. New table `guild_settings` and its append-only `guild_settings_audit` (`migrations/0026_guild_settings.sql`). No wire-format change to any existing action. **The flag itself is still off in every environment as of this line** — approval is recorded, rollout is not done. |
 | `v0.5` | 2026-09-09 | TOG-1648: `automations.import` and `automations.export` implemented but default off behind `TWO_INTERNAL_ALLOW_AUTOMATIONS`; destructive overwrite has a second flag and imports are bounded by the remaining Discord guild-command budget. This does not widen the approved allowlist by default. |
 | `v0.1` | 2026-08-19 | First specification. Three approved actions from TWO-24, plus `guild.add_member` proposed on TWO-57 and awaiting CEO sign-off. |
 | `v0.2` | 2026-08-19 | TWO-59: the pre-Postgres slice implemented — listener, HMAC, skew, replay, rate limits, error envelope, request logging, `role.assign` live and `guild.add_member` built but switched off. No wire-format change. |

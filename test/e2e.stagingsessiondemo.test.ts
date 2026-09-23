@@ -9,7 +9,16 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, type Server } from 'node:http';
 import { execFile } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  readlinkSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -365,37 +374,37 @@ const INDEX_CITATIONS: ReadonlyArray<{
   what: string;
 }> = [
   {
-    printed: 'src/index.ts:449-484',
-    start: 449,
-    end: 484,
+    printed: 'src/index.ts:652-694',
+    start: 652,
+    end: 694,
     contains: /registerSessionWelcome\(client, \{/,
     what: 'exclusive session registration',
   },
   {
-    printed: 'src/index.ts:543 and :272',
-    start: 543,
-    end: 543,
+    printed: 'src/index.ts:748 and :409',
+    start: 748,
+    end: 748,
     contains: /actionsForOnboardingMode\(/,
     what: 'the internal role.assign call site',
   },
   {
-    printed: 'src/index.ts:543 and :272',
-    start: 272,
-    end: 272,
+    printed: 'src/index.ts:748 and :409',
+    start: 409,
+    end: 409,
     contains: /levelRoleWritesForOnboardingMode\(/,
     what: 'the leveling role-write call site',
   },
   {
-    printed: 'src/index.ts:99-103, :112-117',
-    start: 99,
-    end: 103,
+    printed: 'src/index.ts:128-132, :141-146',
+    start: 128,
+    end: 132,
     contains: /forbids TWO_SELF_ROLE_PANELS/,
     what: 'the self-role panel boot guard',
   },
   {
-    printed: 'src/index.ts:99-103, :112-117',
-    start: 112,
-    end: 117,
+    printed: 'src/index.ts:128-132, :141-146',
+    start: 141,
+    end: 146,
     contains: /forbids armed anti-nuke containment/,
     what: 'the armed containment boot guard',
   },
@@ -1032,6 +1041,113 @@ test('a baseline after a confirmed revocation starts normally', async () => {
       2,
       'the second baseline must have created its own invite',
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/**
+ * TOG-3039, survivor 1 of 3: the baseline-side twin of `a receipt-shaped line
+ * that this script would not have written fails closed`.
+ *
+ * Only a receipt whose status actually means gone frees the name - dropping the
+ * status check leaves `if (receipt)`, which reads any receipt-shaped line as
+ * "nothing is live here". A failed revocation is not something `--verify`
+ * writes (it keeps the URL handle instead, see `a receipt whose status does not
+ * mean gone is retried, not believed`), so this line arrives by hand: an
+ * operator mid-cleanup, or the TOG-2964 P2 planted-line threat. Either way the
+ * invite it names was never deleted.
+ */
+test('a baseline refuses a receipt whose status does not say the invite is gone', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
+  try {
+    assert.equal((await runScript(stub, { dir })).code, 0);
+    const firstRun = baselineRunId(dir);
+    writeArtifact(dir, 'revoked invite-code HTTP 500 at 2026-09-16T00:00:00.000Z');
+    const staleArtifact = inviteReceipt(dir);
+
+    const second = await runScript(stub, { dir });
+    assert.notEqual(second.code, 0, 'a revocation that never confirmed must stop a new baseline');
+    assert.match(second.stderr, /still holds the invite handle for baseline run/);
+    assert.match(second.stderr, new RegExp(firstRun));
+    assert.equal(
+      stub.writes.filter((p) => p.endsWith('/invites')).length,
+      1,
+      'the refused run must not create a second invite',
+    );
+    assert.equal(inviteReceipt(dir), staleArtifact, 'and the only handle for the unrevoked invite must survive');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/**
+ * TOG-3039, survivor 2 of 3: the docstring promises that "a present-but-
+ * unreadable file included" refuses, and nothing checked it. A read that fails
+ * for any reason other than ENOENT tells us the name is taken by something we
+ * cannot judge, which is the loud state, not the free one.
+ *
+ * A symlink is how the existing directory-symlink tests reach an unreadable
+ * path: `O_EXCL` still reports EEXIST for it, and the `O_NOFOLLOW` read then
+ * fails ELOOP. Treating that as absent would not merely overwrite the file -
+ * the run would POST for a second invite and only then die on its own
+ * `O_NOFOLLOW` write, orphaning the invite it had just created.
+ */
+test('a baseline refuses an invite handle it cannot read', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
+  try {
+    assert.equal((await runScript(stub, { dir })).code, 0);
+    rmSync(join(dir, 'invite.txt'));
+    symlinkSync('handle-somewhere-else.txt', join(dir, 'invite.txt'));
+
+    const second = await runScript(stub, { dir });
+    assert.notEqual(second.code, 0, 'an unreadable handle must stop a new baseline');
+    assert.match(second.stderr, /exists but could not be read/);
+    assert.match(second.stderr, /may name a demo invite that is still live/);
+    assert.equal(
+      stub.writes.filter((p) => p.endsWith('/invites')).length,
+      1,
+      'the refused run must not create a second invite',
+    );
+    assert.equal(
+      readlinkSync(join(dir, 'invite.txt')),
+      'handle-somewhere-else.txt',
+      'and it must not have written through or replaced what it could not read',
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    await stub.close();
+  }
+});
+
+/**
+ * TOG-3039, survivor 3 of 3, and the one that is reachable without anybody
+ * hand-editing anything: `writePrivate` opens `O_TRUNC` and then `writeSync`, so
+ * a run killed between those two leaves a zero-length `invite.txt`. If that
+ * happened at the write that replaces `pending` with the real URL, an invite is
+ * live in the guild and its code is gone from disk - exactly the state where a
+ * new baseline must not take the name.
+ */
+test('a baseline refuses a handle truncated by an interrupted write', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-staging-demo-'));
+  try {
+    assert.equal((await runScript(stub, { dir })).code, 0);
+    writeFileSync(join(dir, 'invite.txt'), '');
+
+    const second = await runScript(stub, { dir });
+    assert.notEqual(second.code, 0, 'a truncated handle must stop a new baseline');
+    assert.match(second.stderr, /does not hold a recognisable invite handle/);
+    assert.equal(
+      stub.writes.filter((p) => p.endsWith('/invites')).length,
+      1,
+      'the refused run must not create a second invite',
+    );
+    assert.equal(inviteReceipt(dir), '', 'and the truncated file is evidence to resolve, not to overwrite');
   } finally {
     rmSync(dir, { recursive: true, force: true });
     await stub.close();

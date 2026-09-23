@@ -572,6 +572,106 @@ test('audit-sink message tampering is stored but never remirrored', async () => 
   await db.close();
 });
 
+test('generic claim batches exclude pending and expired rota notices before the limit', async () => {
+  const db = await openDb();
+  try {
+    const store = new OperationalAuditStore(db);
+    const ids = ['rota-pending', 'rota-expired', 'rota-active'];
+    for (const entryId of ids) {
+      await store.record({ ...killSwitchEvent(1), entryId, kind: 'rota_notice' }, CHANNEL_A);
+    }
+    for (const entryId of ids.slice(1)) {
+      const claim = await store.claim(entryId);
+      await store.prepareDeliverySend(entryId, claim!.deliveryClaimToken!, '900000000000000001');
+    }
+    await db.prepare(`UPDATE operational_audit_log SET delivery_lease_until = '2000-01-01T00:00:00Z'
+      WHERE entry_id = ?`).run('rota-expired');
+    const before = await Promise.all(ids.map(id => store.get(id)));
+    const generic = killSwitchEvent(2);
+    await store.record(generic, CHANNEL_A);
+    assert.deepEqual((await store.claimPending(1)).map(row => row.event.entryId), [generic.entryId]);
+    assert.deepEqual(await Promise.all(ids.map(id => store.get(id))), before);
+    assert.ok(await store.claim('rota-pending'), 'the dedicated sender can still claim by identity');
+    assert.ok(await store.claim('rota-expired'), 'the dedicated sender can recover an expired claim');
+    assert.equal(await store.claim('rota-active'), null);
+  } finally { await db.close(); }
+});
+
+test('generic reconciliation excludes delivered rota notices before the limit', async () => {
+  const db = await openDb();
+  try {
+    const store = new OperationalAuditStore(db);
+    const rota = { ...killSwitchEvent(1), entryId: 'rota-delivered', kind: 'rota_notice' as const };
+    const generic = killSwitchEvent(2);
+    for (const event of [rota, generic]) {
+      await store.record(event, CHANNEL_A);
+      const claim = await store.claim(event.entryId);
+      await store.markDelivered(event.entryId, claim!.deliveryClaimToken!, `mirror-${event.entryId}`);
+    }
+    assert.deepEqual((await store.selectDeliveredForReconciliation(1)).map(row => row.event.entryId), [generic.entryId]);
+    assert.equal((await store.get(rota.entryId))?.mirrorCheckedAt, null);
+  } finally { await db.close(); }
+});
+
+test('generic retry sends and reconciles ordinary audit work without touching rota-owned rows', async () => {
+  const db = await openDb();
+  try {
+    const store = new OperationalAuditStore(db);
+    const pending = { ...killSwitchEvent(1), entryId: 'rota-pending', kind: 'rota_notice' as const };
+    const delivered = { ...pending, entryId: 'rota-delivered' };
+    const generic = killSwitchEvent(2);
+    await store.record(pending, CHANNEL_A);
+    await store.record(delivered, CHANNEL_A);
+    const claim = await store.claim(delivered.entryId);
+    await store.markDelivered(delivered.entryId, claim!.deliveryClaimToken!, 'rota-mirror');
+    await store.record(generic, CHANNEL_A);
+    const before = await Promise.all([pending, delivered].map(event => store.get(event.entryId)));
+    const sends: string[] = [];
+    const fetched: string[] = [];
+    const channel = {
+      ...auditChannel(async options => {
+        if (!options.message) return new Collection();
+        fetched.push(options.message);
+        return { id: options.message, author: { id: 'bot' }, editedTimestamp: null,
+          content: options.message === 'rota-mirror' ? 'rota-notice:rota-delivered' : formatAuditEvent(generic) };
+      }),
+      send: async (payload?: { content: string }) => {
+        sends.push(payload!.content);
+        return { id: '900000000000000501' };
+      },
+    };
+    const sink = makeOperationalAudit(auditClient(channel), {
+      guildId: GUILD, channels: { audit: CHANNEL_A, voice: null, moderation: null }, store,
+    });
+    assert.equal(await sink.retryPending(), 1);
+    assert.deepEqual(sends, [formatAuditEvent(generic)]);
+    assert.deepEqual(fetched, ['900000000000000501']);
+    assert.deepEqual(await Promise.all([pending, delivered].map(event => store.get(event.entryId))), before);
+    assert.equal((await store.get(generic.entryId))?.deliveryState, 'delivered');
+    assert.ok((await store.get(generic.entryId))?.mirrorCheckedAt);
+    await store.engageDeliveryHalt('test-operator');
+    assert.equal(await sink.retryPending(), 0);
+    assert.deepEqual(await Promise.all([pending, delivered].map(event => store.get(event.entryId))), before);
+  } finally { await db.close(); }
+});
+
+test('generic record refuses rota notices with or without durable storage', async () => {
+  const db = await openDb();
+  try {
+    const store = new OperationalAuditStore(db);
+    const { client, sends } = killSwitchChannel({ failCursorReads: () => false });
+    const event = { ...killSwitchEvent(1), entryId: 'rota-direct', kind: 'rota_notice' as const };
+    for (const backing of [store, null]) {
+      const sink = makeOperationalAudit(client, {
+        guildId: GUILD, channels: { audit: CHANNEL_A, voice: null, moderation: null }, store: backing,
+      });
+      assert.equal(await sink.record(event), false);
+    }
+    assert.equal(sends(), 0);
+    assert.equal(await store.get(event.entryId), null);
+  } finally { await db.close(); }
+});
+
 test('delivered audit mirrors are checked exactly and checkpointed when intact', async () => {
   const db = await openDb();
   const store = new OperationalAuditStore(db);
@@ -1782,4 +1882,160 @@ test('Discord mirror refuses a configured channel from another guild', async () 
     occurredAt: '2026-09-08T16:00:00.000Z',
   });
   assert.equal(sent, 0);
+});
+
+// --- TOG-3187: emergency kill switch for the audit mirror -------------------
+
+/**
+ * A channel whose sends are counted, whose newest-message reads can fail
+ * transiently (leaving genuinely-pending rows before the switch is pulled),
+ * and whose cursor hook fires on each newest-message read - the last Discord
+ * call before `channel.send` - so a test can engage the switch at an exact
+ * point inside delivery.
+ */
+function killSwitchChannel(hooks: {
+  failCursorReads: () => boolean;
+  onCursorRead?: () => Promise<void>;
+}): { client: Client; sends: () => number } {
+  let sends = 0;
+  const channel = {
+    id: CHANNEL_A,
+    guild: { id: GUILD, members: { me: { id: 'bot' } } },
+    isTextBased: () => true,
+    isDMBased: () => false,
+    permissionsFor: () => ({ has: () => true }),
+    messages: {
+      fetch: async (options: { limit?: number }) => {
+        if (options?.limit === 1) {
+          if (hooks.failCursorReads()) {
+            // A pre-send transient failure: the row returns to `pending`
+            // without ever having offered Discord a send.
+            throw Object.assign(new Error('transient cursor failure'), { status: 503 });
+          }
+          await hooks.onCursorRead?.();
+        }
+        return new Collection();
+      },
+    },
+    client: { user: { id: 'bot' } },
+    send: async () => {
+      sends++;
+      return { id: `90000000000000${String(sends).padStart(3, '0')}` };
+    },
+  };
+  const client = { channels: { cache: new Map([[CHANNEL_A, channel]]), fetch: async () => channel } } as unknown as Client;
+  return { client, sends: () => sends };
+}
+
+function killSwitchEvent(n: number): OperationalAuditEvent {
+  return {
+    entryId: `ks-${n}`,
+    kind: 'message_delete',
+    channel: 'audit',
+    guildId: GUILD,
+    occurredAt: '2026-09-09T00:00:00.000Z',
+    sourceChannelId: CHANNEL_B,
+    messageId: `ks-message-${n}`,
+  };
+}
+
+test('kill switch engaged before any sweep: zero sends, rows held as pending, then all resume', async () => {
+  const db = await openDb();
+  const store = new OperationalAuditStore(db);
+  const { client, sends } = killSwitchChannel({ failCursorReads: () => false });
+  const sink = makeOperationalAudit(client, {
+    guildId: GUILD,
+    channels: { audit: CHANNEL_A, voice: null, moderation: null },
+    store,
+  });
+
+  assert.equal(await store.engageDeliveryHalt('test-operator'), true);
+  assert.equal(await store.isDeliveryHalted(), true);
+
+  for (let n = 1; n <= 3; n++) assert.equal(await sink.record(killSwitchEvent(n)), true);
+
+  // Absence half: engaged means no send leaves, yet every durable row exists.
+  assert.equal(sends(), 0);
+  for (let n = 1; n <= 3; n++) {
+    const row = await store.get(`ks-${n}`);
+    assert.equal(row?.deliveryState, 'pending');
+    assert.equal(row?.deliveryLastError, 'audit_kill_switch_held');
+    assert.equal(row?.deliveryAttempts, 0);
+  }
+  assert.equal(await sink.retryPending(), 3);
+  assert.equal(sends(), 0);
+  for (let n = 1; n <= 3; n++) {
+    assert.equal((await store.get(`ks-${n}`))?.deliveryState, 'pending');
+  }
+
+  // Presence half, same test: disengage and the held rows deliver - none skipped.
+  assert.equal(await store.disengageDeliveryHalt(), true);
+  assert.equal(await sink.retryPending(), 3);
+  assert.equal(sends(), 3);
+  for (let n = 1; n <= 3; n++) {
+    const row = await store.get(`ks-${n}`);
+    assert.equal(row?.deliveryState, 'delivered');
+    assert.ok(row?.mirrorMessageId);
+  }
+  const count = await db.prepare(`SELECT COUNT(*) AS n FROM operational_audit_log`).get<{ n: number }>();
+  assert.equal(Number(count?.n), 3, 'the switch must never drop durable evidence');
+  await db.close();
+});
+
+test('kill switch engaged mid-batch stops the next send immediately and holds, not fails, the row', async () => {
+  const db = await openDb();
+  const store = new OperationalAuditStore(db);
+  let cursorFailing = true;
+  let sweepStarted = false;
+  let sweepCursorReads = 0;
+  const { client, sends } = killSwitchChannel({
+    failCursorReads: () => cursorFailing,
+    // The second sweep cursor read belongs to row ks-2: its top-of-delivery
+    // check has already passed, so only the immediate pre-send check can stop
+    // this send. That is the exact race the kill switch exists to close.
+    onCursorRead: async () => {
+      if (!sweepStarted) return;
+      sweepCursorReads++;
+      if (sweepCursorReads === 2) assert.equal(await store.engageDeliveryHalt('mid-batch operator'), true);
+    },
+  });
+  const sink = makeOperationalAudit(client, {
+    guildId: GUILD,
+    channels: { audit: CHANNEL_A, voice: null, moderation: null },
+    store,
+  });
+
+  // Recording fails the pre-send cursor read transiently (503), leaving three
+  // rows `pending` with one attempt each and no Discord send offered.
+  for (let n = 1; n <= 3; n++) await sink.record(killSwitchEvent(n));
+  for (let n = 1; n <= 3; n++) {
+    assert.equal((await store.get(`ks-${n}`))?.deliveryState, 'pending');
+  }
+
+  cursorFailing = false;
+  sweepStarted = true;
+  assert.equal(await sink.retryPending(), 3);
+  // Row 1 was already in flight; rows 2 and 3 must not reach channel.send.
+  assert.equal(sends(), 1);
+  assert.equal((await store.get('ks-1'))?.deliveryState, 'delivered');
+  for (const entryId of ['ks-2', 'ks-3']) {
+    const row = await store.get(entryId);
+    assert.equal(row?.deliveryState, 'pending', `${entryId} must return to pending`);
+    assert.equal(row?.deliveryLastError, 'audit_kill_switch_held');
+    assert.equal(row?.deliveryClaimToken, null);
+    // The recovery boundary this pass prepared must be cleared: it was
+    // written for a send the switch then prevented, and keeping it would
+    // quarantine the row as discord_marker_missing instead of resuming it.
+    assert.equal(row?.deliverySearchBefore, null);
+    assert.equal(row?.deliveryAttempts, 1, 'holding is not an attempt');
+  }
+
+  // Disengage: the held rows deliver. Nothing was skipped or quarantined.
+  assert.equal(await store.disengageDeliveryHalt(), true);
+  assert.equal(await sink.retryPending(), 2);
+  assert.equal(sends(), 3);
+  for (const entryId of ['ks-2', 'ks-3']) {
+    assert.equal((await store.get(entryId))?.deliveryState, 'delivered');
+  }
+  await db.close();
 });

@@ -1,4 +1,5 @@
-import { loadConfig } from './core/config.ts';
+import { loadConfig, storeFirst, HOT_WIRED_FIELDS } from './core/config.ts';
+import { SettingsStore } from './core/settings.ts';
 import { setLogLevel, log } from './core/log.ts';
 import { openDb } from './store/db.ts';
 import { applyWebContract } from './store/webContract.ts';
@@ -44,6 +45,7 @@ import { ModerationDiscord } from './moderation/discord.ts';
 import { RestModerationResolver } from './moderation/resolver.ts';
 import { ModerationService } from './moderation/service.ts';
 import { ModerationStore } from './moderation/store.ts';
+import { enforceModerationShutdownPreflight } from './moderation/shutdownPreflight.ts';
 import { MODERATION_COMMAND_DATA, registerModerationHandler } from './moderation/commands.ts';
 import { ANNOUNCEMENT_COMMAND_DATA, AUTOMATION_COMMAND_DATA, COMMUNITY_COMMAND_DATA } from './discord/commandNames.ts';
 import { loadAutomodConfig } from './automod/config.ts';
@@ -73,8 +75,20 @@ import { AutomationService } from './automations/service.ts';
 import { registerAutomationGateway } from './automations/gateway.ts';
 import { startScheduler } from './automations/scheduler.ts';
 import { loadAutomationConfig } from './automations/config.ts';
+import {
+  AutomationDisableIncomplete,
+  RestGuildCommandRegistrar,
+  removeDbBackedCommands,
+  summariseDisable,
+} from './automations/disable.ts';
 import { CommunityClassifier, loadCommunityClassifierConfig } from './analytics/communityClassifier.ts';
 import { CommunityFactStore } from './analytics/communityFacts.ts';
+import { OnboardingRota } from './analytics/onboardingRota.ts';
+import { loadOnboardingRotaConfig } from './analytics/onboardingRotaConfig.ts';
+import { DiscordOnboardingRota } from './discord/onboardingRota.ts';
+import { ROTA_ACKNOWLEDGEMENT_COMMAND, registerRotaAcknowledgement } from './discord/rotaAcknowledgement.ts';
+import { RotaNoticeDelivery } from './discord/rotaNoticeDelivery.ts';
+import { startRotaNoticeScheduler } from './discord/rotaNoticeScheduler.ts';
 import {
   startCommunityScorecardJob,
   type CommunityScorecardJobHandle,
@@ -85,7 +99,22 @@ import { AnnouncementsStore } from './announcements/store.ts';
 import { AnnouncementsService } from './announcements/service.ts';
 import { DiscordAnnouncements, XmlFeedReader, registerAnnouncementCommands, startFeedPoller } from './announcements/discord.ts';
 
+// The environment-only view. Everything needed to reach the database has to
+// come from here, because the settings store lives in the database: this is the
+// bootstrap, and it is why TWO_DB_POOL_MAX and the URL itself are env-only in
+// src/core/settingsCatalog.ts rather than by policy.
+//
+// `liveCfg` below replaces this once the store is open. Read that, not this,
+// anywhere a value can change while the process runs.
 const cfg = loadConfig();
+const onboardingRotaCfg = loadOnboardingRotaConfig();
+if (onboardingRotaCfg.enabled && onboardingRotaCfg.noticeEnabled &&
+    (!onboardingRotaCfg.noticeChannelId || !onboardingRotaCfg.primaryActorId || !onboardingRotaCfg.readerIds?.length)) {
+  throw new Error(
+    'Onboarding rota notices require DISCORD_STAFF_ALERT_CHANNEL_ID, ' +
+    'TWO_ONBOARDING_ROTA_PRIMARY_ACTOR_ID and TWO_ONBOARDING_ROTA_READER_IDS.',
+  );
+}
 const automationCfg = loadAutomationConfig();
 const processStartedAt = new Date().toISOString();
 const announcementsCfg = loadAnnouncementsConfig();
@@ -130,6 +159,48 @@ const db = await openDb(cfg.databaseUrl, { poolMax: cfg.dbPoolMax });
 // Never log the URL itself - it carries the password. See docs/SECRETS.md.
 log.info('datastore_open', { poolMax: cfg.dbPoolMax });
 
+// The config store (TOG-3100 / TOG-3093 slice 1).
+//
+// Additive by construction: a key with no row reads exactly as it did before
+// this table existed, so the day this ships nothing changes and the Coolify
+// environment can be emptied one key at a time. The undo path for the whole
+// admin-dashboard programme is "stop writing rows".
+//
+// It polls `SELECT max(version)` every 15s rather than using LISTEN/NOTIFY,
+// which would need a dedicated connection; docs/STACK.md sizes the pool at 5
+// deliberately and this is not worth one of them.
+const settings = new SettingsStore(db);
+await settings.load();
+
+/**
+ * The store-first config, rebuilt whenever the store changes.
+ *
+ * Read this rather than `cfg` for anything that can change at runtime. It is
+ * still the same `loadConfig()`, and every env-only key inside it is still read
+ * from the environment - see the note on loadConfig() for which, and why three
+ * of them could not come from the store even if policy allowed it.
+ */
+let liveCfg = loadConfig(storeFirst(settings.envSnapshot(cfg.guildId)));
+
+settings.onChange(() => {
+  const previous = liveCfg;
+  liveCfg = loadConfig(storeFirst(settings.envSnapshot(cfg.guildId)));
+  // One line naming what actually moved. A raid threshold that changed at
+  // 03:00 with no record of it is the kind of thing that makes an incident
+  // unreconstructable afterwards, and "config reloaded" would not have told
+  // anyone which number they are now living with.
+  for (const [key, read] of Object.entries(HOT_WIRED_FIELDS)) {
+    const from = read(previous);
+    const to = read(liveCfg);
+    if (from !== to) log.info('setting_changed', { key, from, to });
+  }
+});
+settings.start();
+log.info('settings_store_ready', {
+  rows: settings.size(),
+  version: settings.currentVersion(),
+});
+
 // Keep the website's read-only views (docs/WEBSITE_CONTRACT.md) in step with
 // the code that owns them. Idempotent, so this is a no-op on a normal boot.
 //
@@ -164,7 +235,39 @@ const handlers = new FunnelHandlers(store, leveling, communityFacts);
 
 const client = createClient(process.env.TWO_AUTOMOD === '1');
 const moderationCfg = loadModerationConfig();
+// Narrowed once: property access below stays on the enabled member.
+const rotaCfg = onboardingRotaCfg.enabled === true ? onboardingRotaCfg : undefined;
+const onboardingRotaCore = rotaCfg
+  ? new OnboardingRota(db, communityClassifier, rotaCfg)
+  : undefined;
+const onboardingRota = onboardingRotaCore && rotaCfg
+  ? new DiscordOnboardingRota(db, onboardingRotaCore, {
+    guildId: rotaCfg.guildId,
+    primaryActorId: rotaCfg.primaryActorId,
+    staffRoleIds: new Set([
+      ...moderationCfg.protectedRoleIds,
+      ...(cfg.ticketStaffRoleId ? [cfg.ticketStaffRoleId] : []),
+    ]),
+    staffActorIds: new Set(moderationCfg.owenUserId ? [moderationCfg.owenUserId] : []),
+    humanChannelIds: new Set([
+      ...cfg.communityHumanChannelIds, ...cfg.communityWelcomeChannelIds,
+      ...(cfg.onboardingMode === 'session' && cfg.sessionLookingToPlayChannelId
+        ? [cfg.sessionLookingToPlayChannelId] : []),
+      ...(cfg.onboardingMode !== 'session' && cfg.anchorWelcomeChannelId ? [cfg.anchorWelcomeChannelId] : []),
+    ]),
+  })
+  : undefined;
 const moderationStore = new ModerationStore(db);
+// TOG-3190. Switching moderation off while a tempban's unban is still pending,
+// or a channel is still locked down, leaves nothing running to release them.
+// Refuse to boot in that state, naming every member and channel affected.
+// TWO_MODERATION_DISABLE_OVERRIDE=1 proceeds and logs the stranded set instead.
+// Before the edit, run `npm run moderation:disable-preflight` - same reads, no
+// restart. See docs/MODERATION.md "Turning moderation off".
+await enforceModerationShutdownPreflight({
+  enabled: moderationCfg.enabled,
+  store: moderationStore,
+});
 const moderationDiscord = new ModerationDiscord({
   token: cfg.discordToken,
   base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
@@ -176,6 +279,7 @@ const moderationResolver = cfg.guildId && moderationCfg.enabled
       base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
     })
   : null;
+const operationalAuditStore = new OperationalAuditStore(db);
 const audit = makeOperationalAudit(client, {
   guildId: cfg.guildId,
   channels: {
@@ -183,8 +287,32 @@ const audit = makeOperationalAudit(client, {
     voice: cfg.voiceLogChannelId,
     moderation: cfg.moderationLogChannelId,
   },
-  store: new OperationalAuditStore(db),
+  store: operationalAuditStore,
 });
+// Staging-only rota fallback notices. The boot guard above guarantees the
+// channel, primary and reader bindings are all present when this constructs;
+// the delivery service rechecks gates, eligibility and effective-reader
+// access before every send. No fallback destination, no permission writes.
+const rotaNoticeDelivery = onboardingRotaCore && rotaCfg &&
+  rotaCfg.noticeEnabled && rotaCfg.noticeChannelId &&
+  rotaCfg.primaryActorId && rotaCfg.readerIds?.length
+  ? new RotaNoticeDelivery(client, {
+    guildId: rotaCfg.guildId,
+    noticeChannelId: rotaCfg.noticeChannelId,
+    readerIds: rotaCfg.readerIds,
+  }, { rota: onboardingRotaCore, store: operationalAuditStore })
+  : undefined;
+if (rotaNoticeDelivery && rotaCfg) {
+  log.info('rota_notice_delivery_enabled', {
+    guildId: rotaCfg.guildId,
+    noticeChannel: rotaCfg.noticeChannelId,
+  });
+} else {
+  log.info('rota_notice_delivery_disabled', {
+    reason: !rotaCfg ? 'measurement off'
+      : !rotaCfg.noticeEnabled ? 'notice off' : 'notice binding incomplete',
+  });
+}
 log.info('operational_audit_enabled', {
   guildId: cfg.guildId ?? 'all joined guilds (Discord mirrors disabled)',
   auditTarget: cfg.auditLogChannelId ?? 'durable/process log only',
@@ -222,6 +350,8 @@ const automodService = cfg.guildId && automodCfg.enabled && moderationResolver &
         botHighestRolePosition: await moderationResolver.botHighestRolePosition(cfg.guildId),
         policy: automodCfg.policy,
       },
+      undefined,
+      () => liveCfg.automodRepeatedMessageCount,
     )
   : null;
 
@@ -233,16 +363,22 @@ if (cfg.apiBase) {
 
 // Join-burst detection (TWO-56). Always on - three raids reached this server
 // unnoticed. Where the alert goes is configurable; whether we watch is not.
+//
+// Thunks, not numbers: these two are the keys slice 1 wires live, so each join
+// is judged against whatever the last settings poll left in `liveCfg` rather
+// than against whatever the environment said at boot. Everything else here
+// still reads `cfg` - see the HOT_WIRED note in src/core/settingsCatalog.ts for
+// why "hot" is a permission and not yet a promise.
 const raid = {
   watch: new RaidWatch({
-    threshold: cfg.raidJoinThreshold,
-    windowSeconds: cfg.raidWindowSeconds,
+    threshold: () => liveCfg.raidJoinThreshold,
+    windowSeconds: () => liveCfg.raidWindowSeconds,
   }),
   announce: makeRaidAnnouncer(client, { channelId: cfg.staffAlertChannelId }),
 };
 log.info('raid_watch_enabled', {
-  threshold: cfg.raidJoinThreshold,
-  windowSeconds: cfg.raidWindowSeconds,
+  threshold: liveCfg.raidJoinThreshold,
+  windowSeconds: liveCfg.raidWindowSeconds,
   // No staff channel means the alert exists only in this log. Said out loud at
   // boot so it is a known state rather than a surprise during a raid.
   alertTarget: cfg.staffAlertChannelId ?? 'log only (DISCORD_STAFF_ALERT_CHANNEL_ID unset)',
@@ -258,6 +394,7 @@ const joinRisk = containmentCfg.enabled
   : undefined;
 
 registerHandlers(client, {
+  onboardingRota,
   handlers,
   invites,
   community: communityFacts
@@ -368,19 +505,69 @@ const automationDiscord = new AutomationDiscord({
 });
 const automationService = new AutomationService(automationStore, automationDiscord);
 
+/**
+ * Deregister every DB-backed custom command an earlier enabled boot published
+ * (TOG-3189). Runs as the command registry's `beforeFirstSync` hook rather than
+ * off its own ready listener: it has to read the set Discord is *currently*
+ * publishing, and the registry's first sync replaces that set wholesale.
+ */
+async function sweepDisabledAutomationCommands(guildId: string): Promise<void> {
+  const applicationId = client.application?.id;
+  if (!applicationId) {
+    log.error('automations_disable_sweep_failed', {
+      guildId,
+      err: 'client.application is unset at ready; custom commands may still be published',
+    });
+    return;
+  }
+  const registrar = new RestGuildCommandRegistrar({
+    token: cfg.discordToken,
+    applicationId,
+    guildId,
+    base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+  });
+  try {
+    const result = await removeDbBackedCommands(guildId, automationStore, registrar);
+    log.info('automations_disable_sweep', {
+      summary: summariseDisable(result),
+      removed: result.removed,
+      alreadyAbsent: result.alreadyAbsent,
+    });
+  } catch (err) {
+    // Loud, and specific about what is still answering. Not fatal: the handler
+    // wiring below already refuses every one of these, so a retryable Discord
+    // failure must not turn into a boot loop.
+    const partial = err instanceof AutomationDisableIncomplete ? err.result : null;
+    log.error('automations_disable_sweep_failed', {
+      guildId,
+      err: String(err),
+      removed: partial?.removed ?? [],
+      stillPublished: partial?.failed.map((f) => f.name) ?? [],
+      untouched: partial?.untouched ?? [],
+    });
+  }
+}
+
 let commandRegistry: CommandRegistry | null = null;
 if (cfg.guildId) {
+  const registryGuildId = cfg.guildId;
   commandRegistry = new CommandRegistry(client, {
-    guildId: cfg.guildId,
+    guildId: registryGuildId,
     automations: automationStore,
     additionalBuiltins: [
       ...(communityFacts ? COMMUNITY_COMMAND_DATA : []),
+      ...(onboardingRotaCfg.enabled && onboardingRotaCfg.primaryActorId ? [ROTA_ACKNOWLEDGEMENT_COMMAND] : []),
       ...(automationCfg.enabled ? AUTOMATION_COMMAND_DATA : []),
       ...(announcementsCfg.enabled ? ANNOUNCEMENT_COMMAND_DATA : []),
       ...(moderationResolver && moderationService ? MODERATION_COMMAND_DATA : []),
     ],
+    // Disabled automations must not have their custom commands re-published by
+    // the very next sync after the disable sweep removed them (TOG-3189).
+    automationsEnabled: automationCfg.enabled,
+    beforeFirstSync: automationCfg.enabled
+      ? undefined
+      : () => sweepDisabledAutomationCommands(registryGuildId),
   });
-  commandRegistry.register();
 }
 if (cfg.guildId && automationCfg.enabled) {
   registerAutomationCommands(client, {
@@ -400,11 +587,26 @@ if (cfg.guildId && automationCfg.enabled) {
     guildId: cfg.guildId,
     textCommands: automationCfg.textCommandsEnabled ? 'on' : 'off (slash-only)',
   });
-} else {
-  log.info('automations_disabled', {
-    reason: cfg.guildId ? 'TWO_AUTOMATIONS is not 1' : 'DISCORD_GUILD_ID is unset',
+} else if (cfg.guildId) {
+  // Disabled, but the guild is configured - so admin-defined commands may still
+  // be published from a previous enabled boot. Two halves, both needed
+  // (TOG-3189): refuse every invocation, and deregister the commands.
+  registerAutomationCommands(client, {
+    guildId: cfg.guildId,
+    service: automationService,
+    store: automationStore,
+    enabled: false,
   });
+  // The deregister half runs as the command registry's beforeFirstSync hook
+  // (above), so it reads the published set before the first full-set replace.
+  log.info('automations_disabled', { reason: 'TWO_AUTOMATIONS is not 1' });
+} else {
+  log.info('automations_disabled', { reason: 'DISCORD_GUILD_ID is unset' });
 }
+if (onboardingRota && onboardingRotaCfg.enabled && onboardingRotaCfg.primaryActorId) {
+  registerRotaAcknowledgement(client, onboardingRotaCfg.guildId, onboardingRota);
+}
+commandRegistry?.register();
 
 // Announcements / scheduled-event RSVP / LFG / feed relays (TOG-1649).
 let feedPoller: ReturnType<typeof startFeedPoller> | null = null;
@@ -437,8 +639,9 @@ if (cfg.guildId && announcementsCfg.enabled) {
 // there first would silently starve the other. DISCORD_ANCHOR_WELCOME_CHANNEL_ID
 // chooses which (TOG-93); with it unset this block behaves as it always has.
 const onboardingDeps = {
+  onboardingRota,
   recorder: new OnboardingRecorder(store),
-  landingChannelIds: cfg.landingChannelIds,
+  landingChannelIds: () => liveCfg.landingChannelIds,
   dryRun: cfg.onboardingDryRun,
 };
 
@@ -448,10 +651,11 @@ const onboardingDeps = {
 // unregistered, selected back by unsetting TWO_ONBOARDING_MODE.
 if (cfg.onboardingMode === 'session') {
   registerSessionWelcome(client, {
+    onboardingRota,
     recorder: new SessionRecorder(store),
     guildId: cfg.guildId!,
     store,
-    landingChannelIds: cfg.landingChannelIds,
+    landingChannelIds: () => liveCfg.landingChannelIds,
     goodbyeChannelIds: cfg.goodbyeChannelIds,
     picks: buildSessionPicks({
       lookingToPlay: cfg.sessionLookingToPlayChannelId!,
@@ -466,6 +670,7 @@ if (cfg.onboardingMode === 'session') {
   });
 } else if (cfg.anchorWelcomeChannelId) {
   registerAnchorWelcome(client, {
+    onboardingRota,
     recorder: onboardingDeps.recorder,
     channelId: cfg.anchorWelcomeChannelId,
     dryRun: cfg.onboardingDryRun,
@@ -656,6 +861,11 @@ client.once('ready', auditRetry);
 const auditSweep = setInterval(auditRetry, 30_000);
 auditSweep.unref();
 
+// Rota fallback-notice ticker. Same non-overlapping shape as the automation
+// scheduler; the durable claim row (not the interval) is the queue, so a
+// missed tick or restart loses nothing.
+const rotaNoticeScheduler = rotaNoticeDelivery ? startRotaNoticeScheduler(rotaNoticeDelivery) : null;
+
 const moderationSweep = moderationService
   ? setInterval(() => {
       void moderationService.runDueUnbans().catch((err: unknown) => {
@@ -710,12 +920,16 @@ async function shutdown(signal: string) {
   clearInterval(sweep);
   automationScheduler?.stop();
   clearInterval(auditSweep);
+  rotaNoticeScheduler?.stop();
   feedPoller?.stop();
   if (moderationSweep) clearInterval(moderationSweep);
   presenceProbe?.stop();
   communitySnapshots?.stop();
   scheduledEvents?.stop();
   communityScorecard?.stop();
+  // Before db.close(), or the next poll runs a query against a closed pool and
+  // the last line of a clean shutdown is a settings_poll_failed.
+  settings.stop();
   // Health goes down first: while the rest is closing, the bot must already be
   // reporting itself out of service so the platform stops routing to it.
   if (health) await health.close();

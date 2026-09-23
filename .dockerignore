@@ -13,7 +13,11 @@ backups/
 .git/
 .github/
 .githooks/
-node_modules/
+# Spelled without the trailing slash to match .gitignore. Unlike gitignore, the
+# slash was never load-bearing here: moby's patternmatcher runs filepath.Clean on
+# every pattern, so `node_modules/` and `node_modules` are the same rule and both
+# already excluded the old symlink. Kept identical so nobody has to re-derive that.
+node_modules
 npm-debug.log*
 
 # Not needed at runtime: the image runs src/ and scripts/ only.

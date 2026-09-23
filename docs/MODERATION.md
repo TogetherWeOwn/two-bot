@@ -45,6 +45,33 @@ TWO_INTERNAL_ALLOW_MODERATION=1
 
 `DISCORD_GUILD_ID` must be the TWO Staging guild (`1545644954272137297`) during parity proof. Do not point this slice at the live guild. Live rollout is a separate owner-gated operator action.
 
+## Turning moderation off (TOG-3190)
+
+Turning the slice on is one environment edit. Turning it **off** is not, because the slice holds promises: a tempban has an unban job that only this process will run, and a lockdown has an `@everyone` overwrite that only `/unlock` will restore. Drop `TWO_MODERATION` while either is outstanding and a real member stays banned, or a real channel stays silent, with nothing left running to notice. Nobody reads the ban list, so nobody finds out.
+
+**Before the edit, ask:**
+
+```bash
+TWO_DATABASE_URL=... npm run moderation:disable-preflight
+```
+
+It writes nothing, runs no migrations, and never calls Discord. Exit `0` means nothing is outstanding and the disable strands nobody. Exit `1` lists every member and channel still waiting - guild, user/channel id, due time, request id. Exit `2` means it could not tell (missing `TWO_DATABASE_URL`, unreachable database); a `2` is never a `0`, because "I could not check" and "there is nothing to check" look identical and only one of them is safe.
+
+**The boot refuses too.** Starting with `TWO_MODERATION` unset while `moderation_scheduled_unbans` holds a `staged`/`pending`/`running` row, or `moderation_lockdowns` holds any row, throws before the client connects and names the whole set. The script exists so you learn this from a command instead of from a bot that will not come back up.
+
+Outstanding state is read from Postgres, never from Discord. A REST call that failed would report "nothing outstanding", and that answer is exactly the one that lets a bad disable through.
+
+**To clear it:** leave `TWO_MODERATION=1` and let the 30-second unban poller drain the schedule and `/unlock` release the channels, or release the named members and channels by hand.
+
+**Emergency override:**
+
+```text
+TWO_MODERATION_DISABLE_OVERRIDE=1
+TWO_MODERATION_DISABLE_OVERRIDE_REASON=<why, one line - logged verbatim>
+```
+
+The boot then proceeds and logs the complete stranded set at error level as `moderation_disable_stranded`, carrying `strandedUnbans` and `strandedLockdowns` with every id, so the release can be done by hand from the log alone. It is not a way to skip the check. It is a way to turn the check into a written record of what you are about to strand - unset it again as soon as the incident is over, or the next disable will be silent.
+
 ## Internal action bodies
 
 Target example:

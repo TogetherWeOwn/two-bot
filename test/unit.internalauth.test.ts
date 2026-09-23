@@ -81,6 +81,39 @@ test('skew window is ±120 seconds and a non-numeric timestamp is not fresh', ()
   assert.equal(withinSkew(String(now), 120, now), false);
 });
 
+/**
+ * The clock above lands exactly on a second, which is the one case that never
+ * happens. Every caller stamps `Math.floor(Date.now() / 1000)`, so the value on
+ * the wire is behind the real clock by the sub-second remainder - and the
+ * window is checked against the real clock when the request is SERVED.
+ *
+ * That gap is what reds e2e.internalactions in CI: at ...56.999Z a caller
+ * stamping "now + 121" is really asking for +120.001s, and 11ms of flight time
+ * makes it a valid +119.995s. The rule itself is unambiguous at every phase,
+ * and that is what this pins - the ±120s edge is inclusive, ±121 is not, and
+ * neither answer depends on where in the second the clock happens to be.
+ */
+test('the skew edge does not move with the sub-second phase of the clock', () => {
+  const second = 1_787_173_135;
+  for (const remainderMs of [0, 1, 500, 999]) {
+    const now = second * 1000 + remainderMs;
+    const at = (offset: number) => withinSkew(String(second + offset), 120, now);
+    const where = `${remainderMs}ms into the second`;
+
+    assert.equal(at(0), true, `a current timestamp is fresh ${where}`);
+    assert.equal(at(119), true, `+119s is fresh ${where}`);
+    assert.equal(at(-119), true, `-119s is fresh ${where}`);
+    // The inclusive edge. `+120` survives only because the stamped second is
+    // already behind `now`; `-120` is the direction that has no slack at all.
+    assert.equal(at(120), true, `+120s is on the inclusive edge ${where}`);
+    assert.equal(at(-120), remainderMs === 0, `-120s is fresh only on the exact second, ${where}`);
+    // One second past the edge is stale in both directions, at every phase.
+    // This is the assertion the e2e suite was relying on the clock for.
+    assert.equal(at(121), false, `+121s is stale ${where}`);
+    assert.equal(at(-121), false, `-121s is stale ${where}`);
+  }
+});
+
 test('a nonce is remembered for 240s and forgotten after', () => {
   let t = 1_000_000;
   const cache = new NonceCache({ ttlSeconds: 240, now: () => t });

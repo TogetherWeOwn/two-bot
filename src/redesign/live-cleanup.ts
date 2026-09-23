@@ -1,5 +1,5 @@
 import { createHash, createHmac } from 'node:crypto';
-import { appendFileSync, closeSync, existsSync, fsyncSync, openSync, readFileSync, truncateSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, fchmodSync, fsyncSync, openSync, readFileSync, truncateSync } from 'node:fs';
 import { LIVE_BOT_APPLICATION_ID, LIVE_GUILD_ID, LIVE_GUILD_NAME } from '../staging/spec.ts';
 
 export const ARCHIVE_PHASE = 'archive-legacy';
@@ -15,6 +15,58 @@ export const ACTIVE_CATEGORY_IDS = [
 ] as const;
 
 /**
+ * The active `🔊 VOICE` category, which holds the `➕ Join to Create` generator
+ * (`ops/auto-voice`, TOG-3052).
+ *
+ * This is the same id as `ACTIVE_CATEGORY_IDS[2]`, referenced rather than
+ * repeated: a second literal would double-count it under the TOG-3103
+ * snowflake ratchet (`scripts/ci/check-src-snowflakes.sh`), which counts
+ * quoted literals, not distinct ids.
+ */
+export const AUTO_VOICE_CATEGORY_ID = ACTIVE_CATEGORY_IDS[2];
+
+/**
+ * The generator spawns one voice channel per occupied lobby directly under
+ * {@link AUTO_VOICE_CATEGORY_ID} and deletes it when it empties, so its IDs cannot be
+ * reviewed ahead of time. This is not hypothetical: `1549949487949283359` (`Hangout #1`,
+ * upstream's default name — `ops/auto-voice/README.md:175`) was created at
+ * 2026-09-17T01:05:54Z, between this phase's review snapshot and its first live dry-run,
+ * and `assertReviewedShape` refused the whole 65-operation plan over it.
+ *
+ * This predicate no longer gates the unreviewed-ID refusal. It could not keep up: the refusal
+ * it bought tolerance from is a whole-guild gate, and four hours later `voice-bot-source`
+ * (`1549978014450716773`, a permanent type-0 channel) broke it again in a different shape.
+ * Chasing that per-shape is a treadmill, so {@link assertReviewedShape} now tolerates every
+ * unreviewed ID outside the reviewed legacy tree and reports what it tolerated (TOG-2907).
+ *
+ * What this predicate still decides is {@link isDriftExcluded} — which objects are dropped
+ * from the apply-time and rollback-time comparisons — and that is the position where its
+ * narrowness is load-bearing, because a drift exclusion hides real movement while a plan
+ * tolerance only declines to refuse. The two must not be conflated: a tolerated
+ * `voice-bot-source` appearing between plan and apply still refuses at the drift gate.
+ *
+ * It also still classifies the log. `assertReviewedShape` partitions what it tolerated into
+ * this transient churn and everything else, so an operator can tell a lobby spawn from a
+ * channel somebody added — and so an over-matching predicate shows up as a count in the wrong
+ * bucket rather than as silence.
+ *
+ * Two limits worth stating rather than discovering (TOG-3139):
+ *
+ * - The last clause is not decoration. `Lobby` and the `➕ Join to Create` generator are
+ *   themselves type-2 channels directly under {@link AUTO_VOICE_CATEGORY_ID}; without it
+ *   the predicate would swallow two reviewed active-tree objects.
+ * - It assumes active categories stay type 4. `ACTIVE_CATEGORY_IDS` is the one reviewed
+ *   set `assertReviewedShape` pins by presence alone, so a category that somehow reported
+ *   as type 2 would classify as ephemeral here. Discord does not permit that, and this
+ *   phase never writes a category outside `LEGACY_CATEGORY_IDS`, so it costs nothing —
+ *   but a later phase reusing this predicate should pin the type.
+ */
+export function isAutoVoiceEphemeralChild(channel: Pick<Channel, 'id' | 'type' | 'parent_id'>): boolean {
+  if (channel.type !== 2 || channel.parent_id !== AUTO_VOICE_CATEGORY_ID) return false;
+  return !([...ACTIVE_CHANNEL_IDS] as string[]).includes(channel.id);
+}
+
+/**
  * The active tree as it stands after the owner's reuse rule (TOG-2806, 2026-09-16 18:20Z):
  * "whenever we can reuse channels we reuse them when they already have content."
  *
@@ -25,8 +77,19 @@ export const ACTIVE_CATEGORY_IDS = [
  * channel to sit under a legacy category. Classifying a hidden twin as legacy would refuse
  * the whole plan. They are already denied to `@everyone`; nothing here re-reveals them.
  *
- * The first ten are the originally-provisioned tree; the last six are the reused channels,
- * each annotated with the legacy name it carried before the move.
+ * A seventh entry followed the same shape without an owner-invoked reuse: `💤 AFK`
+ * (`1045950023663370260`, voice, was under legacy category `TWO | LOBBY`) turned up
+ * re-parented under {@link AUTO_VOICE_CATEGORY_ID} on a fresh-clone-of-main live dry-run
+ * at 2026-09-19T05:23Z (TOG-3358) — new structural drift after the TOG-2907 review, not
+ * an owner-directed move and not a tooling defect. It has no `*-unused` twin, because
+ * `AUTO_VOICE_CATEGORY_ID` is the auto-voice category, not one of the originally-provisioned
+ * template categories that generated one. `assertReviewedShape` refused rather than mis-hide
+ * a channel now live in the active tree, exactly as designed; reclassifying it here is what
+ * that refusal was asking for.
+ *
+ * The first ten are the originally-provisioned tree; the next six are the owner-directed
+ * reuse, each annotated with the legacy name and category it carried before the move; the
+ * last is AFK's post-review re-parent.
  */
 export const ACTIVE_CHANNEL_IDS = [
   '1546777861199896589',
@@ -45,6 +108,7 @@ export const ACTIVE_CHANNEL_IDS = [
   '1104836077761593354', // audit-log, was ❗〢audit-log under TWO | LEADERSHIP
   '1138590808715571300', // discord-updates, was 🔧〢updates-and-changes under TWO | LEADERSHIP
   '1139711709980925962', // voice-log, was voice-log under logs
+  '1045950023663370260', // AFK, was 💤 AFK under TWO | LOBBY (TOG-3358)
 ] as const;
 
 export const LEGACY_CATEGORY_IDS = [
@@ -57,11 +121,12 @@ export const LEGACY_CATEGORY_IDS = [
 ] as const;
 
 /**
- * 106, not the 112 this phase first reviewed. Six of the original 112 were reused into the
- * active tree by owner rule and now appear in `ACTIVE_CHANNEL_IDS` instead; see the note
- * there. The count is deliberately not a round number — it is whatever survives the move,
- * and `assertReviewedShape` re-proves the partition against a fresh snapshot on every run,
- * so a wrong count here refuses rather than plans.
+ * 105, not the 112 this phase first reviewed. Seven of the original 112 were reused into
+ * the active tree — six by owner rule, one (AFK, TOG-3358) by post-review structural drift
+ * this phase merely reconciled — and now appear in `ACTIVE_CHANNEL_IDS` instead; see the
+ * note there. The count is deliberately not a round number — it is whatever survives the
+ * move, and `assertReviewedShape` re-proves the partition against a fresh snapshot on every
+ * run, so a wrong count here refuses rather than plans.
  */
 export const LEGACY_CHANNEL_IDS = [
   '1146611215511081012', '1087198966346690570', '1132448261253369939',
@@ -75,7 +140,7 @@ export const LEGACY_CHANNEL_IDS = [
   '1266840224835833920', '1266840693637255363', '1175127344072118405',
   '1269750661722148954', '1269753028404056076', '1269753534346432644',
   '1269753860193521816', '1269754268265480242', '1269754877303721985',
-  '1045950023663370260', '1465060666972049439', '1087199619546632232',
+  '1465060666972049439', '1087199619546632232',
   '1056447465286541333', '1092312335529541632', '1087199559719067748',
   '1087199767718809650', '1154904611799437404', '1078083546054397982',
   '1057456170320801802', '1113979181391429672', '1117480270044594186',
@@ -142,6 +207,13 @@ export type ArchiveExemptionReason = 'owner' | 'owen' | 'administrator';
 export type ArchiveVisibilityExemption = { memberId: string; bot: boolean; reason: ArchiveExemptionReason };
 /** A reviewed legacy channel Discord refuses to hide, and every guild reference that pins it. */
 export type ArchiveOnboardingExclusion = { channelId: string; referencedBy: string[] };
+/**
+ * What {@link assertReviewedShape} tolerated instead of refusing on. `autoVoiceEphemeral` and
+ * `otherUnreviewed` partition `toleratedUnreviewed` exactly, so a log that prints both counts
+ * shows an over-matching {@link isAutoVoiceEphemeralChild} as a number moving between the two
+ * rather than as nothing at all.
+ */
+export type ReviewedShapeResult = { toleratedUnreviewed: Channel[]; autoVoiceEphemeral: Channel[]; otherUnreviewed: Channel[] };
 export type CleanupManifest = {
   version: 1;
   kind: 'live-clean-slate-cleanup';
@@ -351,6 +423,13 @@ export function appendJournalWitness(token: string, path: string, sequence: numb
   const record: JournalWitnessRecord = { ...body, chain: witnessChain(token, previousChain, body) };
   const fd = openSync(path, 'a', 0o600);
   try {
+    // `openSync`'s mode applies only when it creates the file, so a witness that already
+    // exists keeps whatever mode it has. The run dir is 0700, but the log is what proves
+    // a manifest is current and a truncation of it is indistinguishable from an
+    // interrupted checkpoint, so narrow it on every append the way `atomicFile` and the
+    // apply preflight do for the plan artifacts. On the fd, not the path, so this cannot
+    // be raced onto another file.
+    fchmodSync(fd, 0o600);
     appendFileSync(fd, `${JSON.stringify(record)}\n`);
     fsyncSync(fd);
   } finally {
@@ -502,7 +581,14 @@ export function inFlightExceptionIsAvailable(token: string, manifest: CleanupMan
   if (inFlightId === null) return false;
   const path = journalWitnessPath(manifestPath);
   if (!existsSync(path)) return false;
-  return readJournalWitness(token, path)
+  const records = readJournalWitness(token, path);
+  // TOG-3009: a zero-byte witness reads as no records, which would leave the filter
+  // below empty and `every` vacuously true — the exception granted by a log that
+  // records nothing. That is the same fail-open `assertLatestCheckpoint` refuses, and
+  // it has to be closed here too: this predicate is exported, and today the only
+  // thing stopping it is that both call sites happen to assert the checkpoint first.
+  if (records.length === 0) return false;
+  return records
     .filter((record) => record.phase === 'intent' && record.sequence > manifest.journalSequence)
     .every((record) => record.inFlightId === inFlightId);
 }
@@ -805,7 +891,168 @@ export function withSemanticHash(input: Omit<LiveCleanupSnapshot, 'semanticHash'
   return { ...input, semanticHash: sha256(semanticSnapshot(input)) };
 }
 
-export function assertReviewedShape(snapshot: LiveCleanupSnapshot): void {
+/**
+ * Objects this phase reviewed by ID, in any role. A drift comparison may never drop one of
+ * these from what it compares, whatever shape it is wearing at read time — see
+ * {@link isDriftExcluded}. Kept beside `assertReviewedShape`, which pins the shapes.
+ */
+const REVIEWED_UNTOUCHED_SHAPES = new Map<string, { type: number; parentId: string | null }>([
+  ['1545924265868525588', { type: 4, parentId: null }],
+  ['1545924268489973841', { type: 0, parentId: '1545924265868525588' }],
+  ['1545924265247903884', { type: 4, parentId: null }],
+  ['1545924267453976696', { type: 4, parentId: null }],
+]);
+const REVIEWED_OBJECT_IDS: ReadonlySet<string> = new Set<string>([
+  ...ACTIVE_CATEGORY_IDS,
+  ...ACTIVE_CHANNEL_IDS,
+  ...LEGACY_CATEGORY_IDS,
+  ...LEGACY_CHANNEL_IDS,
+  ...REVIEWED_UNTOUCHED_SHAPES.keys(),
+]);
+
+/**
+ * Whether an object is dropped from the two-read comparisons that ask "has live state moved
+ * since the plan was signed" — the apply-time drift gate, the postflight hash, and both of
+ * rollback's inventory gates.
+ *
+ * Auto-voice ephemeral children have to be dropped, because they are *always* moving. The
+ * generator spawns one per occupied lobby and deletes it when it empties, so any comparison
+ * over the whole channel list is unsatisfiable for as long as auto-voice is on, and every
+ * one of those gates is reached at a different price. Measured against the production
+ * fixture (TOG-3141): a spawn between plan and apply refuses with zero writes; a spawn
+ * *during* apply refuses at the postflight hash with all 65 writes already landed and the
+ * phase left `apply_failed`; a spawn after that refuses rollback's preflight, so the
+ * recovery path for the previous case is shut too; and a spawn during rollback stops it
+ * 34 of 65 operations in, with the manifest stuck `rolling_back`. Two of those four leave
+ * the live guild changed, which is why this is not left to an operator keeping the
+ * generator switched off.
+ *
+ * Dropping them costs the gates nothing they were defending. This phase writes only to
+ * `LEGACY_*` objects; `planArchiveOperations` re-asserts that no operation names one of
+ * these; they sit under an *active* category so they can never join a legacy category's
+ * synchronized-child set; and nothing signs their overwrites into an `expectedBefore` or an
+ * `inverseWrite`. Everything else a drift gate covers — roles, members, integrations, the
+ * guild payload, `references`, and every reviewed channel — is still compared byte for byte.
+ *
+ * The `REVIEWED_OBJECT_IDS` clause is the part that makes this safe rather than merely
+ * narrow. `isAutoVoiceEphemeralChild` is a *shape* test, and shape is attacker-controlled:
+ * moving a reviewed legacy channel under the auto-voice category and flipping it to type 2
+ * wears exactly that shape. Without this clause such a channel would vanish from the
+ * comparison and take its real drift with it. With it, a reviewed ID is never excludable,
+ * so that move still refuses (measured: it does, before any write).
+ */
+export function isDriftExcluded(channel: Pick<Channel, 'id' | 'type' | 'parent_id'>): boolean {
+  return isAutoVoiceEphemeralChild(channel) && !REVIEWED_OBJECT_IDS.has(channel.id);
+}
+
+/** The channel list a drift comparison sees. Apply the same filter to both reads. */
+export function driftComparableChannels<T extends Pick<Channel, 'id' | 'type' | 'parent_id'>>(channels: readonly T[]): T[] {
+  return channels.filter((channel) => !isDriftExcluded(channel));
+}
+
+/** IDs {@link driftComparableChannels} dropped, so a run can name them instead of hiding them. */
+export function driftExcludedIds(channels: readonly Pick<Channel, 'id' | 'type' | 'parent_id'>[]): string[] {
+  return channels.filter((channel) => isDriftExcluded(channel)).map((channel) => channel.id).sort();
+}
+
+/**
+ * Channel fields Discord derives from message traffic, dropped from the live-vs-live
+ * comparisons for the same reason {@link normalizeGuild} sorts `features`: they move on
+ * their own, so leaving them in makes those gates unsatisfiable rather than strict.
+ *
+ * `last_message_id` is measured, not assumed. Across seven real captures of the live guild
+ * it is the *only* channel field that ever moved without an administrator acting: two
+ * captures 2h19m apart differ on exactly three channels — `audit-log`, `voice-log` and
+ * `server-log`, all of them channels Owen itself posts to — and stripping this one field
+ * makes those two captures byte-identical under `driftSemanticHash`. Every other observed
+ * difference (`name`, `parent_id`, `position`, `permission_overwrites`, `flags`) came from
+ * the operator's real reorganization and must keep refusing. Note in particular that
+ * `position` did *not* move when an auto-voice child spawned, so the ephemeral exclusion
+ * does not need a positional companion.
+ *
+ * `last_pin_timestamp` is here because it is the same field class reached by the same
+ * mechanism — any member pinning a message moves it — and there is no way to measure it
+ * without causing the pin. Both are alike in the two properties that make dropping them
+ * free: this phase never writes either one, and neither appears in an `expectedBefore`, an
+ * `inverseWrite`, or anything `planArchiveOperations` reads.
+ *
+ * This matters more than it looks. The pre-apply gate refuses before any write, but the
+ * postflight hash and rollback's post-rollback hash are both reached with every write
+ * already landed — so an ordinary message posted during the run used to strand the phase
+ * `apply_failed`, or leave the manifest `rolling_back` with the guild actually restored
+ * (TOG-3141, round 16; the mechanism `pre.json`-based stub fixtures cannot see, because the
+ * fixture never posts a message).
+ */
+const DRIFT_VOLATILE_CHANNEL_FIELDS = ['last_message_id', 'last_pin_timestamp'] as const;
+
+/** One channel as a drift comparison sees it. Apply to both reads or to neither. */
+export function driftComparableChannel<T extends object>(channel: T): T {
+  const comparable = { ...channel } as T & Partial<Record<(typeof DRIFT_VOLATILE_CHANNEL_FIELDS)[number], unknown>>;
+  for (const field of DRIFT_VOLATILE_CHANNEL_FIELDS) delete comparable[field];
+  return comparable;
+}
+
+/**
+ * The guild-body companion to {@link DRIFT_VOLATILE_CHANNEL_FIELDS}, and it exists because
+ * `semanticSnapshot` reaches the guild by exactly the mechanism that made `last_message_id`
+ * break the channel side: `normalizeGuild` is `{ ...guild, features: sorted }` — a cast, not
+ * a projection — so all 50 raw fields of `GET /guilds/{id}` sit inside every drift hash.
+ *
+ * Measured across eight real captures of the live guild (`scripts/live-cleanup-drift-diff.ts`
+ * reports the guild only as one `non-channel drift: guild` line, so this was measured field by
+ * field). Exactly four fields ever moved. `features` moved on 7/7 adjacent pairs and was
+ * set-equal on all eight, which is `normalizeGuild`'s sort doing its job and is why that sort
+ * is load-bearing rather than cosmetic — and being set-equal, it still refuses a real feature
+ * add or removal. `roles`, `rules_channel_id` and `safety_alerts_channel_id` each moved on
+ * exactly one pair, the same pair, which is the operator's real reorganization of 2026-09-16
+ * and must keep refusing. The remaining 46 fields never moved.
+ *
+ * So nothing here is justified by the captures, and `premium_subscription_count` is listed
+ * anyway — on the same grounds `last_pin_timestamp` is listed on the channel side. It reads
+ * flat at `5` across all eight, but the captures span about 15 hours and a boost lapses on a
+ * monthly cycle, so that is absence of the event, not evidence of stability. A boost expiring
+ * mid-apply reproduces the post-write failure class in a new field: the pre-apply gate refuses
+ * safely, but the postflight hash and rollback's post-rollback hash are both reached with every
+ * write already landed, so it would strand a correct phase `apply_failed` or leave the manifest
+ * `rolling_back` over a guild that had in fact been restored.
+ *
+ * Dropping it is free in the two ways that matter, which is the test to apply before adding
+ * anything else here. This phase never writes it, and it appears in no `expectedBefore`, no
+ * `inverseWrite`, and nothing `planArchiveOperations` or {@link guildReferenceBlock} reads — its
+ * only other reader in the tree is `scripts/audit-report.ts`, which reports rather than gates.
+ * Note also what is *not* dropped: this projection is applied to live-vs-live comparisons only,
+ * so `pre.json` keeps hashing the raw guild under {@link withSemanticHash}, and the forgery
+ * coverage the plan signature buys over the guild body is unchanged.
+ *
+ * Add a field here only with a live measurement or a named mechanism behind it. Every field
+ * projected away is drift these gates stop seeing.
+ */
+const DRIFT_VOLATILE_GUILD_FIELDS = ['premium_subscription_count'] as const;
+
+/** The guild body as a drift comparison sees it. Apply to both reads or to neither. */
+export function driftComparableGuild(guild: JsonObject): JsonObject {
+  const comparable = { ...guild };
+  for (const field of DRIFT_VOLATILE_GUILD_FIELDS) delete comparable[field];
+  return comparable;
+}
+
+/**
+ * `semanticHash` over the drift-comparable channel list and guild body. Never use this as an
+ * object's stored hash: `pre.json` carries the real {@link withSemanticHash} value, which is
+ * what the plan signature covers and what the artifact has to prove it read. This is only for
+ * the moment two live reads are compared to each other.
+ */
+export function driftSemanticHash(input: Omit<LiveCleanupSnapshot, 'semanticHash'>): string {
+  return sha256(semanticSnapshot({ ...input, guild: driftComparableGuild(input.guild), channels: driftComparableChannels(input.channels).map(driftComparableChannel) }));
+}
+
+/**
+ * Refuses unless the live guild still matches what this phase reviewed, and returns the
+ * objects it tolerated rather than refused on, so no caller can report a narrowed scope
+ * without naming what it narrowed. The refusal and the log therefore share one
+ * implementation; a second walk here would be a second answer.
+ */
+export function assertReviewedShape(snapshot: LiveCleanupSnapshot): ReviewedShapeResult {
   if (snapshot.guildId !== LIVE_GUILD_ID || snapshot.applicationId !== LIVE_BOT_APPLICATION_ID) throw new Error('Snapshot identity does not match the live Owen application and guild.');
   if (snapshot.guild.name !== LIVE_GUILD_NAME) throw new Error(`Expected guild name ${LIVE_GUILD_NAME}.`);
   const channelIds = new Set(snapshot.channels.map((channel) => channel.id));
@@ -821,12 +1068,7 @@ export function assertReviewedShape(snapshot: LiveCleanupSnapshot): void {
     if (!channel || channel.type === 4) throw new Error(`Reviewed legacy channel ${id} is missing or is a category.`);
     if (!channel.parent_id || !LEGACY_CATEGORY_IDS.includes(channel.parent_id as never)) throw new Error(`Reviewed legacy channel ${id} is not under a reviewed legacy category.`);
   }
-  const reviewedUntouchedShapes = new Map([
-    ['1545924265868525588', { type: 4, parentId: null }],
-    ['1545924268489973841', { type: 0, parentId: '1545924265868525588' }],
-    ['1545924265247903884', { type: 4, parentId: null }],
-    ['1545924267453976696', { type: 4, parentId: null }],
-  ]);
+  const reviewedUntouchedShapes = REVIEWED_UNTOUCHED_SHAPES;
   for (const [id, expected] of reviewedUntouchedShapes) {
     const channel = snapshot.channels.find((item) => item.id === id);
     if (!channel || channel.type !== expected.type || channel.parent_id !== expected.parentId) {
@@ -838,22 +1080,70 @@ export function assertReviewedShape(snapshot: LiveCleanupSnapshot): void {
   if (unexpectedLegacyChildren.length > 0) {
     throw new Error(`Reviewed legacy categories contain unexpected child IDs: ${unexpectedLegacyChildren.map((channel) => channel.id).join(', ')}.`);
   }
-  const reviewed = new Set<string>([...ACTIVE_CATEGORY_IDS, ...ACTIVE_CHANNEL_IDS, ...LEGACY_CATEGORY_IDS, ...LEGACY_CHANNEL_IDS, ...reviewedUntouchedShapes.keys()]);
-  const unknown = snapshot.channels.filter((channel) => !reviewed.has(channel.id));
-  if (unknown.length > 0) throw new Error(`Fresh snapshot contains unreviewed channel/category IDs: ${unknown.map((channel) => channel.id).join(', ')}.`);
-  // Every channel above is a reviewed one, and every reviewed one is planned over or
-  // reasoned about as a synchronized child — so this walk is the whole set, and it is
-  // the last point at which an unreadable overwrite list is still distinguishable from
-  // an empty one. `normalizedChannel` deliberately carried the absence this far instead
-  // of refusing at capture, so that the pre-snapshot survives to show what Discord
-  // actually returned; refusing to *plan* on it is this function's job.
+  // Everything that is still a refusal is above this line, and the dangerous case is the
+  // one immediately above: an unreviewed object *inside* a reviewed legacy category. That
+  // is the only position from which a new object could join a category this phase writes,
+  // inherit the deny it is about to set, or displace a reviewed child — and it still fails
+  // closed, by ID, with the offending IDs named.
+  //
+  // Outside the legacy tree, an unreviewed ID is reported and not refused (TOG-2907). The
+  // blanket refusal that used to live here was correct against a stale reviewed-ID list and
+  // wrong as a gate on the guild: any channel anyone adds anywhere disables the planner, and
+  // because `audit-live-cleanup-visibility.ts` reaches its independent permission stack
+  // *through* `planArchiveOperations`, it disabled the read-only auditor with it. Measured,
+  // not argued: `1549978014450716773` (`voice-bot-source`, a permanent type-0 channel created
+  // at 02:59Z for the AGPL source offer) refused the whole 65-operation plan and the audit,
+  // four hours after #117 bought a tolerance for a different shape. Fixing that per-shape is
+  // a treadmill; the reviewed *legacy* tree is the thing this phase actually needs pinned.
+  //
+  // Tolerating is safe here and nowhere else, for reasons that are all checked rather than
+  // asserted: no write can name one, because every operation is sourced from `LEGACY_*` and
+  // `planArchiveOperations` re-proves that over the finished plan; none can be a legacy
+  // category's synchronized child, because the refusal above keeps the legacy tree closed;
+  // and none is excluded from anything *after* planning — `isDriftExcluded` still drops only
+  // the auto-voice shape, so a `voice-bot-source` appearing between plan and apply refuses at
+  // the drift gate exactly as it did before. Plan tolerance is deliberately not drift
+  // tolerance; widening one must never widen the other.
+  //
+  // The caller gets the list rather than a count so the log can name every one of them.
+  // Tolerating an object silently is the thing this phase's own standard rules out
+  // ("an audit that quietly narrows its own scope is worse than a red one",
+  // `scripts/audit-live-cleanup-visibility.ts:112`).
+  const toleratedUnreviewed = snapshot.channels.filter((channel) => !REVIEWED_OBJECT_IDS.has(channel.id));
+  // Every channel below — reviewed or tolerated — is walked, and that is the point. This is
+  // the last place an unreadable overwrite list is still distinguishable from an empty one.
+  // `normalizedChannel` deliberately carried the absence this far instead of refusing at
+  // capture, so that the pre-snapshot survives to show what Discord actually returned;
+  // refusing to *plan* on it is this function's job.
+  //
+  // Tolerated objects are tolerated by the refusal above but deliberately NOT skipped here,
+  // and the distinction is load-bearing (TOG-3139 finding 1). Skipping them is sound for
+  // *this* function's writes — nothing signs their overwrites into an `expectedBefore` or an
+  // `inverseWrite`, and they are never a synchronized child — but it is not sound for the
+  // phase, because the rollback preflight walks every pre-snapshot channel no operation names
+  // and calls `normalizeOverwrites` on it
+  // (`scripts/live-clean-slate-cleanup-rollback.ts:335`). Letting an unreadable one through
+  // therefore bought a plan and an apply whose rollback then died on an uncaught exception
+  // with 65 writes already landed. Measured, not argued: plan 0 -> apply 0 (65 writes) ->
+  // rollback stack trace.
+  //
+  // So this walk is the whole set, with no exception: every channel in a signed pre-snapshot
+  // has a readable overwrite list. An unanswered read is a momentary Discord failure that a
+  // re-run clears, not something a lobby occupant can cause, so refusing here costs none of
+  // the plan reachability the tolerance above exists to buy. The tolerance is scoped to
+  // *identity*, not to readability.
   for (const channel of snapshot.channels) {
     const unreadable = unreadableOverwrites(channel.permission_overwrites);
     if (unreadable !== null) {
-      throw new Error(`Reviewed object ${channel.id} carried ${unreadable}, so its live permission overwrites are unknown. Planning refuses rather than treat an unanswered read as a channel with no overwrites — that list is signed into this operation's \`expectedBefore\` and \`inverseWrite\`, so an invented empty one would make rollback delete the overwrites it promises to restore, and would flip the synchronized verdict that decides whether a child is written at all. Re-run the dry-run from a snapshot whose channel read carries \`permission_overwrites\` as an array.`);
+      throw new Error(`Reviewed object ${channel.id} carried ${unreadable}, so its live permission overwrites are unknown. Planning refuses rather than treat an unanswered read as a channel with no overwrites — that list is signed into this operation's \`expectedBefore\` and \`inverseWrite\`, so an invented empty one would make rollback delete the overwrites it promises to restore, and would flip the synchronized verdict that decides whether a child is written at all. An auto-voice ephemeral child reaches this refusal too even though it is never written, because the rollback preflight reads every pre-snapshot channel and would die on it there instead. Re-run the dry-run from a snapshot whose channel read carries \`permission_overwrites\` as an array.`);
     }
   }
   if (snapshot.semanticHash !== sha256(semanticSnapshot(snapshot))) throw new Error('Snapshot semantic hash does not match its content.');
+  return {
+    toleratedUnreviewed,
+    autoVoiceEphemeral: toleratedUnreviewed.filter((channel) => isAutoVoiceEphemeralChild(channel)),
+    otherUnreviewed: toleratedUnreviewed.filter((channel) => !isAutoVoiceEphemeralChild(channel)),
+  };
 }
 
 /**
@@ -969,15 +1259,22 @@ export const PINNED_GUILD_REFERENCES = [
 /**
  * The `references.guildReferences` block, built from a raw `GET /guilds/{id}` body.
  *
- * An absent key is copied as absent rather than collapsed to `null`. Discord sends all
- * three on every guild read — `null` when the guild pins nothing — so absence means the
- * read did not answer the question, and `null` means it answered "nothing". Collapsing
- * the first into the second here would destroy the distinction *before* the semantic
- * hash is taken, after which no downstream check can recover it: dry-run and apply read
- * the same collapsed field and agree on the wrong answer. That is the round-9 defect
- * (TOG-3074) one source to the left, and on the live guild it is the source that matters
- * — every TOG-2907 pre-snapshot has `onboarding.enabled === false`, so the Server Guide
- * contributes 0 exclusions and both real ones come from this block.
+ * Only the three `PINNED_GUILD_REFERENCES` fields get the absence-preserving treatment
+ * below: an absent key is copied as absent rather than collapsed to `null`. Discord
+ * sends all three on every guild read — `null` when the guild pins nothing — so absence
+ * means the read did not answer the question, and `null` means it answered "nothing".
+ * Collapsing the first into the second here would destroy the distinction *before* the
+ * semantic hash is taken, after which no downstream check can recover it: dry-run and
+ * apply read the same collapsed field and agree on the wrong answer. That is the
+ * round-9 defect (TOG-3074) one source to the left, and on the live guild it is the
+ * source that matters — every TOG-2907 pre-snapshot has `onboarding.enabled === false`,
+ * so the Server Guide contributes 0 exclusions and both real ones come from this block.
+ *
+ * `applicationId` and `systemChannelId` stay outside that treatment deliberately, the
+ * same way `onboarding.enabled` stays outside the Server Guide readability gate below
+ * (see `onboardingReferencedChannels`): neither feeds `unreadableGuildReferences` or
+ * decides an exclusion, so collapsing their absence with `??` costs this phase nothing
+ * — there is no distinction here for a downstream check to lose.
  */
 export function guildReferenceBlock(guild: JsonObject): JsonObject {
   const block: JsonObject = {
@@ -1140,6 +1437,23 @@ export function planArchiveOperations(snapshot: LiveCleanupSnapshot): CleanupOpe
     const write = archiveVisibilityOverwrites(snapshot, target, before);
     return { objectId, objectType, before, write };
   });
+  // `assertReviewedShape` stopped refusing on unreviewed objects outside the legacy tree,
+  // which is only sound while no operation can name one. This is where that is proved rather
+  // than assumed, and it is deliberately stated as the full invariant — every operation names
+  // a reviewed *legacy* object — instead of the narrower auto-voice form it replaces
+  // (TOG-2907). The wider tolerance needs the wider re-assertion: an auto-voice-shaped check
+  // would have let a tolerated `voice-bot-source` through if the loops above ever sourced one.
+  //
+  // It is unreachable today, by construction: every write above comes from
+  // `LEGACY_CHANNEL_IDS` or `LEGACY_CATEGORY_IDS`. So a mutation that neuters it survives the
+  // suite, and that is recorded rather than papered over with a test that cannot fail
+  // honestly (TOG-3139). What it defends is someone *rewriting or reordering the loops above*
+  // — it is the one check that sees the finished plan, so it is the backstop that outlives
+  // them. Against the old auto-voice form, that rewrite was caught only if the new source
+  // happened to be an auto-voice channel; against this form it is caught whatever it is.
+  const writable = new Set<string>([...LEGACY_CHANNEL_IDS, ...LEGACY_CATEGORY_IDS]);
+  const planned = writes.filter(({ objectId }) => !writable.has(objectId));
+  if (planned.length > 0) throw new Error(`Planned operations target ${planned.map(({ objectId }) => objectId).join(', ')}, which are not reviewed legacy objects and which this phase must never write.`);
   return writes.map(({ objectId, objectType, before, write }, index) => {
     const kind = objectType === 'category' ? 'patch-category-overwrites' as const : 'patch-channel-overwrites' as const;
     const body = { phase: ARCHIVE_PHASE, kind, objectType, objectId, expectedBefore: { permission_overwrites: before }, write: { permission_overwrites: write }, inverseWrite: { permission_overwrites: before } };
