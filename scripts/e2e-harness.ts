@@ -61,6 +61,7 @@ function targetsFromEnv(env: NodeJS.ProcessEnv): Partial<FlowTargets> {
     selfRoleId: env.TWO_E2E_SELF_ROLE_ID,
     ticketPanelChannelId: env.TWO_E2E_TICKET_CHANNEL_ID,
     ticketPanelMessageId: env.TWO_E2E_TICKET_MESSAGE_ID,
+    ticketBotId: env.TWO_E2E_TICKET_BOT_ID,
     voiceLobbyChannelId: env.TWO_E2E_VOICE_LOBBY_ID,
   };
 }
@@ -82,6 +83,7 @@ function dryRunTargets(): FlowTargets {
     selfRoleId: 'dry-run-role',
     ticketPanelChannelId: 'dry-run-ticket-channel',
     ticketPanelMessageId: 'dry-run-ticket-message',
+    ticketBotId: 'dry-run-ticket-bot',
     voiceLobbyChannelId: 'dry-run-voice-lobby',
   };
 }

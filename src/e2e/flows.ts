@@ -32,6 +32,7 @@
 
 // Imported rather than retyped so a rename in the bot breaks this flow at
 // compile time instead of at 2am on staging.
+import { MessageFlags } from 'discord.js';
 import { TICKET_CLAIM_ID, TICKET_CLOSE_ID, TICKET_OPEN_ID } from '../discord/tickets.ts';
 import type { HarnessGuard } from './guard.ts';
 import type { GatewayEvent, HarnessTransport } from './transport.ts';
@@ -54,6 +55,8 @@ export interface FlowTargets {
   selfRoleId: string;
   ticketPanelChannelId: string;
   ticketPanelMessageId: string;
+  /** The ticket bot's user id, to exclude another author's messages. */
+  ticketBotId: string;
   voiceLobbyChannelId: string;
 }
 
@@ -172,7 +175,7 @@ const ticketButtons: Flow = {
   key: 'ticket-buttons',
   title: 'Open, claim and close a ticket by pressing the buttons',
   unblocks: 'TOG-3690',
-  requires: ['guildId', 'accountId', 'ticketPanelChannelId', 'ticketPanelMessageId'],
+  requires: ['guildId', 'accountId', 'ticketPanelChannelId', 'ticketPanelMessageId', 'ticketBotId'],
   async run(ctx) {
     await ctx.guard.act('button', 'press-open', () =>
       ctx.transport.clickButton(
@@ -189,18 +192,43 @@ const ticketButtons: Flow = {
     );
     const ticketChannelId = String(created.data.id);
 
-    await ctx.guard.act('button', 'press-claim', () =>
-      ctx.transport.clickButton(ticketChannelId, ctx.targets.ticketPanelMessageId, TICKET_CLAIM_ID),
+    // The panel only has Open. Claim and Close live on the bot's greeting in
+    // the newly created channel, with a different message id (tickets.ts).
+    const controls = await expectEvent(
+      ctx,
+      'ticket-controls-posted',
+      'messageCreate',
+      (e) =>
+        e.data.channelId === ticketChannelId &&
+        e.data.authorId === ctx.targets.ticketBotId &&
+        typeof e.data.id === 'string' && e.data.id.length > 0 &&
+        Array.isArray(e.data.componentCustomIds) &&
+        e.data.componentCustomIds.includes(TICKET_CLAIM_ID) &&
+        e.data.componentCustomIds.includes(TICKET_CLOSE_ID),
     );
+    const controlsMessageId = String(controls.data.id);
+
+    await ctx.guard.act('button', 'press-claim', () =>
+      ctx.transport.clickButton(ticketChannelId, controlsMessageId, TICKET_CLAIM_ID),
+    );
+    // claimTicket replies ephemerally with this exact acknowledgment. A greeting,
+    // permission refusal or generic error in the same channel is NOT a claim.
+    // Claim and Close require staff; an ordinary member must fail this flow,
+    // never be silently elevated or counted as a successful staff-action proof.
     await expectEvent(
       ctx,
       'claim-acknowledged',
       'messageCreate',
-      (e) => e.data.channelId === ticketChannelId,
+      (e) =>
+        e.data.channelId === ticketChannelId &&
+        e.data.authorId === ctx.targets.ticketBotId &&
+        e.data.content === `Claimed by <@${ctx.targets.accountId}>.` &&
+        typeof e.data.flags === 'number' &&
+        (e.data.flags & MessageFlags.Ephemeral) !== 0,
     );
 
     await ctx.guard.act('button', 'press-close', () =>
-      ctx.transport.clickButton(ticketChannelId, ctx.targets.ticketPanelMessageId, TICKET_CLOSE_ID),
+      ctx.transport.clickButton(ticketChannelId, controlsMessageId, TICKET_CLOSE_ID),
     );
     // Closing archives or deletes the channel depending on configuration, so
     // the assertion is on the channel going away for us either way.

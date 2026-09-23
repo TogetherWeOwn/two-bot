@@ -32,7 +32,13 @@ import type { Acted } from './guard.ts';
 export interface GatewayEvent {
   /** discord.js event name, e.g. `guildMemberUpdate`, `channelCreate`. */
   name: string;
-  /** The raw payload, narrowed by the predicate that was waiting for it. */
+  /**
+   * Normalized gateway payload, narrowed by each predicate. Ticket messageCreate
+   * assertions read id, channelId, authorId, content, numeric flags and a flat
+   * componentCustomIds string array. Preserve ephemeral replies visible to the
+   * clicking account; never synthesize them from an HTTP success response.
+   * The live adapter must prove that its library delivers those replies.
+   */
   data: Record<string, unknown>;
 }
 
@@ -56,11 +62,13 @@ export interface HarnessTransport {
    * and `voiceStateUpdate` all land well inside that window: by the time the
    * flow asks, the event it is waiting for has usually already happened. So a
    * transport must keep a rolling buffer of received events from the moment the
-   * session opens, scan it first, and only then wait. Proven, not theorised:
-   * the same join-screen flow fails `no guildMemberUpdate matched` on an
-   * unbuffered transport and passes on a buffered one. The offline tests cannot
-   * catch this - their fake reads a pre-populated map - which is exactly why the
-   * obligation is written here.
+   * session opens, scan it first, and only then wait. REMOVE the matched event
+   * before returning it, whether buffered or newly received: one event may
+   * satisfy at most one await. Preserve unmatched events for later assertions.
+   * Otherwise voice-verify can bind the preceding flow's ticket channel instead
+   * of the fresh voice channel. The offline fake consumes its scripted events
+   * too, and tests the ticket-then-voice sequence; the live implementation must
+   * additionally prove that events arriving during guard pacing are retained.
    *
    * A timeout is a FAILED ASSERTION, not an error: it means the bot did not do
    * the thing the flow exists to prove. Implementations report it as status

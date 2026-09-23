@@ -214,11 +214,27 @@ human-ish volume" and "runs whenever CI runs" cannot both be true.
 | `TWO_E2E_ACCOUNT_ID` | for a live run | The throwaway account's user id, so assertions can tell its events from a stranger's. Not a secret. |
 | `TWO_E2E_WELCOME_CHANNEL_ID` | per flow | Where the welcome is expected (`join-screen`). |
 | `TWO_E2E_SELF_ROLE_CHANNEL_ID`, `TWO_E2E_SELF_ROLE_MESSAGE_ID`, `TWO_E2E_SELF_ROLE_EMOJI`, `TWO_E2E_SELF_ROLE_ID` | per flow | The self-role panel and the role it should grant (`reaction`). |
-| `TWO_E2E_TICKET_CHANNEL_ID`, `TWO_E2E_TICKET_MESSAGE_ID` | per flow | The ticket panel (`ticket-buttons`). |
+| `TWO_E2E_TICKET_CHANNEL_ID`, `TWO_E2E_TICKET_MESSAGE_ID` | per flow | The ticket panel (`ticket-buttons`); Claim/Close use the newly observed controls message, not this panel id. |
+| `TWO_E2E_TICKET_BOT_ID` | per flow | The ticket bot's user id (`ticket-buttons`), checked on controls and claim acknowledgment. Not a secret. |
 | `TWO_E2E_VOICE_LOBBY_ID` | per flow | The auto-voice lobby (`voice-verify`). |
 
 A flow whose ids are missing is `skipped` before it spends any traffic, so a
 partially-configured guild still produces a useful run.
+
+**Ticket staff actions are not ordinary-member proof.** `claimTicket` and
+`closeTicket` require the ticket staff role or ManageChannels. The approved
+throwaway remains an ordinary member: do not grant staff/admin privileges just
+to make this flow green. Its staff refusal is not a successful claim. The
+success assertion requires the ticket bot's exact `Claimed by <@accountId>.`
+ephemeral reply, not the greeting or an error message in the same channel.
+Staff-action success remains an explicit coverage gap for the least-privilege
+account; do not claim TOG-3690 is discharged by this harness alone.
+
+Before live proof, the transport must demonstrate it receives the clicking
+account's ephemeral gateway replies and normalizes the message fields described
+in `src/e2e/transport.ts`. An HTTP response alone is not a substitute. It must
+also buffer during guard pacing and consume each matched event exactly once;
+offline scripted events prove predicates and sequencing, not gateway delivery.
 
 ```bash
 node scripts/e2e-harness.ts --dry-run --out transcript.json   # no credential, no network
