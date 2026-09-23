@@ -189,4 +189,5 @@ node --check ops/tog-4104/settings-signed-proof.mjs
 bash -n ops/tog-4104/run-proof.sh
 node --test test/tog4104-settingspoof-offline.test.mjs
 node --test test/tog4104-wrapper-offline.test.mjs
+node --test test/tog4104-offline.test.ts
 ```
