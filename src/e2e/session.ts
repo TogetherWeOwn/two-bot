@@ -18,6 +18,15 @@
  * environment (or a systemd credential) and handed straight to the transport
  * factory. It is not stored on the session, not logged, and not returned, so
  * the object a runner holds cannot leak it into a transcript by accident.
+ *
+ * CLOSE TEARS DOWN THE TRANSPORT (TOG-4122). `close()` calls the transport's
+ * optional `close()` after releasing the singleton, so a throwing teardown
+ * cannot strand the process, and calling it twice tears down once.
+ *
+ * CONNECT FAILURES ARE SANITIZED (TOG-4122). Whatever the client library threw
+ * - URLs, statuses, stack internals - is dropped and replaced with one static
+ * refusal, because a connection error is the most likely place for a credential
+ * or network detail to hide, and the refusal is printed to the operator console.
  */
 
 import { readSecret, credentialSource, type CredentialSource } from '../core/credentials.ts';
@@ -106,19 +115,40 @@ export async function openSession(o: OpenSessionOptions): Promise<HarnessSession
   let transport: HarnessTransport;
   try {
     transport = await o.connect(token);
-  } catch (err) {
+  } catch {
     // A failed connect must not leave the singleton claimed, or the next run
-    // in the same process is refused for a session that does not exist.
+    // in the same process is refused for a session that does not exist. The
+    // library's error is dropped, not forwarded: connect failures are the most
+    // likely place for a credential, URL or stack internal to hide, and this
+    // refusal is printed to the operator console.
     openSessionLabel = null;
-    throw err;
+    throw new Error(
+      'e2e harness refused: the connection failed before any action. ' +
+        'Stop and report the failure; do not automatically retry.',
+    );
   }
 
+  let closed = false;
   return {
     guard: new HarnessGuard(o.guard),
     transport,
     guildId: o.guildId,
     close() {
-      if (openSessionLabel === label) openSessionLabel = null;
+      // Not ours (already closed): do nothing, notably do not tear down the
+      // transport a second time.
+      if (closed) return;
+      closed = true;
+      // Released BEFORE the teardown, so a throwing close cannot strand the
+      // process singleton. The teardown itself is swallowed for the same
+      // reason this file's callers invoke it from `finally`: a teardown
+      // failure must never mask the run's own outcome, nor leak library
+      // internals onto the console.
+      openSessionLabel = null;
+      try {
+        transport.close?.();
+      } catch {
+        // Already released above; nothing left to do safely.
+      }
     },
   };
 }

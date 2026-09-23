@@ -79,7 +79,78 @@ export interface HarnessTransport {
     name: string,
     pred: (e: GatewayEvent) => boolean,
     timeoutMs: number,
+    signal?: AbortSignal,
   ): Promise<Acted<GatewayEvent | null>>;
+  /** Tear down the connection and settle outstanding observations. Idempotent. */
+  close?(): void;
+}
+
+/** A bounded inbox installed at connection time, not when a flow starts waiting. */
+export class GatewayInbox {
+  #events: GatewayEvent[] = [];
+  #waiters: Array<{
+    name: string;
+    pred: (event: GatewayEvent) => boolean;
+    finish: (result: Acted<GatewayEvent | null>) => void;
+  }> = [];
+  #closedStatus: number | null = null;
+  #onOverflow: () => void;
+  constructor(onOverflow: () => void = () => {}) { this.#onOverflow = onOverflow; }
+
+  push(event: GatewayEvent): void {
+    if (this.#closedStatus !== null) return;
+    for (const waiter of [...this.#waiters]) {
+      if (waiter.name !== event.name) continue;
+      let matches: boolean;
+      try { matches = waiter.pred(event); } catch {
+        waiter.finish({ status: 500, value: null });
+        continue;
+      }
+      if (matches) {
+        waiter.finish({ status: 200, value: event });
+        return;
+      }
+    }
+    // Never silently evict a proof that a later assertion may need.
+    if (this.#events.length >= 256) { this.close(507); this.#onOverflow(); return; }
+    this.#events.push(event);
+  }
+
+  wait(name: string, pred: (event: GatewayEvent) => boolean, timeoutMs: number,
+    signal?: AbortSignal): Promise<Acted<GatewayEvent | null>> {
+    if (this.#closedStatus !== null) return Promise.resolve({ status: this.#closedStatus, value: null });
+    if (signal?.aborted) return Promise.resolve({ status: 499, value: null });
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > 60_000) {
+      return Promise.resolve({ status: 400, value: null });
+    }
+    let index: number;
+    try { index = this.#events.findIndex((e) => e.name === name && pred(e)); } catch {
+      return Promise.resolve({ status: 500, value: null });
+    }
+    if (index !== -1) return Promise.resolve({ status: 200, value: this.#events.splice(index, 1)[0] });
+    return new Promise((resolve) => {
+      const finish = (result: Acted<GatewayEvent | null>) => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', cancel);
+        const index = this.#waiters.indexOf(waiter);
+        if (index === -1) return;
+        this.#waiters.splice(index, 1);
+        resolve(result);
+      };
+      const waiter = { name, pred, finish };
+      const cancel = () => finish({ status: 499, value: null });
+      const timer = setTimeout(() => finish({ status: 504, value: null }), timeoutMs);
+      this.#waiters.push(waiter);
+      signal?.addEventListener('abort', cancel, { once: true });
+    });
+  }
+
+  close(status = 503): void {
+    if (this.#closedStatus !== null) return;
+    this.#closedStatus = status;
+    this.#events = [];
+    for (const waiter of [...this.#waiters]) waiter.finish({ status, value: null });
+  }
 }
 
 /**

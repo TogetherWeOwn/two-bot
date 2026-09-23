@@ -36,6 +36,8 @@ export interface FlowResult {
   detail: string | null;
   /** Only this flow's actions, in order. */
   steps: TranscriptEntry[];
+  coverageResidual?: string;
+  cleanupHandoffs?: string[];
 }
 
 export interface HarnessTranscript {
@@ -79,6 +81,11 @@ export async function runFlows(
       continue;
     }
 
+    if (!o.dryRun && flow.liveIneligibleReason) {
+      results.push(skeleton(flow, 'skipped', `ineligible: ${flow.liveIneligibleReason}`, []));
+      continue;
+    }
+
     // Refuse up front rather than three actions in: a half-configured run that
     // fails at step four has already spent real traffic on the account.
     const missing = missingTargets(flow, ctx.targets);
@@ -89,8 +96,11 @@ export async function runFlows(
       continue;
     }
 
+    const cleanupHandoffs: string[] = [];
     try {
-      await flow.run(ctx);
+      await flow.run({ ...ctx, noteCleanupHandoff: (handoff) => {
+        if (!o.dryRun) cleanupHandoffs.splice(0, cleanupHandoffs.length, handoff);
+      } });
       results.push(skeleton(flow, 'passed', null, guard.transcript.slice(from)));
     } catch (err) {
       const steps = guard.transcript.slice(from);
@@ -104,9 +114,10 @@ export async function runFlows(
         // It stops the run for the same reason a halt does: we do not know what
         // state the account is in.
         halted = true;
-        results.push(skeleton(flow, 'halted', `harness error: ${String(err)}`, steps));
+        results.push(skeleton(flow, 'halted', 'harness error: unexpected transport or flow failure', steps));
       }
     }
+    if (cleanupHandoffs.length) results[results.length - 1].cleanupHandoffs = cleanupHandoffs;
   }
 
   return {
@@ -133,11 +144,15 @@ function skeleton(
   detail: string | null,
   steps: TranscriptEntry[],
 ): FlowResult {
-  return { key: flow.key, title: flow.title, unblocks: flow.unblocks, outcome, detail, steps };
+  return { key: flow.key, title: flow.title, unblocks: flow.unblocks, outcome, detail, steps,
+    ...(flow.coverageResidual ? { coverageResidual: flow.coverageResidual } : {}),
+  };
 }
 
-/** Exit code for a run: 0 only when every flow that ran passed and nothing halted. */
+/** Live skipped/empty coverage and unexpected halts cannot be reported as PASS. */
 export function exitCodeFor(t: HarnessTranscript): number {
-  if (t.halt) return 2;
-  return t.flows.some((f) => f.outcome === 'failed') ? 1 : 0;
+  if (t.halt || t.flows.some((f) => f.outcome === 'halted')) return 2;
+  if (t.flows.some((f) => f.outcome === 'failed')) return 1;
+  if (!t.dryRun && (!t.flows.length || t.flows.some((f) => f.outcome === 'skipped'))) return 1;
+  return 0;
 }
