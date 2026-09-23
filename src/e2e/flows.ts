@@ -1,13 +1,25 @@
 /**
- * The four member journeys the harness can drive, and what each one proves.
+ * The five member journeys the harness can drive, and what each one proves.
  *
  * Every flow here is a card that is currently blocked on a human doing the
  * member half by hand:
  *
- *   join-screen    TOG-3085  a member clears the rules gate and gets welcomed
- *   reaction       TOG-2796  a reaction on the self-role panel grants the role
- *   ticket-buttons TOG-3690  open / claim / close, pressed by a member
- *   voice-verify   TOG-3122  joining the lobby makes an auto-voice channel
+ *   join-screen        TOG-3085  a member clears the rules gate and gets welcomed
+ *   reaction           TOG-2796  a reaction on the self-role panel grants the role
+ *   ticket-buttons     TOG-3690  open / claim / close to success (dry-run-only for members)
+ *   ticket-open-denial TOG-3690  open as an ordinary member; staff claim/close refused
+ *   voice-verify       TOG-3122  joining the lobby makes an auto-voice channel
+ *
+ * THE FULL TICKET SEQUENCE IS INELIGIBLE FOR LIVE ORDINARY-MEMBER RUNS
+ * (TOG-4122). `ticket-buttons` presses Claim/Close to success, which requires
+ * staff, so the runner refuses it in live runs before any side effect and
+ * records it `skipped` with an `ineligible:` detail; dry runs still execute
+ * it. `ticket-open-denial` is the live member path instead: it opens a real
+ * ticket, proves Claim and Close are refused with the bot's exact staff-only
+ * replies, leaves the ticket open, and hands the channel to authorized staff
+ * for cleanup. A passed denial flow is partial TOG-3690 coverage by
+ * construction; successful Claim/Close stays an explicit residual, never a
+ * silent one.
  *
  * WHAT COUNTS AS PROOF. Every assertion in this file waits for a GATEWAY
  * event, never for the response to the request that caused it. The distinction
@@ -32,6 +44,7 @@
 
 // Imported rather than retyped so a rename in the bot breaks this flow at
 // compile time instead of at 2am on staging.
+import { MessageFlags } from 'discord.js';
 import { TICKET_CLAIM_ID, TICKET_CLOSE_ID, TICKET_OPEN_ID } from '../discord/tickets.ts';
 import type { HarnessGuard } from './guard.ts';
 import type { GatewayEvent, HarnessTransport } from './transport.ts';
@@ -54,6 +67,8 @@ export interface FlowTargets {
   selfRoleId: string;
   ticketPanelChannelId: string;
   ticketPanelMessageId: string;
+  /** The ticket bot's user id, to exclude another author's messages. */
+  ticketBotId: string;
   voiceLobbyChannelId: string;
 }
 
@@ -74,6 +89,13 @@ export interface FlowContext {
   targets: FlowTargets;
   /** How long to wait for each gateway assertion. */
   timeoutMs: number;
+  /**
+   * Optional sink the runner provides per flow. A flow that creates a live
+   * resource records its handoff here the moment the resource exists, so the
+   * transcript hands it to staff even when a later step fails. Absent when a
+   * flow is run directly (tests); flows must treat it as optional.
+   */
+  noteCleanupHandoff?: (handoff: string) => void;
 }
 
 export interface Flow {
@@ -82,6 +104,18 @@ export interface Flow {
   /** The card this flow un-gates, for the transcript and the board comment. */
   unblocks: string;
   requires: TargetKey[];
+  /**
+   * When set, live runs skip this flow before any side effect with an
+   * `ineligible:` detail. Dry runs still execute it. Used when the sequence
+   * needs privileges the approved ordinary-member account must never hold.
+   */
+  liveIneligibleReason?: string;
+  /**
+   * What a pass does NOT prove, copied into every result for this flow. A flow
+   * that is partial coverage by design says so here rather than letting a
+   * green transcript imply the whole card.
+   */
+  coverageResidual?: string;
   run(ctx: FlowContext): Promise<void>;
 }
 
@@ -104,6 +138,26 @@ async function expectEvent(
 /** `data.userId === the test account`. Every member-scoped assertion needs this. */
 function isOurs(ctx: FlowContext, e: GatewayEvent): boolean {
   return e.data.userId === ctx.targets.accountId;
+}
+
+/**
+ * The bot's exact staff-only refusal for a ticket button, as an ephemeral
+ * reply in the ticket channel from the ticket bot (`claimTicket` /
+ * `closeTicket` in src/discord/tickets.ts). Retyped literally, like the Claim
+ * predicate below: these strings are inline in the bot, not exported
+ * constants, so a reword there must fail this flow loudly, not pass it weakly.
+ */
+function isStaffRefusal(
+  ctx: FlowContext,
+  ticketChannelId: string,
+  content: 'Only staff can claim tickets.' | 'Only staff can close tickets.',
+): (e: GatewayEvent) => boolean {
+  return (e) =>
+    e.data.channelId === ticketChannelId &&
+    e.data.authorId === ctx.targets.ticketBotId &&
+    e.data.content === content &&
+    typeof e.data.flags === 'number' &&
+    (e.data.flags & MessageFlags.Ephemeral) !== 0;
 }
 
 const joinScreen: Flow = {
@@ -172,7 +226,14 @@ const ticketButtons: Flow = {
   key: 'ticket-buttons',
   title: 'Open, claim and close a ticket by pressing the buttons',
   unblocks: 'TOG-3690',
-  requires: ['guildId', 'accountId', 'ticketPanelChannelId', 'ticketPanelMessageId'],
+  requires: ['guildId', 'accountId', 'ticketPanelChannelId', 'ticketPanelMessageId', 'ticketBotId'],
+  // Claim and Close to success require staff. The approved account is an
+  // ordinary member and must stay one, so live runs skip this flow entirely;
+  // see ticket-open-denial for the live member path. Dry runs execute it so
+  // the sequence stays exercised.
+  liveIneligibleReason:
+    'the approved live account is an ordinary member, and claim/close to success require staff ' +
+    '(TOG-4122). Run ticket-open-denial live instead; successful staff claim/close stays residual on TOG-3690.',
   async run(ctx) {
     await ctx.guard.act('button', 'press-open', () =>
       ctx.transport.clickButton(
@@ -189,18 +250,43 @@ const ticketButtons: Flow = {
     );
     const ticketChannelId = String(created.data.id);
 
-    await ctx.guard.act('button', 'press-claim', () =>
-      ctx.transport.clickButton(ticketChannelId, ctx.targets.ticketPanelMessageId, TICKET_CLAIM_ID),
+    // The panel only has Open. Claim and Close live on the bot's greeting in
+    // the newly created channel, with a different message id (tickets.ts).
+    const controls = await expectEvent(
+      ctx,
+      'ticket-controls-posted',
+      'messageCreate',
+      (e) =>
+        e.data.channelId === ticketChannelId &&
+        e.data.authorId === ctx.targets.ticketBotId &&
+        typeof e.data.id === 'string' && e.data.id.length > 0 &&
+        Array.isArray(e.data.componentCustomIds) &&
+        e.data.componentCustomIds.includes(TICKET_CLAIM_ID) &&
+        e.data.componentCustomIds.includes(TICKET_CLOSE_ID),
     );
+    const controlsMessageId = String(controls.data.id);
+
+    await ctx.guard.act('button', 'press-claim', () =>
+      ctx.transport.clickButton(ticketChannelId, controlsMessageId, TICKET_CLAIM_ID),
+    );
+    // claimTicket replies ephemerally with this exact acknowledgment. A greeting,
+    // permission refusal or generic error in the same channel is NOT a claim.
+    // Claim and Close require staff; an ordinary member must fail this flow,
+    // never be silently elevated or counted as a successful staff-action proof.
     await expectEvent(
       ctx,
       'claim-acknowledged',
       'messageCreate',
-      (e) => e.data.channelId === ticketChannelId,
+      (e) =>
+        e.data.channelId === ticketChannelId &&
+        e.data.authorId === ctx.targets.ticketBotId &&
+        e.data.content === `Claimed by <@${ctx.targets.accountId}>.` &&
+        typeof e.data.flags === 'number' &&
+        (e.data.flags & MessageFlags.Ephemeral) !== 0,
     );
 
     await ctx.guard.act('button', 'press-close', () =>
-      ctx.transport.clickButton(ticketChannelId, ctx.targets.ticketPanelMessageId, TICKET_CLOSE_ID),
+      ctx.transport.clickButton(ticketChannelId, controlsMessageId, TICKET_CLOSE_ID),
     );
     // Closing archives or deletes the channel depending on configuration, so
     // the assertion is on the channel going away for us either way.
@@ -209,6 +295,90 @@ const ticketButtons: Flow = {
       'ticket-closed',
       'channelDelete',
       (e) => e.data.id === ticketChannelId,
+    );
+  },
+};
+
+const ticketOpenDenial: Flow = {
+  key: 'ticket-open-denial',
+  title: 'Open a ticket as an ordinary member; staff claim/close are refused',
+  unblocks: 'TOG-3690',
+  requires: ['guildId', 'accountId', 'ticketPanelChannelId', 'ticketPanelMessageId', 'ticketBotId'],
+  // A pass here is partial coverage by design. It must never read as the
+  // whole card, so the runner copies this into every result for this flow.
+  coverageResidual:
+    'covers open-as-member plus staff-only claim/close refusals only; ' +
+    'successful staff claim/close stays residual on TOG-3690 (TOG-4122).',
+  async run(ctx) {
+    ctx.noteCleanupHandoff?.(
+      'cleanup handoff: Open attempted; ticket channel not yet observed. Authorized staff must check ' +
+      `staging for a ticket belonging to account ${ctx.targets.accountId} and close it if created.`,
+    );
+    await ctx.guard.act('button', 'press-open', () =>
+      ctx.transport.clickButton(
+        ctx.targets.ticketPanelChannelId,
+        ctx.targets.ticketPanelMessageId,
+        TICKET_OPEN_ID,
+      ),
+    );
+    const created = await expectEvent(
+      ctx,
+      'ticket-channel-created',
+      'channelCreate',
+      (e) => typeof e.data.id === 'string',
+    );
+    const ticketChannelId = String(created.data.id);
+
+    // The handoff is recorded the moment the channel exists, before any later
+    // assertion can fail. Whatever happens next - a missed refusal, a
+    // timeout, an unknown channel on the follow-up press - the ticket is open
+    // on staging and authorized staff must close it, because the member
+    // cannot: Close is staff-only and the harness must not elevate them.
+    ctx.noteCleanupHandoff?.(
+      `cleanup handoff: ticket channel ${ticketChannelId} left open on staging for authorized staff ` +
+        '(TOG-4122); the ordinary-member account cannot close it.',
+    );
+
+    // Same observed controls as the full sequence: Claim and Close live on
+    // the bot's greeting in the new channel, not on the panel (tickets.ts).
+    const controls = await expectEvent(
+      ctx,
+      'ticket-controls-posted',
+      'messageCreate',
+      (e) =>
+        e.data.channelId === ticketChannelId &&
+        e.data.authorId === ctx.targets.ticketBotId &&
+        typeof e.data.id === 'string' && e.data.id.length > 0 &&
+        Array.isArray(e.data.componentCustomIds) &&
+        e.data.componentCustomIds.includes(TICKET_CLAIM_ID) &&
+        e.data.componentCustomIds.includes(TICKET_CLOSE_ID),
+    );
+    const controlsMessageId = String(controls.data.id);
+
+    // A member pressing Claim must be refused, not ignored and not claimed.
+    // The content below is the bot's exact staff refusal, byte for byte; any
+    // reword fails the flow rather than passing it on a generic error.
+    await ctx.guard.act('button', 'press-claim-expect-denial', () =>
+      ctx.transport.clickButton(ticketChannelId, controlsMessageId, TICKET_CLAIM_ID),
+    );
+    await expectEvent(
+      ctx,
+      'claim-denied',
+      'messageCreate',
+      isStaffRefusal(ctx, ticketChannelId, 'Only staff can claim tickets.'),
+    );
+
+    // Same for Close - and deliberately the last side effect. The flow ends
+    // with the ticket OPEN: no channelDelete is awaited, because the member
+    // must not close what staff own, and cleanup is the handoff above.
+    await ctx.guard.act('button', 'press-close-expect-denial', () =>
+      ctx.transport.clickButton(ticketChannelId, controlsMessageId, TICKET_CLOSE_ID),
+    );
+    await expectEvent(
+      ctx,
+      'close-denied',
+      'messageCreate',
+      isStaffRefusal(ctx, ticketChannelId, 'Only staff can close tickets.'),
     );
   },
 };
@@ -254,7 +424,13 @@ const voiceVerify: Flow = {
   },
 };
 
-export const FLOWS: ReadonlyArray<Flow> = [joinScreen, reaction, ticketButtons, voiceVerify];
+export const FLOWS: ReadonlyArray<Flow> = [
+  joinScreen,
+  reaction,
+  ticketButtons,
+  ticketOpenDenial,
+  voiceVerify,
+];
 
 export function flowByKey(key: string): Flow | null {
   return FLOWS.find((f) => f.key === key) ?? null;

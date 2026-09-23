@@ -46,11 +46,12 @@ function fastGuard(): HarnessGuard {
  * `statuses` maps a verb (or `verb:n` for the nth call of it) to the status to
  * return, so a test can make exactly one action in the middle of a flow fail.
  * `events` is the gateway traffic per event name: `awaitEvent` returns the
- * first entry the predicate accepts, and an empty array means nothing matched
- * before the timeout.
+ * first entry the predicate accepts and removes it. An empty array means
+ * nothing matched before the timeout. This models consumption, not live timing.
  */
 class FakeTransport implements HarnessTransport {
   readonly calls: string[] = [];
+  readonly buttonCalls: { channelId: string; messageId: string; customId: string }[] = [];
   statuses: Record<string, number> = {};
   events: Record<string, GatewayEvent[]> = {};
 
@@ -72,7 +73,8 @@ class FakeTransport implements HarnessTransport {
   addReaction(): Promise<Acted<void>> {
     return this.answer('addReaction', undefined);
   }
-  clickButton(_channelId: string, _messageId: string, customId: string): Promise<Acted<void>> {
+  clickButton(channelId: string, messageId: string, customId: string): Promise<Acted<void>> {
+    this.buttonCalls.push({ channelId, messageId, customId });
     return this.answer(`clickButton:${customId}`, undefined);
   }
   joinVoice(): Promise<Acted<void>> {
@@ -89,7 +91,9 @@ class FakeTransport implements HarnessTransport {
     // The predicate is applied here, exactly as a real gateway client applies
     // it: a fake that returned whatever it was handed could not fail a flow on
     // a wrong userId, which is one of the things these flows exist to check.
-    const event = (this.events[name] ?? [{ name, data: {} }]).find(pred) ?? null;
+    const buffer = this.events[name] ?? [];
+    const index = buffer.findIndex(pred);
+    const event = index < 0 ? null : buffer.splice(index, 1)[0]!;
     // A timeout is reported as 504 by contract, and must NOT halt the session.
     return Promise.resolve({ status: event ? 200 : 504, value: event });
   }
@@ -105,8 +109,40 @@ const TARGETS: FlowTargets = {
   selfRoleId: 'role-1',
   ticketPanelChannelId: 'tickets-1',
   ticketPanelMessageId: 'tickets-msg-1',
+  ticketBotId: 'ticket-bot-1',
   voiceLobbyChannelId: 'lobby-1',
 };
+
+function ticketControls(data: Record<string, unknown> = {}): GatewayEvent {
+  return {
+    name: 'messageCreate',
+    data: {
+      id: 'ticket-controls-42', channelId: 'ticket-42', authorId: TARGETS.ticketBotId,
+      content: `<@${TARGETS.accountId}> Thanks — staff will be with you shortly.`,
+      componentCustomIds: ['two:tickets:claim', 'two:tickets:close'],
+      ...data,
+    },
+  };
+}
+
+function claimAcknowledgment(data: Record<string, unknown> = {}): GatewayEvent {
+  return {
+    name: 'messageCreate',
+    data: {
+      id: 'claim-reply-42', channelId: 'ticket-42', authorId: TARGETS.ticketBotId,
+      content: `Claimed by <@${TARGETS.accountId}>.`, flags: 64,
+      ...data,
+    },
+  };
+}
+
+function ticketTransport(): FakeTransport {
+  const t = new FakeTransport();
+  t.events.channelCreate = [{ name: 'channelCreate', data: { id: 'ticket-42' } }];
+  t.events.messageCreate = [ticketControls(), claimAcknowledgment()];
+  t.events.channelDelete = [{ name: 'channelDelete', data: { id: 'ticket-42' } }];
+  return t;
+}
 
 function ctx(transport: FakeTransport, targets: FlowTargets = TARGETS) {
   return { guard: fastGuard(), transport, targets, timeoutMs: 100 };
@@ -193,13 +229,30 @@ test('a connect that throws does not strand the singleton', async () => {
       openSession({
         guildId: TWO_STAGING_GUILD_ID,
         connect: () => {
-          throw new Error('gateway refused');
+          throw new Error(`gateway refused: ${FAKE_TOKEN}`);
         },
         credentials: creds({ [E2E_TOKEN_ENV]: FAKE_TOKEN }),
       }),
-    /gateway refused/,
+    (error: Error) => /connection failed/.test(error.message) && !error.message.includes(FAKE_TOKEN),
   );
   assert.equal(sessionIsOpen(), false, 'the next run in this process would be refused for nothing');
+});
+
+test('close tears down once, sanitizes teardown errors and does not release a later session', async () => {
+  let closes = 0;
+  const transport = Object.assign(new FakeTransport(), { close() { closes++; throw new Error(FAKE_TOKEN); } });
+  const options = { guildId: TWO_STAGING_GUILD_ID, connect: () => transport,
+    credentials: creds({ [E2E_TOKEN_ENV]: FAKE_TOKEN }) };
+  const first = await openSession(options);
+  assert.doesNotThrow(() => first.close());
+  assert.equal(sessionIsOpen(), false);
+  const second = await openSession(options);
+  first.close();
+  assert.equal(sessionIsOpen(), true);
+  assert.equal(closes, 1);
+  second.close();
+  assert.equal(closes, 2);
+  assert.equal(sessionIsOpen(), false);
 });
 
 // --- the flows ---------------------------------------------------------------
@@ -222,22 +275,112 @@ test('the join-screen flow accepts the rules and then waits for the bot, in that
   ]);
 });
 
-test('the ticket flow presses open, claim and close with the bot\'s own customIds', async () => {
-  const t = new FakeTransport();
-  t.events.channelCreate = [{ name: 'channelCreate', data: { id: 'ticket-42' } }];
-  t.events.messageCreate = [{ name: 'messageCreate', data: { channelId: 'ticket-42' } }];
-  t.events.channelDelete = [{ name: 'channelDelete', data: { id: 'ticket-42' } }];
+test('the ticket flow presses the panel to open, then the new controls to claim and close', async () => {
+  const t = ticketTransport();
 
   await flowByKey('ticket-buttons')!.run(ctx(t));
 
   assert.deepEqual(t.calls, [
     'clickButton:two:tickets:open',
     'awaitEvent:channelCreate',
+    'awaitEvent:messageCreate',
     'clickButton:two:tickets:claim',
     'awaitEvent:messageCreate',
     'clickButton:two:tickets:close',
     'awaitEvent:channelDelete',
   ]);
+  assert.deepEqual(t.buttonCalls, [
+    { channelId: TARGETS.ticketPanelChannelId, messageId: TARGETS.ticketPanelMessageId, customId: 'two:tickets:open' },
+    { channelId: 'ticket-42', messageId: 'ticket-controls-42', customId: 'two:tickets:claim' },
+    { channelId: 'ticket-42', messageId: 'ticket-controls-42', customId: 'two:tickets:close' },
+  ]);
+});
+
+const notClaimAcknowledgments: [string, Record<string, unknown>][] = [
+  ['ticket greeting', { content: `<@${TARGETS.accountId}> Thanks — staff will be with you shortly.` }],
+  ['staff refusal', { content: 'Only staff can claim tickets.' }],
+  ['already claimed', { content: 'This ticket is already claimed or not open.' }],
+  ['handler failure', { content: 'The ticket action failed. Please try again.' }],
+  ['another claimant', { content: 'Claimed by <@somebody-else>.' }],
+  ['another channel', { channelId: 'another-ticket' }],
+  ['another author', { authorId: 'somebody-else' }],
+  ['public message', { flags: 0 }],
+  ['absent flags', { flags: undefined }],
+  ['non-numeric flags', { flags: '64' }],
+  ['missing content', { content: undefined }],
+];
+for (const [name, data] of notClaimAcknowledgments) {
+  test(`the ticket claim rejects ${name} and does not press close`, async () => {
+    const t = ticketTransport();
+    t.events.messageCreate = [ticketControls(), claimAcknowledgment(data)];
+    const transcript = await runFlows([flowByKey('ticket-buttons')!], ctx(t), { dryRun: true });
+    assert.equal(transcript.flows[0]!.outcome, 'failed');
+    assert.match(transcript.flows[0]!.detail!, /claim-acknowledged/);
+    assert.ok(!t.calls.includes('clickButton:two:tickets:close'));
+    assert.equal(transcript.halt, null);
+  });
+}
+
+test('a real claim after unrelated traffic still passes, including extra message flags', async () => {
+  const t = ticketTransport();
+  t.events.messageCreate = [
+    ticketControls(),
+    ...notClaimAcknowledgments.map(([, data]) => claimAcknowledgment(data)),
+    claimAcknowledgment({ flags: 64 | 4 }),
+  ];
+  const transcript = await runFlows([flowByKey('ticket-buttons')!], ctx(t), { dryRun: true });
+  assert.equal(transcript.flows[0]!.outcome, 'passed');
+  assert.equal(exitCodeFor(transcript), 0);
+});
+
+test('a missing ticket bot id is reported as unconfigured without pressing any button', async () => {
+  const t = ticketTransport();
+  const transcript = await runFlows(
+    [flowByKey('ticket-open-denial')!], ctx(t, { ...TARGETS, ticketBotId: '' }), { dryRun: false },
+  );
+  assert.equal(transcript.flows[0]!.outcome, 'skipped');
+  assert.match(transcript.flows[0]!.detail!, /missing targets: ticketBotId/);
+  assert.deepEqual(t.calls, []);
+});
+
+test('missing ticket controls fail before pressing claim, never falling back to the panel id', async () => {
+  const t = ticketTransport();
+  t.events.messageCreate = [
+    ticketControls({ authorId: 'somebody-else' }),
+    ticketControls({ componentCustomIds: ['two:tickets:close'] }),
+    ticketControls({ id: undefined }),
+  ];
+  const transcript = await runFlows([flowByKey('ticket-buttons')!], ctx(t), { dryRun: true });
+  assert.equal(transcript.flows[0]!.outcome, 'failed');
+  assert.match(transcript.flows[0]!.detail!, /ticket-controls-posted/);
+  assert.equal(t.buttonCalls.length, 1);
+});
+
+test('buffered matches are consumed once and unmatched events remain available', async () => {
+  const t = new FakeTransport();
+  const ticket = { name: 'channelCreate', data: { id: 'ticket-42' } };
+  const voice = { name: 'channelCreate', data: { id: 'voice-42' } };
+  t.events.channelCreate = [ticket, voice];
+  const first = await t.awaitEvent('channelCreate', (e) => e.data.id === 'voice-42');
+  assert.equal(first.value, voice);
+  const second = await t.awaitEvent('channelCreate', () => true);
+  assert.equal(second.value, ticket, 'matching voice must not discard an unmatched ticket');
+  const empty = await t.awaitEvent('channelCreate', () => true);
+  assert.deepEqual(empty, { status: 504, value: null }, 'a matched event cannot satisfy a second await');
+});
+
+test('ticket then voice consumes the ticket channel so voice binds its own channel', async () => {
+  const t = ticketTransport();
+  t.events.channelCreate!.push({ name: 'channelCreate', data: { id: 'voice-42' } });
+  t.events.channelDelete!.push({ name: 'channelDelete', data: { id: 'voice-42' } });
+  t.events.voiceStateUpdate = [
+    { name: 'voiceStateUpdate', data: { userId: TARGETS.accountId, channelId: 'voice-42' } },
+  ];
+  const transcript = await runFlows(
+    [flowByKey('ticket-buttons')!, flowByKey('voice-verify')!], ctx(t), { dryRun: true },
+  );
+  assert.deepEqual(transcript.flows.map((f) => f.outcome), ['passed', 'passed']);
+  assert.equal(exitCodeFor(transcript), 0);
 });
 
 test('a gateway event belonging to someone else does not satisfy an assertion', async () => {
@@ -266,11 +409,81 @@ test('the voice flow requires being MOVED, not just a channel appearing', async 
   assert.equal(stuck.flows[0]!.outcome, 'failed');
   assert.match(stuck.flows[0]!.detail!, /moved-into-channel/);
 
+  // A second run needs a fresh channelCreate: the first run consumed its event.
+  t.events.channelCreate = [{ name: 'channelCreate', data: { id: 'spawned-1' } }];
   t.events.voiceStateUpdate = [
     { name: 'voiceStateUpdate', data: { userId: TARGETS.accountId, channelId: 'spawned-1' } },
   ];
   const moved = await runFlows([flowByKey('voice-verify')!], ctx(t), { dryRun: false });
   assert.equal(moved.flows[0]!.outcome, 'passed');
+});
+
+test('full staff-success flow is ineligible live before any side effect', async () => {
+  const t = ticketTransport();
+  const transcript = await runFlows([flowByKey('ticket-buttons')!], ctx(t), { dryRun: false });
+  assert.equal(transcript.flows[0].outcome, 'skipped');
+  assert.match(transcript.flows[0].detail!, /ineligible:.*ordinary member/);
+  assert.equal(exitCodeFor(transcript), 1);
+  assert.deepEqual(t.calls, []);
+});
+
+function denialTransport(): FakeTransport {
+  const t = ticketTransport();
+  t.events.messageCreate = [ticketControls(),
+    claimAcknowledgment({ content: 'Only staff can claim tickets.' }),
+    claimAcknowledgment({ id: 'close-denial', content: 'Only staff can close tickets.' }),
+  ];
+  return t;
+}
+
+test('ordinary-member denial flow records partial coverage and staff cleanup without claiming success', async () => {
+  const t = denialTransport();
+  const transcript = await runFlows([flowByKey('ticket-open-denial')!], ctx(t), { dryRun: false });
+  const result = transcript.flows[0];
+  assert.equal(result.outcome, 'passed');
+  assert.match(result.coverageResidual!, /successful staff claim\/close stays residual/);
+  assert.match(result.cleanupHandoffs![0], /ticket-42.*authorized staff/);
+  assert.equal(exitCodeFor(transcript), 0);
+  assert.equal(t.buttonCalls.length, 3);
+  assert.ok(!t.calls.includes('awaitEvent:channelDelete'));
+});
+
+for (const override of [{ content: 'Claimed by <@account-1>.' }, { authorId: 'other' },
+  { channelId: 'other' }, { flags: 0 }, { flags: '64' }, { content: 'Generic error' }]) {
+  test(`denial rejects ${JSON.stringify(override)} and retains cleanup handoff`, async () => {
+    const t = denialTransport();
+    Object.assign(t.events.messageCreate![1].data, override);
+    const transcript = await runFlows([flowByKey('ticket-open-denial')!], ctx(t), { dryRun: false });
+    assert.equal(transcript.flows[0].outcome, 'failed');
+    assert.match(transcript.flows[0].cleanupHandoffs![0], /ticket-42/);
+    assert.equal(t.buttonCalls.length, 2);
+    assert.equal(exitCodeFor(transcript), 1);
+  });
+}
+
+test('denial flow retains cleanup on unknown channel, missing controls, close timeout and halt', async () => {
+  for (const failure of ['unknown', 'controls', 'close', 'halt']) {
+    const t = denialTransport();
+    if (failure === 'unknown') t.events.channelCreate = [];
+    if (failure === 'controls') t.events.messageCreate = [];
+    if (failure === 'close') t.events.messageCreate!.pop();
+    if (failure === 'halt') t.statuses['clickButton:two:tickets:claim'] = 403;
+    const transcript = await runFlows([flowByKey('ticket-open-denial')!], ctx(t), { dryRun: false });
+    const result = transcript.flows[0];
+    assert.notEqual(result.outcome, 'passed');
+    assert.match(result.cleanupHandoffs![0], failure === 'unknown' ? /not yet observed.*account-1/ : /ticket-42/);
+    assert.ok(exitCodeFor(transcript) > 0);
+  }
+});
+
+test('unexpected errors are sanitized and halted/empty live runs cannot exit zero', async () => {
+  const t = new FakeTransport();
+  t.acceptRules = async () => { throw new Error(FAKE_TOKEN); };
+  const transcript = await runFlows([flowByKey('join-screen')!], ctx(t), { dryRun: false });
+  assert.equal(transcript.flows[0].outcome, 'halted');
+  assert.ok(!JSON.stringify(transcript).includes(FAKE_TOKEN));
+  assert.equal(exitCodeFor(transcript), 2);
+  assert.equal(exitCodeFor(await runFlows([], ctx(t), { dryRun: false })), 1);
 });
 
 // --- the runner --------------------------------------------------------------
@@ -283,7 +496,7 @@ test('a failed assertion fails one flow and the next flow still runs', async () 
   // predicate is what tells them apart.
   t.events.messageCreate = [
     { name: 'messageCreate', data: { channelId: TARGETS.welcomeChannelId } },
-    { name: 'messageCreate', data: { channelId: 'ticket-42' } },
+    ticketControls(), claimAcknowledgment(),
   ];
   t.events.channelCreate = [{ name: 'channelCreate', data: { id: 'ticket-42' } }];
   t.events.channelDelete = [{ name: 'channelDelete', data: { id: 'ticket-42' } }];
@@ -296,7 +509,7 @@ test('a failed assertion fails one flow and the next flow still runs', async () 
 
   assert.deepEqual(
     transcript.flows.map((f) => f.outcome),
-    ['failed', 'failed', 'passed'],
+    ['failed', 'failed', 'skipped'],
   );
   assert.match(transcript.flows[0]!.detail!, /no guildMemberUpdate matched/);
   assert.equal(transcript.halt, null, 'a 504 timeout must not halt the session');
@@ -341,7 +554,7 @@ test('a half-configured run is refused before it spends any traffic', async () =
   assert.equal(transcript.flows[0]!.outcome, 'skipped');
   assert.match(transcript.flows[0]!.detail!, /missing targets: voiceLobbyChannelId/);
   assert.deepEqual(t.calls, [], 'a skipped flow reached Discord');
-  assert.equal(exitCodeFor(transcript), 0);
+  assert.equal(exitCodeFor(transcript), 1);
 });
 
 test('missingTargets names only what the flow actually needs', () => {
@@ -363,7 +576,7 @@ test('the transcript is self-describing, non-secret, and marked as a dry run or 
 });
 
 test('every flow names the card it unblocks, and the four cards are distinct', () => {
-  const unblocks = FLOWS.map((f) => f.unblocks);
+  const unblocks = [...new Set(FLOWS.map((f) => f.unblocks))];
   assert.deepEqual(unblocks.slice().sort(), ['TOG-2796', 'TOG-3085', 'TOG-3122', 'TOG-3690']);
   assert.equal(new Set(FLOWS.map((f) => f.key)).size, FLOWS.length);
 });

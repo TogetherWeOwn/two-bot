@@ -32,7 +32,13 @@ import type { Acted } from './guard.ts';
 export interface GatewayEvent {
   /** discord.js event name, e.g. `guildMemberUpdate`, `channelCreate`. */
   name: string;
-  /** The raw payload, narrowed by the predicate that was waiting for it. */
+  /**
+   * Normalized gateway payload, narrowed by each predicate. Ticket messageCreate
+   * assertions read id, channelId, authorId, content, numeric flags and a flat
+   * componentCustomIds string array. Preserve ephemeral replies visible to the
+   * clicking account; never synthesize them from an HTTP success response.
+   * The live adapter must prove that its library delivers those replies.
+   */
   data: Record<string, unknown>;
 }
 
@@ -56,11 +62,13 @@ export interface HarnessTransport {
    * and `voiceStateUpdate` all land well inside that window: by the time the
    * flow asks, the event it is waiting for has usually already happened. So a
    * transport must keep a rolling buffer of received events from the moment the
-   * session opens, scan it first, and only then wait. Proven, not theorised:
-   * the same join-screen flow fails `no guildMemberUpdate matched` on an
-   * unbuffered transport and passes on a buffered one. The offline tests cannot
-   * catch this - their fake reads a pre-populated map - which is exactly why the
-   * obligation is written here.
+   * session opens, scan it first, and only then wait. REMOVE the matched event
+   * before returning it, whether buffered or newly received: one event may
+   * satisfy at most one await. Preserve unmatched events for later assertions.
+   * Otherwise voice-verify can bind the preceding flow's ticket channel instead
+   * of the fresh voice channel. The offline fake consumes its scripted events
+   * too, and tests the ticket-then-voice sequence; the live implementation must
+   * additionally prove that events arriving during guard pacing are retained.
    *
    * A timeout is a FAILED ASSERTION, not an error: it means the bot did not do
    * the thing the flow exists to prove. Implementations report it as status
@@ -71,7 +79,78 @@ export interface HarnessTransport {
     name: string,
     pred: (e: GatewayEvent) => boolean,
     timeoutMs: number,
+    signal?: AbortSignal,
   ): Promise<Acted<GatewayEvent | null>>;
+  /** Tear down the connection and settle outstanding observations. Idempotent. */
+  close?(): void;
+}
+
+/** A bounded inbox installed at connection time, not when a flow starts waiting. */
+export class GatewayInbox {
+  #events: GatewayEvent[] = [];
+  #waiters: Array<{
+    name: string;
+    pred: (event: GatewayEvent) => boolean;
+    finish: (result: Acted<GatewayEvent | null>) => void;
+  }> = [];
+  #closedStatus: number | null = null;
+  #onOverflow: () => void;
+  constructor(onOverflow: () => void = () => {}) { this.#onOverflow = onOverflow; }
+
+  push(event: GatewayEvent): void {
+    if (this.#closedStatus !== null) return;
+    for (const waiter of [...this.#waiters]) {
+      if (waiter.name !== event.name) continue;
+      let matches: boolean;
+      try { matches = waiter.pred(event); } catch {
+        waiter.finish({ status: 500, value: null });
+        continue;
+      }
+      if (matches) {
+        waiter.finish({ status: 200, value: event });
+        return;
+      }
+    }
+    // Never silently evict a proof that a later assertion may need.
+    if (this.#events.length >= 256) { this.close(507); this.#onOverflow(); return; }
+    this.#events.push(event);
+  }
+
+  wait(name: string, pred: (event: GatewayEvent) => boolean, timeoutMs: number,
+    signal?: AbortSignal): Promise<Acted<GatewayEvent | null>> {
+    if (this.#closedStatus !== null) return Promise.resolve({ status: this.#closedStatus, value: null });
+    if (signal?.aborted) return Promise.resolve({ status: 499, value: null });
+    if (!Number.isFinite(timeoutMs) || timeoutMs < 0 || timeoutMs > 60_000) {
+      return Promise.resolve({ status: 400, value: null });
+    }
+    let index: number;
+    try { index = this.#events.findIndex((e) => e.name === name && pred(e)); } catch {
+      return Promise.resolve({ status: 500, value: null });
+    }
+    if (index !== -1) return Promise.resolve({ status: 200, value: this.#events.splice(index, 1)[0] });
+    return new Promise((resolve) => {
+      const finish = (result: Acted<GatewayEvent | null>) => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', cancel);
+        const index = this.#waiters.indexOf(waiter);
+        if (index === -1) return;
+        this.#waiters.splice(index, 1);
+        resolve(result);
+      };
+      const waiter = { name, pred, finish };
+      const cancel = () => finish({ status: 499, value: null });
+      const timer = setTimeout(() => finish({ status: 504, value: null }), timeoutMs);
+      this.#waiters.push(waiter);
+      signal?.addEventListener('abort', cancel, { once: true });
+    });
+  }
+
+  close(status = 503): void {
+    if (this.#closedStatus !== null) return;
+    this.#closedStatus = status;
+    this.#events = [];
+    for (const waiter of [...this.#waiters]) waiter.finish({ status, value: null });
+  }
 }
 
 /**

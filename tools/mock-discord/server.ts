@@ -14,6 +14,7 @@
 import { createServer, type Server } from 'node:http';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { AddressInfo } from 'node:net';
+import { randomUUID } from 'node:crypto';
 import { GAME_PICKS, GAME_HUB_CHANNEL_ID, GATED_CATEGORIES, GUILD_ID as TWO_GUILD_ID } from '../../src/onboarding/catalog.ts';
 import { LOOKING_TO_PLAY_CHANNEL_ID, LOBBY_VOICE_CHANNEL_ID } from '../../src/onboarding/session.ts';
 
@@ -92,8 +93,8 @@ export interface MockDiscord {
   memberJoinPending(memberId: string, username: string, guildId?: string): void;
   /** Rules accepted - pending flips false. This is the real onboarding trigger. */
   memberAcceptRules(memberId: string, username: string, guildId?: string): void;
-  /** Simulate the member choosing games in the picker. */
-  selectGames(memberId: string, username: string, keys: string[], heldRoleIds?: string[]): void;
+  /** Simulate a game selection; return its unique token to correlate the reply. */
+  selectGames(memberId: string, username: string, keys: string[], heldRoleIds?: string[]): string;
   /** Simulate the member using the session picker (TOG-1644). */
   selectSession(memberId: string, username: string, keys: string[], guildId?: string): void;
   /** Simulate the member leaving the guild (triggers goodbye, TOG-1644). */
@@ -746,11 +747,12 @@ export async function startMockDiscord(
     },
 
     selectGames(memberId, username, keys, heldRoleIds = [MEMBER_ROLE]) {
+      const token = `mock-game-${randomUUID()}`;
       dispatch('INTERACTION_CREATE', {
         id: snowflake(),
         application_id: BOT_ID,
         type: 3, // MESSAGE_COMPONENT
-        token: 'mock-interaction-token',
+        token,
         version: 1,
         guild_id: GUILD_ID,
         channel_id: TEXT_CHANNEL,
@@ -794,6 +796,7 @@ export async function startMockDiscord(
         entitlements: [],
         authorizing_integration_owners: {},
       });
+      return token;
     },
 
     setMemberRoles(memberId: string, roleIds: string[]) {

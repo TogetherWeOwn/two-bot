@@ -14,7 +14,57 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # An outside contributor's pull request must not execute on our hardware.
+  # Every runner here is self-hosted and persistent — five share one host — so
+  # a fork's code would run next to whatever the last job left behind
+  # (TOG-3103). This is the only job a fork ever reaches, and everything else
+  # in this workflow waits on it.
+  #
+  # It checks out the BASE commit, not the pull request. Running the pull
+  # request's copy would mean asking the fork to supply the script that decides
+  # whether to trust the fork.
+  #
+  # Delete this job, and the `needs:` lines below, in the commit that moves
+  # this workflow to hosted runners. On a hosted runner there is no host of
+  # ours to protect and this would only turn away contributions.
+  fork-gate:
+    runs-on: [self-hosted, two-selfhosted]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
+      # Policy lands independently on main before this workflow. A missing
+      # base policy fails closed; the candidate cannot select a bootstrap ref.
+      - name: Refuse fork pull requests
+        env:
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: ./scripts/ci/refuse-fork-pr.sh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      # This lockfile belongs to the trusted policy, not the candidate. The YAML
+      # parser is CI-only; no candidate packages or lifecycle scripts execute.
+      - name: Install trusted workflow parser
+        run: npm ci --ignore-scripts --prefix scripts/ci
+      # Read the proposed workflow files, not the old base wiring. Checkout
+      # only materializes data here: all commands below still use the policy
+      # at the workspace root. No candidate actions/scripts are invoked.
+      # https://github.com/actions/checkout/tree/v5#fetch-only-the-root-files-and-github-and-src-folder
+      - name: Read candidate workflows
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
+          sparse-checkout: .github/workflows
+          persist-credentials: false
+      - name: Verify the fork gate against candidate wiring
+        run: ./scripts/ci/refuse-fork-pr.test.sh "$GITHUB_WORKSPACE/candidate"
+
   check:
+    needs: fork-gate
     runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 10
 
@@ -81,7 +131,7 @@ jobs:
   # Exercise the website views and least-privilege grants end to end after the
   # required check has proved the full Postgres-backed suite.
   postgres:
-    needs: check
+    needs: [fork-gate, check]
     runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 10
 
