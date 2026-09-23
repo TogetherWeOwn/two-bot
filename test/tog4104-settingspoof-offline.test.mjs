@@ -1,267 +1,238 @@
-/**
- * TOG-4104 offline tests for `ops/tog-4104/settings-signed-proof.mjs`.
- *
- * These exercise the ACTUAL shipped executable (spawned as a child process
- * with stub env), not a duplicated algorithm. Each case starts a fixture HTTP
- * server that mimics the endpoint's contract (HMAC verify, allowlist, store
- * vs unset, idempotency guard) and asserts the probe's exit code and its
- * value-blind receipt.
- *
- * No Postgres, no Discord, no secrets: the fixture key is `test-only`.
- * Run: `node --test test/tog4104-settingspoof-offline.test.mjs`
- * (lives in test/ so `npm test` and `npm run test:postgres` pick it up).
+/** Offline HTTP/state fixtures spawning the actual shipped proof and recovery.
+ * Never substitute a second implementation for the executable under test.
  */
-import { test, before, after } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { createHash, createHmac, randomUUID } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 import { createServer } from 'node:http';
+import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
 
-const HERE = dirname(fileURLToPath(import.meta.url));
-const PROBE = join(HERE, '..', 'ops', 'tog-4104', 'settings-signed-proof.mjs');
+const PROBE = fileURLToPath(new URL('../ops/tog-4104/settings-signed-proof.mjs', import.meta.url));
+const KEY = 'TWO_RAID_JOIN_THRESHOLD', MATE = 'TWO_RAID_WINDOW_SECONDS';
+const SECRET = 'offline-only-signing-material-not-a-real-key';
+const SOURCE = 'b03c6232a75fe4655964c1f0b523ff9c8e1ae7fe';
+const RUNTIME = 'f5fd3e1d6d08847589d3bf48ebc0b0e198196e90';
+const kid = 'offline-key-id';
 
-const SECRET = 't'.repeat(48);
-const KEY_ID = 'web-staging';
-const GUILD = '1545644954272137297';
-const KEY = 'TWO_RAID_JOIN_THRESHOLD';
-const MATE = 'TWO_RAID_WINDOW_SECONDS';
-
-function bodyHash(raw) {
-  return createHash('sha256').update(raw).digest('hex');
-}
-function expectedSig(secret, ts, nonce, raw) {
-  const canon = ['POST', '/internal/actions', ts, nonce, bodyHash(raw)].join('\n');
-  return 'sha256=' + createHmac('sha256', secret).update(canon).digest('hex');
-}
-
-// --- fixture state (per test, reset in beforeEach-style) ---
-let store; // Map key -> value (string); absence = environment fallback
-let failRestoreOnce;
-let flakyWriteOnce;
-
-function resetFixture({ seed, failRestore = false, flakyWrite = false } = {}) {
-  store = new Map(Object.entries(seed ?? {}));
-  failRestoreOnce = failRestore;
-  flakyWriteOnce = flakyWrite;
-}
-
-function readBody(req) {
-  return new Promise((resolve, reject) => {
+async function fixture(t, seed = {}, hooks = {}) {
+  const root = await mkdtemp(join(process.env.PAPERCLIP_RUN_SCRATCH_DIR ?? tmpdir(), 'tog4104-offline-'));
+  const stateDir = join(root, 'private');
+  const store = new Map(Object.entries(seed)), idempotency = new Map(), reads = new Map();
+  const writes = [], signatures = [];
+  let getCount = 0;
+  const server = createServer(async (req, res) => {
+    const send = (status, body) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
+    const deny = (status, code) => send(status, { ok: false, error: { code } });
     const chunks = [];
-    req.on('data', (c) => chunks.push(c));
-    req.on('end', () => resolve(Buffer.concat(chunks)));
-    req.on('error', reject);
-  });
-}
-
-let server;
-let port;
-
-before(async () => {
-  server = createServer(async (req, res) => {
-    const send = (status, obj, headers = {}) => {
-      res.writeHead(status, { 'content-type': 'application/json', ...headers });
-      res.end(JSON.stringify(obj));
-    };
-    if (req.method !== 'POST' || req.url !== '/internal/actions') {
-      return send(404, { ok: false, error: { code: 'malformed', retryable: false }, request_id: 'x' });
+    for await (const c of req) chunks.push(c);
+    const raw = Buffer.concat(chunks);
+    // Independently reconstruct the live canonical input, including literal LF.
+    const h = req.headers;
+    const canonical = `POST\n/internal/actions\n${h['x-two-timestamp']}\n${h['x-two-nonce']}\n${createHash('sha256').update(raw).digest('hex')}`;
+    const signature = 'sha256=' + createHmac('sha256', SECRET).update(canonical).digest('hex');
+    signatures.push(signature);
+    if (h['x-two-signature'] !== signature || h['x-two-key-id'] !== kid) return deny(401, 'unauthorized');
+    const body = JSON.parse(raw.toString());
+    if (!['settings.get', 'settings.set'].includes(body.action) || ![KEY, MATE].includes(body.key)) return deny(403, 'action_not_allowed');
+    const { key } = body;
+    const ctx = { req, res, body, send, deny, store, writes, reads, idempotency };
+    if (body.action === 'settings.get') {
+      getCount++;
+      reads.set(key, (reads.get(key) ?? 0) + 1);
+      if (hooks.get?.({ ...ctx, getCount })) return;
+      // The live contract RETURNS exact stored values, not a presence-only null.
+      const result = store.has(key) ? { key, source: 'store', value: store.get(key) } : { key, source: 'unset', value: null };
+      send(200, { ok: true, result });
+      hooks.afterGet?.({ ...ctx, getCount });
+      return;
     }
-    const raw = await readBody(req);
-    const ts = req.headers['x-two-timestamp'] ?? '';
-    const nonce = req.headers['x-two-nonce'] ?? '';
-    const sig = req.headers['x-two-signature'] ?? '';
-    const kid = req.headers['x-two-key-id'] ?? '';
-    const skewOk = /^\d+$/.test(String(ts)) && Math.abs(Date.now() / 1000 - Number(ts)) < 300;
-    const sigOk =
-      kid === KEY_ID &&
-      skewOk &&
-      sig.length === expectedSig(SECRET, String(ts), String(nonce), raw).length &&
-      sig === expectedSig(SECRET, String(ts), String(nonce), raw);
-    if (!sigOk) {
-      return send(401, { ok: false, error: { code: 'unauthorized', retryable: false }, request_id: 'x' });
+    assert.ok(h['idempotency-key']);
+    const idem = h['idempotency-key'];
+    if (idempotency.has(idem)) {
+      const entry = idempotency.get(idem);
+      assert.equal(raw.toString(), entry.raw, 'reconciliation must reuse exact request body');
+      return send(200, entry.response);
     }
-    let body;
-    try {
-      body = JSON.parse(raw.toString('utf8'));
-    } catch {
-      return send(400, { ok: false, error: { code: 'malformed', retryable: false }, request_id: 'x' });
-    }
-    const { action, key } = body;
-    if (key === 'TWO_INTERNAL_ALLOW_SETTINGS' || String(key).startsWith('TWO_INTERNAL_')) {
-      return send(403, { ok: false, error: { code: 'action_not_allowed', retryable: false }, request_id: 'x' });
-    }
-    if (!/^[A-Z][A-Z0-9_]{1,127}$/.test(String(key))) {
-      return send(400, { ok: false, error: { code: 'malformed', retryable: false }, request_id: 'x' });
-    }
-    if (action === 'settings.get') {
-      if (!store.has(key)) return send(200, { ok: true, result: { key, value: null, source: 'unset' }, request_id: 'x' });
-      return send(200, { ok: true, result: { key, value: null, source: 'store' }, request_id: 'x' });
-    }
-    if (action === 'settings.set') {
-      if (!req.headers['idempotency-key']) {
-        return send(400, { ok: false, error: { code: 'malformed', retryable: false }, request_id: 'x' });
-      }
-      if (!('value' in body)) {
-        return send(400, { ok: false, error: { code: 'malformed', retryable: false }, request_id: 'x' });
-      }
-      if (!/^\d{17,20}$/.test(String(body.updated_by ?? ''))) {
-        return send(400, { ok: false, error: { code: 'malformed', retryable: false }, request_id: 'x' });
-      }
-      const value = body.value ?? null;
-      if (value === null && failRestoreOnce) {
-        failRestoreOnce = false;
-        return send(500, { ok: false, error: { code: 'internal', retryable: true }, request_id: 'x' });
-      }
-      if (value !== null && flakyWriteOnce) {
-        // Ambiguous write: applied, but the response is lost (500 after commit).
-        flakyWriteOnce = false;
-        store.set(key, value);
-        return send(500, { ok: false, error: { code: 'internal', retryable: true }, request_id: 'x' });
-      }
-      if (value === null) store.delete(key);
-      else store.set(key, value);
-      return send(200, { ok: true, result: { key, outcome: value === null ? 'unset' : 'saved' }, request_id: 'x' });
-    }
-    return send(403, { ok: false, error: { code: 'action_not_allowed', retryable: false }, request_id: 'x' });
+    if (hooks.beforeSet?.(ctx)) return;
+    if (body.value === null) store.delete(key); else store.set(key, body.value);
+    writes.push({ key, value: body.value, idem });
+    const response = { ok: true, result: { key, outcome: body.value === null ? 'unset' : 'saved' } };
+    idempotency.set(idem, { raw: raw.toString(), response });
+    if (hooks.afterSet?.(ctx)) return;
+    send(200, response);
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
-  port = server.address().port;
-});
+  const env = {
+    STAGING_APP_UUID: 'uy4d9ndeygjcem6lgayhxgub', PROOF_RUNTIME_REVISION: RUNTIME,
+    PROOF_SOURCE_SHA: SOURCE, PROOF_EXCLUSIVE_WINDOW: 'staging-writers-quiesced',
+    PROOF_STATE_DIR: stateDir, INTERNAL_ACTIONS_URL: `http://127.0.0.1:${server.address().port}`,
+    TWO_INTERNAL_KEYS: `${kid}:${SECRET}`, TWO_INTERNAL_ACTIONS: '1', TWO_INTERNAL_ALLOW_SETTINGS: '1',
+    DISCORD_GUILD_ID: '1545644954272137297',
+  };
+  function start(extra = {}, mode = 'run') {
+    const child = spawn(process.execPath, [PROBE, mode], { env: { ...env, ...extra } });
+    let out = '', err = '';
+    child.stdout.on('data', (b) => { out += b; }); child.stderr.on('data', (b) => { err += b; });
+    const done = new Promise((resolve) => child.on('close', (code, signal) => {
+      for (const forbidden of [SECRET, kid, 'sha256=', '"value":', '003001', ...signatures]) {
+        assert.ok(!out.includes(forbidden) && !err.includes(forbidden), 'sensitive output');
+      }
+      resolve({ code, signal, out, err, receipt: out.trim() ? JSON.parse(out.trim()) : null });
+    }));
+    return { child, done };
+  }
+  t.after(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+    await rm(root, { recursive: true, force: true });
+  });
+  return { store, writes, stateDir, start, run: (extra, mode) => start(extra, mode).done };
+}
 
-after(async () => {
-  await new Promise((resolve) => server.close(resolve));
-});
-
-function runProbe(extraEnv = {}) {
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, [PROBE], {
-      env: {
-        ...process.env,
-        COOLIFY_APP_UUID: 'uy4d9ndeygjcem6lgayhxgub',
-        INTERNAL_ACTIONS_URL: `http://127.0.0.1:${port}`,
-        TWO_INTERNAL_KEYS: `${KEY_ID}:${SECRET}`,
-        TWO_INTERNAL_ACTIONS: '1',
-        TWO_INTERNAL_ALLOW_SETTINGS: '1',
-        DISCORD_GUILD_ID: GUILD,
-        ...extraEnv,
-      },
-    });
-    let out = '';
-    let err = '';
-    child.stdout.on('data', (c) => (out += c));
-    child.stderr.on('data', (c) => (err += c));
-    child.on('close', (code) => resolve({ code, out, err }));
+for (const [name, seed] of [
+  ['both absent', {}], ['both stored', { [KEY]: '003001', [MATE]: 9 }],
+  ['key stored, mate absent', { [KEY]: 9 }], ['key absent, mate stored', { [MATE]: '9' }],
+]) {
+  test(`exact restore: ${name}`, async (t) => {
+    const f = await fixture(t, seed);
+    const r = await f.run();
+    assert.equal(r.code, 0, r.out + r.err);
+    assert.equal(r.receipt.verdict, 'PROOF PASS');
+    assert.equal(r.receipt.cleanup, 'exact-prestate-verified');
+    assert.deepEqual(f.store, new Map(Object.entries(seed)));
+    assert.equal(f.writes.length, 4);
+    assert.deepEqual(await readdir(f.stateDir), []);
   });
 }
 
-function receipt(run) {
-  const line = run.out.trim().split('\n').pop();
-  return JSON.parse(line);
+test('assertion failure after a confirmed write still restores both exact pre-states', async (t) => {
+  let corrupt = true;
+  const seed = { [KEY]: '003001', [MATE]: 9 };
+  const f = await fixture(t, seed, { get({ writes, send }) {
+    if (writes.length === 1 && corrupt) { corrupt = false; send(200, { ok: true, result: {} }); return true; }
+  } });
+  const r = await f.run();
+  assert.equal(r.code, 1); assert.equal(r.receipt.cleanup, 'exact-prestate-verified');
+  assert.deepEqual(f.store, new Map(Object.entries(seed)));
+});
+
+for (const loss of ['socket', '500', 'timeout']) {
+  test(`ambiguous ${loss} after commit reconciles same idempotency key and restores`, async (t) => {
+    const f = await fixture(t, { [MATE]: '9' }, { afterSet({ writes, req, deny }) {
+      if (writes.length !== 1) return;
+      if (loss === 'socket') req.socket.destroy();
+      if (loss === '500') deny(500, 'internal');
+      // Timeout case intentionally holds the response past the executable's 30s deadline.
+      return true;
+    } });
+    const r = await f.run();
+    assert.equal(r.code, 1); assert.equal(r.receipt.responseUncertainty, true);
+    assert.equal(r.receipt.cleanup, 'exact-prestate-verified');
+    assert.deepEqual(f.store, new Map([[MATE, '9']]));
+    assert.equal(f.writes.length, 4, 'no duplicate committed writes');
+  });
 }
 
-const SECRET_SHAPES = [SECRET, 'sha256=', 'sig=', KEY_ID];
-
-function assertNoSecrets(run, label) {
-  // The probe must never print keys, signatures, or setting values. The
-  // fixture value '9' stands in for any real stored value.
-  for (const shape of [...SECRET_SHAPES, '"value":"9"', ':9,', ':9}']) {
-    assert.ok(!run.out.includes(shape) && !run.err.includes(shape), `${label}: output leaks ${shape}`);
-  }
-}
-
-test('prior stored value is preserved only via audit restore (fail closed)', async () => {
-  // A stored pre-state cannot be restored value-blind through the endpoint
-  // alone, so the probe must REFUSE to unset it rather than destroy it.
-  resetFixture({ seed: { [KEY]: '9', [MATE]: '9' } });
-  const run = await runProbe();
-  assert.equal(run.code, 1);
-  assert.equal(receipt(run).step, 'cleanup.stored-needs-audit-restore');
-  assert.ok(store.has(KEY), 'stored key untouched');
-  assertNoSecrets(run, 'stored-prestate');
+test('restore failure stays nonzero with encrypted journal; recovery restores exact values', async (t) => {
+  let refuse = true;
+  const seed = { [KEY]: '003001', [MATE]: 9 };
+  const f = await fixture(t, seed, { beforeSet({ body, deny }) {
+    if (body.value === 9 && refuse) { deny(500, 'internal'); return true; }
+  } });
+  const r = await f.run();
+  assert.equal(r.code, 1); assert.equal(r.receipt.cleanup, 'recovery-required');
+  const file = join(f.stateDir, 'recovery.enc');
+  assert.equal((await stat(file)).mode & 0o777, 0o600);
+  const bytes = await readFile(file);
+  assert.ok(!bytes.includes(Buffer.from('003001')) && !bytes.includes(Buffer.from(SECRET)));
+  const noRerun = await f.run();
+  assert.equal(noRerun.code, 2, 'never replace outstanding recovery');
+  refuse = false;
+  const recovery = await f.run({}, 'recover');
+  assert.equal(recovery.code, 0, recovery.out + recovery.err);
+  assert.equal(recovery.receipt.verdict, 'RECOVERED');
+  assert.deepEqual(f.store, new Map(Object.entries(seed)));
 });
 
-test('prior absence is preserved: unset + readback-verified PASS', async () => {
-  resetFixture({ seed: {} });
-  const run = await runProbe();
-  assert.equal(run.code, 0, run.out + run.err);
-  const r = receipt(run);
-  assert.equal(r.verdict, 'PROOF PASS');
-  assert.equal(r.preState.hadRow, false);
-  assert.ok(!store.has(KEY) && !store.has(MATE), 'no rows left behind');
-  assertNoSecrets(run, 'absent-prestate');
+test('SIGKILL during applied write is recovered from the shipped encrypted journal', async (t) => {
+  let signal;
+  const applied = new Promise((resolve) => { signal = resolve; });
+  const f = await fixture(t, { [KEY]: '003001' }, { afterSet({ writes }) {
+    if (writes.length === 1) { signal(); return true; }
+  } });
+  const running = f.start();
+  await applied;
+  running.child.kill('SIGKILL');
+  assert.equal((await running.done).signal, 'SIGKILL');
+  const recovery = await f.run({}, 'recover');
+  assert.equal(recovery.code, 0, recovery.out + recovery.err);
+  assert.deepEqual(f.store, new Map([[KEY, '003001']]));
 });
 
-test('ambiguous write response is a FAIL, not a PASS', async () => {
-  resetFixture({ seed: {}, flakyWrite: true });
-  const run = await runProbe();
-  assert.equal(run.code, 1);
-  assert.equal(receipt(run).step, 'mutate.set');
-  assertNoSecrets(run, 'ambiguous-write');
+test('concurrent mate drift before mutation is not overwritten', async (t) => {
+  const f = await fixture(t, { [MATE]: '9' }, { afterGet({ key, reads, store }) {
+    if (key === MATE && reads.get(MATE) === 1) store.set(MATE, '11');
+  } });
+  const r = await f.run();
+  assert.notEqual(r.code, 0); assert.equal(f.writes.length, 0); assert.equal(f.store.get(MATE), '11');
 });
 
-test('restore failure is nonzero and names manual recovery', async () => {
-  resetFixture({ seed: {}, failRestore: true });
-  const run = await runProbe();
-  assert.equal(run.code, 1);
-  assertNoSecrets(run, 'restore-failure');
+test('concurrent writer before cleanup is not silently overwritten or reported PASS', async (t) => {
+  const f = await fixture(t, {}, { afterGet({ key, writes, store }) {
+    if (key === MATE && writes.length === 2) store.set(MATE, '11');
+  } });
+  const r = await f.run();
+  assert.equal(r.code, 1); assert.equal(r.receipt.cleanup, 'recovery-required');
+  assert.equal(f.store.get(MATE), '11'); assert.equal(f.writes.length, 2);
 });
 
-test('wrong app identity refuses before any mutation', async () => {
-  resetFixture({ seed: {} });
-  const run = await runProbe({ COOLIFY_APP_UUID: 'wrong-app-id' });
-  assert.equal(run.code, 2);
-  assert.equal(receipt(run).step, 'preflight.app');
-  assert.ok(!store.has(KEY), 'nothing was written');
-});
-
-test('wrong guild identity refuses before any mutation', async () => {
-  resetFixture({ seed: {} });
-  const run = await runProbe({ DISCORD_GUILD_ID: '326474832151838730' });
-  assert.equal(run.code, 2);
-  assert.equal(receipt(run).step, 'preflight.guild');
-  assert.ok(!store.has(KEY), 'nothing was written');
-});
-
-test('missing flags refuse before any mutation', async () => {
-  resetFixture({ seed: {} });
-  const run = await runProbe({ TWO_INTERNAL_ALLOW_SETTINGS: '0' });
-  assert.equal(run.code, 2);
-  assert.equal(receipt(run).step, 'preflight.flags');
-  assert.ok(!store.has(KEY), 'nothing was written');
-});
-
-test('non-loopback endpoint refuses before any mutation', async () => {
-  resetFixture({ seed: {} });
-  const run = await runProbe({ INTERNAL_ACTIONS_URL: 'http://10.0.0.9:8787' });
-  assert.equal(run.code, 2);
-  assert.equal(receipt(run).step, 'preflight.url');
-});
-
-test('concurrent pre-state change cannot be silently overwritten', async () => {
-  // The fixture flips the key between the probe's two pre-state reads.
-  resetFixture({ seed: {} });
-  let reads = 0;
-  const origGet = store.has.bind(store);
-  store.has = (k) => {
-    if (k === KEY) {
-      reads += 1;
-      if (reads === 2) store.set(KEY, 'concurrent');
+test('cache lag cannot turn a presence-only read into a successful roundtrip', async (t) => {
+  let lag = 2;
+  const f = await fixture(t, { [KEY]: 9 }, { get({ key, writes, send }) {
+    if (key === KEY && writes.length === 1 && lag-- > 0) {
+      send(200, { ok: true, result: { key, source: 'store', value: 9 } }); return true;
     }
-    return origGet(k);
-  };
-  const run = await runProbe();
-  assert.equal(run.code, 1);
-  assert.equal(receipt(run).step, 'prestate.stable');
+  } });
+  const r = await f.run();
+  assert.equal(r.code, 0); assert.equal(lag, -1);
+  assert.deepEqual(f.store, new Map([[KEY, 9]]));
 });
 
-test('canonical newline serialization matches the endpoint', () => {
-  // The old packet's join('\n') shape, verified against the same construction
-  // src/internal/signing.ts uses: POST, path, timestamp, nonce, body hash.
-  const raw = Buffer.from(JSON.stringify({ action: 'settings.get', key: KEY }));
-  const canon = ['POST', '/internal/actions', '1700000000', 'abc', bodyHash(raw)].join('\n');
-  assert.equal(canon.split('\n').length, 5);
-  assert.ok(expectedSig(SECRET, '1700000000', 'abc', raw).startsWith('sha256='));
-  void randomUUID;
+for (const [name, overrides] of [
+  ['wrong app', { STAGING_APP_UUID: 'production' }],
+  ['wrong runtime', { PROOF_RUNTIME_REVISION: SOURCE }],
+  ['missing runtime', { PROOF_RUNTIME_REVISION: '' }],
+  ['missing source', { PROOF_SOURCE_SHA: '' }],
+  ['wrong guild', { DISCORD_GUILD_ID: '326474832151838730' }],
+  ['missing guild', { DISCORD_GUILD_ID: '' }],
+  ['missing flag', { TWO_INTERNAL_ALLOW_SETTINGS: '0' }],
+  ['malformed signing key', { TWO_INTERNAL_KEYS: 'no-colon' }],
+  ['no exclusive window', { PROOF_EXCLUSIVE_WINDOW: '' }],
+  ['public endpoint', { INTERNAL_ACTIONS_URL: 'https://example.invalid' }],
+  ['URL credentials', { INTERNAL_ACTIONS_URL: 'http://user:secret@127.0.0.1:8787' }],
+]) {
+  test(`${name} refuses before mutation`, async (t) => {
+    const f = await fixture(t);
+    const r = await f.run(overrides);
+    assert.equal(r.code, 2); assert.equal(f.writes.length, 0);
+  });
+}
+
+test('malformed stored value refuses rather than writes an unreviewed recovery value', async (t) => {
+  const f = await fixture(t, { [MATE]: { unsafe: 'not numeric' } });
+  const r = await f.run();
+  assert.equal(r.code, 2); assert.equal(f.writes.length, 0);
+});
+
+test('redirect is not followed with signing headers', async (t) => {
+  let requests = 0;
+  const f = await fixture(t, {}, { get({ res }) {
+    requests++; res.writeHead(307, { location: '/stolen' }); res.end(); return true;
+  } });
+  const r = await f.run();
+  assert.equal(r.code, 2); assert.equal(requests, 1); assert.equal(f.writes.length, 0);
 });

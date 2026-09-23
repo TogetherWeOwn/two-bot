@@ -1,227 +1,252 @@
-/**
- * TOG-4104 staging proof: `settings.get` / `settings.set` through the signed
- * internal-actions endpoint, with the actual pre-state restored afterward.
- *
- * Runs INSIDE the staging container (loopback only) so it uses the live
- * signing keys without copying them anywhere:
- *
- *   docker cp ops/tog-4104/settings-signed-proof.mjs <container>:/tmp/settings-proof.mjs
- *   docker exec -i <container> sh -c 'node /tmp/settings-proof.mjs'
- *
- * The proof key MUST be a live-wired pair at the accepted runtime revision:
- * `TWO_RAID_JOIN_THRESHOLD` with its mate `TWO_RAID_WINDOW_SECONDS`. Both are
- * `hot` in `src/core/settingsCatalog.ts` AND in `HOT_WIRED`, both feed live
- * consumers through `liveCfg` thunks (`RaidWatch` at `src/index.ts`), and both
- * are enforced in both directions by `test/unit.settingscatalog.test.ts`
- * ("hot-wired keys are a subset of hot keys" + "every hot-wired key has a
- * Config field the reload line can name, and vice versa"). A hot-but-unwired
- * key would store cleanly while the running bot ignored it; a cold key would
- * need a restart to take effect. The old packet's
- * `DISCORD_SESSION_LOBBY_VOICE_CHANNEL_ID` is hot-but-UNWIRED at the live
- * revision (read once into `cfg` at boot), and its `proof-<uuid>` value is
- * not a real channel id - so it proves the store, not the behaviour. The
- * raid pair is numeric tuning with a live reload path, so a stored value
- * changes what the running bot does at the next 15s poll and the cleanup
- * restores exactly that.
- *
- * Exit codes: 0 PROOF PASS (round-trip verified AND pre-state restored) -
- * 1 PROOF FAIL (assertion or restore failed; see which step) -
- * 2 misconfigured / preflight refusal (nothing was mutated).
- *
- * Nothing secret is printed: no keys, no signatures, no setting values. The
- * receipt carries shapes (source/presence/outcome), never values.
+#!/usr/bin/env node
+/** Staging-only signed proof. Run through run-proof.sh; never print response bodies.
+ * The live API has no compare-and-set. An externally exclusive writer window is
+ * REQUIRED, including recovery. Read guards detect drift, not atomic exclusion.
+ * Exact pre-state is retained in an authenticated encrypted, container-local
+ * journal before any write. Recovery uses the same signed API, not ad-hoc SQL.
  */
-import { createHash, createHmac, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomUUID, randomBytes, hkdfSync, createCipheriv, createDecipheriv } from 'node:crypto';
+import { open, mkdir, lstat, rename, unlink, readFile } from 'node:fs/promises';
+import { constants } from 'node:fs';
+import { join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
+import { setTimeout as sleep } from 'node:timers/promises';
 
+const APP = 'uy4d9ndeygjcem6lgayhxgub';
+const GUILD = '1545644954272137297';
+const RUNTIME = 'f5fd3e1d6d08847589d3bf48ebc0b0e198196e90';
 const PATH = '/internal/actions';
-const EXPECTED_APP = 'uy4d9ndeygjcem6lgayhxgub';
-const EXPECTED_GUILD = '1545644954272137297';
-const EXPECTED_RUNTIME = 'f5fd3e1d6d08847589d3bf48ebc0b0e198196e90';
-// Both keys move together so the pair is never left half-changed.
-const KEY = 'TWO_RAID_JOIN_THRESHOLD';
-const MATE_KEY = 'TWO_RAID_WINDOW_SECONDS';
 const ACTOR = '900000000000009999';
+const KEYS = ['TWO_RAID_JOIN_THRESHOLD', 'TWO_RAID_WINDOW_SECONDS'];
+const FIXTURES = ['7', '42'];
+const mode = process.argv[2] ?? 'run';
+let stage = 'preflight', state, secret, kid, url, encryptionKey;
+let dir, journal, lock, lockOwned = false, interrupted = false, uncertain = false;
+const check = (condition, code) => { if (!condition) throw new Error(code); };
+const same = isDeepStrictEqual;
+const fixture = (i) => ({ source: 'store', value: FIXTURES[i] });
+const validValue = (value) => (typeof value === 'string' && /^\d{1,6}$/.test(value) || typeof value === 'number') &&
+  Number.isSafeInteger(Number(value)) && Number(value) > 0 && Number(value) <= 3600;
+const uuid = (v) => typeof v === 'string' && /^[0-9a-f-]{36}$/.test(v);
 
-function fail(code, step, detail) {
-  console.log(JSON.stringify({ verdict: code === 2 ? 'REFUSED' : 'PROOF FAIL', step, detail }));
-  process.exit(code);
+function preflight() {
+  check(['run', 'recover'].includes(mode), 'preflight.mode');
+  check(process.env.STAGING_APP_UUID === APP, 'preflight.app');
+  check(process.env.PROOF_RUNTIME_REVISION === RUNTIME, 'preflight.runtime');
+  check(process.env.DISCORD_GUILD_ID === GUILD, 'preflight.guild');
+  check(/^[a-f0-9]{40}$/.test(process.env.PROOF_SOURCE_SHA ?? ''), 'preflight.source');
+  check(process.env.PROOF_EXCLUSIVE_WINDOW === 'staging-writers-quiesced', 'preflight.exclusivity');
+  check(process.env.TWO_INTERNAL_ACTIONS === '1' && process.env.TWO_INTERNAL_ALLOW_SETTINGS === '1', 'preflight.flags');
+  const entry = (process.env.TWO_INTERNAL_KEYS ?? '').split(',')[0].trim();
+  const at = entry.indexOf(':');
+  check(at > 0 && at < entry.length - 1, 'preflight.keys');
+  kid = entry.slice(0, at); secret = entry.slice(at + 1);
+  check(/^[A-Za-z0-9_-]+$/.test(kid), 'preflight.keys');
+  url = new URL(process.env.INTERNAL_ACTIONS_URL ?? 'http://127.0.0.1:8787');
+  check(url.protocol === 'http:' && ['127.0.0.1', '[::1]'].includes(url.hostname) &&
+    !url.username && !url.password && !url.search && !url.hash && url.pathname === '/', 'preflight.url');
+  url.pathname = PATH;
+  encryptionKey = hkdfSync('sha256', secret, APP, 'tog-4104-private-recovery-v2', 32);
 }
 
-const app = process.env.COOLIFY_APP_UUID ?? process.env.STAGING_APP_UUID ?? '';
-if (!app) fail(2, 'preflight.app', 'Set COOLIFY_APP_UUID (or STAGING_APP_UUID) to the staging app id.');
-if (app !== EXPECTED_APP) fail(2, 'preflight.app', `Wrong app: expected ${EXPECTED_APP}. Refusing.`);
+async function privateFile(path) {
+  const s = await lstat(path);
+  check(s.isFile() && s.uid === process.getuid() && (s.mode & 0o777) === 0o600 && s.nlink === 1, 'journal.permissions');
+}
+async function acquire() {
+  dir = process.env.PROOF_STATE_DIR ?? '/tmp/tog-4104-private';
+  check(dir.startsWith('/'), 'journal.path');
+  await mkdir(dir, { mode: 0o700, recursive: false }).catch((e) => { if (e.code !== 'EEXIST') throw e; });
+  const s = await lstat(dir);
+  check(s.isDirectory() && s.uid === process.getuid() && (s.mode & 0o777) === 0o700, 'journal.permissions');
+  journal = join(dir, 'recovery.enc'); lock = join(dir, 'process.lock');
+  if (mode === 'recover') {
+    try {
+      await privateFile(lock);
+      const pid = Number(await readFile(lock, 'utf8'));
+      check(Number.isSafeInteger(pid) && pid > 0, 'journal.lock');
+      let dead = false;
+      try { process.kill(pid, 0); } catch (e) { if (e.code === 'ESRCH') dead = true; }
+      check(dead, 'journal.busy');
+      await unlink(lock);
+    } catch (e) { if (e.code !== 'ENOENT') throw e; }
+  }
+  const f = await open(lock, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+  lockOwned = true;
+  try { await f.writeFile(String(process.pid)); await f.sync(); } finally { await f.close(); }
+}
+async function save() {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', encryptionKey, iv);
+  const data = Buffer.concat([cipher.update(JSON.stringify(state)), cipher.final()]);
+  const bytes = Buffer.concat([iv, cipher.getAuthTag(), data]);
+  const tmp = join(dir, `journal-${randomUUID()}.enc`);
+  const f = await open(tmp, 'wx', 0o600);
+  try { await f.writeFile(bytes); await f.sync(); } finally { await f.close(); }
+  await rename(tmp, journal);
+  const d = await open(dir, 'r');
+  try { await d.sync(); } finally { await d.close(); }
+}
+async function load() {
+  await privateFile(journal);
+  const bytes = await readFile(journal);
+  const decipher = createDecipheriv('aes-256-gcm', encryptionKey, bytes.subarray(0, 12));
+  decipher.setAuthTag(bytes.subarray(12, 28));
+  const data = JSON.parse(Buffer.concat([decipher.update(bytes.subarray(28)), decipher.final()]).toString());
+  check(data.version === 2 && data.runtime === RUNTIME && data.source === process.env.PROOF_SOURCE_SHA &&
+    data.endpoint === url.href && uuid(data.run) && Array.isArray(data.entries) && data.entries.length === 2, 'journal.identity');
+  data.entries.forEach((e, i) => {
+    check(e.key === KEYS[i] && uuid(e.writeId) && uuid(e.restoreId) &&
+      ['captured', 'writePending', 'written', 'restorePending', 'restored'].includes(e.phase) &&
+      (e.pre?.source === 'unset' && e.pre.value === null || e.pre?.source === 'store' && validValue(e.pre.value)), 'journal.schema');
+  });
+  return data;
+}
 
-const base = process.env.INTERNAL_ACTIONS_URL ?? 'http://127.0.0.1:8787';
-let url;
-try {
-  url = new URL(PATH, base);
-} catch {
-  fail(2, 'preflight.url', 'INTERNAL_ACTIONS_URL is not a URL.');
-}
-if (url.protocol !== 'http:') fail(2, 'preflight.url', 'Only http loopback is allowed.');
-if (!['127.0.0.1', 'localhost', '::1'].includes(url.hostname)) {
-  fail(2, 'preflight.url', 'Only loopback is allowed. The endpoint refuses public binds; so does this proof.');
-}
-
-const entry = (process.env.TWO_INTERNAL_KEYS ?? '').split(',').map((s) => s.trim()).filter(Boolean)[0] ?? '';
-const at = entry.indexOf(':');
-const kid = entry.slice(0, at);
-const secret = entry.slice(at + 1);
-if (!kid || !secret) fail(2, 'preflight.keys', 'No usable TWO_INTERNAL_KEYS entry.');
-if (process.env.TWO_INTERNAL_ACTIONS !== '1' || process.env.TWO_INTERNAL_ALLOW_SETTINGS !== '1') {
-  fail(2, 'preflight.flags', 'TWO_INTERNAL_ACTIONS and TWO_INTERNAL_ALLOW_SETTINGS must both be 1.');
-}
-if (process.env.DISCORD_GUILD_ID && process.env.DISCORD_GUILD_ID !== EXPECTED_GUILD) {
-  fail(2, 'preflight.guild', 'DISCORD_GUILD_ID is not the TWO Staging guild. Refusing.');
-}
-
-function sign(timestamp, nonce, raw) {
-  const canon = ['POST', PATH, timestamp, nonce, createHash('sha256').update(raw).digest('hex')].join('\n');
-  return 'sha256=' + createHmac('sha256', secret).update(canon).digest('hex');
-}
-
-async function send(body, { tamperBody = false, tamperSig = false, idem = null, keyId = kid } = {}) {
-  let raw = Buffer.from(JSON.stringify(body));
+async function send(body, { idem, badSignature = false, badBody = false, unknownKey = false } = {}) {
+  let raw = JSON.stringify(body);
   const ts = String(Math.floor(Date.now() / 1000));
   const nonce = randomUUID().replaceAll('-', '');
-  let sig = sign(ts, nonce, raw);
-  // Tamper the BODY after signing (the attack shape: a signature valid for a
-  // body we are not sending). Flipping a hex digit tests nothing - the real
-  // endpoint compares equal-length strings exactly.
-  if (tamperBody) {
-    const wire = Buffer.from(raw);
-    const i = wire.indexOf(0x7b) + 1;
-    wire[i] = wire[i] ^ 0x01;
-    raw = wire;
-  }
-  if (tamperSig) sig = 'sha256=' + '0'.repeat(64);
+  const canonical = ['POST', PATH, ts, nonce, createHash('sha256').update(raw).digest('hex')].join('\n');
+  const sig = 'sha256=' + createHmac('sha256', secret).update(canonical).digest('hex');
+  if (badBody) raw += ' ';
   const res = await fetch(url, {
-    method: 'POST',
-    body: raw,
-    signal: AbortSignal.timeout(30_000),
-    headers: {
-      'content-type': 'application/json',
-      'x-two-key-id': keyId,
-      'x-two-timestamp': ts,
-      'x-two-nonce': nonce,
-      'x-two-signature': sig,
-      ...(idem ? { 'idempotency-key': idem } : {}),
-    },
+    method: 'POST', redirect: 'error', signal: AbortSignal.timeout(30_000), body: raw,
+    headers: { 'content-type': 'application/json', 'x-two-key-id': unknownKey ? 'tog4104-unknown' : kid,
+      'x-two-timestamp': ts, 'x-two-nonce': nonce, 'x-two-signature': badSignature ? 'invalid' : sig,
+      ...(idem ? { 'idempotency-key': idem } : {}) },
   });
-  let json = null;
-  try {
-    json = await res.json();
-  } catch {
-    json = { unparseable: true };
+  return { status: res.status, json: await res.json() };
+}
+async function read(i) {
+  const r = await send({ action: 'settings.get', key: KEYS[i] });
+  check(r.status === 200 && r.json?.ok === true && r.json.result?.key === KEYS[i], 'read.contract');
+  const { source, value } = r.json.result;
+  check(source === 'unset' && value === null || source === 'store' && validValue(value), 'read.state');
+  return { source, value };
+}
+async function readEquals(i, expected) {
+  // settings.get reads a cache; SettingsStore.set does NOT refresh it. Give the
+  // real 15s poll time to observe a completed write, but never accept presence only.
+  for (let n = 0; n < 21; n++) {
+    if (same(await read(i), expected)) return;
+    if (n < 20) await sleep(1000);
   }
-  return { status: res.status, json };
+  throw new Error('readback.mismatch');
+}
+async function guard() {
+  for (let i = 0; i < 2; i++) {
+    const e = state.entries[i];
+    const current = await read(i);
+    const expected = ['written', 'writePending'].includes(e.phase) ? fixture(i) : e.pre;
+    check(same(current, expected), 'guard.concurrent-change');
+  }
+}
+async function write(i, restoring = false) {
+  const e = state.entries[i];
+  const value = restoring ? e.pre.value : FIXTURES[i];
+  // Reuse exactly the body and idempotency key on response loss. At most one
+  // reconciliation attempt; never declare success from a mere matching read.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const r = await send({ action: 'settings.set', key: e.key, value, updated_by: ACTOR },
+        { idem: restoring ? e.restoreId : e.writeId });
+      check(r.status === 200 && r.json?.ok === true && r.json.result?.key === e.key &&
+        r.json.result.outcome === (value === null ? 'unset' : 'saved'), 'write.contract');
+      return;
+    } catch {
+      uncertain = true;
+    }
+  }
+  throw new Error('write.unconfirmed');
+}
+async function cleanup() {
+  for (let i = 1; i >= 0; i--) {
+    const e = state.entries[i];
+    if (e.phase === 'captured' || e.phase === 'restored') continue;
+    if (e.phase === 'writePending') {
+      const current = await read(i);
+      check(same(current, fixture(i)) || same(current, e.pre), 'guard.concurrent-change');
+      await write(i);
+      e.phase = 'written'; await save();
+      await readEquals(i, fixture(i));
+    }
+    if (e.phase === 'written') {
+      // No value- or presence-only restore, including the mate. Refuse unknown
+      // state rather than overwriting a writer that violated the exclusive window.
+      check(same(await read(i), fixture(i)), 'guard.concurrent-change');
+      e.phase = 'restorePending'; await save();
+    } else {
+      const current = await read(i);
+      check(same(current, fixture(i)) || same(current, e.pre), 'guard.concurrent-change');
+    }
+    await write(i, true);
+    await readEquals(i, e.pre);
+    e.phase = 'restored'; await save();
+  }
+  for (let i = 0; i < 2; i++) check(same(await read(i), state.entries[i].pre), 'cleanup.verify');
+  await unlink(journal);
+}
+async function negatives() {
+  const cases = [
+    [{ action: 'settings.get', key: 'TWO_INTERNAL_ALLOW_SETTINGS' }, {}, 403, 'action_not_allowed'],
+    [{ action: 'settings.get', key: 'TWO_PROOF_UNREVIEWED_KEY' }, {}, 403, 'action_not_allowed'],
+    [{ action: 'proof.not_allowlisted' }, {}, 403, 'action_not_allowed'],
+    [{ action: 'settings.get', key: KEYS[0] }, { badSignature: true }, 401, 'unauthorized'],
+    [{ action: 'settings.get', key: KEYS[0] }, { badBody: true }, 401, 'unauthorized'],
+    [{ action: 'settings.get', key: KEYS[0] }, { unknownKey: true }, 401, 'unauthorized'],
+  ];
+  for (const [body, options, status, code] of cases) {
+    const r = await send(body, options);
+    check(r.status === status && r.json?.error?.code === code, 'negative.control');
+  }
 }
 
-const get = (key, opts) => send({ action: 'settings.get', key }, opts);
-const set = (key, value) =>
-  send({ action: 'settings.set', key, value, updated_by: ACTOR }, { idem: randomUUID() });
-
-function storedOf(resp) {
-  // Store-shaped answers only. `source` distinguishes "row present" from
-  // "reading from the environment"; the value itself never leaves this process.
-  if (resp.status !== 200 || !resp.json?.ok) return { known: false };
-  const r = resp.json.result;
-  if (r?.source === 'store') return { known: true, present: true };
-  if (r?.source === 'unset') return { known: true, present: false };
-  return { known: false };
+let exit = 2, cleanupResult = 'not-started', failed = false;
+try {
+  preflight(); await acquire();
+  if (mode === 'recover') {
+    stage = 'recovery'; state = await load();
+    await cleanup(); cleanupResult = 'exact-prestate-verified'; exit = 0;
+  } else {
+    try { await lstat(journal); throw new Error('journal.recovery-required'); }
+    catch (e) { if (e.code !== 'ENOENT') throw e; }
+    stage = 'capture';
+    const pre = [await read(0), await read(1)];
+    state = { version: 2, runtime: RUNTIME, source: process.env.PROOF_SOURCE_SHA, endpoint: url.href,
+      run: randomUUID(), entries: KEYS.map((key, i) => ({ key, pre: pre[i], phase: 'captured',
+        writeId: randomUUID(), restoreId: randomUUID() })) };
+    await guard();
+    stage = 'negative'; await negatives();
+    await save();
+    for (const signal of ['SIGTERM', 'SIGINT']) process.on(signal, () => { interrupted = true; });
+    try {
+      for (let i = 0; i < 2; i++) {
+        stage = 'mutation'; check(!interrupted, 'interrupted'); await guard();
+        state.entries[i].phase = 'writePending'; await save();
+        await write(i);
+        state.entries[i].phase = 'written'; await save();
+        stage = 'roundtrip'; await readEquals(i, fixture(i));
+      }
+    } catch { failed = true; }
+    finally {
+      stage = 'cleanup';
+      try { await cleanup(); cleanupResult = 'exact-prestate-verified'; }
+      catch { cleanupResult = 'recovery-required'; failed = true; }
+    }
+    exit = failed || uncertain || interrupted ? 1 : 0;
+  }
+} catch {
+  if (state?.entries.some((e) => e.phase !== 'captured')) { exit = 1; cleanupResult = 'recovery-required'; }
+  // Deliberately do not print exception text, stack, URL, response, or journal.
+} finally {
+  if (lockOwned) await unlink(lock).catch(() => { exit = 1; });
 }
-
-// --- 1. capture the actual pre-state (stored vs environment fallback) ---
-const preGet = await get(KEY);
-const preMateGet = await get(MATE_KEY);
-const pre = storedOf(preGet);
-const preMate = storedOf(preMateGet);
-if (!pre.known || !preMate.known) fail(1, 'prestate.read', 'Pre-state read did not return a store-shaped answer.');
-// A concurrent writer between the two reads is a stop, not a merge.
-const recheck = storedOf(await get(KEY));
-if (recheck.present !== pre.present) {
-  fail(1, 'prestate.stable', 'Pre-state moved between the two reads. Stop; do not clobber a concurrent writer.');
-}
-
-// --- 2. negative controls (no mutation yet) ---
-// env-only refusal: the flag that gates this very action must refuse.
-const envOnly = await get('TWO_INTERNAL_ALLOW_SETTINGS');
-if (!(envOnly.status === 403 && envOnly.json?.error?.code === 'action_not_allowed')) {
-  fail(1, 'negative.env-only', `Expected 403 action_not_allowed, got HTTP ${envOnly.status}.`);
-}
-// malformed signature: HMAC failure, NOT a website-permission proof.
-const badBody = await get(KEY, { tamperBody: true });
-if (!(badBody.status === 401 && badBody.json?.error?.code === 'unauthorized')) {
-  fail(1, 'negative.signature', `Expected 401 unauthorized, got HTTP ${badBody.status}.`);
-}
-const badSig = await get(KEY, { tamperSig: true });
-if (!(badSig.status === 401 && badSig.json?.error?.code === 'unauthorized')) {
-  fail(1, 'negative.signature', `Expected 401 unauthorized, got HTTP ${badSig.status}.`);
-}
-// unknown key id is indistinguishable from a bad signature.
-const unknown = await send({ action: 'settings.get', key: KEY }, { keyId: 'no-such-key' });
-if (!(unknown.status === 401 && unknown.json?.error?.code === 'unauthorized')) {
-  fail(1, 'negative.unknown-key', `Expected 401 unauthorized, got HTTP ${unknown.status}.`);
-}
-
-// --- 3. bounded mutation on the live-wired pair ---
-const fixture = '7';
-const mateFixture = '42';
-const setResp = await set(KEY, fixture);
-if (!(setResp.status === 200 && setResp.json?.ok === true && setResp.json?.result?.outcome === 'saved')) {
-  fail(1, 'mutate.set', `HTTP ${setResp.status}.`);
-}
-const mateSetResp = await set(MATE_KEY, mateFixture);
-if (!(mateSetResp.status === 200 && mateSetResp.json?.ok === true)) {
-  fail(1, 'mutate.mate-set', `HTTP ${mateSetResp.status}.`);
-}
-const readBack = await get(KEY);
-// settings.set returns no value by design (the result is replayed), so the
-// readback is the assertion: source store AND the value we wrote.
-if (
-  !(readBack.status === 200 && readBack.json?.ok === true && readBack.json?.result?.source === 'store')
-) {
-  fail(1, 'assert.readback', `HTTP ${readBack.status}.`);
-}
-
-// --- 4. cleanup: restore the exact pre-state, then verify it ---
-// The pre-state value is never held in this process beyond what the endpoint
-// already knows: restore replays the captured presence. When the key was
-// stored before, the only value-blind restore is the audit trail's old_value,
-// which the runbook reads with a redacted presence check - never printed.
-let cleanup;
-if (pre.present) {
-  // Presence was captured; the VALUE restore happens via the runbook's
-  // value-blind audit SQL (old_value written back without display). If that
-  // path is unavailable, fail closed rather than unsetting a stored key.
-  fail(1, 'cleanup.stored-needs-audit-restore', 'Key was stored before the run: restore old_value from guild_settings_audit per the runbook, then re-run readback. Refusing to unset a stored key.');
-} else {
-  cleanup = await set(KEY, null);
-}
-if (!(cleanup.status === 200 && cleanup.json?.ok === true && cleanup.json?.result?.outcome === 'unset')) {
-  fail(1, 'cleanup.unset', `HTTP ${cleanup.status}. Restore manually per the runbook; do not report PASS.`);
-}
-const mateCleanup = preMate.present
-  ? null
-  : await set(MATE_KEY, null);
-if (mateCleanup && !(mateCleanup.status === 200 && mateCleanup.json?.ok === true)) {
-  fail(1, 'cleanup.mate-unset', `HTTP ${mateCleanup.status}. Restore manually per the runbook.`);
-}
-const verify = storedOf(await get(KEY));
-const verifyMate = storedOf(await get(MATE_KEY));
-if (!verify.known || verify.present !== pre.present) {
-  fail(1, 'cleanup.verify', 'Readback does not match the captured pre-state. Restore manually per the runbook.');
-}
-if (!verifyMate.known || verifyMate.present !== preMate.present) {
-  fail(1, 'cleanup.mate-verify', 'Mate readback does not match the captured pre-state.');
-}
-
 console.log(JSON.stringify({
-  verdict: 'PROOF PASS',
-  runtime: EXPECTED_RUNTIME,
-  preState: { key: KEY, hadRow: pre.present, mateHadRow: preMate.present },
-  roundTrip: 'saved/store-readback',
-  negative: 'env-only 403; tampered 401; unknown-key 401',
-  cleanup: pre.present ? 'AUDIT-RESTORE-REQUIRED' : 'unset + readback-verified',
-  note: 'HMAC 401 is not a website non-admin denial proof; that gap needs the website contract suite.',
+  verdict: exit === 0 ? (mode === 'recover' ? 'RECOVERED' : 'PROOF PASS') : exit === 2 ? 'REFUSED' : 'PROOF FAIL',
+  stage, runtime: RUNTIME, proofSource: process.env.PROOF_SOURCE_SHA?.match(/^[a-f0-9]{40}$/)?.[0] ?? null,
+  preState: state?.entries.map((e) => ({ key: e.key, hadRow: e.pre.source === 'store' })) ?? null,
+  cleanup: cleanupResult, responseUncertainty: uncertain,
+  note: 'Requires exclusive staging writers; no website non-admin or full-runtime acceptance claim.',
 }));
+process.exitCode = exit;
