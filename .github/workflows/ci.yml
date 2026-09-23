@@ -65,18 +65,13 @@ jobs:
       # which makes npm silently skip devDependencies and typecheck disappears.
       - run: npm ci --include=dev
 
-      # Node strips types, it does not check them. Without this step type
-      # errors reach production perfectly happily.
-      - run: npm run typecheck
-
-      # The required `check` context runs the complete Postgres-backed suite.
-      - run: npm run test:postgres
-
-      # The TOG-64 grant check ships its own six cases and needs neither a token
-      # nor the network, so there is no reason for it to rot untested. It is the
-      # only check that fails on a half-applied grant; if its bit arithmetic
-      # breaks, the de-escalation silently stops being verifiable.
-      - run: npm run verify:grant:selftest
+      # Keep typecheck, the service-DB suite, owned-cluster restart tests and the
+      # grant self-test on the required check path. The wrapper's execution
+      # tests pin order and fail-fast propagation, not just YAML command text.
+      # Owned storage provisions integrity-pinned binaries in private scratch;
+      # the service container/ambient database settings never reach its child.
+      - name: Run required checks including owned storage
+        run: ./scripts/ci/run-check-job.sh
 
   # Exercise the website views and least-privilege grants end to end after the
   # required check has proved the full Postgres-backed suite.
