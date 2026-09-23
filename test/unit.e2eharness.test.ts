@@ -1,0 +1,369 @@
+/**
+ * The session fence and the flow runner (TOG-3978).
+ *
+ * `unit.e2eguard.test.ts` covers the volume conditions. This file covers the
+ * other two: the harness only ever points at TWO Staging, and only one session
+ * exists at a time. Then it covers the runner's contract, which is the reason a
+ * single run can serve four blocked cards - a failed assertion is about the BOT
+ * and the next flow still runs, a halt is about the ACCOUNT and everything
+ * stops.
+ *
+ * The transport here is a fake with a scripted status per call. No socket is
+ * opened and no credential is read from the real environment: `openSession`
+ * takes an injected `CredentialSource`, so the token in these tests is a string
+ * in this file's scope and nothing else.
+ */
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+
+import { HarnessGuard, type Acted, type HarnessClock } from '../src/e2e/guard.ts';
+import {
+  E2E_TOKEN_ENV,
+  assertStagingGuild,
+  openSession,
+  sessionIsOpen,
+} from '../src/e2e/session.ts';
+import type { GatewayEvent, HarnessTransport } from '../src/e2e/transport.ts';
+import { FLOWS, flowByKey, missingTargets, type FlowTargets } from '../src/e2e/flows.ts';
+import { exitCodeFor, runFlows } from '../src/e2e/runner.ts';
+import { LIVE_GUILD_ID, TWO_STAGING_GUILD_ID } from '../src/staging/spec.ts';
+
+const FAKE_TOKEN = 'not.a.real.token';
+
+function instantClock(): HarnessClock {
+  let t = 0;
+  return { now: () => t, sleep: async (ms) => void (t += ms) };
+}
+
+/** A guard with real budgets but no wall-clock cost. Pacing is tested elsewhere. */
+function fastGuard(): HarnessGuard {
+  return new HarnessGuard({ clock: instantClock(), random: () => 0 });
+}
+
+/**
+ * A transport that records every call and answers from a script.
+ *
+ * `statuses` maps a verb (or `verb:n` for the nth call of it) to the status to
+ * return, so a test can make exactly one action in the middle of a flow fail.
+ * `events` is the gateway traffic per event name: `awaitEvent` returns the
+ * first entry the predicate accepts, and an empty array means nothing matched
+ * before the timeout.
+ */
+class FakeTransport implements HarnessTransport {
+  readonly calls: string[] = [];
+  statuses: Record<string, number> = {};
+  events: Record<string, GatewayEvent[]> = {};
+
+  private counts: Record<string, number> = {};
+
+  private answer<T>(verb: string, value: T): Promise<Acted<T>> {
+    this.calls.push(verb);
+    const n = (this.counts[verb] = (this.counts[verb] ?? 0) + 1);
+    const status = this.statuses[`${verb}:${n}`] ?? this.statuses[verb] ?? 200;
+    return Promise.resolve({ status, value });
+  }
+
+  acceptRules(): Promise<Acted<void>> {
+    return this.answer('acceptRules', undefined);
+  }
+  sendMessage(): Promise<Acted<{ id: string }>> {
+    return this.answer('sendMessage', { id: 'msg' });
+  }
+  addReaction(): Promise<Acted<void>> {
+    return this.answer('addReaction', undefined);
+  }
+  clickButton(_channelId: string, _messageId: string, customId: string): Promise<Acted<void>> {
+    return this.answer(`clickButton:${customId}`, undefined);
+  }
+  joinVoice(): Promise<Acted<void>> {
+    return this.answer('joinVoice', undefined);
+  }
+  leaveVoice(): Promise<Acted<void>> {
+    return this.answer('leaveVoice', undefined);
+  }
+  awaitEvent(
+    name: string,
+    pred: (e: GatewayEvent) => boolean,
+  ): Promise<Acted<GatewayEvent | null>> {
+    this.calls.push(`awaitEvent:${name}`);
+    // The predicate is applied here, exactly as a real gateway client applies
+    // it: a fake that returned whatever it was handed could not fail a flow on
+    // a wrong userId, which is one of the things these flows exist to check.
+    const event = (this.events[name] ?? [{ name, data: {} }]).find(pred) ?? null;
+    // A timeout is reported as 504 by contract, and must NOT halt the session.
+    return Promise.resolve({ status: event ? 200 : 504, value: event });
+  }
+}
+
+const TARGETS: FlowTargets = {
+  guildId: TWO_STAGING_GUILD_ID,
+  accountId: 'account-1',
+  welcomeChannelId: 'welcome-1',
+  selfRolePanelChannelId: 'panel-1',
+  selfRolePanelMessageId: 'panel-msg-1',
+  selfRoleEmoji: 'ok',
+  selfRoleId: 'role-1',
+  ticketPanelChannelId: 'tickets-1',
+  ticketPanelMessageId: 'tickets-msg-1',
+  voiceLobbyChannelId: 'lobby-1',
+};
+
+function ctx(transport: FakeTransport, targets: FlowTargets = TARGETS) {
+  return { guard: fastGuard(), transport, targets, timeoutMs: 100 };
+}
+
+// --- the guild fence ---------------------------------------------------------
+
+test('the live guild is refused by name, not by a generic error', () => {
+  assert.throws(() => assertStagingGuild(LIVE_GUILD_ID), /live guild \(TogetherWeOwn\)/);
+  assert.throws(() => assertStagingGuild(LIVE_GUILD_ID), /new owner decision/);
+});
+
+test('any guild that is not staging is refused too', () => {
+  assert.throws(() => assertStagingGuild('123456789012345678'), /not the staging guild/);
+  assert.doesNotThrow(() => assertStagingGuild(TWO_STAGING_GUILD_ID));
+});
+
+// --- the session -------------------------------------------------------------
+
+const creds = (env: NodeJS.ProcessEnv) => ({ dir: null, env });
+
+test('openSession refuses the live guild before it reads any credential', async () => {
+  let read = false;
+  await assert.rejects(
+    () =>
+      openSession({
+        guildId: LIVE_GUILD_ID,
+        connect: () => {
+          read = true;
+          return new FakeTransport();
+        },
+        credentials: creds({ [E2E_TOKEN_ENV]: FAKE_TOKEN }),
+      }),
+    /live guild/,
+  );
+  assert.equal(read, false);
+  assert.equal(sessionIsOpen(), false);
+});
+
+test('a missing credential is refused by naming the env var, and says where it is not', async () => {
+  await assert.rejects(
+    () =>
+      openSession({
+        guildId: TWO_STAGING_GUILD_ID,
+        connect: () => new FakeTransport(),
+        credentials: creds({}),
+      }),
+    (err: unknown) => {
+      const msg = err instanceof Error ? err.message : '';
+      assert.match(msg, new RegExp(E2E_TOKEN_ENV));
+      assert.match(msg, /never read from a file in this repo/);
+      return true;
+    },
+  );
+  assert.equal(sessionIsOpen(), false);
+});
+
+test('one session at a time; close() releases it', async () => {
+  const open = () =>
+    openSession({
+      guildId: TWO_STAGING_GUILD_ID,
+      connect: (token) => {
+        assert.equal(token, FAKE_TOKEN, 'the transport is the only thing handed the credential');
+        return new FakeTransport();
+      },
+      credentials: creds({ [E2E_TOKEN_ENV]: FAKE_TOKEN }),
+    });
+
+  const first = await open();
+  assert.equal(sessionIsOpen(), true);
+  // Refused, not queued: two gateway connections from one user account is the
+  // most legible automation signal there is.
+  await assert.rejects(open, /a session is already open/);
+
+  first.close();
+  assert.equal(sessionIsOpen(), false);
+  const second = await open();
+  second.close();
+});
+
+test('a connect that throws does not strand the singleton', async () => {
+  await assert.rejects(
+    () =>
+      openSession({
+        guildId: TWO_STAGING_GUILD_ID,
+        connect: () => {
+          throw new Error('gateway refused');
+        },
+        credentials: creds({ [E2E_TOKEN_ENV]: FAKE_TOKEN }),
+      }),
+    /gateway refused/,
+  );
+  assert.equal(sessionIsOpen(), false, 'the next run in this process would be refused for nothing');
+});
+
+// --- the flows ---------------------------------------------------------------
+
+test('the join-screen flow accepts the rules and then waits for the bot, in that order', async () => {
+  const t = new FakeTransport();
+  t.events.guildMemberUpdate = [
+    { name: 'guildMemberUpdate', data: { userId: TARGETS.accountId, pending: false } },
+  ];
+  t.events.messageCreate = [
+    { name: 'messageCreate', data: { channelId: TARGETS.welcomeChannelId } },
+  ];
+
+  await flowByKey('join-screen')!.run(ctx(t));
+
+  assert.deepEqual(t.calls, [
+    'acceptRules',
+    'awaitEvent:guildMemberUpdate',
+    'awaitEvent:messageCreate',
+  ]);
+});
+
+test('the ticket flow presses open, claim and close with the bot\'s own customIds', async () => {
+  const t = new FakeTransport();
+  t.events.channelCreate = [{ name: 'channelCreate', data: { id: 'ticket-42' } }];
+  t.events.messageCreate = [{ name: 'messageCreate', data: { channelId: 'ticket-42' } }];
+  t.events.channelDelete = [{ name: 'channelDelete', data: { id: 'ticket-42' } }];
+
+  await flowByKey('ticket-buttons')!.run(ctx(t));
+
+  assert.deepEqual(t.calls, [
+    'clickButton:two:tickets:open',
+    'awaitEvent:channelCreate',
+    'clickButton:two:tickets:claim',
+    'awaitEvent:messageCreate',
+    'clickButton:two:tickets:close',
+    'awaitEvent:channelDelete',
+  ]);
+});
+
+test('a gateway event belonging to someone else does not satisfy an assertion', async () => {
+  const t = new FakeTransport();
+  // The role landed - on a different member. Without the userId check this
+  // would pass and TOG-2796 would be "proved" by a stranger's role.
+  t.events.guildMemberUpdate = [
+    { name: 'guildMemberUpdate', data: { userId: 'somebody-else', roles: [TARGETS.selfRoleId] } },
+  ];
+  const c = ctx(t);
+  const transcript = await runFlows([flowByKey('reaction')!], c, { dryRun: false });
+  assert.equal(transcript.flows[0]!.outcome, 'failed');
+});
+
+test('the voice flow requires being MOVED, not just a channel appearing', async () => {
+  const t = new FakeTransport();
+  t.events.channelCreate = [{ name: 'channelCreate', data: { id: 'spawned-1' } }];
+  t.events.channelDelete = [{ name: 'channelDelete', data: { id: 'spawned-1' } }];
+  // The bot made the channel but left the member sitting in the lobby, which is
+  // the half of TOG-3122 that a channelCreate alone would wrongly call a pass.
+  t.events.voiceStateUpdate = [
+    { name: 'voiceStateUpdate', data: { userId: TARGETS.accountId, channelId: TARGETS.voiceLobbyChannelId } },
+  ];
+
+  const stuck = await runFlows([flowByKey('voice-verify')!], ctx(t), { dryRun: false });
+  assert.equal(stuck.flows[0]!.outcome, 'failed');
+  assert.match(stuck.flows[0]!.detail!, /moved-into-channel/);
+
+  t.events.voiceStateUpdate = [
+    { name: 'voiceStateUpdate', data: { userId: TARGETS.accountId, channelId: 'spawned-1' } },
+  ];
+  const moved = await runFlows([flowByKey('voice-verify')!], ctx(t), { dryRun: false });
+  assert.equal(moved.flows[0]!.outcome, 'passed');
+});
+
+// --- the runner --------------------------------------------------------------
+
+test('a failed assertion fails one flow and the next flow still runs', async () => {
+  const t = new FakeTransport();
+  // The bot never opened the gate and never granted the role.
+  t.events.guildMemberUpdate = [];
+  // Both the welcome post and the ticket acknowledgement are on the wire; the
+  // predicate is what tells them apart.
+  t.events.messageCreate = [
+    { name: 'messageCreate', data: { channelId: TARGETS.welcomeChannelId } },
+    { name: 'messageCreate', data: { channelId: 'ticket-42' } },
+  ];
+  t.events.channelCreate = [{ name: 'channelCreate', data: { id: 'ticket-42' } }];
+  t.events.channelDelete = [{ name: 'channelDelete', data: { id: 'ticket-42' } }];
+
+  const transcript = await runFlows(
+    [flowByKey('join-screen')!, flowByKey('reaction')!, flowByKey('ticket-buttons')!],
+    ctx(t),
+    { dryRun: false },
+  );
+
+  assert.deepEqual(
+    transcript.flows.map((f) => f.outcome),
+    ['failed', 'failed', 'passed'],
+  );
+  assert.match(transcript.flows[0]!.detail!, /no guildMemberUpdate matched/);
+  assert.equal(transcript.halt, null, 'a 504 timeout must not halt the session');
+  assert.equal(exitCodeFor(transcript), 1);
+});
+
+test('a 403 mid-run halts and skips every remaining flow', async () => {
+  const t = new FakeTransport();
+  t.statuses.addReaction = 403;
+  t.events.guildMemberUpdate = [
+    { name: 'guildMemberUpdate', data: { userId: TARGETS.accountId, pending: false } },
+  ];
+  t.events.messageCreate = [
+    { name: 'messageCreate', data: { channelId: TARGETS.welcomeChannelId } },
+  ];
+
+  const transcript = await runFlows(
+    [flowByKey('join-screen')!, flowByKey('reaction')!, flowByKey('ticket-buttons')!],
+    ctx(t),
+    { dryRun: false },
+  );
+
+  assert.deepEqual(
+    transcript.flows.map((f) => f.outcome),
+    ['passed', 'halted', 'skipped'],
+  );
+  assert.equal(transcript.halt?.reason, 'forbidden');
+  assert.ok(
+    !t.calls.some((c) => c.startsWith('clickButton')),
+    'the harness kept poking Discord after a 403',
+  );
+  assert.equal(exitCodeFor(transcript), 2);
+});
+
+test('a half-configured run is refused before it spends any traffic', async () => {
+  const t = new FakeTransport();
+  const partial: FlowTargets = { ...TARGETS, voiceLobbyChannelId: '', selfRoleId: '' };
+  const transcript = await runFlows([flowByKey('voice-verify')!], ctx(t, partial), {
+    dryRun: false,
+  });
+
+  assert.equal(transcript.flows[0]!.outcome, 'skipped');
+  assert.match(transcript.flows[0]!.detail!, /missing targets: voiceLobbyChannelId/);
+  assert.deepEqual(t.calls, [], 'a skipped flow reached Discord');
+  assert.equal(exitCodeFor(transcript), 0);
+});
+
+test('missingTargets names only what the flow actually needs', () => {
+  const partial: FlowTargets = { ...TARGETS, voiceLobbyChannelId: '', selfRoleId: '' };
+  assert.deepEqual(missingTargets(flowByKey('voice-verify')!, partial), ['voiceLobbyChannelId']);
+  assert.deepEqual(missingTargets(flowByKey('reaction')!, partial), ['selfRoleId']);
+  assert.deepEqual(missingTargets(flowByKey('join-screen')!, partial), []);
+});
+
+test('the transcript is self-describing, non-secret, and marked as a dry run or not', async () => {
+  const t = new FakeTransport();
+  const transcript = await runFlows([flowByKey('join-screen')!], ctx(t), { dryRun: true });
+
+  assert.equal(transcript.dryRun, true, 'a dry run must never be mistakable for evidence');
+  assert.equal(transcript.guildId, TWO_STAGING_GUILD_ID);
+  assert.equal(transcript.limits.minGapMs, 2_000, 'the transcript states the pacing it ran under');
+  assert.ok(transcript.limits.maxMessagesPerRun < 10);
+  assert.ok(!JSON.stringify(transcript).includes(FAKE_TOKEN));
+});
+
+test('every flow names the card it unblocks, and the four cards are distinct', () => {
+  const unblocks = FLOWS.map((f) => f.unblocks);
+  assert.deepEqual(unblocks.slice().sort(), ['TOG-2796', 'TOG-3085', 'TOG-3122', 'TOG-3690']);
+  assert.equal(new Set(FLOWS.map((f) => f.key)).size, FLOWS.length);
+});
