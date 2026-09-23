@@ -24,7 +24,8 @@
  * those four cards must say false.
  */
 import { writeFileSync } from 'node:fs';
-import { FLOWS, flowByKey, type Flow, type FlowTargets } from '../src/e2e/flows.ts';
+import { FLOWS, flowByKey, missingTargets, type Flow, type FlowTargets } from '../src/e2e/flows.ts';
+import { DiscordHarnessTransport } from '../src/e2e/discordTransport.ts';
 import { HarnessGuard } from '../src/e2e/guard.ts';
 import { tripKillSwitch } from '../src/e2e/killSwitch.ts';
 import { exitCodeFor, runFlows } from '../src/e2e/runner.ts';
@@ -138,6 +139,18 @@ async function main(): Promise<number> {
   const targets = dryRun ? dryRunTargets() : targetsFromEnv(process.env);
   const guildId = targets.guildId ?? TWO_STAGING_GUILD_ID;
   assertStagingGuild(guildId);
+  const timeoutMs = Number(arg('timeout-ms') ?? DEFAULT_ASSERTION_TIMEOUT_MS);
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0 || timeoutMs > 60_000) {
+    throw new Error('--timeout-ms must be between 1 and 60000.');
+  }
+  if (!dryRun) {
+    if (flag('no-pace')) throw new Error('--no-pace is available only with --dry-run.');
+    if (!targets.accountId || !process.env.TWO_E2E_STAFF_ROLE_ID) {
+      throw new Error('Live transport needs TWO_E2E_ACCOUNT_ID and TWO_E2E_STAFF_ROLE_ID.');
+    }
+    const missing = [...new Set(flows.flatMap((flow) => missingTargets(flow, targets)))];
+    if (missing.length) throw new Error(`Live flow configuration missing: ${missing.join(', ')}`);
+  }
 
   let guard: HarnessGuard;
   let transport: HarnessTransport;
@@ -154,17 +167,9 @@ async function main(): Promise<number> {
   } else {
     const session = await openSession({
       guildId,
-      connect: () => {
-        // The live user-token client lands here once the account exists
-        // (TOG-3978 step 1). It is deliberately absent rather than stubbed: a
-        // stub that silently answered 200 would let a green transcript be
-        // produced with no Discord behind it, which is the one failure mode
-        // this whole card is trying to avoid.
-        throw new Error(
-          'no live transport is wired yet. The throwaway account does not exist; ' +
-            'run with --dry-run, or finish TOG-3978 step 1 first.',
-        );
-      },
+      connect: (token) => DiscordHarnessTransport.connect(token, targets, {
+        staffRoleId: process.env.TWO_E2E_STAFF_ROLE_ID!,
+      }),
     });
     guard = session.guard;
     transport = session.transport;
@@ -178,7 +183,7 @@ async function main(): Promise<number> {
         guard,
         transport,
         targets: targets as FlowTargets,
-        timeoutMs: Number(arg('timeout-ms') ?? DEFAULT_ASSERTION_TIMEOUT_MS),
+        timeoutMs,
       },
       { dryRun },
     );
