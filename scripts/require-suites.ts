@@ -60,6 +60,11 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     minTests: 8,
     why: 'a HOT key reloading without a restart, and the schema-level refusal of every env-only key',
   },
+  {
+    file: 'test/e2e.stagingrestart.test.ts',
+    minTests: 1,
+    why: 'real entrypoint containment across three restarts, zero Discord mutations and pre-persistence actor filtering',
+  },
 ];
 
 /**

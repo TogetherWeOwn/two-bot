@@ -107,6 +107,8 @@ export const SETTING_CLASSES: Readonly<Record<string, SettingClass>> = {
   // process which guild it is. This one is structural, not a policy choice.
   DISCORD_GUILD_ID: 'env_only',
   DISCORD_STAGING_GUILD_ID: 'env_only',
+  TWO_STAGING_RESTART_CONTAINMENT: 'env_only', // boot-only safety gate, src/index.ts
+  TWO_STAGING_RESTART_SYNTHETIC_ACTORS: 'env_only', // ingestion allowlist, src/index.ts
 
   // ---------------------------------------------------------------- network
   TWO_HEALTH_BIND_HOST: 'env_only',
