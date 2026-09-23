@@ -27,6 +27,7 @@ import {
 import { pickByKey, GAME_HUB_CHANNEL_ID } from '../src/onboarding/catalog.ts';
 import type { Db } from '../src/store/db.ts';
 import { openTestDb, TEST_PG_URL } from './helpers/testDb.ts';
+import { waitForInteractionReply } from './helpers/interactionReply.ts';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const NEWBIE = '900000000000007777';
@@ -124,18 +125,6 @@ function postedMessages(mock: MockDiscord): { channelId: string; content: string
       channelId: m![1],
       content: (c.body as { content?: string })?.content ?? '',
     }));
-}
-
-/**
- * The ephemeral reply text the bot sent back to the member.
- *
- * discord.js percent-encodes the `@` in `@original`, so the URL on the wire is
- * `/messages/%40original`. Matching both spellings.
- */
-function ephemeralReplies(mock: MockDiscord): string[] {
-  return mock.captured
-    .filter((c) => /\/webhooks\/\d+\/[^/]+\/messages\/(@|%40)original/.test(c.url))
-    .map((c) => (c.body as { content?: string })?.content ?? '');
 }
 
 test(
@@ -238,7 +227,7 @@ test(
     assert.ok(projected?.gate_cleared_at, 'members.gate_cleared_at must be set');
 
     // 3. They pick Shooters.
-    mock.selectGames(NEWBIE, 'newbie', ['shooters']);
+    const token = mock.selectGames(NEWBIE, 'newbie', ['shooters']);
 
     await waitFor(
       () =>
@@ -265,7 +254,8 @@ test(
 
     // 5. They were handed a link they can actually open. The dedicated channel
     //    is dark in this configuration, so it must be the hub.
-    const reply = ephemeralReplies(mock).at(-1) ?? '';
+    // channel_routed is committed before editReply; wait for this interaction's HTTP write too.
+    const reply = await waitForInteractionReply(mock, token);
     assert.match(reply, new RegExp(GAME_HUB_CHANNEL_ID), 'must fall back to the visible hub');
     assert.doesNotMatch(
       reply,
@@ -301,7 +291,7 @@ test(
 
     const shooters = pickByKey('shooters')!;
     // The member now holds Shooter Games, which is what reveals the category.
-    mock.selectGames(NEWBIE, 'newbie', ['shooters'], [
+    const token = mock.selectGames(NEWBIE, 'newbie', ['shooters'], [
       '1078755185423286372',
       shooters.roleId,
     ]);
@@ -316,11 +306,8 @@ test(
       `channel_routed recorded.\n${botLog.join('')}`,
     );
 
-    // routed() commits before editReply(); the row is not a delivery barrier.
-    const reply = await waitFor(
-      () => ephemeralReplies(mock).at(-1),
-      `the routing reply.\n${botLog.join('')}`,
-    );
+    // channel_routed is committed before editReply; wait for this interaction's HTTP write too.
+    const reply = await waitForInteractionReply(mock, token);
     assert.match(
       reply,
       new RegExp(shooters.primaryChannelId!),
@@ -361,7 +348,7 @@ test(
     );
 
     const shooters = pickByKey('shooters')!;
-    mock.selectGames(NEWBIE, 'newbie', ['shooters'], ['1078755185423286372', shooters.roleId]);
+    const token = mock.selectGames(NEWBIE, 'newbie', ['shooters'], ['1078755185423286372', shooters.roleId]);
 
     await waitFor(
       () =>
@@ -373,12 +360,14 @@ test(
       `channel_routed recorded.\n${botLog.join('')}`,
     );
 
-    const reply = ephemeralReplies(mock).at(-1) ?? '';
+    // channel_routed is committed before editReply; wait for this interaction's HTTP write too.
+    const reply = await waitForInteractionReply(mock, token);
     assert.doesNotMatch(
       reply,
       new RegExp(shooters.primaryChannelId!),
       'a category-only grant must not be mistaken for working access',
     );
+    assert.match(reply, new RegExp(GAME_HUB_CHANNEL_ID), 'must fall back to the visible hub');
 
     const routed = await queryDb(reader, (db) =>
       db
