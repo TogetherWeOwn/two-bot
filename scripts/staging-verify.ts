@@ -59,13 +59,14 @@ import {
   type AuditAcceptanceRow,
   type AuditMarkerCount,
 } from '../src/staging/auditAcceptance.ts';
+import { requestDiscordJson } from '../src/discord/rateLimit.ts';
 import { openDb } from '../src/store/db.ts';
 import { hasAuditEventIdentity } from '../src/audit/events.ts';
 
 const API = 'https://discord.com/api/v10';
 
-const token = process.env.DISCORD_STAGING_BOT_TOKEN;
-if (!token) {
+const configuredToken = process.env.DISCORD_STAGING_BOT_TOKEN;
+if (!configuredToken) {
   console.error(
     '\nMissing DISCORD_STAGING_BOT_TOKEN.\n' +
       `  This is the ${STAGING_BOT_APPLICATION_NAME} bot token (application ${STAGING_BOT_APPLICATION_ID}).\n` +
@@ -73,6 +74,7 @@ if (!token) {
   );
   process.exit(2);
 }
+const token = configuredToken;
 
 const tokenCheck = checkStagingToken(token);
 if (!tokenCheck.ok) {
@@ -172,25 +174,12 @@ async function api<T>(
   path: string,
   init: { method?: string; body?: unknown } = {},
 ): Promise<{ status: number; body: T | null }> {
-  const res = await fetch(`${API}${path}`, {
-    method: init.method ?? 'GET',
-    headers: {
-      Authorization: `Bot ${token}`,
-      ...(init.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
-    },
-    body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
-    signal: AbortSignal.timeout(apiTimeoutMs),
+  return requestDiscordJson<T>(`${API}${path}`, {
+    token,
+    method: init.method,
+    body: init.body,
+    timeoutMs: apiTimeoutMs,
   });
-  const text = await res.text();
-  let body: T | null = null;
-  if (text) {
-    try {
-      body = JSON.parse(text) as T;
-    } catch {
-      body = null;
-    }
-  }
-  return { status: res.status, body };
 }
 
 console.log('\nTWO staging server check\n');
