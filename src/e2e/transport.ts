@@ -94,6 +94,8 @@ export class GatewayInbox {
     finish: (result: Acted<GatewayEvent | null>) => void;
   }> = [];
   #closedStatus: number | null = null;
+  #onOverflow: () => void;
+  constructor(onOverflow: () => void = () => {}) { this.#onOverflow = onOverflow; }
 
   push(event: GatewayEvent): void {
     if (this.#closedStatus !== null) return;
@@ -110,7 +112,7 @@ export class GatewayInbox {
       }
     }
     // Never silently evict a proof that a later assertion may need.
-    if (this.#events.length >= 256) { this.close(507); return; }
+    if (this.#events.length >= 256) { this.close(507); this.#onOverflow(); return; }
     this.#events.push(event);
   }
 

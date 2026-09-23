@@ -47,7 +47,7 @@ export class DiscordHarnessTransport implements HarnessTransport {
   #options: DiscordTransportOptions;
   #io: DiscordTransportIO;
   #guard: HarnessGuard;
-  #inbox = new GatewayInbox();
+  #inbox = new GatewayInbox(() => this.#stop(507));
   #socket?: WebSocket;
   #abort = new AbortController();
   #status: number | null = null;
@@ -63,6 +63,7 @@ export class DiscordHarnessTransport implements HarnessTransport {
   #hello = false;
   #finishConnect?: (status: number) => void;
   #roles = new Map<string, bigint>();
+  #memberRoles: string[] = [];
   #channels = new Map<string, number>();
   #messages = new Map<string, ObjectData>();
   #seenMessages = new Set<string>();
@@ -92,13 +93,6 @@ export class DiscordHarnessTransport implements HarnessTransport {
     try {
       const user = object(await client.#request('GET', '/users/@me'));
       if (user.id !== targets.accountId || user.bot === true) throw new TransportFailure(403);
-      const roles = await client.#request('GET', `/guilds/${targets.guildId}/roles`);
-      if (!Array.isArray(roles)) throw new TransportFailure(403);
-      for (const role of roles.map(object)) {
-        if (!isId(role.id)) throw new TransportFailure(403);
-        client.#roles.set(role.id, bits(role.permissions));
-      }
-      if (!client.#roles.has(options.staffRoleId)) throw new TransportFailure(403);
       await client.#member();
       for (const id of [targets.welcomeChannelId, targets.selfRolePanelChannelId,
         targets.ticketPanelChannelId, targets.voiceLobbyChannelId]) {
@@ -141,8 +135,18 @@ export class DiscordHarnessTransport implements HarnessTransport {
     const assigned = [this.#targets.guildId!, ...roles as string[]];
     if (assigned.includes(this.#options.staffRoleId) || assigned.some((id) =>
       !this.#roles.has(id) || (this.#roles.get(id)! & privileged) !== 0n)) throw new TransportFailure(403);
+    this.#memberRoles = assigned;
   }
   async #member(): Promise<void> {
+    // Do not rely on role-change gateway delivery to detect permission drift.
+    const roles = await this.#request('GET', `/guilds/${this.#targets.guildId}/roles`);
+    if (!Array.isArray(roles)) throw new TransportFailure(403);
+    this.#roles.clear();
+    for (const role of roles.map(object)) {
+      if (!isId(role.id)) throw new TransportFailure(403);
+      this.#roles.set(role.id, bits(role.permissions));
+    }
+    if (!this.#roles.has(this.#options.staffRoleId)) throw new TransportFailure(403);
     const member = object(await this.#request('GET', `/guilds/${this.#targets.guildId}/members/${this.#targets.accountId}`));
     if (object(member.user).id !== this.#targets.accountId) throw new TransportFailure(403);
     this.#ordinary(member.roles);
@@ -153,14 +157,18 @@ export class DiscordHarnessTransport implements HarnessTransport {
     if (channel.id !== id || channel.guild_id !== this.#targets.guildId || channel.type !== type) {
       throw new TransportFailure(403);
     }
+    this.#ordinaryOverwrites(channel);
+    this.#channels.set(id, type);
+  }
+  #ordinaryOverwrites(channel: ObjectData): void {
     // Channel-level overrides must not quietly turn an ordinary account into a moderator.
     for (const entry of Array.isArray(channel.permission_overwrites) ? channel.permission_overwrites : []) {
       const overwrite = object(entry);
-      if (overwrite.id === this.#targets.accountId && (bits(overwrite.allow) & privileged) !== 0n) {
+      const applies = overwrite.id === this.#targets.accountId || this.#memberRoles.includes(String(overwrite.id));
+      if (applies && (bits(overwrite.allow) & privileged) !== 0n) {
         throw new TransportFailure(403);
       }
     }
-    this.#channels.set(id, type);
   }
 
   async #connect(): Promise<void> {
@@ -180,9 +188,9 @@ export class DiscordHarnessTransport implements HarnessTransport {
     if (this.#status !== null || this.#socket?.readyState !== 1) throw new TransportFailure(this.#status ?? 503);
     this.#socket.send(JSON.stringify({ op, d }));
   }
-  #beat(): void {
+  #beat(requested = false): void {
     try {
-      if (this.#awaitingAck) { this.#stop(504); return; }
+      if (this.#awaitingAck && !requested) { this.#stop(504); return; }
       this.#awaitingAck = true;
       this.#send(1, this.#sequence);
     } catch { this.#stop(503); }
@@ -209,7 +217,7 @@ export class DiscordHarnessTransport implements HarnessTransport {
           os: process.platform, browser: 'two-staging-e2e', device: 'two-staging-e2e',
         }, compress: false });
       } else if (packet.op === 11) this.#awaitingAck = false;
-      else if (packet.op === 1) this.#beat();
+      else if (packet.op === 1) this.#beat(true);
       else if (packet.op === 7 || packet.op === 9) this.#stop(503); // No resume or reconnect.
       else if (packet.op === 0 && packet.t === 'READY') {
         if (this.#ready || object(d.user).id !== this.#targets.accountId || typeof d.session_id !== 'string' || !d.session_id) {
@@ -242,6 +250,7 @@ export class DiscordHarnessTransport implements HarnessTransport {
         typeof d.topic === 'string' && d.topic.startsWith('two-ticket:') && owns;
       const voice = this.#joiningVoice && !this.#voiceChannel && d.type === 2 && owns;
       if (!ticket && !voice) return;
+      this.#ordinaryOverwrites(d);
       if (ticket) this.#ticketChannel = d.id;
       else this.#voiceChannel = d.id;
       this.#channels.set(d.id, d.type as number);

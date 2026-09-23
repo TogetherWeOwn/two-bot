@@ -252,6 +252,62 @@ test('unknown buttons, wrong reaction targets, unsupported screening and permiss
   change.socket.dispatch('GUILD_MEMBER_UPDATE', { guild_id: guildId, user: { id: accountId }, roles: [staffRoleId] });
   assert.equal((await client.sendMessage(textId, 'never')).status, 403); client.close();
 });
+test('connection timeout, invalid session and explicit close are terminal, not reconnections', async () => {
+  const f = fixture(); f.io.socket = () => f.socket as unknown as WebSocket; f.io.connectTimeoutMs = 5;
+  await assert.rejects(f.connect(), /status 504/); assert.equal(f.socket.closed, 1);
+  for (const op of [7, 9]) {
+    const f = fixture(); const client = await f.connect();
+    f.socket.packet({ op, d: true });
+    assert.equal((await client.acceptRules()).status, 503); assert.equal(f.socket.closed, 1);
+  }
+  const explicit = fixture(); const client = await explicit.connect();
+  const wait = client.awaitEvent('messageCreate', () => true, 1000);
+  client.close(); assert.equal((await wait).status, 503);
+});
+test('a close during transport pacing prevents the queued action reaching HTTP', async () => {
+  const f = fixture(); let now = 0; let client: DiscordHarnessTransport;
+  f.io.guard = { random: () => 0, clock: { now: () => now, sleep: async (ms) => { now += ms; client.close(); } } };
+  client = await f.connect();
+  assert.equal((await client.sendMessage(textId, 'first')).status, 200);
+  const count = f.requests.length;
+  assert.equal((await client.sendMessage(textId, 'after-close')).status, 503);
+  assert.equal(f.requests.length, count);
+});
+test('account and applicable role overwrite privilege drift stops writes; inbox overflow stops the socket', async () => {
+  for (const id of [accountId, guildId]) {
+    const f = fixture(); const client = await f.connect();
+    f.channels.set(textId, { id: textId, guild_id: guildId, type: 0, permission_overwrites: [{ id, allow: '16' }] });
+    assert.equal((await client.sendMessage(textId, 'forbidden')).status, 403); client.close();
+  }
+  const f = fixture(); const client = await f.connect();
+  for (let i = 0; i <= 256; i++) f.socket.dispatch('GUILD_MEMBER_UPDATE', { guild_id: guildId, user: { id: accountId }, roles: [], pending: false });
+  assert.equal((await client.sendMessage(textId, 'overflow')).status, 507);
+  assert.equal(f.socket.closed, 1);
+});
+test('role permissions are refreshed before writes even without a role gateway event', async () => {
+  const f = fixture(); const client = await f.connect();
+  f.setHook((_m, path) => path.endsWith('/roles') ? Response.json([
+    { id: guildId, permissions: '8' }, { id: staffRoleId, permissions: '0' },
+  ]) : undefined);
+  assert.equal((await client.sendMessage(textId, 'forbidden')).status, 403);
+  assert.equal(f.requests.filter((r) => r.method === 'POST').length, 0);
+  client.close();
+});
+test('privileged discovered channel overwrites cannot become gateway proof', async () => {
+  const f = fixture(); const client = await f.connect();
+  await client.joinVoice(lobbyId);
+  f.socket.dispatch('CHANNEL_CREATE', { id: voiceId, guild_id: guildId, type: 2,
+    permission_overwrites: [{ id: accountId, type: 1, allow: '1040' }] });
+  assert.equal((await client.awaitEvent('channelCreate', () => true, 0)).status, 403);
+  assert.equal(f.socket.closed, 1);
+});
+test('a wrong-account READY and a changed account membership halt before actions', async () => {
+  const f = fixture(); f.socket.send = () => f.socket.dispatch('READY', { user: { id: botId }, session_id: 'wrong' });
+  await assert.rejects(f.connect(), /status 403/);
+  const drift = fixture(); const client = await drift.connect();
+  drift.setHook((_m, path) => path.includes('/members/') ? Response.json({ user: { id: botId }, roles: [] }) : undefined);
+  assert.equal((await client.sendMessage(textId, 'wrong-account')).status, 403); client.close();
+});
 test('CLI dry-run works without credential and incomplete live configuration refuses before network', () => {
   const env = { PATH: process.env.PATH, HOME: process.env.HOME };
   const dry = spawnSync(process.execPath, ['scripts/e2e-harness.ts', '--dry-run', '--no-pace', '--flow', 'reaction'], { encoding: 'utf8', env });
