@@ -2,12 +2,53 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { REST } from 'discord.js';
+import { Events, REST } from 'discord.js';
+import { createClient } from '../src/discord/client.ts';
+import { startMockDiscord } from '../tools/mock-discord/server.ts';
+import { stagingRestartWriteAttempts } from './helpers/stagingRestartWriteAttempts.ts';
 import { createRestartFetch, restartRestBase } from '../src/staging/restartRest.ts';
 
 const api = 'https://discord.com/api';
 const base = `${api}/v10`;
 const refusal = /^Error: Staging restart REST request refused\.$/;
+
+test('public SDK writes reject under the guard but reach the loopback server without it',
+  { timeout: 30_000 }, async () => {
+    const mock = await startMockDiscord();
+    const client = createClient(false, {});
+    client.rest.options.api = mock.apiBase;
+    client.rest.options.retries = 0;
+    const ordinaryRequest = client.rest.options.makeRequest;
+    try {
+      const ready = once(client, Events.ClientReady);
+      await client.login('inert-local-token');
+      await ready;
+      const attempts = stagingRestartWriteAttempts(client, mock.guildId, mock.textChannelId);
+      client.rest.options.makeRequest = createRestartFetch(mock.apiBase);
+      for (const attempt of Object.values(attempts)) await assert.rejects(attempt, refusal);
+      assert.equal(mock.captured.length, 0, 'not even one write may reach the fixture server');
+
+      // Counterfactual: these exact operations must reach HTTP without the guard.
+      // The minimal mock has no command collection response, so registry response
+      // parsing may reject AFTER its recorded PUT. Only wire reachability is claimed.
+      client.rest.options.makeRequest = ordinaryRequest;
+      await Promise.allSettled(Object.values(attempts).map((attempt) => attempt()));
+      assert.equal(mock.captured.length, 4);
+      const puts = mock.captured.filter((request) => request.method === 'PUT');
+      assert.deepEqual(puts.map((request) => request.url).sort(), [
+        `/api/v10/applications/${client.application!.id}/commands`,
+        `/api/v10/applications/${client.application!.id}/guilds/${mock.guildId}/commands`,
+      ].sort());
+      const posts = mock.captured.filter((request) => request.method === 'POST');
+      assert.equal(posts.length, 2);
+      assert.ok(posts.some((request) => request.url === `/api/v10/channels/${mock.textChannelId}/messages`));
+      assert.equal(new Set(posts.map((request) => request.url)).size, 2,
+        'designated and unrelated channel writes must have distinct wire destinations');
+    } finally {
+      await client.destroy();
+      await mock.close();
+    }
+  });
 
 test('restart REST permits only canonical Discord or explicit loopback fixture bases', () => {
   assert.equal(restartRestBase(), base);

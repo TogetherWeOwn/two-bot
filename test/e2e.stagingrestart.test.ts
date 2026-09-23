@@ -117,11 +117,12 @@ async function launch(db: TestDb, mode: Mode) {
   bot.stdout!.on('data', (data) => { log += String(data); });
   bot.stderr!.on('data', (data) => { log += String(data); });
   bot.on('error', (error) => { spawnError = error; });
-  let restProbe: number | undefined;
-  bot.on('message', (message: Witness | { kind: 'egress-refused' } | { kind: 'rest-probe'; refused: number }) => {
+  let restProbe: { refused: number; sdkRefused: string[] } | undefined;
+  bot.on('message', (message: Witness | { kind: 'egress-refused' } |
+    { kind: 'rest-probe'; refused: number; sdkRefused: string[] }) => {
     if (message.kind === 'egress-refused') refused++;
     else if (message.kind === 'witness') snapshots.set(message.id, message);
-    else if (message.kind === 'rest-probe') restProbe = message.refused;
+    else if (message.kind === 'rest-probe') restProbe = message;
   });
   const exited = new Promise<void>((res) => bot.once('close', () => res()));
   const running = () => {
@@ -132,7 +133,10 @@ async function launch(db: TestDb, mode: Mode) {
   const snapshot = async () => {
     running();
     await until(() => { running(); return restProbe !== undefined; }, 'installed REST transport probe');
-    assert.equal(restProbe, 8, 'all forbidden requests must refuse at the real entrypoint REST boundary');
+    assert.equal(restProbe!.refused, 8, 'all forbidden requests must refuse at the real entrypoint REST boundary');
+    assert.deepEqual(restProbe!.sdkRefused, [
+      'global-command-set', 'guild-command-set', 'designated-channel-send', 'unrelated-channel-send',
+    ], 'public SDK writes must reject, not silently omit or fabricate success');
     const id = ++sequence;
     bot.send({ command: 'snapshot', id });
     const result = await until(() => { running(); return snapshots.get(id); }, 'observer queue snapshot')

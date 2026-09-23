@@ -2,7 +2,10 @@
  * installed REST transport after login. Delegate login unchanged. This neither
  * patches the rota lifecycle nor fabricates a successful mutation.
  */
-import { Client } from 'discord.js';
+import assert from 'node:assert/strict';
+import { once } from 'node:events';
+import { Client, Events } from 'discord.js';
+import { stagingRestartWriteAttempts } from './stagingRestartWriteAttempts.ts';
 
 if (process.env.TWO_STAGING_RESTART_CONTAINMENT !== '1' ||
     !/^http:\/\/127\.0\.0\.1:\d+\/api$/.test(process.env.DISCORD_API_BASE ?? '') ||
@@ -28,6 +31,14 @@ Client.prototype.login = async function (token) {
       if (error instanceof Error && error.message === 'Staging restart REST request refused.') refused++;
     }
   }
-  process.send!({ kind: 'rest-probe', refused });
+  if (!this.isReady()) await once(this, Events.ClientReady);
+  const sdkRefused: string[] = [];
+  const attempts = stagingRestartWriteAttempts(this, process.env.DISCORD_GUILD_ID!,
+    process.env.DISCORD_SESSION_LOOKING_TO_PLAY_CHANNEL_ID!);
+  for (const [name, attempt] of Object.entries(attempts)) {
+    await assert.rejects(attempt, /^Error: Staging restart REST request refused\.$/);
+    sdkRefused.push(name);
+  }
+  process.send!({ kind: 'rest-probe', refused, sdkRefused });
   return result;
 };
