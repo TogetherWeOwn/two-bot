@@ -44,6 +44,7 @@ whoever owns the box (TWO-79), not by a config file. The full accounting is the
 | Discord bot token | `discord_token` | `DISCORD_BOT_TOKEN`, then `DISCORD_TOKEN` |
 | Postgres URL | `database_url` | `TWO_DATABASE_URL` |
 | Internal-actions signing keys | `internal_keys` | `TWO_INTERNAL_KEYS` |
+| e2e test-account token | `two_e2e_user_token` | `TWO_E2E_USER_TOKEN` |
 
 The credential wins when present. The environment fallback is what makes local
 development, CI and the one-off scripts keep working unchanged — none of those
@@ -181,3 +182,55 @@ administers the server; this repo cannot execute it. After applying it, run
 only check that fails if Administrator is still attached, which is how this
 change most plausibly gets half-done. Everything before the token arrived was
 built and verified against a local mock Discord (see `tools/mock-discord/`).
+
+## The end-to-end test account (TOG-3978)
+
+Four cards — TOG-3085, TOG-2796, TOG-3690, TOG-3122 — are blocked on a *member*
+doing something a bot token cannot do: clear a rules gate, press its own ticket
+buttons, get dragged into an auto-voice channel. The owner approved a throwaway
+Discord account for that on 2026-09-22, on five conditions. Three of them are
+enforced in `src/e2e/guard.ts`, one in `src/e2e/session.ts`, and one is this
+section.
+
+**`TWO_E2E_USER_TOKEN` is a user credential and it is not the bot's.** It is
+never read from a file in this repository, never written to a transcript, and
+never passed as a command-line argument. `src/e2e/session.ts` reads it once and
+hands it straight to the transport; nothing else in the harness can see it.
+Provision it the same way as every other secret above — the systemd credential
+`two_e2e_user_token` wins over the env var when both are present.
+
+**The harness is staging-only.** Every entry point checks the guild id against
+`TWO_STAGING_GUILD_ID` in `src/staging/spec.ts` and refuses `LIVE_GUILD_ID` by
+name. Live-guild use needs a new owner decision.
+
+**It runs on demand, never on a schedule.** There is deliberately no workflow,
+no cron and no `pretest` hook that invokes `scripts/e2e-harness.ts` — "low,
+human-ish volume" and "runs whenever CI runs" cannot both be true.
+
+| Variable | Required | What it is |
+|---|---|---|
+| `TWO_E2E_USER_TOKEN` | for a live run | The throwaway account's token. Credential `two_e2e_user_token`. |
+| `TWO_E2E_GUILD_ID` | no | Defaults to the staging guild. Any other value is refused. |
+| `TWO_E2E_ACCOUNT_ID` | for a live run | The throwaway account's user id, so assertions can tell its events from a stranger's. Not a secret. |
+| `TWO_E2E_WELCOME_CHANNEL_ID` | per flow | Where the welcome is expected (`join-screen`). |
+| `TWO_E2E_SELF_ROLE_CHANNEL_ID`, `TWO_E2E_SELF_ROLE_MESSAGE_ID`, `TWO_E2E_SELF_ROLE_EMOJI`, `TWO_E2E_SELF_ROLE_ID` | per flow | The self-role panel and the role it should grant (`reaction`). |
+| `TWO_E2E_TICKET_CHANNEL_ID`, `TWO_E2E_TICKET_MESSAGE_ID` | per flow | The ticket panel (`ticket-buttons`). |
+| `TWO_E2E_VOICE_LOBBY_ID` | per flow | The auto-voice lobby (`voice-verify`). |
+
+A flow whose ids are missing is `skipped` before it spends any traffic, so a
+partially-configured guild still produces a useful run.
+
+```bash
+node scripts/e2e-harness.ts --dry-run --out transcript.json   # no credential, no network
+node scripts/e2e-harness.ts --flow reaction --out transcript.json
+node scripts/e2e-harness.ts --kill-switch --reason "Discord flagged the account"
+```
+
+The kill switch removes the account from staging using the **bot** token
+(`DISCORD_TOKEN`) — an account cannot reliably kick itself, and this half must
+keep working after the user credential has been revoked. It always reports
+`rotationRequired`: nothing in this repository can rotate a Discord credential,
+so that half is a human at a login screen.
+
+A transcript with `"dryRun": true` is not evidence. Only a run against the
+staging guild with a real credential is.
