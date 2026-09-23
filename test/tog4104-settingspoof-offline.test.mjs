@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash, createHmac } from 'node:crypto';
 import { createServer } from 'node:http';
-import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -39,7 +39,7 @@ async function fixture(t, seed = {}, hooks = {}) {
     const body = JSON.parse(raw.toString());
     if (!['settings.get', 'settings.set'].includes(body.action) || ![KEY, MATE].includes(body.key)) return deny(403, 'action_not_allowed');
     const { key } = body;
-    const ctx = { req, res, body, send, deny, store, writes, reads, idempotency };
+    const ctx = { req, res, body, key, send, deny, store, writes, reads, idempotency };
     if (body.action === 'settings.get') {
       getCount++;
       reads.set(key, (reads.get(key) ?? 0) + 1);
@@ -73,8 +73,8 @@ async function fixture(t, seed = {}, hooks = {}) {
     TWO_INTERNAL_KEYS: `${kid}:${SECRET}`, TWO_INTERNAL_ACTIONS: '1', TWO_INTERNAL_ALLOW_SETTINGS: '1',
     DISCORD_GUILD_ID: '1545644954272137297',
   };
-  function start(extra = {}, mode = 'run') {
-    const child = spawn(process.execPath, [PROBE, mode], { env: { ...env, ...extra } });
+  function start(extra = {}, mode = 'run', nodeOptions = []) {
+    const child = spawn(process.execPath, [...nodeOptions, PROBE, mode], { env: { ...env, ...extra } });
     let out = '', err = '';
     child.stdout.on('data', (b) => { out += b; }); child.stderr.on('data', (b) => { err += b; });
     const done = new Promise((resolve) => child.on('close', (code, signal) => {
@@ -90,7 +90,7 @@ async function fixture(t, seed = {}, hooks = {}) {
     await new Promise((resolve) => server.close(resolve));
     await rm(root, { recursive: true, force: true });
   });
-  return { store, writes, stateDir, start, run: (extra, mode) => start(extra, mode).done };
+  return { root, store, writes, stateDir, start, run: (extra, mode, nodeOptions) => start(extra, mode, nodeOptions).done };
 }
 
 for (const [name, seed] of [
@@ -137,6 +137,15 @@ for (const loss of ['socket', '500', 'timeout']) {
   });
 }
 
+test('pre-action rate limit gets one bounded backoff without a duplicate mutation', async (t) => {
+  let limited = true;
+  const f = await fixture(t, {}, { beforeSet({ deny }) {
+    if (limited) { limited = false; deny(429, 'rate_limited'); return true; }
+  } });
+  const r = await f.run();
+  assert.equal(r.code, 0); assert.equal(f.writes.length, 4); assert.equal(f.store.size, 0);
+});
+
 test('restore failure stays nonzero with encrypted journal; recovery restores exact values', async (t) => {
   let refuse = true;
   const seed = { [KEY]: '003001', [MATE]: 9 };
@@ -166,11 +175,29 @@ test('SIGKILL during applied write is recovered from the shipped encrypted journ
   } });
   const running = f.start();
   await applied;
+  assert.equal((await f.run({}, 'recover')).code, 2, 'live PID lock must refuse recovery');
   running.child.kill('SIGKILL');
   assert.equal((await running.done).signal, 'SIGKILL');
   const recovery = await f.run({}, 'recover');
   assert.equal(recovery.code, 0, recovery.out + recovery.err);
   assert.deepEqual(f.store, new Map([[KEY, '003001']]));
+});
+
+test('old ambiguous intent refuses replay before the unfenced 60-second takeover boundary', async (t) => {
+  let signal;
+  const applied = new Promise((resolve) => { signal = resolve; });
+  const f = await fixture(t, { [KEY]: '9' }, { afterSet({ writes }) {
+    if (writes.length === 1) { signal(); return true; }
+  } });
+  const running = f.start();
+  await applied; running.child.kill('SIGKILL'); await running.done;
+  const clock = join(f.root, 'advanced-clock.mjs');
+  await writeFile(clock, 'const now = Date.now; Date.now = () => now() + 46000;');
+  const r = await f.run({}, 'recover', ['--import', clock]);
+  assert.equal(r.code, 1); assert.equal(r.receipt.failure, 'write.reconciliation-expired');
+  assert.equal(f.writes.length, 1, 'no stale-claim takeover or restore is sent');
+  assert.equal(f.store.get(KEY), '7');
+  assert.ok((await readdir(f.stateDir)).includes('recovery.enc'));
 });
 
 test('concurrent mate drift before mutation is not overwritten', async (t) => {
@@ -193,12 +220,13 @@ test('concurrent writer before cleanup is not silently overwritten or reported P
 test('cache lag cannot turn a presence-only read into a successful roundtrip', async (t) => {
   let lag = 2;
   const f = await fixture(t, { [KEY]: 9 }, { get({ key, writes, send }) {
-    if (key === KEY && writes.length === 1 && lag-- > 0) {
+    if (key === KEY && writes.length === 1 && lag > 0) {
+      lag--;
       send(200, { ok: true, result: { key, source: 'store', value: 9 } }); return true;
     }
   } });
   const r = await f.run();
-  assert.equal(r.code, 0); assert.equal(lag, -1);
+  assert.equal(r.code, 0); assert.equal(lag, 0);
   assert.deepEqual(f.store, new Map([[KEY, 9]]));
 });
 

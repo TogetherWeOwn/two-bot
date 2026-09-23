@@ -21,8 +21,13 @@ const KEYS = ['TWO_RAID_JOIN_THRESHOLD', 'TWO_RAID_WINDOW_SECONDS'];
 const FIXTURES = ['7', '42'];
 const mode = process.argv[2] ?? 'run';
 let stage = 'preflight', state, secret, kid, url, encryptionKey;
-let dir, journal, lock, lockOwned = false, interrupted = false, uncertain = false;
-const check = (condition, code) => { if (!condition) throw new Error(code); };
+let dir, journal, lock, lockOwned = false, interrupted = false, uncertain = false, journalHealthy = true;
+class ProofError extends Error {
+  constructor(code) { super(); this.code = code; }
+}
+let failure = null;
+const noteFailure = (error) => { failure = error instanceof ProofError ? error.code : 'operation.failed'; };
+const check = (condition, code) => { if (!condition) throw new ProofError(code); };
 const same = isDeepStrictEqual;
 const fixture = (i) => ({ source: 'store', value: FIXTURES[i] });
 const validValue = (value) => (typeof value === 'string' && /^\d{1,6}$/.test(value) || typeof value === 'number') &&
@@ -76,6 +81,10 @@ async function acquire() {
   try { await f.writeFile(String(process.pid)); await f.sync(); } finally { await f.close(); }
 }
 async function save() {
+  try { await persist(); }
+  catch (e) { journalHealthy = false; throw e; }
+}
+async function persist() {
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', encryptionKey, iv);
   const data = Buffer.concat([cipher.update(JSON.stringify(state)), cipher.final()]);
@@ -98,12 +107,14 @@ async function load() {
   data.entries.forEach((e, i) => {
     check(e.key === KEYS[i] && uuid(e.writeId) && uuid(e.restoreId) &&
       ['captured', 'writePending', 'written', 'restorePending', 'restored'].includes(e.phase) &&
+      (e.phase === 'captured' || Number.isSafeInteger(e.writeAt) && e.writeAt > 0) &&
+      (!['restorePending', 'restored'].includes(e.phase) || Number.isSafeInteger(e.restoreAt) && e.restoreAt > 0) &&
       (e.pre?.source === 'unset' && e.pre.value === null || e.pre?.source === 'store' && validValue(e.pre.value)), 'journal.schema');
   });
   return data;
 }
 
-async function send(body, { idem, badSignature = false, badBody = false, unknownKey = false } = {}) {
+async function send(body, { idem, badSignature = false, badBody = false, unknownKey = false } = {}, rateRetry = true) {
   let raw = JSON.stringify(body);
   const ts = String(Math.floor(Date.now() / 1000));
   const nonce = randomUUID().replaceAll('-', '');
@@ -116,7 +127,14 @@ async function send(body, { idem, badSignature = false, badBody = false, unknown
       'x-two-timestamp': ts, 'x-two-nonce': nonce, 'x-two-signature': badSignature ? 'invalid' : sig,
       ...(idem ? { 'idempotency-key': idem } : {}) },
   });
-  return { status: res.status, json: await res.json() };
+  const json = await res.json();
+  // Live bucket: burst 20, refill 1/s; rate_limited precedes the action/claim.
+  // One bounded retry, with a fresh nonce and the same operation ID/body.
+  if (res.status === 429 && json?.error?.code === 'rate_limited' && rateRetry) {
+    await sleep(1100);
+    return send(body, { idem, badSignature, badBody, unknownKey }, false);
+  }
+  return { status: res.status, json };
 }
 async function read(i) {
   const r = await send({ action: 'settings.get', key: KEYS[i] });
@@ -128,11 +146,11 @@ async function read(i) {
 async function readEquals(i, expected) {
   // settings.get reads a cache; SettingsStore.set does NOT refresh it. Give the
   // real 15s poll time to observe a completed write, but never accept presence only.
-  for (let n = 0; n < 21; n++) {
+  for (let n = 0; n < 11; n++) {
     if (same(await read(i), expected)) return;
-    if (n < 20) await sleep(1000);
+    if (n < 10) await sleep(2000);
   }
-  throw new Error('readback.mismatch');
+  throw new ProofError('readback.mismatch');
 }
 async function guard() {
   for (let i = 0; i < 2; i++) {
@@ -143,11 +161,16 @@ async function guard() {
   }
 }
 async function write(i, restoring = false) {
+  check(journalHealthy, 'journal.unavailable');
   const e = state.entries[i];
   const value = restoring ? e.pre.value : FIXTURES[i];
   // Reuse exactly the body and idempotency key on response loss. At most one
   // reconciliation attempt; never declare success from a mere matching read.
   for (let attempt = 0; attempt < 2; attempt++) {
+    // Live claims are unfenced and stealable at 60s. Never automatically replay
+    // an old ambiguous intent across that lease, including after interruption.
+    const age = Date.now() - (restoring ? e.restoreAt : e.writeAt);
+    check(Number.isFinite(age) && age >= 0 && age < 45_000, 'write.reconciliation-expired');
     try {
       const r = await send({ action: 'settings.set', key: e.key, value, updated_by: ACTOR },
         { idem: restoring ? e.restoreId : e.writeId });
@@ -158,7 +181,7 @@ async function write(i, restoring = false) {
       uncertain = true;
     }
   }
-  throw new Error('write.unconfirmed');
+  throw new ProofError('write.unconfirmed');
 }
 async function cleanup() {
   for (let i = 1; i >= 0; i--) {
@@ -175,7 +198,7 @@ async function cleanup() {
       // No value- or presence-only restore, including the mate. Refuse unknown
       // state rather than overwriting a writer that violated the exclusive window.
       check(same(await read(i), fixture(i)), 'guard.concurrent-change');
-      e.phase = 'restorePending'; await save();
+      e.phase = 'restorePending'; e.restoreAt = Date.now(); await save();
     } else {
       const current = await read(i);
       check(same(current, fixture(i)) || same(current, e.pre), 'guard.concurrent-change');
@@ -209,7 +232,7 @@ try {
     stage = 'recovery'; state = await load();
     await cleanup(); cleanupResult = 'exact-prestate-verified'; exit = 0;
   } else {
-    try { await lstat(journal); throw new Error('journal.recovery-required'); }
+    try { await lstat(journal); throw new ProofError('journal.recovery-required'); }
     catch (e) { if (e.code !== 'ENOENT') throw e; }
     stage = 'capture';
     const pre = [await read(0), await read(1)];
@@ -223,20 +246,21 @@ try {
     try {
       for (let i = 0; i < 2; i++) {
         stage = 'mutation'; check(!interrupted, 'interrupted'); await guard();
-        state.entries[i].phase = 'writePending'; await save();
+        state.entries[i].phase = 'writePending'; state.entries[i].writeAt = Date.now(); await save();
         await write(i);
         state.entries[i].phase = 'written'; await save();
         stage = 'roundtrip'; await readEquals(i, fixture(i));
       }
-    } catch { failed = true; }
+    } catch (e) { failed = true; noteFailure(e); }
     finally {
       stage = 'cleanup';
       try { await cleanup(); cleanupResult = 'exact-prestate-verified'; }
-      catch { cleanupResult = 'recovery-required'; failed = true; }
+      catch (e) { cleanupResult = 'recovery-required'; failed = true; noteFailure(e); }
     }
     exit = failed || uncertain || interrupted ? 1 : 0;
   }
-} catch {
+} catch (e) {
+  noteFailure(e);
   if (state?.entries.some((e) => e.phase !== 'captured')) { exit = 1; cleanupResult = 'recovery-required'; }
   // Deliberately do not print exception text, stack, URL, response, or journal.
 } finally {
@@ -246,7 +270,7 @@ console.log(JSON.stringify({
   verdict: exit === 0 ? (mode === 'recover' ? 'RECOVERED' : 'PROOF PASS') : exit === 2 ? 'REFUSED' : 'PROOF FAIL',
   stage, runtime: RUNTIME, proofSource: process.env.PROOF_SOURCE_SHA?.match(/^[a-f0-9]{40}$/)?.[0] ?? null,
   preState: state?.entries.map((e) => ({ key: e.key, hadRow: e.pre.source === 'store' })) ?? null,
-  cleanup: cleanupResult, responseUncertainty: uncertain,
+  cleanup: cleanupResult, responseUncertainty: uncertain, failure,
   note: 'Requires exclusive staging writers; no website non-admin or full-runtime acceptance claim.',
 }));
 process.exitCode = exit;
