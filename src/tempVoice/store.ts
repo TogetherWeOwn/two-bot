@@ -15,6 +15,8 @@ export interface TempVoiceRow {
   generatorId: string;
   categoryId: string;
   ownerId: string;
+  /** Durable, fixed destination for an interrupted ownership transition. */
+  pendingOwnerId: string | null;
   createdBy: string;
   name: string;
   createdAt: string;
@@ -44,6 +46,7 @@ function mapRow(row: Record<string, unknown>): TempVoiceRow {
     generatorId: String(row.generator_id),
     categoryId: String(row.category_id),
     ownerId: String(row.owner_id),
+    pendingOwnerId: text(row.pending_owner_id),
     createdBy: String(row.created_by),
     name: String(row.name),
     createdAt: String(row.created_at),
@@ -127,6 +130,7 @@ export class TempVoiceStore {
           generatorId: input.generatorId,
           categoryId: input.categoryId,
           ownerId: input.ownerId,
+          pendingOwnerId: null,
           createdBy: input.ownerId,
           name: input.name,
           createdAt: input.createdAt,
@@ -197,8 +201,39 @@ export class TempVoiceStore {
     return result.changes > 0;
   }
 
-  async setOwner(id: string, ownerId: string): Promise<void> {
-    await this.db.prepare(`UPDATE temp_voice_channels SET owner_id = ? WHERE id = ?`).run(ownerId, id);
+  /**
+   * One ownership worker per staging guild, including recovery, across processes.
+   * Contenders refuse rather than pinning every pool connection behind a lock.
+   *
+   * This transaction holds ONLY the lock. Intent/finalization writes deliberately
+   * use the ordinary store, on a second connection, so they commit before any
+   * Discord mutation and survive an interrupted worker. Do not wrap this store
+   * in a caller transaction: that would make the recovery journal uncommitted.
+   */
+  async withOwnershipLock<T>(guildId: string, fn: (assertHeld: () => Promise<void>) => Promise<T>): Promise<{ acquired: false } | { acquired: true; value: T }> {
+    return this.db.transaction(async (tx) => {
+      const lock = await tx.prepare(`SELECT pg_try_advisory_xact_lock(hashtextextended(?, 0)) AS acquired`)
+        .get<{ acquired: boolean }>(`tempvoice:ownership:${guildId}`);
+      if (!lock?.acquired) return { acquired: false as const };
+      const assertHeld = async () => { await tx.prepare('SELECT 1').get(); };
+      return { acquired: true as const, value: await fn(assertHeld) };
+    });
+  }
+
+  async beginOwnerChange(id: string, oldOwnerId: string, newOwnerId: string): Promise<boolean> {
+    const result = await this.db.prepare(
+      `UPDATE temp_voice_channels SET pending_owner_id = ?
+       WHERE id = ? AND owner_id = ? AND pending_owner_id IS NULL`,
+    ).run(newOwnerId, id, oldOwnerId);
+    return result.changes === 1;
+  }
+
+  async completeOwnerChange(id: string, oldOwnerId: string, newOwnerId: string): Promise<boolean> {
+    const result = await this.db.prepare(
+      `UPDATE temp_voice_channels SET owner_id = ?, pending_owner_id = NULL
+       WHERE id = ? AND owner_id = ? AND pending_owner_id = ?`,
+    ).run(newOwnerId, id, oldOwnerId, newOwnerId);
+    return result.changes === 1;
   }
 
   async setName(id: string, name: string, renamedAt: string): Promise<void> {

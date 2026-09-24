@@ -62,8 +62,8 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
   },
   {
     file: 'test/unit.tempvoice.test.ts',
-    minTests: 63,
-    why: 'provenance-guarded deletion, atomic user/guild caps, and pre-mutation permission refusal',
+    minTests: 86,
+    why: 'provenance-guarded deletion and cleanup recovery, atomic caps, serialized durable ownership, and permission refusal',
   },
 ];
 
