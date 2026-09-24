@@ -1,9 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  SnapshotIntegrityError,
   canonicalSnapshot,
   configHash,
   driftAgainstAcceptedSpec,
+  sealSnapshot,
+  verifySnapshotIntegrity,
   type GuildConfigSnapshot,
 } from '../src/redesign/guildConfig.ts';
 import { CATEGORIES, MODERATOR_ROLE, OWNER_ROLE, SERVER_DESCRIPTION, TOPICS, desiredEveryoneOverwrite } from '../src/redesign/clean-slate.ts';
@@ -130,10 +133,8 @@ test('ordering drift is reported and restored with batched role and channel posi
   await applyRestorePlan(api, plan);
   owner.position = source.roles.find((role) => role.name === 'Owner')!.position;
   moderator.position = source.roles.find((role) => role.name === 'Moderator')!.position;
-  for (const position of calls[1]!.body as Array<{ id: string; position: number; parent_id?: string | null }>) {
-    const channel = current.channels.find((item) => item.id === position.id)!;
-    channel.position = position.position;
-    if ('parent_id' in position) channel.parent_id = position.parent_id ?? null;
+  for (const position of calls[1]!.body as Array<{ id: string; position: number }>) {
+    current.channels.find((item) => item.id === position.id)!.position = position.position;
   }
   assert.deepEqual(canonicalSnapshot(current), canonicalSnapshot(source));
   assert.equal(snapshotsEqual(source, current), true);
@@ -145,7 +146,30 @@ test('ordering drift is reported and restored with batched role and channel posi
     { roleId: moderator.id, position: source.roles.find((role) => role.name === 'Moderator')!.position },
     { roleId: owner.id, position: source.roles.find((role) => role.name === 'Owner')!.position },
   ]);
-  assert.ok((calls[1]!.body as Array<{ id: string; position: number; parent_id: string | null }>).some((position) => position.id === child.id && position.position === 0 && position.parent_id === child.parent_id));
+  // TOG-3513: the bulk position batch carries no parent_id (live Discord 40009),
+  // and no parent is moving here so no per-channel move op exists.
+  const batch = calls[1]!.body as Array<Record<string, unknown>>;
+  assert.ok(batch.every((entry) => !('parent_id' in entry)));
+  assert.ok(batch.some((entry) => entry.id === child.id && entry.position === 0));
+  assert.ok(!plan.operations.some((operation) => operation.label.startsWith('move channel')));
+});
+
+test('restore patches a renamed channel in place instead of duplicating it, and moves parents per-channel', async () => {
+  const source = acceptedSnapshot();
+  const current = acceptedSnapshot();
+  // Rename: same id, different name — the TOG-3513 staging case (bot-log there).
+  current.channels.find((channel) => channel.name === 'looking-to-play')!.name = 'looking-to-play-mutated';
+  // Move: general out of its category to the guild root.
+  current.channels.find((channel) => channel.name === 'general')!.parent_id = null;
+  const plan = planRestore(source, current);
+  const patchRenamed = plan.operations.find((operation) => operation.label === 'patch channel looking-to-play')!;
+  assert.ok(patchRenamed);
+  assert.ok(!plan.operations.some((operation) => operation.label === 'create channel looking-to-play'));
+  const moveGeneral = plan.operations.find((operation) => operation.label === 'move channel general')!;
+  assert.deepEqual(moveGeneral.body, { parent_id: { restoreReference: 'channel', sourceId: source.channels.find((channel) => channel.name === 'general')!.parent_id } });
+  // Nothing positional changed, so no bulk batch exists; when one does, it
+  // carries no parent_id (see the ordering-drift test above).
+  assert.ok(!plan.operations.some((operation) => operation.label === 'restore channel positions'));
 });
 
 test('restore applies roles, categories, channels and overwrites in dependency order with returned ids', async () => {
@@ -256,6 +280,36 @@ test('restore sends emoji image data and refuses a non-restorable snapshot emoji
 
   delete source.emojis[0]!.image;
   assert.throws(() => planRestore(source, current), /has no restorable image data URI/);
+});
+
+test('sealed snapshot verifies, tampered content throws SnapshotIntegrityError, legacy passes unsealed', () => {
+  const sealed = sealSnapshot(acceptedSnapshot());
+  assert.equal(sealed.integrity?.algorithm, 'sha256');
+  assert.equal(verifySnapshotIntegrity(sealed), 'sealed');
+  // Sealing is idempotent: resealing drops the old seal first.
+  assert.deepEqual(sealSnapshot(sealed).integrity, sealed.integrity);
+  // generatedAt is presentation metadata outside the canonical form, like drift.
+  assert.equal(verifySnapshotIntegrity({ ...sealed, generatedAt: '2026-09-25T00:00:00.000Z' }), 'sealed');
+
+  const tampered = structuredClone(sealed);
+  tampered.channels.find((channel) => channel.name === 'general')!.name = 'general-evil';
+  assert.throws(() => verifySnapshotIntegrity(tampered), SnapshotIntegrityError);
+  assert.throws(() => verifySnapshotIntegrity(tampered), /content hash .* does not match sealed hash/);
+  try {
+    verifySnapshotIntegrity(tampered);
+    assert.fail('expected SnapshotIntegrityError');
+  } catch (error) {
+    assert.ok(error instanceof SnapshotIntegrityError);
+    assert.equal(error.name, 'SnapshotIntegrityError');
+    assert.notEqual(error.expectedHash, error.actualHash);
+  }
+
+  const tamperedOverwrite = structuredClone(sealed);
+  tamperedOverwrite.channels.find((channel) => channel.name === 'general')!.permission_overwrites = [];
+  assert.throws(() => verifySnapshotIntegrity(tamperedOverwrite), SnapshotIntegrityError);
+
+  assert.equal(verifySnapshotIntegrity(acceptedSnapshot()), 'legacy');
+  assert.throws(() => verifySnapshotIntegrity({ ...sealed, integrity: { algorithm: 'md5', snapshotHash: 'x' } as never }), SnapshotIntegrityError);
 });
 
 test('restore refuses a snapshot for another guild and ambiguous targets', () => {
