@@ -324,7 +324,7 @@ export class FunnelHandlers {
     return e;
   }
 
-  async onLeave(guildId: string, memberId: string, occurredAt?: string): Promise<FunnelEvent> {
+  async onLeave(guildId: string, memberId: string, occurredAt?: string): Promise<FunnelEvent | null> {
     const e: FunnelEvent = {
       guildId,
       memberId,

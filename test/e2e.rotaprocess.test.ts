@@ -35,6 +35,12 @@ async function until<T>(read: () => T | Promise<T>, what: string, timeout = 15_0
   throw new Error(`timed out: ${what}`);
 }
 
+/**
+ * Identify capability of the connection `src/index.ts` actually opens, by
+ * intent name. Pinned as literals so a rename cannot move the boundary.
+ */
+const MAIN_INTENT_BITS = 34503;
+
 function environment(mock: MockDiscord, db: TestDb, mode: Mode): NodeJS.ProcessEnv {
   // This opt-in test URL must identify a disposable local database. Never use
   // TWO_DATABASE_URL from the invoking shell or inherit its env/secret files.
@@ -61,10 +67,11 @@ function environment(mock: MockDiscord, db: TestDb, mode: Mode): NodeJS.ProcessE
   };
 }
 
-async function launch(db: TestDb, mode: Mode, mutation = false, wrongGuild = false) {
+async function launch(db: TestDb, mode: Mode, mutation = false, wrongGuild = false, containment?: string) {
   const mock = await startMockDiscord({ guildId: GUILD });
   const env = environment(mock, db, mode);
   if (wrongGuild) env.DISCORD_STAGING_GUILD_ID = '900000000000007999';
+  if (containment !== undefined) env.TWO_STAGING_RESTART_CONTAINMENT = containment;
   const args = ['--require', './test/helpers/rotaProcessGuard.cjs'];
   if (mutation) args.push('--import', './test/helpers/rotaNoDispatchMutation.ts');
   args.push('--import', './test/helpers/rotaProcessWitness.ts', 'src/index.ts');
@@ -113,7 +120,8 @@ async function launch(db: TestDb, mode: Mode, mutation = false, wrongGuild = fal
       await mock.close();
     }
     assert.equal(forced, false, `child required SIGKILL\n${log}`);
-    if (!wrongGuild) assert.equal(bot.exitCode, 0, `child shutdown must be clean\n${log}`);
+    const invalidFlag = containment !== undefined && containment !== '' && containment !== '0' && containment !== '1';
+    if (!wrongGuild && !invalidFlag) assert.equal(bot.exitCode, 0, `child shutdown must be clean\n${log}`);
     assert.throws(() => process.kill(bot.pid!, 0), { code: 'ESRCH' }, 'no leaked child process');
   };
   return { mock, bot, snapshot, close, exited, running, output: () => log, refusals: () => refused };
@@ -225,6 +233,80 @@ test('wrong staging guild binding refuses real boot before database or Discord u
       assert.match(harness.output(), /Onboarding rota is staging-only/);
       assert.doesNotMatch(harness.output(), /datastore_open/);
       assert.equal(harness.mock.captured.length, 0);
+    } finally { await harness.close(); }
+  } finally { await db.cleanup(); }
+});
+
+/** The contained Identify/observer test lives in e2e.stagingrestart.test.ts,
+ * whose fixture satisfies the real staging containment preflight. The ordinary
+ * process fixture here deliberately retains command publication and welcomes.
+ */
+test('invalid containment flags refuse boot before database or Discord use', { timeout: 60_000 }, async () => {
+  const db = await openTestDb(`rota_capability_invalid_${process.pid}`);
+  try {
+    for (const flag of ['true', 'yes', '2']) {
+      const harness = await launch(db, 'notice-off', false, false, flag);
+      try {
+        await until(() => harness.bot.exitCode !== null, 'invalid containment flag stops boot');
+        await harness.exited;
+        assert.notEqual(harness.bot.exitCode, 0);
+        assert.match(harness.output(), /TWO_STAGING_RESTART_CONTAINMENT must be exactly 0 or 1/);
+        assert.doesNotMatch(harness.output(), /datastore_open/);
+        assert.equal(harness.mock.identifies.length, 0);
+        assert.equal(harness.mock.gatewayOpcodes.length, 0);
+        assert.equal(harness.mock.captured.length, 0);
+      } finally { await harness.close(); }
+    }
+  } finally { await db.cleanup(); }
+});
+
+/**
+ * The negative half. Without this the contained invisible/643 assertions could be
+ * passing for any reason at all - including the fixture reading a field that
+ * was always there.
+ */
+test('without the exact flag the identify capability is unchanged from production', { timeout: 60_000 }, async () => {
+  const db = await openTestDb(`rota_capability_off_${process.pid}`);
+  try {
+    // Client construction treats non-'1' as inert; the full entrypoint separately
+    // rejects malformed flags. Absent, empty and explicit '0' boot normally.
+    for (const [label, flag] of [['absent', undefined], ['empty', ''], ['"0"', '0']] as const) {
+      const harness = await launch(db, 'notice-off', false, false, flag);
+      try {
+        await until(() => {
+          harness.running();
+          return harness.mock.identifies.length > 0;
+        }, `identify with the flag ${label}\n${harness.output()}`);
+        const [identify] = harness.mock.identifies;
+        assert.equal(identify.intents, MAIN_INTENT_BITS, `flag ${label} changed the intents`);
+        assert.equal(identify.presenceStatus, 'online', `flag ${label} changed the presence`);
+      } finally {
+        await harness.close();
+      }
+    }
+  } finally {
+    await db.cleanup();
+  }
+});
+
+/**
+ * Criterion 4's other half: a refusal under containment fails loudly. The
+ * staging-guild binding check is the refusal the rota already has; the flag
+ * must not turn it into a silent drop or a fabricated success.
+ */
+test('a refusal under containment still exits nonzero before any Discord use', { timeout: 30_000 }, async () => {
+  const db = await openTestDb(`rota_capability_refuse_${process.pid}`);
+  try {
+    const harness = await launch(db, 'notice-off', false, true, '1');
+    try {
+      await until(() => harness.bot.exitCode !== null, 'contained wrong binding stops boot');
+      await harness.exited;
+      assert.notEqual(harness.bot.exitCode, 0, 'a refusal must exit nonzero');
+      assert.match(harness.output(), /Onboarding rota is staging-only/);
+      assert.doesNotMatch(harness.output(), /datastore_open/);
+      assert.equal(harness.mock.captured.length, 0);
+      // Refused before login, so the scoped connection was never opened either.
+      assert.equal(harness.mock.identifies.length, 0);
     } finally { await harness.close(); }
   } finally { await db.cleanup(); }
 });
