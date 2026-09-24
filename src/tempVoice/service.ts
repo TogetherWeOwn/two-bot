@@ -489,6 +489,7 @@ export class TempVoiceService {
         }
         continue;
       }
+      if (row.pendingOwnerId !== null && !(await this.recoverOwnerChange(guildId, channelId))) continue;
       await this.store.setEmptySince(row.id, null);
       // Only a real rename starts a window. Seeding from `createdAt` would
       // make a restart silently cost the owner their first rename.
@@ -538,6 +539,7 @@ export class TempVoiceService {
         continue;
       }
       if (occupants.length > 0) {
+        if (row.pendingOwnerId !== null && !(await this.recoverOwnerChange(guildId, channelId))) continue;
         if (row.emptySince !== null) await this.store.setEmptySince(row.id, null);
         await this.flushPendingRename(row, channelId);
         continue;
@@ -597,6 +599,9 @@ export class TempVoiceService {
     const row = await this.store.getByChannel(ctx.guildId, ctx.actorChannelId);
     if (!row) {
       return { ok: false, outcome: { status: 'noop', message: 'This is not a temporary voice channel.' } };
+    }
+    if (row.pendingOwnerId !== null) {
+      return { ok: false, outcome: { status: 'refused', message: 'An ownership change is pending recovery. Controls are unavailable until it completes.' } };
     }
     if ((options.requireOwner ?? true) && row.ownerId !== ctx.actorId) {
       return { ok: false, outcome: { status: 'refused', message: `Only <@${row.ownerId}> can do that here.` } };
@@ -768,43 +773,81 @@ export class TempVoiceService {
 
   /** Only available once the recorded owner has actually left the channel. */
   async claim(ctx: ControlContext): Promise<ControlOutcome> {
-    const resolved = await this.resolve('claim', ctx, { requireOwner: false });
-    if (!resolved.ok) return resolved.outcome;
-    const { row, channelId } = resolved;
-    if (row.ownerId === ctx.actorId) {
-      return this.record(ctx, channelId, 'claim', { status: 'noop', message: 'You already own this channel.' });
-    }
-    const occupants = (await this.gateway.occupantsOf(channelId)) ?? [];
-    if (occupants.includes(row.ownerId)) {
-      return this.record(ctx, channelId, 'claim', { status: 'refused', message: `<@${row.ownerId}> is still here, so the channel cannot be claimed.` });
-    }
-    await this.transferTo(row, channelId, ctx.actorId);
-    return this.record(ctx, channelId, 'claim', { status: 'ok', message: `<@${ctx.actorId}> now owns this channel.` });
+    return this.changeOwner('claim', ctx, ctx.actorId);
   }
 
   async transfer(ctx: ControlContext, targetId: string): Promise<ControlOutcome> {
-    const resolved = await this.resolve('transfer', ctx);
-    if (!resolved.ok) return resolved.outcome;
-    const { row, channelId } = resolved;
-    if (targetId === row.ownerId) {
-      return this.record(ctx, channelId, 'transfer', { status: 'noop', message: 'You already own this channel.' });
-    }
-    const occupants = (await this.gateway.occupantsOf(channelId)) ?? [];
-    if (!occupants.includes(targetId)) {
-      return this.record(ctx, channelId, 'transfer', { status: 'refused', message: 'You can only hand the channel to somebody currently in it.' });
-    }
-    await this.transferTo(row, channelId, targetId);
-    return this.record(ctx, channelId, 'transfer', { status: 'ok', message: `<@${targetId}> now owns this channel.` });
+    return this.changeOwner('transfer', ctx, targetId);
   }
 
-  /** Move the per-channel owner grant, so exactly one member holds it. */
-  private async transferTo(row: TempVoiceRow, channelId: string, newOwnerId: string): Promise<void> {
-    await this.gateway.applyOverwrite(channelId, {
-      id: newOwnerId,
-      type: 'member',
-      allow: ['ViewChannel', 'Connect', 'Speak', 'ManageChannels', 'MoveMembers'],
+  private async changeOwner(control: 'claim' | 'transfer', ctx: ControlContext, targetId: string): Promise<ControlOutcome> {
+    const result = await this.store.withOwnershipLock(ctx.guildId, async (assertHeld) => {
+      // Resolve AFTER serialization: a previously read owner is not authority
+      // to clear grants or transfer somebody else's newly claimed channel.
+      const resolved = await this.resolve(control, ctx, { requireOwner: control === 'transfer' });
+      if (!resolved.ok) return resolved.outcome;
+      const { row, channelId } = resolved;
+      if (targetId === row.ownerId) {
+        return this.record(ctx, channelId, control, { status: 'noop', message: 'You already own this channel.' });
+      }
+      const occupants = (await this.gateway.occupantsOf(channelId)) ?? [];
+      if (!occupants.includes(ctx.actorId)) {
+        return this.record(ctx, channelId, control, { status: 'refused', message: 'You are no longer in this channel.' });
+      }
+      if (control === 'claim' && occupants.includes(row.ownerId)) {
+        return this.record(ctx, channelId, control, { status: 'refused', message: `<@${row.ownerId}> is still here, so the channel cannot be claimed.` });
+      }
+      if (!occupants.includes(targetId)) {
+        return this.record(ctx, channelId, control, { status: 'refused', message: 'You can only hand the channel to somebody currently in it.' });
+      }
+      if (!(await this.store.beginOwnerChange(row.id, row.ownerId, targetId))) {
+        return this.record(ctx, channelId, control, { status: 'refused', message: 'Channel ownership changed. No permissions were modified.' });
+      }
+      const completed = await this.applyOwnerChange({ ...row, pendingOwnerId: targetId }, channelId, assertHeld);
+      return this.record(ctx, channelId, control, completed
+        ? { status: 'ok', message: `<@${targetId}> now owns this channel.` }
+        : { status: 'refused', message: 'Ownership change could not finish. It is saved for recovery; controls are unavailable until it completes.' });
     });
-    await this.gateway.clearOverwrite(channelId, row.ownerId);
-    await this.store.setOwner(row.id, newOwnerId);
+    return result.acquired ? result.value : { status: 'refused', message: 'Another ownership change is in progress. Try again shortly.' };
+  }
+
+  /**
+   * Finish a committed intent under the ownership lock, also after a restart.
+   * Revoke BEFORE granting: a failed/ambiguous grant can leave zero owners or
+   * the intended owner, never both. Keep the intent until every step succeeds.
+   */
+  private async applyOwnerChange(row: TempVoiceRow, channelId: string, assertHeld: () => Promise<void>): Promise<boolean> {
+    const targetId = row.pendingOwnerId!;
+    try {
+      await assertHeld();
+      await this.gateway.clearOverwrite(channelId, row.ownerId);
+      await assertHeld();
+      await this.gateway.applyOverwrite(channelId, {
+        id: targetId,
+        type: 'member',
+        allow: ['ViewChannel', 'Connect', 'Speak', 'ManageChannels', 'MoveMembers'],
+      });
+      await assertHeld();
+      if (!(await this.store.completeOwnerChange(row.id, row.ownerId, targetId))) {
+        throw new Error('temp-voice ownership finalization lost its persisted intent');
+      }
+      return true;
+    } catch (err) {
+      log.error('temp_voice_owner_change_pending', { guildId: row.guildId, channelId, ownerId: row.ownerId, targetId, err: String(err) });
+      await this.store.audit(
+        { guildId: row.guildId, actorId: null, channelId, action: 'owner_change', outcome: 'pending', reason: String(err).slice(0, 300) },
+        this.iso(),
+      );
+      return false;
+    }
+  }
+
+  private async recoverOwnerChange(guildId: string, channelId: string): Promise<boolean> {
+    const result = await this.store.withOwnershipLock(guildId, async (assertHeld) => {
+      const row = await this.store.getByChannel(guildId, channelId);
+      if (!row || row.pendingOwnerId === null) return true;
+      return this.applyOwnerChange(row, channelId, assertHeld);
+    });
+    return result.acquired && result.value;
   }
 }

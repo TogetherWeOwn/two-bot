@@ -16,6 +16,7 @@ import { loadTempVoiceConfig, TEMP_VOICE_CONTROLS, type TempVoiceConfig, type Te
 import { filterChannelName, renderNameTemplate } from '../src/tempVoice/nameFilter.ts';
 import { RenameThrottle, RENAME_MIN_INTERVAL_MS } from '../src/tempVoice/rename.ts';
 import { TempVoiceStore } from '../src/tempVoice/store.ts';
+import { openPostgres } from '../src/store/postgresDriver.ts';
 import {
   CATEGORY_FULL_CODE,
   MISSING_PERMISSIONS_CODE,
@@ -211,6 +212,12 @@ async function join(svc: TempVoiceService, userId: string, username = 'owen') {
 
 function ctx(actorId: string, actorChannelId: string | null): ControlContext {
   return { guildId: GUILD, actorId, actorChannelId };
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
 }
 
 /** Every button custom id on the rendered panel, in order. */
@@ -894,6 +901,166 @@ describe('owner controls', () => {
     gateway.channels.get(channelId)!.members.push(OTHER);
     assert.equal((await svc.transfer(ctx(OWNER, channelId), OTHER)).status, 'ok');
     assert.equal((await store.getByChannel(GUILD, channelId))?.ownerId, OTHER);
+  });
+
+  for (const action of ['claim', 'transfer'] as const) {
+    test(`serializes simultaneous ${action}s across independent stores and connection pools`, { timeout: 5000 }, async (t) => {
+      await setup();
+      const third = '1546451670500642004';
+      const channel = gateway.channels.get(channelId)!;
+      channel.members = action === 'claim' ? [OTHER, third] : [OWNER, OTHER, third];
+      const peerDb = await openPostgres({ connectionString: process.env.TWO_TEST_DATABASE_URL!, schema: dbFixture.schema, max: 2 });
+      t.after(() => peerDb.close());
+      const peer = new TempVoiceService({ store: new TempVoiceStore(peerDb), gateway, config: config(), policy: POLICY, now });
+      const entered = deferred();
+      const release = deferred();
+      t.after(() => release.resolve());
+      const apply = gateway.applyOverwrite.bind(gateway);
+      t.mock.method(gateway, 'applyOverwrite', async (id: string, spec: OverwriteSpec) => {
+        if (spec.id === OTHER) {
+          entered.resolve();
+          await release.promise;
+        }
+        await apply(id, spec);
+      });
+      const first = action === 'claim' ? svc.claim(ctx(OTHER, channelId)) : svc.transfer(ctx(OWNER, channelId), OTHER);
+      await entered.promise;
+      let second;
+      try {
+        second = action === 'claim' ? await peer.claim(ctx(third, channelId)) : await peer.transfer(ctx(OWNER, channelId), third);
+      } finally {
+        release.resolve();
+      }
+      const outcomes = [await first, second];
+      assert.equal(outcomes.filter((outcome) => outcome.status === 'ok').length, 1);
+      const owners = [...channel.overwrites].filter(([id, flags]) =>
+        id !== gateway.botUserId() && (flags.get('ManageChannels') || flags.get('MoveMembers'))).map(([id]) => id);
+      assert.deepEqual(owners, [OTHER], 'exactly one member may hold owner permissions');
+      assert.equal((await store.getByChannel(GUILD, channelId))?.ownerId, OTHER);
+      assert.equal((await peer.claim(ctx(third, channelId))).status, 'refused', 'revalidate the persisted winner after lock release');
+      assert.equal((await peer.transfer(ctx(OWNER, channelId), third)).status, 'refused', 'the old owner loses transfer authority');
+    });
+  }
+
+  for (const failure of ['revoke-before', 'revoke-after', 'grant-before', 'grant-after', 'finalize', 'finalize-stale'] as const) {
+    for (const recovery of ['sweep', 'reconcile'] as const) {
+      test(`${recovery} recovers a durable ownership intent after ${failure} failure`, async (t) => {
+        await setup();
+        const channel = gateway.channels.get(channelId)!;
+        channel.members = [OWNER, OTHER];
+        const clear = gateway.clearOverwrite.bind(gateway);
+        const apply = gateway.applyOverwrite.bind(gateway);
+        const complete = store.completeOwnerChange.bind(store);
+        let failing = true;
+        const assertSingleOwner = () => {
+          const owners = [...channel.overwrites].filter(([id, flags]) =>
+            id !== gateway.botUserId() && (flags.get('ManageChannels') || flags.get('MoveMembers')));
+          assert.ok(owners.length <= 1, 'never grant two members owner permissions, even between calls');
+        };
+        t.mock.method(gateway, 'clearOverwrite', async (id: string, target: string) => {
+          assert.equal((await store.getByChannel(GUILD, id))?.pendingOwnerId, OTHER,
+            'intent must already be committed and visible on another connection before Discord mutation');
+          if (failing && failure === 'revoke-before') throw new Error('revoke denied');
+          await clear(id, target);
+          assertSingleOwner();
+          if (failing && failure === 'revoke-after') throw new Error('revoke response lost');
+        });
+        t.mock.method(gateway, 'applyOverwrite', async (id: string, spec: OverwriteSpec) => {
+          assert.equal(channel.overwrites.has(OWNER), false, 'remove the old grant before adding the new one');
+          if (failing && failure === 'grant-before') throw new Error('grant denied');
+          await apply(id, spec);
+          assertSingleOwner();
+          if (failing && failure === 'grant-after') throw new Error('grant response lost');
+        });
+        t.mock.method(store, 'completeOwnerChange', async (id: string, oldOwner: string, target: string) => {
+          if (failing && failure === 'finalize') throw new Error('database finalization unavailable');
+          if (failing && failure === 'finalize-stale') return false;
+          return complete(id, oldOwner, target);
+        });
+
+        const outcome = await svc.transfer(ctx(OWNER, channelId), OTHER);
+        assert.equal(outcome.status, 'refused', 'a partial transition must not claim success');
+        assert.match(outcome.message, /recovery/);
+        const pending = await store.getByChannel(GUILD, channelId);
+        assert.equal(pending?.ownerId, OWNER);
+        assert.equal(pending?.pendingOwnerId, OTHER);
+        assertSingleOwner();
+        assert.equal((await svc.lock(ctx(OWNER, channelId), true)).status, 'refused');
+        assert.equal((await svc.claim(ctx(OTHER, channelId))).status, 'refused');
+        assert.equal((await svc.transfer(ctx(OWNER, channelId), '1546451670500642004')).status, 'refused');
+        const audit = await dbFixture.db.prepare(
+          `SELECT outcome FROM temp_voice_audit WHERE channel_id = ? AND action = 'owner_change'`,
+        ).get<{ outcome: string }>(channelId);
+        assert.equal(audit?.outcome, 'pending');
+
+        failing = false;
+        const restarted = new TempVoiceService({ store: new TempVoiceStore(dbFixture.db), gateway, config: config(), policy: POLICY, now });
+        await restarted[recovery](GUILD);
+        const recovered = await store.getByChannel(GUILD, channelId);
+        assert.equal(recovered?.ownerId, OTHER);
+        assert.equal(recovered?.pendingOwnerId, null);
+        assert.equal(channel.overwrites.has(OWNER), false);
+        assert.equal(channel.overwrites.get(OTHER)?.get('ManageChannels'), true);
+        assert.equal(channel.overwrites.get(OTHER)?.get('MoveMembers'), true);
+        assert.equal(channel.overwrites.get(OTHER)?.has('ManageRoles'), false);
+        assertSingleOwner();
+        await restarted[recovery](GUILD);
+        assert.equal((await store.getByChannel(GUILD, channelId))?.ownerId, OTHER);
+      });
+    }
+  }
+
+  test('restart resumes a committed intent even if the worker never recorded its failure', async () => {
+    await setup();
+    const channel = gateway.channels.get(channelId)!;
+    channel.members = [OTHER];
+    const row = (await store.getByChannel(GUILD, channelId))!;
+    assert.equal(await store.beginOwnerChange(row.id, OWNER, OTHER), true);
+    await gateway.clearOverwrite(channelId, OWNER);
+    await gateway.applyOverwrite(channelId, { id: OTHER, type: 'member', allow: ['ManageChannels', 'MoveMembers'] });
+    // The worker died here, before database finalization or an error handler.
+    const restarted = new TempVoiceService({ store: new TempVoiceStore(dbFixture.db), gateway, config: config(), policy: POLICY, now });
+    await restarted.reconcile(GUILD);
+    const recovered = await store.getByChannel(GUILD, channelId);
+    assert.equal(recovered?.ownerId, OTHER);
+    assert.equal(recovered?.pendingOwnerId, null);
+    assert.equal(channel.overwrites.has(OWNER), false);
+  });
+
+  test('a recovery worker shares the ownership lock with a new claim', { timeout: 5000 }, async (t) => {
+    await setup();
+    const third = '1546451670500642004';
+    gateway.channels.get(channelId)!.members = [OTHER, third];
+    const row = (await store.getByChannel(GUILD, channelId))!;
+    assert.equal(await store.beginOwnerChange(row.id, OWNER, OTHER), true);
+    const entered = deferred();
+    const release = deferred();
+    t.after(() => release.resolve());
+    const apply = gateway.applyOverwrite.bind(gateway);
+    t.mock.method(gateway, 'applyOverwrite', async (id: string, spec: OverwriteSpec) => {
+      entered.resolve();
+      await release.promise;
+      await apply(id, spec);
+    });
+    const recovering = service().reconcile(GUILD);
+    await entered.promise;
+    try {
+      const attempted = await service().claim(ctx(third, channelId));
+      assert.equal(attempted.status, 'refused');
+      assert.match(attempted.message, /in progress/);
+    } finally {
+      release.resolve();
+      await recovering;
+    }
+    assert.equal((await store.getByChannel(GUILD, channelId))?.ownerId, OTHER);
+    assert.equal(gateway.channels.get(channelId)!.overwrites.has(third), false);
+  });
+
+  test('claim revalidates that the actor is still connected', async () => {
+    await setup();
+    gateway.channels.get(channelId)!.members = [];
+    assert.equal((await svc.claim(ctx(OTHER, channelId))).status, 'refused');
+    assert.equal((await store.getByChannel(GUILD, channelId))?.ownerId, OWNER);
   });
 
   test('controls are inert while the feature is off', async () => {
