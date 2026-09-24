@@ -1,0 +1,61 @@
+{
+  "revision": "f5fd3e1d6d08847589d3bf48ebc0b0e198196e90",
+  "blocks": {
+    "startup": {
+      "path": "src/index.ts",
+      "blob": "45775ab4d39d25c7e18277dc4e6945b46e8c0ee1",
+      "startLine": 743,
+      "endLine": 765,
+      "sha256": "80b6c82d312bfafb4cadd7596517b0957137db8eb657ce4abd00a3cd452f7385",
+      "code": "  internal = await startInternalActions({\n    host: internalCfg.host,\n    port: internalCfg.port,\n    keys: new KeyRing(internalCfg.keys),\n    guildId: cfg.guildId,\n    discord: new DiscordActions({\n      token: cfg.discordToken,\n      base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,\n    }),\n    roleKeys: internalCfg.roleKeys,\n    channelKeys: internalCfg.channelKeys,\n    enabled: internalCfg.enabled,\n    // The durable nonce, idempotency and audit tables (TOG-44). The same\n    // database as everything else, so it is covered by the same backups.\n    store: new InternalActionStore(db),\n    expectedJoins,\n    automations: automationCfg.enabled ? automationService : null,\n    allowAutomationOverwrite: automationCfg.enabled && internalCfg.allowAutomationOverwrite,\n    syncCommands: automationCfg.enabled && commandRegistry ? () => commandRegistry!.sync() : null,\n    moderation: moderationResolver && moderationService\n      ? { resolver: moderationResolver, service: moderationService }\n      : null,\n  });\n"
+    },
+    "serverGate": {
+      "path": "src/internal/server.ts",
+      "blob": "5fe42441a964a5c4c2bbd4758d305ee2cdc2fa92",
+      "startLine": 303,
+      "endLine": 305,
+      "sha256": "e803d83daad999359af35bad69e1fab70a9536cd7069f8070f5b2962e52b0d63",
+      "code": "  const store = opts.store ?? null;\n  const settings = opts.settings ?? null;\n  assertAllowed(action, { enabled: opts.enabled, store, settings });\n"
+    },
+    "implemented": {
+      "path": "src/internal/actions.ts",
+      "blob": "f6ce4baf2f1e79ee5c439354cc94d7fb5825cbfc",
+      "startLine": 29,
+      "endLine": 39,
+      "sha256": "2c244b3390706b7f54952d39b5c1de6c3f1cddf2797d2eb8b0ab3ccfd5bfdd29",
+      "code": "export const IMPLEMENTED_ACTIONS = [\n  'role.assign',\n  'guild.add_member',\n  'announcement.post',\n  'event.upsert',\n  'automations.import',\n  'automations.export',\n  'settings.get',\n  'settings.set',\n  ...MODERATION_ACTIONS,\n] as const;\n"
+    },
+    "needsStores": {
+      "path": "src/internal/actions.ts",
+      "blob": "f6ce4baf2f1e79ee5c439354cc94d7fb5825cbfc",
+      "startLine": 49,
+      "endLine": 66,
+      "sha256": "abcfd50db5266d1ca65a2c5aa2be1ef244f145006e057b4d9c019e869483aaca",
+      "code": "export const NEEDS_IDEMPOTENCY_KEY: ReadonlySet<string> = new Set([\n  'announcement.post',\n  'event.upsert',\n  'automations.import',\n  // A settings write is not naturally idempotent the way role.assign is: two\n  // deliveries of the same save are two audit rows and two version bumps, and\n  // if a concurrent save landed in between, the second delivery silently\n  // reverts it. The key makes the retry replay one stored result instead.\n  'settings.set',\n  ...MODERATION_ACTIONS,\n]);\n\n/**\n * Actions that cannot run without the config store wired in. Same shape as the\n * NEEDS_IDEMPOTENCY_KEY/store check: configured-on with nothing behind it is a\n * typed refusal, never a 500.\n */\nexport const NEEDS_SETTINGS_STORE: ReadonlySet<string> = new Set(['settings.get', 'settings.set']);\n"
+    },
+    "isImplemented": {
+      "path": "src/internal/actions.ts",
+      "blob": "f6ce4baf2f1e79ee5c439354cc94d7fb5825cbfc",
+      "startLine": 205,
+      "endLine": 207,
+      "sha256": "808bc293bc8144a50325400c4bd13bd595fc14d474dce59447cb532cacdd6fb0",
+      "code": "export function isImplemented(action: string): action is ActionName {\n  return (IMPLEMENTED_ACTIONS as readonly string[]).includes(action);\n}\n"
+    },
+    "assertAllowed": {
+      "path": "src/internal/actions.ts",
+      "blob": "f6ce4baf2f1e79ee5c439354cc94d7fb5825cbfc",
+      "startLine": 213,
+      "endLine": 240,
+      "sha256": "38cf7aeb1748aae71aef7a868fa77c175cf4d2957a9775a3be2ea9fb2b61ddd0",
+      "code": "export function assertAllowed(\n  action: string,\n  ctx: Pick<ActionContext, 'enabled' | 'store'> & Partial<Pick<ActionContext, 'settings'>>,\n): asserts action is ActionName {\n  if (!isImplemented(action)) {\n    throw new ActionError('action_not_allowed', `\"${action}\" is not an allowlisted action`, {\n      logReason: 'action_unknown',\n    });\n  }\n  if (!ctx.enabled.has(action)) {\n    throw new ActionError('action_not_allowed', `\"${action}\" is not enabled on this bot`, {\n      logReason: 'action_disabled',\n    });\n  }\n  // Configured on but with no database behind it. Only reachable if the\n  // endpoint is started without a store, which src/index.ts does not do; a\n  // typed refusal beats a 500 if that ever changes.\n  if (NEEDS_IDEMPOTENCY_KEY.has(action) && !ctx.store) {\n    throw new ActionError('action_not_allowed', `\"${action}\" needs the durable store`, {\n      logReason: 'action_needs_store',\n    });\n  }\n  if (NEEDS_SETTINGS_STORE.has(action) && !ctx.settings) {\n    throw new ActionError('action_not_allowed', `\"${action}\" needs the config store`, {\n      logReason: 'action_needs_settings',\n    });\n  }\n}\n"
+    },
+    "actionError": {
+      "path": "src/internal/errors.ts",
+      "blob": "5731256e009c25c745f38641703c128e73cdf2fe",
+      "startLine": 69,
+      "endLine": 82,
+      "sha256": "cf18e5ed8f64ba84b49484eecf7ae7d40f01f4d7b86e65e7a9e918ffc6e72df7",
+      "code": "export class ActionError extends Error {\n  code: ErrorCode;\n  logReason: string;\n  /** Seconds, for `rate_limited` only. */\n  retryAfter?: number;\n\n  constructor(code: ErrorCode, message: string, opts: { logReason?: string; retryAfter?: number } = {}) {\n    super(message);\n    this.name = 'ActionError';\n    this.code = code;\n    this.logReason = opts.logReason ?? code;\n    this.retryAfter = opts.retryAfter;\n  }\n}\n"
+    }
+  }
+}

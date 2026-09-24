@@ -149,8 +149,8 @@ let storedRewards: LevelRoleReward[] | null = null;
 if (useDb) {
   const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
   if (!databaseUrl) throw new Error('TWO_DATABASE_URL is required. Pass --no-db to skip the delta.');
-  // skipMigrations, which no other script passes, is the point rather than an
-  // optimisation. openDb migrates by default, so a "read-only" probe would
+  // skipMigrations is the point rather than an optimisation. openDb migrates
+  // by default, so a "read-only" probe would
   // otherwise be able to create tables and rewrite schema on a database an
   // operator pointed it at by accident - and "it wrote nothing" would be a
   // claim about one table instead of about the connection. A probe that finds

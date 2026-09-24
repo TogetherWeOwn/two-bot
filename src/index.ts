@@ -8,6 +8,7 @@ import { InviteTracker } from './core/inviteTracker.ts';
 import { ExpectedJoins } from './core/expectedJoins.ts';
 import { FunnelHandlers } from './core/handlers.ts';
 import { createClient, registerHandlers } from './discord/client.ts';
+import { createRestartFetch } from './staging/restartRest.ts';
 import { registerOnboarding, registerGameSelect } from './discord/onboarding.ts';
 import { registerSessionWelcome } from './discord/sessionWelcome.ts';
 import { registerSelfRoles } from './discord/selfRoles.ts';
@@ -67,6 +68,12 @@ import { GuildConfigDiscordApi } from './discord/guildConfigApi.ts';
 import type { GuildConfigSnapshot } from './redesign/guildConfig.ts';
 import { readFileSync } from 'node:fs';
 import { STAGING_BOT_APPLICATION_ID, TWO_STAGING_GUILD_ID } from './staging/spec.ts';
+import {
+  assertStagingRestartPreflight,
+  parseSyntheticStagingActorIds,
+  stagingRestartContainmentArmed,
+  StagingRestartFunnelFirewall,
+} from './staging/restartContainment.ts';
 import { assertSelfRoleStagingBoundary } from './selfRoles/stagingFence.ts';
 import { CommandRegistry } from './discord/commandRegistry.ts';
 import { AutomationStore } from './automations/store.ts';
@@ -124,6 +131,37 @@ const selfRolePanels = loadSelfRolePanels();
 // touched. It is a pure read of process.env.
 const containmentCfg = loadContainmentConfig();
 setLogLevel(cfg.logLevel);
+
+// Acceptance-only registration and ingestion boundary. Validate before opening
+// storage; unrelated handlers/jobs are not registered, rather than pretending
+// their Discord writes succeeded. The real rota observer and scheduler remain.
+// Both verdicts use the same effective config, including systemd credentials.
+// A conflicting plain env value must never make a refused boot continue.
+const stagingRestartControls = {
+  discordToken: cfg.discordToken,
+  databaseUrl: cfg.databaseUrl,
+  stagingDatabaseUrl: process.env.TWO_STAGING_DATABASE_URL ?? null,
+  guildId: cfg.guildId,
+};
+const stagingRestartFlag = process.env.TWO_STAGING_RESTART_CONTAINMENT;
+if (stagingRestartFlag !== undefined && stagingRestartFlag !== '' && stagingRestartFlag !== '0' && stagingRestartFlag !== '1') {
+  throw new Error('TWO_STAGING_RESTART_CONTAINMENT must be exactly 0 or 1.');
+}
+const stagingRestartArmed = stagingRestartContainmentArmed(process.env, stagingRestartControls);
+if (stagingRestartFlag === '1') {
+  assertStagingRestartPreflight(process.env, stagingRestartControls);
+  log.info('staging_restart_containment_armed', { guildId: cfg.guildId });
+}
+const stagingSyntheticActors = stagingRestartArmed
+  ? parseSyntheticStagingActorIds(process.env.TWO_STAGING_RESTART_SYNTHETIC_ACTORS)
+  : null;
+const communityClassifierCfg = loadCommunityClassifierConfig();
+if (stagingRestartArmed && !communityClassifierCfg.stagingGuildIds.has(TWO_STAGING_GUILD_ID)) {
+  throw new Error('Staging restart containment requires explicit community staging-guild classification.');
+}
+// Construct before storage/network effects; unknown API bases refuse here.
+// Explicit injection covers application REST, not gateway/raw-socket egress.
+const stagingRestartFetch = stagingRestartArmed ? createRestartFetch(cfg.apiBase ?? undefined) : undefined;
 
 if (cfg.onboardingMode === 'session' && selfRolePanels.length) {
   throw new Error(
@@ -229,11 +267,20 @@ const invites = new InviteTracker(db);
 // note, the gateway join handler consumes it. docs/INTERNAL_ACTIONS.md §7.
 const expectedJoins = new ExpectedJoins();
 const leveling = new LevelingService(db);
-const communityClassifier = new CommunityClassifier(loadCommunityClassifierConfig());
+const communityClassifier = new CommunityClassifier(communityClassifierCfg);
 const communityFacts = cfg.communityScorecard ? new CommunityFactStore(db, communityClassifier) : null;
-const handlers = new FunnelHandlers(store, leveling, communityFacts);
+// The dispatcher rejects unbound actors before attribution or persistence.
+// This second boundary protects direct funnel calls; staging eligibility and
+// the real observer's per-subject ordering remain unchanged.
+const handlers = stagingRestartArmed && stagingSyntheticActors
+  ? new StagingRestartFunnelFirewall(store, leveling, communityFacts, stagingSyntheticActors)
+  : new FunnelHandlers(store, leveling, communityFacts);
 
 const client = createClient(process.env.TWO_AUTOMOD === '1');
+if (stagingRestartFetch) {
+  client.rest.options.makeRequest = stagingRestartFetch;
+  client.rest.options.retries = 0;
+}
 const moderationCfg = loadModerationConfig();
 // Narrowed once: property access below stays on the enabled member.
 const rotaCfg = onboardingRotaCfg.enabled === true ? onboardingRotaCfg : undefined;
@@ -271,15 +318,20 @@ await enforceModerationShutdownPreflight({
 const moderationDiscord = new ModerationDiscord({
   token: cfg.discordToken,
   base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+  fetchImpl: stagingRestartFetch,
 });
-const moderationResolver = cfg.guildId && moderationCfg.enabled
+const moderationResolver = !stagingRestartArmed && cfg.guildId && moderationCfg.enabled
   ? new RestModerationResolver({
       token: cfg.discordToken,
       botUserId: moderationCfg.owenUserId,
       base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+      fetchImpl: stagingRestartFetch,
     })
   : null;
 const operationalAuditStore = new OperationalAuditStore(db);
+// Under staging restart containment the audit mirror never POSTs: dryRun
+// keeps the durable rows and kill-switch semantics while every send path
+// records 'dry_run' instead. Normal production behavior is unchanged.
 const audit = makeOperationalAudit(client, {
   guildId: cfg.guildId,
   channels: {
@@ -288,6 +340,7 @@ const audit = makeOperationalAudit(client, {
     moderation: cfg.moderationLogChannelId,
   },
   store: operationalAuditStore,
+  ...(stagingRestartArmed ? { dryRun: true } : {}),
 });
 // Staging-only rota fallback notices. The boot guard above guarantees the
 // channel, primary and reader bindings are all present when this constructs;
@@ -303,10 +356,22 @@ const rotaNoticeDelivery = onboardingRotaCore && rotaCfg &&
   }, { rota: onboardingRotaCore, store: operationalAuditStore })
   : undefined;
 if (rotaNoticeDelivery && rotaCfg) {
-  log.info('rota_notice_delivery_enabled', {
-    guildId: rotaCfg.guildId,
-    noticeChannel: rotaCfg.noticeChannelId,
-  });
+  // Under staging restart containment the scheduler stays live (its lifecycle
+  // is under test) but the delivery service is stopped at construction, so no
+  // POST can begin — including work already waiting on access/history I/O.
+  // Tier T1 proves the negative (zero facts, no sends); Tier T2 stays gated.
+  if (stagingRestartArmed) {
+    rotaNoticeDelivery.stop();
+    log.info('rota_notice_delivery_contained', {
+      guildId: rotaCfg.guildId,
+      noticeChannel: rotaCfg.noticeChannelId,
+    });
+  } else {
+    log.info('rota_notice_delivery_enabled', {
+      guildId: rotaCfg.guildId,
+      noticeChannel: rotaCfg.noticeChannelId,
+    });
+  }
 } else {
   log.info('rota_notice_delivery_disabled', {
     reason: !rotaCfg ? 'measurement off'
@@ -334,7 +399,7 @@ if (moderationCfg.enabled && !moderationCfg.moderationAuditSecret) {
   });
 }
 const automodCfg = loadAutomodConfig();
-if (automodCfg.enabled && !moderationService) {
+if (!stagingRestartArmed && automodCfg.enabled && !moderationService) {
   throw new Error('TWO_AUTOMOD=1 requires TWO_MODERATION=1 so sanctions use the reviewed moderation path.');
 }
 const automodService = cfg.guildId && automodCfg.enabled && moderationResolver && moderationService
@@ -345,7 +410,10 @@ const automodService = cfg.guildId && automodCfg.enabled && moderationResolver &
       new AutomodStore(db),
       moderationResolver,
       {
-        dryRun: automodCfg.dryRun,
+        // Under staging restart containment automod inspects but never
+        // deletes or sanctions: message deletion is a Discord mutation
+        // outside the rota lifecycle. Production default unchanged.
+        dryRun: stagingRestartArmed ? true : automodCfg.dryRun,
         owenUserId: moderationCfg.owenUserId,
         botHighestRolePosition: await moderationResolver.botHighestRolePosition(cfg.guildId),
         policy: automodCfg.policy,
@@ -369,12 +437,19 @@ if (cfg.apiBase) {
 // than against whatever the environment said at boot. Everything else here
 // still reads `cfg` - see the HOT_WIRED note in src/core/settingsCatalog.ts for
 // why "hot" is a permission and not yet a promise.
+// Under staging restart containment the staff announcers log only and post
+// nothing: the watch/scorer still observe (their lifecycle is under test) but
+// the channel write is replaced with a null channel. Production defaults and
+// the session-mode armed-containment refusal above are unchanged.
 const raid = {
   watch: new RaidWatch({
     threshold: () => liveCfg.raidJoinThreshold,
     windowSeconds: () => liveCfg.raidWindowSeconds,
   }),
-  announce: makeRaidAnnouncer(client, { channelId: cfg.staffAlertChannelId }),
+  announce: makeRaidAnnouncer(client, {
+    channelId: stagingRestartArmed ? null : cfg.staffAlertChannelId,
+    ...(stagingRestartArmed ? { dryRun: true } : {}),
+  }),
 };
 log.info('raid_watch_enabled', {
   threshold: liveCfg.raidJoinThreshold,
@@ -389,7 +464,10 @@ const joinRisk = containmentCfg.enabled
   ? new JoinRiskScorer({
       store: containmentStore,
       config: containmentCfg,
-      announce: makeJoinRiskAnnouncer(client, containmentCfg.alertChannelId),
+      announce: makeJoinRiskAnnouncer(
+        client,
+        stagingRestartArmed ? null : containmentCfg.alertChannelId,
+      ),
     })
   : undefined;
 
@@ -412,9 +490,12 @@ registerHandlers(client, {
   audit,
   auditGuildId: cfg.guildId,
   moderationAuditSecret: moderationCfg.moderationAuditSecret,
+  ...(stagingRestartArmed && stagingSyntheticActors ? {
+    stagingRestart: { guildId: TWO_STAGING_GUILD_ID, syntheticActorIds: stagingSyntheticActors },
+  } : {}),
 });
 
-if (containmentCfg.enabled && containmentCfg.guildId) {
+if (!stagingRestartArmed && containmentCfg.enabled && containmentCfg.guildId) {
   if (containmentCfg.guildId !== TWO_STAGING_GUILD_ID || containmentCfg.botUserId !== STAGING_BOT_APPLICATION_ID) {
     throw new Error(
       `TOG-1650 is staging-only: expected guild ${TWO_STAGING_GUILD_ID} and application ${STAGING_BOT_APPLICATION_ID}.`,
@@ -425,6 +506,7 @@ if (containmentCfg.enabled && containmentCfg.guildId) {
     applicationId: STAGING_BOT_APPLICATION_ID,
     guildId: TWO_STAGING_GUILD_ID,
     apiBase: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+    fetchImpl: stagingRestartFetch,
   });
   await guildConfigApi.assertIdentity();
   const restore = containmentCfg.snapshotPath
@@ -439,9 +521,13 @@ if (containmentCfg.enabled && containmentCfg.guildId) {
       token: cfg.discordToken,
       botUserId: containmentCfg.botUserId,
       base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+      fetchImpl: stagingRestartFetch,
     }),
     config: containmentCfg,
-    announce: makeContainmentAnnouncer(client, containmentCfg.alertChannelId),
+    announce: makeContainmentAnnouncer(
+      client,
+      stagingRestartArmed ? null : containmentCfg.alertChannelId,
+    ),
     restore,
   });
   registerContainment(client, containment, containmentCfg.guildId);
@@ -454,11 +540,19 @@ if (containmentCfg.enabled && containmentCfg.guildId) {
   });
 }
 
-if (communityFacts) {
+if (communityFacts && !stagingRestartArmed) {
   registerCommunityAttendance(client, { facts: communityFacts, guildId: cfg.guildId });
+} else if (communityFacts) {
+  log.info('community_attendance_disabled', { reason: 'staging restart containment' });
 }
 
-if (cfg.ticketCategoryId && cfg.ticketStaffRoleId && cfg.ticketPanelChannelId) {
+// Under staging restart containment tickets stay unregistered: ticket
+// creation opens private channels and posts member-facing messages —
+// unrelated Discord mutations the Tier T1 negative proof must exclude.
+// Production defaults unchanged.
+if (stagingRestartArmed) {
+  log.info('tickets_disabled', { reason: 'staging restart containment' });
+} else if (cfg.ticketCategoryId && cfg.ticketStaffRoleId && cfg.ticketPanelChannelId) {
   registerTickets(client, {
     db,
     guildId: cfg.guildId,
@@ -477,7 +571,7 @@ if (cfg.ticketCategoryId && cfg.ticketStaffRoleId && cfg.ticketPanelChannelId) {
 } else {
   log.info('tickets_disabled', { reason: 'ticket channel, category, and staff role are not all configured' });
 }
-registerLeveling(client, { service: leveling, guildId: cfg.guildId });
+if (!stagingRestartArmed) registerLeveling(client, { service: leveling, guildId: cfg.guildId });
 if (automodService) {
   log.info('automod_enabled', {
     guildId: cfg.guildId,
@@ -487,7 +581,13 @@ if (automodService) {
     exemptChannels: automodCfg.policy.exemptChannelIds.size,
   });
 }
-if (cfg.guildId && moderationResolver && moderationService) {
+// Under staging restart containment the moderation slash handler stays
+// unregistered: kick/ban/timeout/lockdown are destructive Discord mutations
+// outside the rota lifecycle. The moderation service still exists for the
+// automod wiring decision below; no command reaches it. Production unchanged.
+if (stagingRestartArmed) {
+  log.info('moderation_handler_disabled', { reason: 'staging restart containment' });
+} else if (cfg.guildId && moderationResolver && moderationService) {
   registerModerationHandler(client, {
     guildId: cfg.guildId,
     resolver: moderationResolver,
@@ -502,6 +602,7 @@ const automationStore = new AutomationStore(db);
 const automationDiscord = new AutomationDiscord({
   token: cfg.discordToken,
   base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+  fetchImpl: stagingRestartFetch,
 });
 const automationService = new AutomationService(automationStore, automationDiscord);
 
@@ -525,6 +626,7 @@ async function sweepDisabledAutomationCommands(guildId: string): Promise<void> {
     applicationId,
     guildId,
     base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+    fetchImpl: stagingRestartFetch,
   });
   try {
     const result = await removeDbBackedCommands(guildId, automationStore, registrar);
@@ -549,7 +651,8 @@ async function sweepDisabledAutomationCommands(guildId: string): Promise<void> {
 }
 
 let commandRegistry: CommandRegistry | null = null;
-if (cfg.guildId) {
+// No publication, cleanup DELETE, or reconnect sync during acceptance.
+if (!stagingRestartArmed && cfg.guildId) {
   const registryGuildId = cfg.guildId;
   commandRegistry = new CommandRegistry(client, {
     guildId: registryGuildId,
@@ -569,7 +672,10 @@ if (cfg.guildId) {
       : () => sweepDisabledAutomationCommands(registryGuildId),
   });
 }
-if (cfg.guildId && automationCfg.enabled) {
+// Even disabled-command replies are writes, so containment omits both paths.
+if (stagingRestartArmed) {
+  log.info('automations_disabled', { reason: 'staging restart containment' });
+} else if (cfg.guildId && automationCfg.enabled) {
   registerAutomationCommands(client, {
     guildId: cfg.guildId,
     service: automationService,
@@ -599,22 +705,29 @@ if (cfg.guildId && automationCfg.enabled) {
   });
   // The deregister half runs as the command registry's beforeFirstSync hook
   // (above), so it reads the published set before the first full-set replace.
-  log.info('automations_disabled', { reason: 'TWO_AUTOMATIONS is not 1' });
+  log.info('automations_disabled', {
+    reason: 'TWO_AUTOMATIONS is not 1',
+  });
 } else {
   log.info('automations_disabled', { reason: 'DISCORD_GUILD_ID is unset' });
 }
-if (onboardingRota && onboardingRotaCfg.enabled && onboardingRotaCfg.primaryActorId) {
+if (!stagingRestartArmed && onboardingRota && onboardingRotaCfg.enabled && onboardingRotaCfg.primaryActorId) {
   registerRotaAcknowledgement(client, onboardingRotaCfg.guildId, onboardingRota);
 }
 commandRegistry?.register();
 
 // Announcements / scheduled-event RSVP / LFG / feed relays (TOG-1649).
+// Under staging restart containment the feed poller never starts: it relays
+// external feed content into Discord channels — unrelated sends the Tier T1
+// negative proof must exclude. Command handlers are omitted as well.
 let feedPoller: ReturnType<typeof startFeedPoller> | null = null;
-if (cfg.guildId && announcementsCfg.enabled) {
+if (stagingRestartArmed) {
+  log.info('announcements_disabled', { reason: 'staging restart containment' });
+} else if (cfg.guildId && announcementsCfg.enabled) {
   const announcementsStore = new AnnouncementsStore(db);
   const announcementsService = new AnnouncementsService(
     announcementsStore,
-    new DiscordAnnouncements({ token: cfg.discordToken, base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined }),
+    new DiscordAnnouncements({ token: cfg.discordToken, base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined, fetchImpl: stagingRestartFetch }),
     new XmlFeedReader(),
   );
   registerAnnouncementCommands(client, {
@@ -649,7 +762,13 @@ const onboardingDeps = {
 // instead, and no other onboarding handler may be registered alongside it -
 // see the starvation note above. The legacy picker code stays in the tree,
 // unregistered, selected back by unsetting TWO_ONBOARDING_MODE.
-if (cfg.onboardingMode === 'session') {
+//
+// Welcome/picker listeners write directly through their own recorders and can
+// send even in production dry-run mode. Omit registration for acceptance;
+// never redefine that normal behavior or fabricate a promptShown observation.
+if (stagingRestartArmed) {
+  log.info('onboarding_disabled', { reason: 'staging restart containment' });
+} else if (cfg.onboardingMode === 'session') {
   registerSessionWelcome(client, {
     onboardingRota,
     recorder: new SessionRecorder(store),
@@ -696,7 +815,9 @@ if (cfg.onboardingMode === 'session') {
 // Hardened self-role panels (TOG-1646). The panel catalogue is deployment data:
 // ids are never guessed from the live guild, and an empty catalogue is a clean
 // disable rather than an implicit panel with production ids.
-if (selfRolePanels.length) {
+if (stagingRestartArmed) {
+  log.info('self_roles_disabled', { reason: 'staging restart containment' });
+} else if (selfRolePanels.length) {
   if (!cfg.guildId) {
     throw new Error('TWO_SELF_ROLE_PANELS requires DISCORD_GUILD_ID - every panel belongs to one guild.');
   }
@@ -704,6 +825,7 @@ if (selfRolePanels.length) {
   const selfRoleRest = new DiscordRest({
     token: cfg.discordToken,
     base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+    fetchImpl: stagingRestartFetch,
   });
   const [selfRoleRoles, selfRoleChannels] = await Promise.all([
     selfRoleRest.get<Array<{ id: string; name?: string; permissions: string }>>(`/guilds/${cfg.guildId}/roles`),
@@ -746,8 +868,13 @@ if (selfRolePanels.length) {
 // crash rather than a quietly-exposed remote control for the server.
 const internalCfg = loadInternalActionsConfig();
 if (internalCfg) internalCfg.enabled = actionsForOnboardingMode(cfg.onboardingMode, internalCfg.enabled);
+// Under staging restart containment the internal actions listener never
+// starts: role.assign/event.upsert/guild.add_member are Discord mutations
+// outside the rota lifecycle. Production defaults unchanged.
 let internal: InternalServer | null = null;
-if (internalCfg) {
+if (stagingRestartArmed) {
+  log.info('internal_actions_disabled', { reason: 'staging restart containment' });
+} else if (internalCfg) {
   if (!cfg.guildId) {
     throw new Error('TWO_INTERNAL_ACTIONS=1 requires DISCORD_GUILD_ID - the actions act on one guild.');
   }
@@ -759,6 +886,7 @@ if (internalCfg) {
     discord: new DiscordActions({
       token: cfg.discordToken,
       base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+      fetchImpl: stagingRestartFetch,
     }),
     roleKeys: internalCfg.roleKeys,
     channelKeys: internalCfg.channelKeys,
@@ -766,6 +894,12 @@ if (internalCfg) {
     // The durable nonce, idempotency and audit tables (TOG-44). The same
     // database as everything else, so it is covered by the same backups.
     store: new InternalActionStore(db),
+    // The config store behind settings.get / settings.set (TOG-4230). The
+    // same instance the live config above reads through, so a signed write
+    // reaches the consumers on the next poll. Auth and the allowlist stay
+    // environment-only (src/internal/config.ts) - this only supplies the
+    // dependency server.ts null-defaults without.
+    settings,
     expectedJoins,
     automations: automationCfg.enabled ? automationService : null,
     allowAutomationOverwrite: automationCfg.enabled && internalCfg.allowAutomationOverwrite,
@@ -783,8 +917,16 @@ if (internalCfg) {
 // Needs a guild to ask about. A missing guild is a logged skip, never a crash -
 // this is an instrument for an internal question and it does not get to stop
 // the funnel from recording joins.
+// Under staging restart containment the member-list snapshot jobs stay off:
+// communitySnapshots writes member_ranks.member_id/member_exclusions rows for
+// every real member (TOG-3903 launch blocker), presenceProbe/scheduledEvents
+// ingest real-member presence/event state, and the scorecard derives
+// member-attributed facts. The rota observer/scheduler lifecycle under test is
+// untouched. Production defaults are unchanged.
 let presenceProbe: PresenceProbeHandle | null = null;
-if (!cfg.presenceProbe) {
+if (stagingRestartArmed) {
+  log.info('presence_probe_disabled', { reason: 'staging restart containment' });
+} else if (!cfg.presenceProbe) {
   log.info('presence_probe_disabled', { reason: 'TWO_PRESENCE_PROBE=0' });
 } else if (!cfg.guildId) {
   log.info('presence_probe_disabled', { reason: 'DISCORD_GUILD_ID is unset' });
@@ -794,6 +936,7 @@ if (!cfg.presenceProbe) {
     rest: new DiscordRest({
       token: cfg.discordToken,
       base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+      fetchImpl: stagingRestartFetch,
     }),
     guildId: cfg.guildId,
   });
@@ -804,7 +947,9 @@ if (!cfg.presenceProbe) {
 // counter, rank aggregates and public member projection by the same decision.
 // A failed or ungrounded read writes nothing and ages out in web_v1.
 let communitySnapshots: CommunitySnapshotHandle | null = null;
-if (!cfg.guildId) {
+if (stagingRestartArmed) {
+  log.info('community_snapshots_disabled', { reason: 'staging restart containment' });
+} else if (!cfg.guildId) {
   log.info('community_snapshots_disabled', { reason: 'DISCORD_GUILD_ID is unset' });
 } else {
   communitySnapshots = startCommunitySnapshots({
@@ -812,6 +957,7 @@ if (!cfg.guildId) {
     rest: new DiscordRest({
       token: cfg.discordToken,
       base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+      fetchImpl: stagingRestartFetch,
     }),
     guildId: cfg.guildId,
   });
@@ -822,7 +968,9 @@ if (!cfg.guildId) {
 // malformed read leaves the last good snapshot in place rather than publishing
 // "no events" as a transport error.
 let scheduledEvents: ScheduledEventsHandle | null = null;
-if (!cfg.guildId) {
+if (stagingRestartArmed) {
+  log.info('scheduled_events_disabled', { reason: 'staging restart containment' });
+} else if (!cfg.guildId) {
   log.info('scheduled_events_disabled', { reason: 'DISCORD_GUILD_ID is unset' });
 } else {
   scheduledEvents = startScheduledEventsPoller({
@@ -830,13 +978,16 @@ if (!cfg.guildId) {
     rest: new DiscordRest({
       token: cfg.discordToken,
       base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
+      fetchImpl: stagingRestartFetch,
     }),
     guildId: cfg.guildId,
   });
 }
 
 let communityScorecard: CommunityScorecardJobHandle | null = null;
-if (!cfg.communityScorecard) {
+if (stagingRestartArmed) {
+  log.info('community_scorecard_disabled', { reason: 'staging restart containment' });
+} else if (!cfg.communityScorecard) {
   log.info('community_scorecard_disabled', { reason: 'TWO_COMMUNITY_SCORECARD is not 1' });
 } else if (!cfg.guildId) {
   log.info('community_scorecard_disabled', { reason: 'DISCORD_GUILD_ID is unset' });
@@ -857,16 +1008,16 @@ const auditRetry = () => {
     log.error('operational_audit_retry_failed', { classification: 'audit_retry_failed' });
   });
 };
-client.once('ready', auditRetry);
-const auditSweep = setInterval(auditRetry, 30_000);
-auditSweep.unref();
+if (!stagingRestartArmed) client.once('ready', auditRetry);
+const auditSweep = stagingRestartArmed ? null : setInterval(auditRetry, 30_000);
+auditSweep?.unref();
 
 // Rota fallback-notice ticker. Same non-overlapping shape as the automation
 // scheduler; the durable claim row (not the interval) is the queue, so a
 // missed tick or restart loses nothing.
 const rotaNoticeScheduler = rotaNoticeDelivery ? startRotaNoticeScheduler(rotaNoticeDelivery) : null;
 
-const moderationSweep = moderationService
+const moderationSweep = !stagingRestartArmed && moderationService
   ? setInterval(() => {
       void moderationService.runDueUnbans().catch((err: unknown) => {
         log.error('moderation_unban_sweep_failed', { err: String(err) });
@@ -876,7 +1027,7 @@ const moderationSweep = moderationService
 moderationSweep?.unref();
 
 // Inactivity sweep once an hour. Cheap query; no outbound messages.
-const sweep = setInterval(
+const sweep = stagingRestartArmed ? null : setInterval(
   () => {
     void flagInactive(db, store, cfg.inactivityDays).catch((err: unknown) => {
       log.error('inactivity_sweep_failed', { err: String(err) });
@@ -884,7 +1035,7 @@ const sweep = setInterval(
   },
   60 * 60 * 1000,
 );
-sweep.unref();
+sweep?.unref();
 
 // The container health endpoint (TOG-13). Started BEFORE client.login, so that
 // during the seconds a cold start spends connecting to the gateway the platform
@@ -917,9 +1068,9 @@ if (healthPort > 0) {
 
 async function shutdown(signal: string) {
   log.info('shutdown', { signal });
-  clearInterval(sweep);
+  if (sweep) clearInterval(sweep);
   automationScheduler?.stop();
-  clearInterval(auditSweep);
+  if (auditSweep) clearInterval(auditSweep);
   rotaNoticeScheduler?.stop();
   feedPoller?.stop();
   if (moderationSweep) clearInterval(moderationSweep);
