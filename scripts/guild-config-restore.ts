@@ -2,9 +2,11 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { GuildConfigDiscordApi } from '../src/discord/guildConfigApi.ts';
 import {
+  SnapshotIntegrityError,
   canonicalSnapshot,
   configHash,
   snapshotCounts,
+  verifySnapshotIntegrity,
   type GuildConfigSnapshot,
 } from '../src/redesign/guildConfig.ts';
 import { applyRestorePlan, planRestore, remapSnapshotIds } from '../src/redesign/guildConfigRestore.ts';
@@ -48,6 +50,17 @@ try {
   die(`cannot read snapshot ${snapshotPath}: ${error instanceof Error ? error.message : String(error)}`, 2);
 }
 if (snapshot.version !== 1) die(`unsupported snapshot version ${String(snapshot.version)}`, 2);
+// TOG-3513: refuse a tampered backup before any Discord read or write.
+// A SnapshotIntegrityError is the typed negative signal; legacy pre-seal
+// snapshots restore with a warning so TOG-1651-era backups stay usable.
+try {
+  if (verifySnapshotIntegrity(snapshot) === 'legacy') {
+    console.error('guild-config-restore: warning: snapshot has no integrity seal (predates TOG-3513); skipping tamper check');
+  }
+} catch (error) {
+  if (error instanceof SnapshotIntegrityError) die(`refusing tampered backup: ${error.message}`, 3);
+  throw error;
+}
 if (snapshot.guildId !== guildId) die(`snapshot guild ${snapshot.guildId} does not match staging guild ${guildId}`, 2);
 if (snapshot.applicationId !== STAGING_BOT_APPLICATION_ID) {
   die(`snapshot application ${snapshot.applicationId} is not Owen QA Test ${STAGING_BOT_APPLICATION_ID}`, 2);

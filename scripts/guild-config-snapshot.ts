@@ -2,7 +2,7 @@ import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, wr
 import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { GuildConfigDiscordApi } from '../src/discord/guildConfigApi.ts';
-import { canonicalSnapshot, configHash, driftAgainstAcceptedSpec } from '../src/redesign/guildConfig.ts';
+import { canonicalSnapshot, configHash, driftAgainstAcceptedSpec, sealSnapshot, verifySnapshotIntegrity } from '../src/redesign/guildConfig.ts';
 import { checkStagingToken, stagingGuildId, STAGING_BOT_APPLICATION_ID } from '../src/staging/spec.ts';
 import { buildUploadArgv } from '../src/store/uploadCmd.ts';
 import { readSecret } from '../src/core/credentials.ts';
@@ -51,7 +51,8 @@ const api = new GuildConfigDiscordApi({
   guildId,
 });
 await api.assertIdentity();
-const snapshot = await api.capture();
+// TOG-3513: seal the snapshot at capture so restore can refuse a tampered backup.
+const snapshot = sealSnapshot(await api.capture());
 const report = driftAgainstAcceptedSpec(snapshot);
 const stamp = snapshot.generatedAt.replace(/[:.]/g, '-');
 const outputDir = resolve(process.env.TWO_GUILD_CONFIG_BACKUP_DIR ?? '/var/backups/two-bot/guild-config');
@@ -62,6 +63,11 @@ atomicJson(driftPath, report);
 
 const onDisk = JSON.parse(readFileSync(snapshotPath, 'utf8'));
 if (configHash(canonicalSnapshot(onDisk)) !== report.snapshotHash) die(`snapshot hash changed after write: ${snapshotPath}`);
+try {
+  if (verifySnapshotIntegrity(onDisk) !== 'sealed') die(`snapshot at ${snapshotPath} is missing its integrity seal`);
+} catch (error) {
+  die(error instanceof Error ? error.message : String(error));
+}
 console.log(`guild-config-snapshot: stored ${snapshotPath}`);
 console.log(`guild-config-snapshot: hash=${report.snapshotHash} roles=${report.counts.roles} channels=${report.counts.channels} overwrites=${report.counts.overwrites} emojis=${report.counts.emojis}`);
 console.log(`guild-config-snapshot: drift=${report.counts.drift} report=${driftPath}`);

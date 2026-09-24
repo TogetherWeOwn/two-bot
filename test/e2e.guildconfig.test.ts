@@ -102,6 +102,11 @@ async function stubDiscord(options: { botPermissions?: bigint; botPosition?: num
         return send(200, role);
       }
       if (method === 'PATCH' && path === `/api/v10/guilds/${GUILD}/channels` && Array.isArray(body)) {
+        // Mirror live Discord: bulk update rejects when more than one entry
+        // carries parent_id (40009). TOG-3513: this is what caught the old
+        // restore path, which always sent parent_id for every channel.
+        const withParent = (body as Array<{ parent_id?: unknown }>).filter((entry) => 'parent_id' in entry);
+        if (withParent.length > 1) return send(400, { message: 'Only one channel can have a parent_id modified at a time', code: 40009 });
         for (const position of body as Array<{ id: string; position: number; parent_id?: string | null }>) {
           const channel = state.channels.find((item) => item.id === position.id)!;
           channel.position = position.position;
@@ -226,6 +231,39 @@ test('restore that recreates role, category and child channel remaps ids and rea
     assert.notEqual(restoredOwner.id, sourceOwner.id);
     assert.notEqual(restoredCategory.id, sourceCategory.id);
     assert.equal(restoredChild.permission_overwrites.at(-1)!.id, restoredOwner.id);
+  } finally {
+    await stub.close();
+  }
+});
+
+test('restore refuses a tampered sealed backup with a typed error before any Discord call', async () => {
+  const stub = await stubDiscord();
+  const dir = mkdtempSync(join(tmpdir(), 'two-guild-tampered-'));
+  const source = join(dir, 'source.json');
+  const pristine = {
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    applicationId: STAGING_BOT_APPLICATION_ID,
+    guildId: GUILD,
+    ...stub.state,
+    emojis: stub.state.emojis.map((emoji) => ({ ...emoji, image: 'data:image/png;base64,dHdv' })),
+  };
+  const { sealSnapshot } = await import('../src/redesign/guildConfig.ts');
+  writeFileSync(source, `${JSON.stringify(sealSnapshot(pristine as never))}\n`);
+  // Tamper after sealing: rename one channel, exactly the TOG-3513 negative case.
+  const tampered = JSON.parse(readFileSync(source, 'utf8'));
+  tampered.channels.find((channel: Channel) => channel.name === 'general')!.name = 'general-tampered';
+  writeFileSync(source, `${JSON.stringify(tampered)}\n`);
+  try {
+    const refused = await run(RESTORE, ['--snapshot', source, '--confirm-staging-guild', '--apply'], { GUILD_CONFIG_API_BASE: stub.base, GUILD_CONFIG_CDN_BASE: stub.base.replace(/\/api\/v10$/, '') });
+    assert.equal(refused.code, 3, refused.stderr);
+    assert.match(refused.stderr, /refusing tampered backup: Snapshot integrity check failed/);
+    assert.equal(stub.writes.length, 0);
+    // The un-tampered sealed twin restores cleanly: seal-then-verify is not a false positive.
+    writeFileSync(source, `${JSON.stringify(sealSnapshot(pristine as never))}\n`);
+    const planned = await run(RESTORE, ['--snapshot', source], { GUILD_CONFIG_API_BASE: stub.base, GUILD_CONFIG_CDN_BASE: stub.base.replace(/\/api\/v10$/, '') });
+    assert.equal(planned.code, 0, planned.stderr);
+    assert.match(planned.stdout, /planned 0 operation\(s\)/);
   } finally {
     await stub.close();
   }
