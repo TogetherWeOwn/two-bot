@@ -55,6 +55,11 @@ export type GuildConfigEmoji = {
   image?: string;
 };
 
+export type GuildConfigSnapshotIntegrity = {
+  algorithm: 'sha256';
+  snapshotHash: string;
+};
+
 export type GuildConfigSnapshot = {
   version: 1;
   generatedAt: string;
@@ -64,7 +69,28 @@ export type GuildConfigSnapshot = {
   roles: GuildConfigRole[];
   channels: GuildConfigChannel[];
   emojis: GuildConfigEmoji[];
+  /**
+   * Tamper-evident seal written by `scripts/guild-config-snapshot.ts`: the
+   * sha256 of `canonicalSnapshot()` at capture time. Restore refuses a sealed
+   * snapshot whose content no longer matches. Absent on snapshots predating
+   * the seal (TOG-3513); those restore with a warning, not a refusal.
+   */
+  integrity?: GuildConfigSnapshotIntegrity;
 };
+
+export class SnapshotIntegrityError extends Error {
+  readonly expectedHash: string;
+  readonly actualHash: string;
+  constructor(expectedHash: string, actualHash: string) {
+    super(
+      `Snapshot integrity check failed: content hash ${actualHash} does not match sealed hash ${expectedHash}. ` +
+        'The backup was modified after capture; refusing to restore a tampered snapshot.',
+    );
+    this.name = 'SnapshotIntegrityError';
+    this.expectedHash = expectedHash;
+    this.actualHash = actualHash;
+  }
+}
 
 export type DriftItem = {
   path: string;
@@ -97,6 +123,44 @@ export function stable(value: unknown): string {
 
 export function configHash(value: unknown): string {
   return createHash('sha256').update(stable(value)).digest('hex');
+}
+
+/**
+ * Attach a tamper-evident seal to a freshly captured snapshot (TOG-3513).
+ * The seal covers `canonicalSnapshot()` — the same normalized form restore
+ * compares — so any post-capture edit (renamed channel, altered overwrite,
+ * swapped role) breaks verification. Idempotent: resealing drops the old seal
+ * first, so seal(seal(s)) === seal(s).
+ */
+export function sealSnapshot(snapshot: GuildConfigSnapshot): GuildConfigSnapshot {
+  const { integrity: _dropped, ...content } = snapshot;
+  return {
+    ...(content as GuildConfigSnapshot),
+    integrity: { algorithm: 'sha256', snapshotHash: configHash(canonicalSnapshot(content as GuildConfigSnapshot)) },
+  };
+}
+
+/**
+ * Verify a snapshot's tamper-evident seal before restore (TOG-3513).
+ * Returns 'sealed' when the content matches, 'legacy' for pre-seal snapshots
+ * that carry no seal (restore proceeds with a warning), and throws
+ * SnapshotIntegrityError — never a generic Error — on any mismatch, so
+ * callers can distinguish "tampered backup" from other restore failures.
+ * Pure and local: safe to run before any Discord call, so a tampered backup
+ * is refused with zero writes.
+ */
+export function verifySnapshotIntegrity(snapshot: GuildConfigSnapshot): 'sealed' | 'legacy' {
+  const seal = snapshot.integrity;
+  if (!seal) return 'legacy';
+  if (seal.algorithm !== 'sha256' || typeof seal.snapshotHash !== 'string') {
+    throw new SnapshotIntegrityError(`unsupported-seal:${String(seal.algorithm)}`, 'unverifiable');
+  }
+  const { integrity: _dropped, ...content } = snapshot;
+  const actualHash = configHash(canonicalSnapshot(content as GuildConfigSnapshot));
+  if (seal.snapshotHash !== actualHash) {
+    throw new SnapshotIntegrityError(seal.snapshotHash, actualHash);
+  }
+  return 'sealed';
 }
 
 export const GUILD_CONFIG_FIELDS = [
