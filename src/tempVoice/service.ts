@@ -302,12 +302,34 @@ export class TempVoiceService {
       log.info('temp_voice_created', { guildId: input.guildId, userId: input.userId, channelId, name });
       return { status: 'created', channelId, name };
     } catch (err) {
-      // Roll the claim back so a failed create does not spend the user's cap.
-      // This delete is safe without a row lookup precisely because we are
-      // holding the id of a channel this function created microseconds ago -
-      // provenance we have in hand, not provenance we inferred.
-      if (channelId) await this.gateway.deleteChannel(channelId, 'temp-voice create rollback').catch(() => undefined);
-      await this.store.deleteById(row.id);
+      // A failed create can release its reservation immediately only if no
+      // channel was created. Otherwise keep provenance (and the cap slot)
+      // until Discord confirms deletion or a 404. A failed cleanup is retried
+      // by the ordinary sweep/boot reconcile, not converted into an orphan.
+      let cleanupPending = false;
+      if (channelId) {
+        // Retry attachment if the original write failed transiently. If even
+        // this cannot persist the known id, fail loudly rather than discarding
+        // the reservation or reporting a recoverable cleanup without evidence.
+        if (!(await this.store.attach(row.id, channelId))) {
+          throw new Error(`temp-voice rollback cannot persist channel ${channelId} for reservation ${row.id}`, { cause: err });
+        }
+        try {
+          const deleted = await this.deleteGeneratedChannel(input.guildId, channelId, 'temp-voice create rollback');
+          if (deleted === 'refused') throw new Error('temp-voice rollback deletion refused');
+        } catch (cleanupError) {
+          cleanupPending = true;
+          log.error('temp_voice_create_rollback_failed', {
+            guildId: input.guildId, channelId, reservationId: row.id, err: String(cleanupError),
+          });
+          await this.store.audit(
+            { guildId: input.guildId, actorId: input.userId, channelId, action: 'create_rollback', outcome: 'failed', reason: String(cleanupError).slice(0, 300) },
+            this.iso(),
+          );
+        }
+      } else {
+        await this.store.deleteById(row.id);
+      }
 
       const code = err instanceof TempVoiceGatewayError ? err.code : null;
       if (code === CATEGORY_FULL_CODE) {
@@ -347,7 +369,12 @@ export class TempVoiceService {
         this.iso(),
       );
       log.error('temp_voice_create_failed', { guildId: input.guildId, userId: input.userId, err: String(err) });
-      return { status: 'refused', reason: 'Could not create your voice channel. Please try again.' };
+      return {
+        status: 'refused',
+        reason: cleanupPending
+          ? 'Could not finish creating your voice channel. Cleanup is pending; your channel limit remains reserved until it is removed.'
+          : 'Could not create your voice channel. Please try again.',
+      };
     }
   }
 

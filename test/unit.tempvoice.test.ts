@@ -436,6 +436,84 @@ describe('creating a channel', () => {
     assert.equal((await join(svc, OWNER)).status, 'created');
   });
 
+  for (const recovery of ['sweep', 'restart', 'missing'] as const) {
+    test(`retains provenance and cap accounting after rollback failure until ${recovery} cleanup`, async () => {
+      const svc = service(config({ maxPerGuild: 1 }));
+      gateway.moveMember = async () => { throw new Error('move failed'); };
+      const deleteChannel = gateway.deleteChannel.bind(gateway);
+      gateway.deleteChannel = async () => { throw new TempVoiceGatewayError('delete denied', MISSING_PERMISSIONS_CODE); };
+
+      const outcome = await join(svc, OWNER);
+      assert.equal(outcome.status, 'refused');
+      assert.match(outcome.status === 'refused' ? outcome.reason : '', /Cleanup is pending/);
+      const children = [...gateway.channels.values()].filter((channel) => ![LOBBY, GENERATOR].includes(channel.id));
+      assert.equal(children.length, 1);
+      const channelId = children[0].id;
+      assert.equal((await store.getByChannel(GUILD, channelId))?.ownerId, OWNER,
+        'a failed rollback must keep the surviving channel discoverable');
+      assert.equal(await store.countForOwner(GUILD, OWNER), 1);
+      assert.equal(await store.countForGuild(GUILD), 1);
+      assert.equal((await join(svc, OTHER)).status, 'refused');
+      assert.equal(gateway.createCalls, 1, 'retained cleanup rows must still consume the guild cap');
+      const audit = await dbFixture.db.prepare(
+        `SELECT outcome FROM temp_voice_audit WHERE channel_id = ? AND action = 'create_rollback'`,
+      ).get<{ outcome: string }>(channelId);
+      assert.equal(audit?.outcome, 'failed', 'rollback failures must not be swallowed');
+
+      await assert.rejects(service().reconcile(GUILD), /delete denied/);
+      assert.ok(await store.getByChannel(GUILD, channelId), 'a repeated cleanup failure must also retain provenance');
+
+      gateway.deleteChannel = deleteChannel;
+      const restarted = service();
+      if (recovery === 'sweep') {
+        await restarted.sweep(GUILD);
+        clock += 60_000;
+        assert.equal((await restarted.sweep(GUILD)).deleted, 1);
+      } else if (recovery === 'restart') {
+        assert.equal((await restarted.reconcile(GUILD)).deleted, 1);
+      } else {
+        gateway.channels.delete(channelId);
+        assert.equal(await restarted.deleteGeneratedChannel(GUILD, channelId, 'retry rollback'), 'missing');
+      }
+      assert.equal(gateway.channels.has(channelId), false);
+      assert.equal(await store.getByChannel(GUILD, channelId), null);
+      assert.equal(await store.countForGuild(GUILD), 0);
+      assert.ok(gateway.channels.has(LOBBY));
+      assert.ok(gateway.channels.has(GENERATOR));
+    });
+  }
+
+  test('retries a transient attachment failure before retaining a failed cleanup', async (t) => {
+    const attach = store.attach.bind(store);
+    let attempts = 0;
+    t.mock.method(store, 'attach', async (id: string, channelId: string) => {
+      if (++attempts === 1) throw new Error('transient attachment failure');
+      return attach(id, channelId);
+    });
+    gateway.deleteChannel = async () => { throw new Error('delete unavailable'); };
+    const outcome = await join(service(), OWNER);
+    assert.equal(outcome.status, 'refused');
+    assert.equal(attempts, 2);
+    const live = await store.listLive(GUILD);
+    assert.equal(live.length, 1);
+    assert.ok(gateway.channels.has(live[0].channelId!));
+  });
+
+  test('does not delete an unrecorded channel when the rollback cannot persist provenance', async (t) => {
+    t.mock.method(store, 'attach', async () => false);
+    await assert.rejects(join(service(), OWNER), /rollback cannot persist channel/);
+    assert.deepEqual(gateway.deleteCalls, []);
+    assert.equal(await store.countForGuild(GUILD), 1, 'do not silently discard the reservation');
+  });
+
+  test('successful compensating deletion releases a failed move reservation', async () => {
+    gateway.moveMember = async () => { throw new Error('move failed'); };
+    assert.equal((await join(service(), OWNER)).status, 'refused');
+    assert.equal(gateway.deleteCalls.length, 1);
+    assert.equal(gateway.channels.size, 2);
+    assert.equal(await store.countForGuild(GUILD), 0);
+  });
+
   test('refuses a 50013 without telling the member to retry', async () => {
     const svc = service();
     gateway.failCreate = new TempVoiceGatewayError('missing permissions', MISSING_PERMISSIONS_CODE);
