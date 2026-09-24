@@ -118,6 +118,13 @@ function existingCandidate(channel: GuildConfigChannel, parent: GuildConfigChann
     throw new Error(`Target has multiple ${channel.name} channels in ${parent?.name ?? 'the guild root'}; restore is ambiguous.`);
   }
   if (exact[0]) return exact[0];
+  // TOG-3513: a Discord id is never reused, so a live channel carrying the
+  // snapshot id IS the snapshot channel even when its name drifted (a rename).
+  // Without this, restoring a rename falls through to "create" and duplicates
+  // the channel — found live on TWO Staging 2026-09-24. Checked after the
+  // ambiguity throw so genuine duplicates still refuse.
+  const byId = current.channels.find((item) => item.id === channel.id && item.type === channel.type);
+  if (byId) return byId;
   return parent && actualParentId === null ? undefined : candidates[0];
 }
 
@@ -249,10 +256,20 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
         channelWrites++;
       }
     }
+    // TOG-3513: the bulk position PATCH must not carry parent_id for channels
+    // whose parent is unchanged — live Discord rejects the batch with 40009
+    // ("Only one channel can have a parent_id modified at a time") as soon as
+    // more than one entry carries it, which the old code always sent. A genuine
+    // parent move goes out as its own per-channel PATCH instead.
+    // actualParentId null means the parent is itself being created: the create
+    // above (or the reference patch) already carries the parent, so no move op.
+    if (actual && parent && actualParentId && actualParentId !== (actual.parent_id ?? null)) {
+      channelOperations.push({ label: `move channel ${channel.name}`, method: 'PATCH', path: { channelSourceId: channel.id }, body: { parent_id: targetParent } });
+      channelWrites++;
+    }
     sourceChannelPositions.push({
       id: reference('channel', channel.id),
       position: channel.position,
-      parent_id: parent ? reference('channel', parent.id) : null,
     });
 
     const expectedOverwrites = channel.permission_overwrites ?? [];
