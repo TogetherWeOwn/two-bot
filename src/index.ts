@@ -894,6 +894,12 @@ if (stagingRestartArmed) {
     // The durable nonce, idempotency and audit tables (TOG-44). The same
     // database as everything else, so it is covered by the same backups.
     store: new InternalActionStore(db),
+    // The config store behind settings.get / settings.set (TOG-4230). The
+    // same instance the live config above reads through, so a signed write
+    // reaches the consumers on the next poll. Auth and the allowlist stay
+    // environment-only (src/internal/config.ts) - this only supplies the
+    // dependency server.ts null-defaults without.
+    settings,
     expectedJoins,
     automations: automationCfg.enabled ? automationService : null,
     allowAutomationOverwrite: automationCfg.enabled && internalCfg.allowAutomationOverwrite,
