@@ -70,6 +70,7 @@
     "levels:inventory": "node scripts/levels-import-mee6.ts inventory",
     "levels:roles": "node scripts/levels-role-rewards.ts",
     "levels:roles:probe": "node scripts/levels-import-rewards-probe.ts",
+    "onboarding:web:acceptance": "node scripts/onboarding-web-slice-acceptance.ts",
     "automod:export": "node scripts/automod-export.ts",
     "community:scorecard": "node scripts/community-scorecard.ts"
   },
