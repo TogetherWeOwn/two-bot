@@ -95,46 +95,8 @@ permissions:
   contents: read
 
 jobs:
-  # See ci.yml for the full argument. This workflow's pull_request trigger is
-  # path-filtered, which makes it easy to forget that it is still a fork's code
-  # on our persistent runners — scripts/ci/check-fork-gate-coverage.mjs is what
-  # remembered it (TOG-3103). The gate checks out the base commit, so the fork
-  # is not the one supplying the guard.
-  #
-  # The "reports only on a PR" rule above is about the plan changing, which is
-  # nobody's fault. Coming from a fork is a different thing and does fail.
-  fork-gate:
-    runs-on: [self-hosted, two-selfhosted]
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ github.event.pull_request.base.sha || github.sha }}
-          persist-credentials: false
-      # The policy must already be on the base; no candidate-selected fallback.
-      - name: Refuse fork pull requests
-        env:
-          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-        run: ./scripts/ci/refuse-fork-pr.sh
-      # Match ci.yml: only trusted policy code runs; candidate checkout is data.
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '24'
-      - name: Install trusted workflow parser
-        run: npm ci --ignore-scripts --prefix scripts/ci
-      - name: Read candidate workflows
-        uses: actions/checkout@v5
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          path: candidate
-          sparse-checkout: .github/workflows
-          persist-credentials: false
-      - name: Verify the fork gate against candidate wiring
-        run: ./scripts/ci/refuse-fork-pr.test.sh "$GITHUB_WORKSPACE/candidate"
-
   protection-available:
-    needs: fork-gate
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
