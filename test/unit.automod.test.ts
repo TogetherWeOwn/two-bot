@@ -13,6 +13,8 @@ import { ModerationStore } from '../src/moderation/store.ts';
 import type { ModerationTarget } from '../src/moderation/types.ts';
 import { openTestDb } from './helpers/testDb.ts';
 
+const STAGING_TOKEN = `${Buffer.from('1469137636663758888').toString('base64url')}.mock.signature`;
+
 const GUILD = '1545644954272137297';
 const CHANNEL = '1546211375251066941';
 const USER = '900000000000000001';
@@ -69,14 +71,16 @@ const unprotected = {
 };
 
 test('loads default-off configuration and validates the sanction ladder', () => {
+  const staging = { DISCORD_GUILD_ID: '1545644954272137297', DISCORD_TOKEN: STAGING_TOKEN };
   assert.equal(loadAutomodConfig({}).enabled, false);
-  assert.equal(loadAutomodConfig({ TWO_AUTOMOD: '1' }).dryRun, true);
-  assert.equal(loadAutomodConfig({ TWO_AUTOMOD: '1', TWO_AUTOMOD_ENFORCE: '1' }).dryRun, false);
+  assert.equal(loadAutomodConfig({ ...staging, TWO_AUTOMOD: '1' }).dryRun, true);
+  assert.equal(loadAutomodConfig({ ...staging, TWO_AUTOMOD: '1', TWO_AUTOMOD_ENFORCE: '1' }).dryRun, false);
   assert.throws(
-    () => loadAutomodConfig({ TWO_AUTOMOD: '1', DISCORD_GUILD_ID: '326474832151838730' }),
-    /staging-only.*live TWO guild/i,
+    () => loadAutomodConfig({ TWO_AUTOMOD: '1', DISCORD_GUILD_ID: '326474832151838730', DISCORD_TOKEN: STAGING_TOKEN }),
+    /allowlist refused automod/i,
   );
   const cfg = loadAutomodConfig({
+    ...staging,
     TWO_AUTOMOD: '1',
     TWO_AUTOMOD_BAD_WORDS: 'one,two',
     TWO_AUTOMOD_SANCTIONS: '1:delete,2:warn,4:timeout:900',

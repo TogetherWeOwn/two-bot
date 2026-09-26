@@ -42,6 +42,7 @@ import { loadMigrations } from '../src/store/migrate.ts';
 import { cleanupDecision, restoredStickyRow } from '../scripts/staging-automations-proof-state.ts';
 
 const GUILD = '1545644954272137297';
+const STAGING_TOKEN = `${Buffer.from('1469137636663758888').toString('base64url')}.mock.signature`;
 const CHANNEL = '100000000000000001';
 const ACTOR = '900000000000000001';
 
@@ -153,17 +154,17 @@ test('mee6: translateExport preserves the first trigger and suffixes later colli
 
 // --- command registry ---------------------------------------------------------
 
-test('automations are default-off and categorically refuse the live guild', () => {
-  assert.deepEqual(loadAutomationConfig({}), { enabled: false, textCommandsEnabled: false });
+test('automations are default-off and fenced by the live-activation allowlist', () => {
+  assert.deepEqual(loadAutomationConfig({}, null), { enabled: false, textCommandsEnabled: false });
   assert.deepEqual(loadAutomationConfig({
     TWO_AUTOMATIONS: '1',
     TWO_TEXT_COMMANDS: '1',
     DISCORD_GUILD_ID: GUILD,
-  }), {
+  }, STAGING_TOKEN), {
     enabled: true,
     textCommandsEnabled: true,
   });
-  assert.deepEqual(loadAutomationConfig({ TWO_TEXT_COMMANDS: '1' }), {
+  assert.deepEqual(loadAutomationConfig({ TWO_TEXT_COMMANDS: '1' }, null), {
     enabled: false,
     textCommandsEnabled: false,
   });
@@ -171,16 +172,16 @@ test('automations are default-off and categorically refuse the live guild', () =
     () => loadAutomationConfig({
       TWO_AUTOMATIONS: '1',
       DISCORD_GUILD_ID: '326474832151838730',
-    }),
-    /staging-only.*expected guild/i,
+    }, STAGING_TOKEN),
+    /allowlist refused automations.*expected guild/i,
   );
   assert.throws(
-    () => loadAutomationConfig({ TWO_AUTOMATIONS: '1' }),
-    /got unset/i,
+    () => loadAutomationConfig({ TWO_AUTOMATIONS: '1' }, STAGING_TOKEN),
+    /guild unset/i,
   );
   assert.throws(
-    () => loadAutomationConfig({ TWO_AUTOMATIONS: '1', DISCORD_GUILD_ID: '999999999999999999' }),
-    /got 999999999999999999/i,
+    () => loadAutomationConfig({ TWO_AUTOMATIONS: '1', DISCORD_GUILD_ID: '999999999999999999' }, STAGING_TOKEN),
+    /guild 999999999999999999/i,
   );
 });
 
