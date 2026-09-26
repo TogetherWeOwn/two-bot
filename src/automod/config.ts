@@ -1,4 +1,4 @@
-import { LIVE_GUILD_ID } from '../staging/spec.ts';
+import { assertActivationPermitted, botTokenFrom } from '../live/activation.ts';
 import type { AutomodPolicy, AutomodSanction } from './types.ts';
 
 const DEFAULT_BLOCKED_ATTACHMENTS = ['bat', 'cmd', 'com', 'exe', 'js', 'jse', 'msi', 'ps1', 'scr', 'vbs', 'wsf'];
@@ -14,14 +14,16 @@ export interface AutomodConfig {
   policy: AutomodPolicy;
 }
 
-export function loadAutomodConfig(env: NodeJS.ProcessEnv = process.env): AutomodConfig {
+/**
+ * When enabled, the live-activation allowlist decides where automod may run.
+ * This used to be a denylist naming the live guild, so every other guild passed.
+ */
+export function loadAutomodConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  token: string | null = botTokenFrom(env),
+): AutomodConfig {
   const enabled = env.TWO_AUTOMOD === '1';
-  if (enabled && env.DISCORD_GUILD_ID?.trim() === LIVE_GUILD_ID) {
-    throw new Error(
-      `TWO_AUTOMOD=1 is staging-only and refuses the live TWO guild (${LIVE_GUILD_ID}). ` +
-      'Live rollout requires a separately reviewed operator change.',
-    );
-  }
+  if (enabled) assertActivationPermitted('automod', env.DISCORD_GUILD_ID, token);
   const dryRun = env.TWO_AUTOMOD_ENFORCE !== '1';
   const policy: AutomodPolicy = {
     badWords: csv(env.TWO_AUTOMOD_BAD_WORDS).map(normalize).filter(Boolean),

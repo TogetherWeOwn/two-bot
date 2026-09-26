@@ -74,7 +74,7 @@ import {
   stagingRestartContainmentArmed,
   StagingRestartFunnelFirewall,
 } from './staging/restartContainment.ts';
-import { assertSelfRoleStagingBoundary } from './selfRoles/stagingFence.ts';
+import { assertActivationPermitted } from './live/activation.ts';
 import { CommandRegistry } from './discord/commandRegistry.ts';
 import { AutomationStore } from './automations/store.ts';
 import { AutomationDiscord, registerAutomationCommands } from './automations/discord.ts';
@@ -821,7 +821,7 @@ if (stagingRestartArmed) {
   if (!cfg.guildId) {
     throw new Error('TWO_SELF_ROLE_PANELS requires DISCORD_GUILD_ID - every panel belongs to one guild.');
   }
-  assertSelfRoleStagingBoundary(cfg.guildId, cfg.discordToken);
+  assertActivationPermitted('self_roles', cfg.guildId, cfg.discordToken);
   const selfRoleRest = new DiscordRest({
     token: cfg.discordToken,
     base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,
