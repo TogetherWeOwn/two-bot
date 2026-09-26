@@ -403,6 +403,42 @@ describe('creating a channel', () => {
     assert.equal(flags.includes('Administrator' as OverwriteFlag), false);
   });
 
+  test('filters a blocked word out of the display name at create rather than minting it', async () => {
+    const svc = service();
+    const outcome = await join(svc, OWNER, 'a badword fan');
+    assert.equal(outcome.status, 'created');
+    const createdName = outcome.status === 'created' ? outcome.name : '';
+    assert.doesNotMatch(createdName.toLowerCase(), /badword/, 'the channel name must not carry the blocked word');
+    const channel = gateway.channels.get(outcome.status === 'created' ? outcome.channelId : '')!;
+    assert.equal(channel.name, createdName);
+    const row = await store.getByChannel(GUILD, channel.id);
+    assert.equal(row?.name, createdName, 'the persisted row must store the filtered name, not the raw render');
+  });
+
+  test('filters an invite link out of the display name at create', async () => {
+    const svc = service();
+    const before = gateway.createCalls;
+    const outcome = await join(svc, OWNER, 'join discord.gg/abc');
+    assert.equal(outcome.status, 'created');
+    const createdName = outcome.status === 'created' ? outcome.name : '';
+    assert.doesNotMatch(createdName, /discord\.gg/, 'the channel name must not carry the invite link');
+    assert.equal(gateway.createCalls, before + 1, 'filtering renames, it does not refuse the join');
+  });
+
+  test('refuses when the template itself violates automod instead of laundering it', async () => {
+    const svc = service(config({ nameTemplate: 'badword room {seq}' }));
+    const before = gateway.createCalls;
+    const outcome = await join(svc, OWNER, 'ava');
+    assert.equal(outcome.status, 'refused');
+    assert.match(outcome.status === 'refused' ? outcome.reason : '', /not allowed/);
+    assert.equal(gateway.createCalls, before, 'a blocked template must refuse before the create call, not after');
+    assert.equal(await store.countForGuild(GUILD), 0, 'a blocked name must not consume the guild cap');
+    const audit = await dbFixture.db.prepare(
+      `SELECT reason FROM temp_voice_audit WHERE action = 'create' AND outcome = 'refused' ORDER BY created_at DESC LIMIT 1`,
+    ).get<{ reason: string | null }>();
+    assert.equal(audit?.reason, 'name_blocked');
+  });
+
   test('refuses over the per-user cap BEFORE calling Discord', async () => {
     const svc = service();
     await join(svc, OWNER);
