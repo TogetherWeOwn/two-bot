@@ -8,6 +8,7 @@ import { assertPublicHostname, createPublicLookup, isPublicAddress, readLimitedT
 import { openTestDb } from './helpers/testDb.ts';
 
 const GUILD = '1545644954272137297';
+const STAGING_TOKEN = `${Buffer.from('1469137636663758888').toString('base64url')}.mock.signature`;
 const CHANNEL = '1546451670500642826';
 const EVENT = '1546451670500642999';
 const USER = '1546451670500642888';
@@ -43,14 +44,14 @@ class FakeDiscord {
 beforeEach(async () => dbFixture.reset());
 after(async () => dbFixture.cleanup());
 
-test('feature is default-off and categorically staging-only', () => {
-  assert.deepEqual(loadAnnouncementsConfig({}), { enabled: false, feedPollSeconds: 300 });
+test('feature is default-off and fenced by the live-activation allowlist', () => {
+  assert.deepEqual(loadAnnouncementsConfig({}, null), { enabled: false, feedPollSeconds: 300 });
   assert.throws(
-    () => loadAnnouncementsConfig({ TWO_ANNOUNCEMENTS: '1', DISCORD_GUILD_ID: '326474832151838730' }),
-    /staging-only/,
+    () => loadAnnouncementsConfig({ TWO_ANNOUNCEMENTS: '1', DISCORD_GUILD_ID: '326474832151838730' }, STAGING_TOKEN),
+    /allowlist refused announcements/,
   );
   assert.deepEqual(
-    loadAnnouncementsConfig({ TWO_ANNOUNCEMENTS: '1', DISCORD_GUILD_ID: GUILD, TWO_FEED_POLL_SECONDS: '60' }),
+    loadAnnouncementsConfig({ TWO_ANNOUNCEMENTS: '1', DISCORD_GUILD_ID: GUILD, TWO_FEED_POLL_SECONDS: '60' }, STAGING_TOKEN),
     { enabled: true, feedPollSeconds: 60 },
   );
 });
