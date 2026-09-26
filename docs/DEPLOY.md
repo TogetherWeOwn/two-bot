@@ -44,7 +44,7 @@ one — the same application backs the website's OAuth client.
 
 | Field | Value |
 |---|---|
-| Repository | `git@135.148.42.223:/srv/git/two-bot.git` |
+| Repository | `git@<mirror-host>:/srv/git/two-bot.git` (host from the operator — never commit it here) |
 | Branch | `main` |
 | Compose file | `docker-compose.yml` |
 | Build context | `/` (repo root) |
@@ -52,8 +52,9 @@ one — the same application backs the website's OAuth client.
 **Do not point this at `github.com`.** Coolify on this box cannot clone from
 GitHub: a deploy key is refused by the GitHub *enterprise* policy (TOG-1175), an
 embedded `x-access-token` clone URL 500s, and `private_key_uuid` 422s. The box
-keeps a mirror of the GitHub repo at the path above and re-mirrors every 2
-minutes; Coolify clones from that over SSH.
+keeps a mirror of the GitHub repo at the repository path above and re-mirrors
+every 2 minutes; Coolify clones from that over SSH. Get the mirror host from
+the operator — it is infrastructure addressing, not repository content.
 
 The failure mode if you get this wrong is quiet: the deploy ends in a few
 seconds with a **zero-byte build log**, which looks like a broken server rather
@@ -73,9 +74,9 @@ silently writes real data somewhere nobody looks.
 | Variable | Required | Value | Notes |
 |---|---|---|---|
 | `DISCORD_BOT_TOKEN` | **yes** | the `discord_bot_token` secret | **Mark as secret** in Coolify so it is masked in build logs |
-| `DISCORD_GUILD_ID` | **yes** | `326474832151838730` | TogetherWeOwn |
+| `DISCORD_GUILD_ID` | **yes** | your guild's snowflake, e.g. `123456789012345678` | The example is synthetic, not a live server |
 | `TWO_DATABASE_URL` | **yes** | `postgres://…` | **Not** `DATABASE_URL` — see below |
-| `DISCORD_STAFF_ALERT_CHANNEL_ID` | recommended | `1138590808715571300` | Settled on TOG-412. Staff-only: the alert lists member ids |
+| `DISCORD_STAFF_ALERT_CHANNEL_ID` | recommended | e.g. `123456789012345679` (synthetic) | Staff-only: the alert lists member ids. Use the real staff alerts channel — settled on TOG-412 |
 | `DISCORD_LANDING_CHANNEL_IDS` | no | empty | Onboarding does not run while empty. Set it only when you want the picker posted |
 | `TWO_ONBOARDING_MODE` | no | `legacy` | Set `session` for roleless routing; requires the next three settings, removes `role.assign` from internal actions, stops leveling reward roles, and refuses to boot with a non-empty `TWO_SELF_ROLE_PANELS` or an armed `TWO_ANTI_NUKE` (see [ANTI-NUKE.md](ANTI-NUKE.md)) |
 | `DISCORD_GOODBYE_CHANNEL_IDS` | session only | empty | Comma-separated, guild-scoped goodbye targets |
@@ -140,7 +141,7 @@ Run preflight against the live server. It is read-only and takes seconds, and it
 catches the failures that otherwise appear as a permanent hole in the numbers:
 
 ```bash
-DISCORD_TOKEN=... DISCORD_GUILD_ID=326474832151838730 node scripts/preflight.ts
+DISCORD_TOKEN=... DISCORD_GUILD_ID=123456789012345678 node scripts/preflight.ts
 ```
 
 `Ready to deploy.` means the funnel will collect. A `FAIL` on the **Server
@@ -161,7 +162,7 @@ deliverable today is that `Owen` still carries **Administrator**. When TOG-64
 trims that bit, `View` goes false while `Send` stays true — the channel keeps
 looking healthy to anything that checks `Send` alone, and alerts silently stop.
 Before the trim lands, add a channel overwrite allowing `View Channel` to the
-`Owen` role (`1539718644953514087`). Preflight reports this as a `WARN`, not a
+`Owen` role (ask the operator for the role id). Preflight reports this as a `WARN`, not a
 `FAIL`, because it is correct today; `src/discord/channelAccess.ts` does the
 overwrite arithmetic and `test/unit.channelaccess.test.ts` pins the live shape.
 

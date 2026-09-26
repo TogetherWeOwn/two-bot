@@ -10,7 +10,7 @@ behind it.
 ## Re-running it
 
 ```bash
-DISCORD_BOT_TOKEN=<bot token> DISCORD_GUILD_ID=326474832151838730 \
+DISCORD_BOT_TOKEN=<bot token> DISCORD_GUILD_ID=<guild id> \
   node scripts/audit-collect.ts     # ~118 requests, ~3 min, writes audit/raw/
 node scripts/audit-report.ts        # no network, rebuilds every table
 git diff audit/ data/               # what moved since last time
