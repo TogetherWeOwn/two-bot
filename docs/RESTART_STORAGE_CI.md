@@ -111,9 +111,10 @@ negative controls and cleanup, including unsuccessful development attempts.
 
 This candidate is based on the parent's reviewed
 `4a8d8d846cb2fd37f661e5cdaacccf4bce91cf07`; it does not alter that branch.
-Fresh main `d2555efbafeb2913f03d20689921037527350654` contains fork-gate workflow
+Fresh main `d2555efbafeb2913f03d20689921037527350654` contains workflow
 protections absent from that baseline. Parent integration must preserve those
 protections when reconciling the workflow; applying the whole old workflow over
-main would be incorrect. The child delta only replaces the check job's four
+main would be incorrect. (The self-hosted fork-gate guard referenced by the
+original text was retired when CI moved to hosted runners; TOG-4817.) The child delta only replaces the check job's four
 commands with the explicit wrapper and does not modify job dependencies.
 No parent rebase, merge, deployment or actual staging is authorized here.
