@@ -184,7 +184,7 @@ test('deleting the row hands the key back to the environment, live', async () =>
 test('a stored landing channel list reaches a thunk built before the write', async () => {
   const store = new SettingsStore(testDb.db);
   await store.load();
-  const { cfg } = bootLikeIndex(store);
+  const { cfg, changes } = bootLikeIndex(store);
   // The exact shape src/index.ts passes into OnboardingDeps/SessionWelcomeDeps.
   const live = () => cfg().landingChannelIds;
   // The control: a plain array captured once, which is what shipped before
@@ -206,6 +206,20 @@ test('a stored landing channel list reaches a thunk built before the write', asy
     fixed,
     ['100000000000000001', '100000000000000002'],
     'a value captured once, the way it shipped before this card, does not move',
+  );
+  // TOG-4697: the suite used to assert only the thunked value above, not the
+  // per-key log line. `changes` is the verbatim src/index.ts diff, so this is
+  // the setting_changed assertion.
+  assert.deepEqual(
+    changes,
+    [
+      {
+        key: 'DISCORD_LANDING_CHANNEL_IDS',
+        from: '100000000000000001,100000000000000002',
+        to: '200000000000000003',
+      },
+    ],
+    'the index diff names the landing-channel move (the setting_changed line)',
   );
 });
 
@@ -265,7 +279,7 @@ function dryRunAutomod(liveRepeatedMessageCount: () => number): AutomodService {
 test('a stored repeat-count threshold reaches an AutomodService built before the write', async () => {
   const store = new SettingsStore(testDb.db);
   await store.load();
-  const { cfg } = bootLikeIndex(store);
+  const { cfg, changes } = bootLikeIndex(store);
   const live = dryRunAutomod(() => cfg().automodRepeatedMessageCount);
   // The control: the exact default `AutomodServiceOptions` falls back to when
   // TOG-3536 never reaches the call site - a number captured once.
@@ -283,6 +297,12 @@ test('a stored repeat-count threshold reaches an AutomodService built before the
   await store.set(GUILD, 'TWO_AUTOMOD_REPEAT_COUNT', 2, ADMIN);
   assert.equal(await store.refreshIfChanged(), true, 'the version poll saw the write');
   assert.equal(cfg().automodRepeatedMessageCount, 2, 'the store beat the environment');
+  // TOG-4697: per-key log-line assertion for the automod hot key.
+  assert.deepEqual(
+    changes,
+    [{ key: 'TWO_AUTOMOD_REPEAT_COUNT', from: 4, to: 2 }],
+    'the index diff names the automod move (the setting_changed line)',
+  );
 
   // The third identical message from the same author: both trackers have now
   // seen 3 repeats, but only the live threshold moved (2 <= 3; the control's
