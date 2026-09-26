@@ -240,11 +240,44 @@ export class TempVoiceService {
     const createdAt = this.iso();
     const mine = await this.store.countForOwner(input.guildId, input.userId);
     const total = await this.store.countForGuild(input.guildId);
-    const name = renderNameTemplate(this.config.nameTemplate, {
+    // The rename control filters through automod, so creation must too: a
+    // display name carrying a blocked word or invite link must not become a
+    // channel name. Fall back to the username-less template rather than
+    // refusing the join. Only a template that is itself blocked refuses, and
+    // that is an operator misconfiguration to fix, not a member to punish.
+    // The generator is the filter context: it is the channel the member is
+    // sitting in, and there is no generated channel yet to name.
+    const where = { guildId: input.guildId, channelId: this.config.generatorChannelId, userId: input.userId };
+    const rendered = renderNameTemplate(this.config.nameTemplate, {
       username: input.username,
       count: mine + 1,
       seq: total + 1,
     });
+    const filtered = filterChannelName(rendered, this.policy, where);
+    let name: string;
+    if (filtered.ok) {
+      name = filtered.name;
+    } else {
+      const bare = renderNameTemplate(this.config.nameTemplate, {
+        username: '',
+        count: mine + 1,
+        seq: total + 1,
+      });
+      const fallback = filterChannelName(bare, this.policy, where);
+      if (!fallback.ok) {
+        // The guild's own template violates its own automod policy. Creating
+        // anyway would mint a forbidden name, so refuse loudly instead of
+        // laundering it through.
+        log.error('temp_voice_create_name_blocked', { guildId: input.guildId, reason: fallback.reason });
+        await this.store.audit(
+          { guildId: input.guildId, actorId: input.userId, channelId: null, action: 'create', outcome: 'refused', reason: 'name_blocked' },
+          createdAt,
+        );
+        return { status: 'refused', reason: `That channel name is not allowed here. ${fallback.reason}` };
+      }
+      log.info('temp_voice_create_name_filtered', { guildId: input.guildId, userId: input.userId });
+      name = fallback.name;
+    }
 
     // The claim enforces every cap atomically and writes the row, all before a
     // single Discord mutation. Anti-abuse that runs after the create is not
