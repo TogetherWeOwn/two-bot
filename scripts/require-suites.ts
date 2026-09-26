@@ -72,6 +72,15 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     why: 'the reward-role probe writing nothing, proved by a database that refuses the write',
   },
   {
+    // TOG-4444. The staging reward-role apply path: grant/readback/revoke
+    // through the CLI, its audit row, and the triggers that refuse a
+    // reward-config write or a live-guild audit row. Floor is the file's test
+    // count as written; not yet measured against a Postgres run.
+    file: 'test/e2e.levelrewardroleapply.test.ts',
+    minTests: 10,
+    why: 'the staging reward-role apply writing only the staging guild, proved by a database that refuses the rest',
+  },
+  {
     file: 'test/e2e.stagingrestart.test.ts',
     minTests: 1,
     why: 'real entrypoint containment across three restarts, zero Discord mutations and pre-persistence actor filtering',
