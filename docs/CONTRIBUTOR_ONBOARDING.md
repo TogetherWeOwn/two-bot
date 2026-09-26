@@ -31,7 +31,8 @@ links in the server's welcome message — those are always current.
    as a message.
 
 **Your privacy:** we store Discord user IDs, timestamps and channel IDs —
-never message content, email, or anything else. Full detail:
+never public message content, email, or anything else. (Private support
+tickets keep a staff-only transcript for 90 days.) Full detail:
 [docs/PRIVACY.md](PRIVACY.md).
 
 ## 2. Host checklist
