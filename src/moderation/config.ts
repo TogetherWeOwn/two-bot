@@ -1,4 +1,5 @@
 import { readSecret, credentialSource } from '../core/credentials.ts';
+import { assertActivationPermitted, botTokenFrom } from '../live/activation.ts';
 import { MODERATION_ACTIONS } from './types.ts';
 
 export interface ModerationConfig {
@@ -14,8 +15,13 @@ export interface ModerationConfig {
   moderationAuditSecret: string | null;
 }
 
-export function loadModerationConfig(env: NodeJS.ProcessEnv = process.env): ModerationConfig {
+export function loadModerationConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  token: string | null = botTokenFrom(env),
+): ModerationConfig {
   const enabled = env.TWO_MODERATION === '1';
+  // TOG-3186: moderation had no guild fence at all before the allowlist.
+  if (enabled) assertActivationPermitted('moderation', env.DISCORD_GUILD_ID, token);
   const owenUserId = env.TWO_OWEN_USER_ID ?? '';
   const protectedRoleIds = new Set(
     (env.TWO_MODERATION_PROTECTED_ROLE_IDS ?? '')
