@@ -3,9 +3,8 @@
 // Mirror-settle wait for the TOG-6911 deploy jobs
 // (.github/workflows/deploy.yml: deploy-staging, deploy-production).
 //
-// Coolify clones the HOST mirror (git@135.148.42.223:/srv/git/two-bot.git),
-// never github.com — the box cannot clone from GitHub (docs/DEPLOY.md §2,
-// TOG-1175). The box re-mirrors GitHub roughly every 2 minutes, so triggering
+// Coolify clones the HOST mirror (mirror clone URL from the operator —
+// never commit it here; see docs/DEPLOY.md §2, TOG-1175). The box re-mirrors GitHub roughly every 2 minutes, so triggering
 // a deploy the instant main moves rebuilds the PREVIOUS commit and looks like
 // the merge did nothing (docs/DEPLOY.md §6.1).
 //
