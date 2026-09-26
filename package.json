@@ -71,6 +71,7 @@
     "levels:roles": "node scripts/levels-role-rewards.ts",
     "levels:roles:probe": "node scripts/levels-import-rewards-probe.ts",
     "levels:roles:apply": "node scripts/levels-reward-role-apply.ts",
+    "onboarding:web:acceptance": "node scripts/onboarding-web-slice-acceptance.ts",
     "automod:export": "node scripts/automod-export.ts",
     "community:scorecard": "node scripts/community-scorecard.ts"
   },
