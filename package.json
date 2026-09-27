@@ -17,6 +17,7 @@
     "test:restart-storage": "node scripts/require-restart-storage.ts",
     "typecheck": "tsc --noEmit",
     "funnel": "node scripts/funnel.ts",
+    "health:check": "node scripts/health-check.ts",
     "gate": "node scripts/gate-report.ts",
     "gate:timeout": "node scripts/rules-gate-timeout.ts",
     "redirect": "node scripts/redirect.ts",

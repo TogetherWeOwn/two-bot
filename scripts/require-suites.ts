@@ -87,6 +87,15 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     minTests: 8,
     why: 'the settings-service startup injection and the signed settings round trip, or the TOG-4104 gap re-opens unnoticed',
   },
+  {
+    // TOG-5689. The RUNBOOK "Is it alive?" checks as an executable script: the
+    // ready-line shape, health-before-ready ordering and one-JSON-object-per-line
+    // logs against the mock harness, with host-only checks listed as skipped.
+    // Measured 2026-09-27 against Postgres 18.4 (embedded), at this commit.
+    file: 'test/e2e.runbook-health.test.ts',
+    minTests: 3,
+    why: 'the runbook liveness verdict going green against the mock harness, or its skips going unlisted',
+  },
 ];
 
 /**
