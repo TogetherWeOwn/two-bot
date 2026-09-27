@@ -75,7 +75,21 @@
     "levels:roles:probe": "node scripts/levels-import-rewards-probe.ts",
     "onboarding:web:acceptance": "node scripts/onboarding-web-slice-acceptance.ts",
     "automod:export": "node scripts/automod-export.ts",
-    "community:scorecard": "node scripts/community-scorecard.ts"
+    "community:scorecard": "node scripts/community-scorecard.ts",
+    "staging:discord-fetch": "node scripts/staging-discord-fetch.ts --help",
+    "staging:session-demo": "node scripts/staging-session-demo.ts",
+    "staging:temp-voice-demo": "node scripts/staging-temp-voice-demo.ts",
+    "staging:voice-occupant": "node scripts/staging-voice-occupant.ts",
+    "staging:clean-slate": "node scripts/staging-clean-slate.ts",
+    "staging:announcements-proof": "node scripts/staging-announcements-proof.ts",
+    "staging:announcements-state": "node scripts/staging-announcements-state.ts --help",
+    "staging:announcements-verify": "node scripts/staging-announcements-verify.ts",
+    "mutate:tempvoice": "node scripts/mutate-tempvoice.ts",
+    "e2e:harness": "node scripts/e2e-harness.ts",
+    "test:report": "node scripts/test-report.ts --help",
+    "backup:upload-s3": "node scripts/backup-upload-s3.ts",
+    "internal-actions:host": "node scripts/internal-actions-host.ts",
+    "internal-actions:host-real": "node scripts/internal-actions-host-real.ts"
   },
   "dependencies": {
     "@discordjs/collection": "2.1.1",

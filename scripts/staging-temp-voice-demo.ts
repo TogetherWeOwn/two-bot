@@ -33,6 +33,17 @@ import { TempVoiceService, type ControlContext } from '../src/tempVoice/service.
 import { DiscordTempVoiceGateway, registerTempVoice } from '../src/tempVoice/discord.ts';
 import { loadAutomodConfig } from '../src/automod/config.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('usage: node scripts/staging-temp-voice-demo.ts <create|restart|cleanup>');
+  console.log('');
+  console.log('TOG-3052 staging evidence: drive the temp-voice runtime against TWO Staging.');
+  console.log('  create   generator -> channel, controls');
+  console.log('  restart  boot reconcile, occupied channel');
+  console.log('  cleanup  empty -> grace -> deleted');
+  console.log('Staging only. Requires DISCORD_STAGING_BOT_TOKEN and TWO_TEST_DATABASE_URL; --help needs neither.');
+  process.exit(0);
+}
+
 const phase = process.argv[2];
 if (!['create', 'restart', 'cleanup'].includes(phase ?? '')) {
   throw new Error('usage: staging-temp-voice-demo.ts <create|restart|cleanup>');

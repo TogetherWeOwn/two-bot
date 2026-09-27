@@ -18,6 +18,14 @@
 import { Client, GatewayIntentBits } from 'discord.js';
 import { TWO_STAGING_GUILD_ID } from '../src/staging/spec.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('usage: node scripts/staging-voice-occupant.ts <channelId>');
+  console.log('');
+  console.log('Hold a voice state open in TWO Staging until killed (TOG-3052 evidence).');
+  console.log('Staging only. Requires DISCORD_STAGING_BOT_TOKEN; --help needs no token and opens no connection.');
+  process.exit(0);
+}
+
 const channelId = process.argv[2];
 if (!channelId) throw new Error('usage: staging-voice-occupant.ts <channelId>');
 

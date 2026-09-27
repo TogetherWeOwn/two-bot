@@ -23,6 +23,15 @@ const TARGET = resolve(import.meta.dirname, '../src/tempVoice/service.ts');
 const SUITE = 'test/unit.tempvoice.test.ts';
 const ROOT = resolve(import.meta.dirname, '..');
 
+if (process.argv.includes('--help')) {
+  console.log('usage: node scripts/mutate-tempvoice.ts');
+  console.log('');
+  console.log('Mutation harness for the temp-voice delete path (TOG-3052): relaxes one guard');
+  console.log('at a time and requires the unit suite to go red for every one.');
+  console.log('Mutates a working-tree file and restores it; --help performs no mutation and runs no suite.');
+  process.exit(0);
+}
+
 interface Mutation {
   /** Short label for the report line. */
   name: string;
