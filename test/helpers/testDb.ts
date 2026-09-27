@@ -103,6 +103,10 @@ const TABLES = [
   // a stray UPDATE/DELETE still does not.
   'guild_settings',
   'guild_settings_audit',
+  // TOG-3052 temp voice.
+  'temp_voice_audit',
+  'temp_voice_creates',
+  'temp_voice_channels',
 ];
 
 export interface TestDb {
