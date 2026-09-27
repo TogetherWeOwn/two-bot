@@ -180,8 +180,11 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
   // and node --test runs files in parallel, so a sibling bot or mock can
   // claim the port before our child binds (CI signatures: EADDRINUSE crash,
   // or a fetch landing on the wrong server and reading '{}'). Retry the boot
-  // phase only - once our health server answers, the port is ours.
-  const BOOT_ATTEMPTS = 3;
+  // phase only - once our health server answers, the port is ours. Five
+  // attempts: run 36314095503 exhausted three consecutive squats on the
+  // shared host, so the budget must survive sustained contention. Retries
+  // cost nothing on a green path (first attempt boots straight through).
+  const BOOT_ATTEMPTS = 5;
   let port = 0;
   let url = (p: string) => `http://127.0.0.1:${port}${p}`;
   let logTail = () => '';

@@ -63,8 +63,10 @@ test('health endpoints answer on the real bot process', { timeout: 180_000 }, as
   // so a sibling bot or mock can claim the port before our child binds (run
   // 36312762086: our liveness fetch answered '{}' - a sibling mock, not our
   // bot). Retry the boot with a fresh port + mock; a 200 `ok` together with
-  // our own child's health_listening line proves the bind is ours.
-  const BOOT_ATTEMPTS = 3;
+  // our own child's health_listening line proves the bind is ours. Five
+  // attempts to match scripts/health-check.ts: run 36314095503 exhausted
+  // three consecutive squats on the shared host.
+  const BOOT_ATTEMPTS = 5;
   let mock: Awaited<ReturnType<typeof startMockDiscord>> | null = null;
   let bot: ChildProcess | null = null;
   const botLog: string[] = [];
@@ -231,8 +233,9 @@ test('no health port means no listener at all', { timeout: 90_000 }, async (t) =
   // parallel, so a sibling bot or mock can claim it between release and probe
   // (run 36301673171: Missing expected rejection). A fetch that succeeds is a
   // squatter, never our bot - it opened nothing - so retry with a fresh port
-  // rather than failing the run.
-  const PROBE_ATTEMPTS = 3;
+  // rather than failing the run. Five attempts to match the boot retry above;
+  // each attempt is a single cheap fetch.
+  const PROBE_ATTEMPTS = 5;
   let squatter = '';
   for (let attempt = 1; attempt <= PROBE_ATTEMPTS; attempt++) {
     const probePort = attempt === 1 ? port : await freePort();
