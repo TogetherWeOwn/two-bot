@@ -78,6 +78,7 @@ console.log(`  members who ever posted ${pad(summary.authorsSeen)}`);
 // The number TWO-95 is about: these are the members AM7 can now judge on the
 // agreed 3+ bar instead of the "posted at all" proxy.
 console.log(`  members with 3+ posts   ${pad(summary.authorsWithFullLadder)}   (AM7 text bar, exactly)`);
+console.log(`  malformed rows refused  ${pad(summary.malformed)}   (counted, never laddered)`);
 console.log(`  oldest message reached  ${summary.scannedBackTo?.slice(0, 10) ?? 'n/a'}`);
 
 if (!dryRun) {
