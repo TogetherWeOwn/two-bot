@@ -84,7 +84,7 @@
     "staging:announcements-proof": "node scripts/staging-announcements-proof.ts",
     "staging:announcements-state": "node scripts/staging-announcements-state.ts --help",
     "staging:announcements-verify": "node scripts/staging-announcements-verify.ts",
-    "mutate:tempvoice": "node scripts/mutate-tempvoice.ts",
+    "mutate:tempvoice": "node scripts/mutate-tempvoice.ts --staging",
     "e2e:harness": "node scripts/e2e-harness.ts",
     "test:report": "node scripts/test-report.ts --help",
     "backup:upload-s3": "node scripts/backup-upload-s3.ts",
