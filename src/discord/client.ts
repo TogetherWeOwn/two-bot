@@ -624,11 +624,20 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
   // session we think is open is now unproven. Dropping them costs the duration
   // on those sessions (they end with startKnown: false) and is the only
   // alternative to reporting a duration that silently includes the outage.
-  client.on(Events.ShardResume, () => {
+  // This covers BOTH gateway recovery paths (TOG-6123): ShardResume after a
+  // successful resume, and ShardReady after a fresh session - a full
+  // re-identify following an unresumable disconnect (InvalidSession with no
+  // stored session, Reconnect opcode, unrecoverable close). ShardReady only
+  // follows a READY dispatch, never a RESUMED one, so the two handlers never
+  // double-drop; on first-ever connect the tracker is empty and this is a
+  // no-op.
+  const dropSessionsOnReconnect = (event: string) => {
     const dropped = handlers.voiceSessions.openCount;
     handlers.voiceSessions.clear();
-    if (dropped) log.info('voice_sessions_dropped_on_resume', { dropped });
-  });
+    if (dropped) log.info(event, { dropped });
+  };
+  client.on(Events.ShardResume, () => dropSessionsOnReconnect('voice_sessions_dropped_on_resume'));
+  client.on(Events.ShardReady, () => dropSessionsOnReconnect('voice_sessions_dropped_on_fresh_session'));
 
   client.on(Events.InviteCreate, async (invite) => {
     if (!contained && invite.guild) await snapshotInvites(invite.guild as Guild, invites);
