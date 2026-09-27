@@ -48,7 +48,14 @@ if (!guildId) {
 const db = await openDb(url, { skipMigrations: true, applicationName: 'two-bot-presence-trend' });
 
 try {
-  const readings = await readSeries(db, guildId);
+  // Push the --days window into the query (TOG-7206): without it the script
+  // pulled every hourly row ever collected and sliced in memory. The verdict
+  // needs the trailing REOPEN_WINDOW_DAYS (14) regardless of the display
+  // window, so the query bound is the wider of the two.
+  const { REOPEN_WINDOW_DAYS } = await import('../src/analytics/presence.ts');
+  const daysBack = Math.max(days ?? 0, REOPEN_WINDOW_DAYS);
+  const since = new Date(Date.now() - daysBack * 86_400_000).toISOString();
+  const readings = await readSeries(db, guildId, { since });
   const verdict = evaluateTrigger(readings, {
     now: new Date().toISOString(),
     webV1Live: args.has('--web-live'),
