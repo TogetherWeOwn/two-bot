@@ -89,7 +89,20 @@
     "test:report": "node scripts/test-report.ts --help",
     "backup:upload-s3": "node scripts/backup-upload-s3.ts",
     "internal-actions:host": "node scripts/internal-actions-host.ts",
-    "internal-actions:host-real": "node scripts/internal-actions-host-real.ts"
+    "internal-actions:host-real": "node scripts/internal-actions-host-real.ts",
+    "raid:list": "node scripts/raid-list.ts",
+    "raid:remove": "node scripts/raid-remove.ts",
+    "roles:consolidation": "node scripts/role-consolidation.ts",
+    "events:dedupe": "node scripts/dedupe-events.ts",
+    "audit:report": "node scripts/audit-report.ts",
+    "cleanup:audit-visibility": "node scripts/audit-live-cleanup-visibility.ts",
+    "cleanup:derive-pins": "node scripts/derive-live-cleanup-pins.ts",
+    "cleanup:drift-diff": "node scripts/live-cleanup-drift-diff.ts",
+    "cleanup:live": "node scripts/live-clean-slate-cleanup.ts",
+    "cleanup:live-rollback": "node scripts/live-clean-slate-cleanup-rollback.ts",
+    "guild:clean-slate": "node scripts/main-guild-clean-slate.ts",
+    "guild:clean-slate-rollback": "node scripts/main-guild-clean-slate-rollback.ts",
+    "channels:game-access": "node scripts/apply-game-channel-access.ts"
   },
   "dependencies": {
     "@discordjs/collection": "2.1.1",

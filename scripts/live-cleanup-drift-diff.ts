@@ -41,6 +41,14 @@ import { readFileSync } from 'node:fs';
 import { driftSemanticHash, withSemanticHash, type LiveCleanupSnapshot } from '../src/redesign/live-cleanup.ts';
 
 const [pathA, pathB] = process.argv.slice(2);
+// --help prints usage with no snapshot reads and no network.
+if (process.argv.includes('--help')) {
+  console.log('usage: node scripts/live-cleanup-drift-diff.ts <a/pre.json> <b/pre.json>');
+  console.log('');
+  console.log('Compare two captured snapshots field-by-field: exit 0 means a drift gate would accept.');
+  console.log('Read-only, no token, no network; --help reads nothing.');
+  process.exit(0);
+}
 if (!pathA || !pathB) {
   console.error('usage: node scripts/live-cleanup-drift-diff.ts <a/pre.json> <b/pre.json>');
   process.exit(2);

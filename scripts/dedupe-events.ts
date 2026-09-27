@@ -21,6 +21,15 @@ import { openDb } from '../src/store/db.ts';
 import { collapseCrossSourceDuplicates } from '../src/backfill/dedupe.ts';
 
 const dryRun = process.argv.includes('--dry-run');
+
+// --help boots with no database and deletes nothing.
+if (process.argv.includes('--help')) {
+  console.log('usage: node scripts/dedupe-events.ts [--dry-run]');
+  console.log('');
+  console.log('One-off repair: delete cross-logger duplicate member_join/member_leave rows, keeping the earliest of each cluster.');
+  console.log('--dry-run counts without deleting; --help opens no database.');
+  process.exit(0);
+}
 const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
 if (!databaseUrl) {
   console.error('dedupe-events: TWO_DATABASE_URL is not set.');

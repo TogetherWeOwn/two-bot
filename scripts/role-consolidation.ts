@@ -16,6 +16,15 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
+// --help prints usage without touching audit/raw (the reads below run at import time).
+if (process.argv.includes('--help')) {
+  console.log('usage: node scripts/role-consolidation.ts');
+  console.log('');
+  console.log('Build audit/role-consolidation.csv: the per-role keep/merge/delete plan (TOG-55).');
+  console.log('No network, reads audit/raw/ only; --help reads nothing.');
+  process.exit(0);
+}
+
 const ROOT = resolve(import.meta.dirname, '..');
 const raw = (f: string) => JSON.parse(readFileSync(resolve(ROOT, 'audit/raw', f), 'utf8'));
 
