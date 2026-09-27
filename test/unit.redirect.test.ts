@@ -579,6 +579,63 @@ test('a path traversal attempt is just an unknown slug', async () => {
   assert.equal((await clicks()).length, 0);
 });
 
+test('malicious campaign variants are 404s with no redirect target and record nothing', async () => {
+  // TOG-7196. The acceptance set: scheme, protocol-relative and encoded-slash
+  // variants must all fail closed. The Location header is only ever built from
+  // a validated invite code on a fixed host (inviteUrl in
+  // src/redirect/campaigns.ts), never from the path, so there is no
+  // attacker-controlled target to compare against — the assertion is "none".
+  await addCampaign('reddit');
+  // A private listener with a fresh bucket: fifteen rapid 404s must each be a
+  // 404 verdict, never a 429 from sharing the main server's burst budget.
+  const audit = await startRedirectServer({
+    host: '127.0.0.1',
+    port: 0,
+    guildId: GUILD,
+    campaigns,
+    recorder: handlers,
+    fallbackInviteCode: 'fallbackCode',
+  });
+  try {
+    const malicious = [
+      '//evil.example',
+      '///evil.example',
+      '/%2fevil.example',
+      '/%2Fevil.example',
+      '/%252fevil.example',
+      '/javascript:alert(1)',
+      '/JaVaScRiPt:alert(1)',
+      '/https://evil.example',
+      '/http://evil.example/reddit',
+      '/reddit%2f..',
+      '/reddit%00',
+      '/reddit%0d%0aLocation:https://evil.example',
+      '/.evil.example',
+      '/-evil',
+      '/a',
+    ];
+    for (const path of malicious) {
+      const res = await fetch(`http://127.0.0.1:${audit.port}${path}`, { redirect: 'manual' });
+      await audit.drain();
+      assert.equal(res.status, 404, `${path} must be a 404, got ${res.status}`);
+      assert.equal(res.headers.get('location'), null, `${path} must not redirect anywhere`);
+    }
+    assert.equal((await clicks()).length, 0);
+  } finally {
+    await audit.close();
+  }
+});
+
+test('an encoded known slug still redirects only to the fixed invite host', async () => {
+  // Decoding happens before lookup, so prove the decoded path cannot escape
+  // the host either: even a fully valid slug resolves to discord.gg + code.
+  await addCampaign('reddit');
+  const res = await get('/%72eddit'); // %72 == 'r'
+  assert.equal(res.status, 302);
+  assert.equal(res.headers.get('location'), `https://discord.gg/${CODE}`);
+  assert.equal((await clicks()).length, 1);
+});
+
 // --- retired links ----------------------------------------------------------
 
 test('a retired campaign still redirects, because the post cannot be edited', async () => {
