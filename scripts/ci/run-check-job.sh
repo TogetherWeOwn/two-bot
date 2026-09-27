@@ -11,6 +11,10 @@ report_failure() {
 }
 trap report_failure ERR
 
+# Instant and hermetic: every `node scripts/<x>` target in package.json must
+# exist on disk (TOG-6810 - the `reconcile` entry pointed at a file that never
+# existed). Runs first so a dangling entry fails before the slow suites start.
+npm run check:script-targets
 npm run typecheck
 # Offline and instant: the golden ambiguous-vs-unknown eval (TOG-5849). It
 # scores the fixture split against the real attribution code, so a report or
