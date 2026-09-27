@@ -182,6 +182,9 @@ describe('presence probe containment', () => {
       join('src', 'jobs', 'presenceProbe.ts'),
       join('scripts', 'presence-trend.ts'),
       join('test', 'unit.presenceprobe.test.ts'),
+      // TOG-7206 cost test. Seeds and reads the table to measure scan cost,
+      // never renders it - same non-rendering status as this file.
+      join('test', 'unit.presenceprobecost.test.ts'),
       join('test', 'helpers', 'testDb.ts'),
       // The role verifier names every bot-owned table so a specific denial is
       // proven in addition to the relation census. Its inventory test parses
@@ -273,7 +276,7 @@ describe('presence probe collection', () => {
       { user: { id: '4', bot: false } },
     ];
     const { rest } = stubRest((p) => (p.startsWith(`/guilds/${GUILD}/members`) ? members : []));
-    const floor = await countBotFloor(rest, GUILD);
+    const { floor } = await countBotFloor(rest, GUILD, { maxPages: 10 });
 
     assert.equal(floor, 2);
     // The value handed back is a number. Not a list we might later log, not an
@@ -285,7 +288,7 @@ describe('presence probe collection', () => {
 
   test('a failed presence read writes nothing at all', async () => {
     const { rest } = stubRest(() => undefined); // 404 everywhere
-    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z' });
+    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z', botFloorMaxPages: 10 });
 
     assert.equal(res.recorded, false);
     assert.deepEqual(await readSeries(db, GUILD), []);
@@ -308,7 +311,7 @@ describe('presence probe collection', () => {
     });
 
     const cycle = (iso: string) =>
-      runProbeCycle({ db, rest, guildId: GUILD, now: () => iso, botFloorMaxAgeMs: 86_400_000 });
+      runProbeCycle({ db, rest, guildId: GUILD, now: () => iso, botFloorMaxAgeMs: 86_400_000, botFloorMaxPages: 10 });
 
     const first = await cycle('2026-08-25T10:00:00.000Z');
     assert.equal(first.botFloor, 23, 'the floor from IDENTIFIERS.md, re-derived live');
@@ -337,7 +340,7 @@ describe('presence probe collection', () => {
     const { rest } = stubRest((p) =>
       p.startsWith(`/guilds/${GUILD}/members`) ? undefined : { approximate_presence_count: 30 },
     );
-    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z' });
+    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z', botFloorMaxPages: 10 });
 
     assert.equal(res.recorded, true);
     assert.equal(res.presence, 30);
@@ -372,7 +375,7 @@ describe('presence probe collection', () => {
         ? [{ user: { id: '1', bot: true } }, { user: { id: '2' } }]
         : { approximate_presence_count: 0, approximate_member_count: 107 },
     );
-    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z' });
+    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z', botFloorMaxPages: 10 });
 
     assert.equal(res.recorded, true);
     assert.equal(res.presence, 0);
@@ -389,7 +392,7 @@ describe('presence probe collection', () => {
         ? [{ user: { id: '1', bot: true } }, { user: { id: '2' } }]
         : { approximate_presence_count: 112, approximate_member_count: 112 },
     );
-    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z' });
+    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z', botFloorMaxPages: 10 });
 
     assert.equal(res.recorded, true);
     assert.equal(res.presence, 112);
@@ -402,7 +405,7 @@ describe('presence probe collection', () => {
         ? [{ user: { id: '1', bot: true } }, { user: { id: '2', bot: true } }]
         : { approximate_presence_count: 2 },
     );
-    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z' });
+    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z', botFloorMaxPages: 10 });
 
     assert.equal(res.recorded, true);
     assert.equal(res.botFloor, 2);
@@ -415,7 +418,7 @@ describe('presence probe collection', () => {
         ? [{ user: { id: '1' } }, { user: { id: '2', bot: false } }]
         : { approximate_presence_count: 2 },
     );
-    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z' });
+    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z', botFloorMaxPages: 10 });
 
     assert.equal(res.recorded, true);
     assert.equal(res.botFloor, 0);
@@ -429,7 +432,7 @@ describe('presence probe collection', () => {
     const { rest } = stubRest((p) =>
       p.startsWith(`/guilds/${GUILD}/members`) ? [] : { approximate_presence_count: 30 },
     );
-    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z' });
+    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z', botFloorMaxPages: 10 });
 
     assert.equal(res.recorded, true);
     assert.equal(res.presence, 30);
@@ -439,7 +442,7 @@ describe('presence probe collection', () => {
 
   test('a negative presence from Discord is a failed read, never a row', async () => {
     const { rest } = stubRest(() => ({ approximate_presence_count: -5 }));
-    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z' });
+    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z', botFloorMaxPages: 10 });
 
     assert.equal(res.recorded, false);
     assert.equal(res.presence, null);
@@ -455,7 +458,7 @@ describe('presence probe collection', () => {
         body: [{ user: { id: '1', bot: true } }, { user: { id: '2' } }],
       },
     ]);
-    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z' });
+    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z', botFloorMaxPages: 10 });
 
     assert.equal(res.recorded, true);
     assert.equal(res.presence, 31);
