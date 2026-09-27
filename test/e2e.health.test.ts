@@ -181,15 +181,17 @@ test('health endpoints answer on the real bot process', { timeout: 90_000 }, asy
   // the check Coolify gates the deploy on, so it has to go green against the
   // real wiring, not a stub. The body is checked for the same squatter reason
   // as liveness above: only our bot answers `ok`.
-  const ready = await waitFor(async () => {
+  // The body is consumed during the check (it is what distinguishes our bot
+  // from a squatter), so the poll returns the verdict, not the Response.
+  const readyBody = await waitFor(async (): Promise<string | null> => {
     const res = await fetch(url('/readyz'));
     if (res.status !== 200) return null;
     if (!(res.headers.get('content-type') ?? '').includes('text/plain')) return null;
-    return (await res.text()).trim() === 'ok' ? res : null;
+    return (await res.text()).trim() === 'ok' ? 'ok' : null;
   }).catch((e) => {
     throw new Error(`${String(e)}\n--- bot output ---\n${botLog.join('')}`);
   });
-  assert.equal((await ready.text()).trim(), 'ok');
+  assert.equal(readyBody, 'ok');
 
   const nope = await fetch(url('/nope'));
   assert.equal(nope.status, 404);
