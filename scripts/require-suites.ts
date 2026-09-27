@@ -46,6 +46,11 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     why: 'the provision/verify website-role CLIs themselves, not just the library calls underneath them',
   },
   {
+    file: 'test/e2e.growthreview.test.ts',
+    minTests: 4,
+    why: 'growth-review CLI golden scores, kill/scale citations, red-gate refusal and sustained-effort guard',
+  },
+  {
     file: 'test/e2e.backup.test.ts',
     minTests: 7,
     why: 'the dump/restore round trip - the only thing standing behind a restore',
