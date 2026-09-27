@@ -140,83 +140,175 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
 
   let mock: MockDiscord | null = null;
   let bot: ChildProcess | null = null;
+  let child: ChildProcess | null = null;
+  let exited: number | null = null;
   // Raw child output only - never synthetic annotations, so the JSONL check
   // below asserts on exactly what the process wrote.
   const lines: BotLogLine[] = [];
   let pending = '';
+  const onData = (d: unknown) => {
+    pending += String(d);
+    const parts = pending.split('\n');
+    pending = parts.pop() ?? '';
+    for (const raw of parts) {
+      if (raw.trim() === '') continue;
+      lines.push(parseLine(raw));
+    }
+  };
+
+  const pushSkips = () => {
+    checks.push({
+      id: 'systemctl-status',
+      status: 'skip',
+      detail: 'no systemd under the mock harness; covered by bot-process-stays-up + liveness-200-ok',
+    });
+    checks.push({
+      id: 'journalctl-tail',
+      status: 'skip',
+      detail: 'no journal under the mock harness; covered by captured stdio + logs-jsonl',
+    });
+  };
+  // Failure exit: the host-only skips are part of the report contract (the
+  // acceptance on TOG-5689 requires them listed), so they ride along on red
+  // reports too rather than only on green ones.
+  const failReport = (): RunbookHealthReport => {
+    pushSkips();
+    return { checks, passed: false };
+  };
+
+  // The health port is racy by construction: freePort() binds and releases,
+  // and node --test runs files in parallel, so a sibling bot or mock can
+  // claim the port before our child binds (CI signatures: EADDRINUSE crash,
+  // or a fetch landing on the wrong server and reading '{}'). Retry the boot
+  // phase only - once our health server answers, the port is ours.
+  const BOOT_ATTEMPTS = 3;
+  let port = 0;
+  let url = (p: string) => `http://127.0.0.1:${port}${p}`;
+  let logTail = () => '';
+  let bootOk = false;
 
   try {
-    mock = await startMockDiscord();
-    const port = await freePort();
+    for (let attempt = 1; attempt <= BOOT_ATTEMPTS && !bootOk; attempt++) {
+      // Fresh state per attempt so a collided try leaves no checks behind.
+      checks.length = 0;
+      lines.length = 0;
+      pending = '';
+      if (bot && bot.exitCode === null) bot.kill('SIGKILL');
+      bot = null;
+      await mock?.close().catch(() => {});
+      mock = null;
 
-    bot = spawn(process.execPath, ['src/index.ts'], {
-      cwd: ROOT,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        ...(opts.extraEnv ?? {}),
-        DISCORD_TOKEN: 'mock.token.value',
-        DISCORD_API_BASE: mock.apiBase,
-        DISCORD_GUILD_ID: mock.guildId,
-        TWO_DATABASE_URL: opts.databaseUrl,
-        // The variable the container image sets. Bound to loopback so this
-        // check never opens a port off the machine running it.
-        TWO_HEALTH_PORT: String(port),
-        TWO_HEALTH_BIND_HOST: '127.0.0.1',
-        LOG_LEVEL: 'debug',
-      },
-    });
-    const child = bot;
-    const onData = (d: unknown) => {
-      pending += String(d);
-      const parts = pending.split('\n');
-      pending = parts.pop() ?? '';
-      for (const raw of parts) {
-        if (raw.trim() === '') continue;
-        lines.push(parseLine(raw));
+      mock = await startMockDiscord();
+      port = await freePort();
+      url = (p: string) => `http://127.0.0.1:${port}${p}`;
+      logTail = () => lines.map((l) => l.raw).join('\n');
+
+      bot = spawn(process.execPath, ['src/index.ts'], {
+        cwd: ROOT,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          ...(opts.extraEnv ?? {}),
+          DISCORD_TOKEN: 'mock.token.value',
+          DISCORD_API_BASE: mock.apiBase,
+          DISCORD_GUILD_ID: mock.guildId,
+          TWO_DATABASE_URL: opts.databaseUrl,
+          // The variable the container image sets. Bound to loopback so this
+          // check never opens a port off the machine running it.
+          TWO_HEALTH_PORT: String(port),
+          TWO_HEALTH_BIND_HOST: '127.0.0.1',
+          LOG_LEVEL: 'debug',
+        },
+      });
+      child = bot;
+      exited = null;
+      // Identity-guarded: a SIGKILLed previous attempt can still deliver
+      // buffered exit/data events after the next attempt spawned. Only the
+      // current child may write this attempt's `exited` and `lines`.
+      const thisChild = child;
+      const isCurrent = () => bot === thisChild;
+      thisChild.stdout?.on('data', (d: unknown) => {
+        if (isCurrent()) onData(d);
+      });
+      thisChild.stderr?.on('data', (d: unknown) => {
+        if (isCurrent()) onData(d);
+      });
+      thisChild.on('exit', (code) => {
+        if (isCurrent()) exited = code;
+      });
+
+      // 1. The process stays up through the whole check window. A boot crash is
+      //    the thing `systemctl status` would have shown as anything but active.
+      //    An EADDRINUSE crash means a sibling claimed our released port first -
+      //    retry with a fresh one rather than failing the run.
+      await sleep(1500);
+      if (exited !== null) {
+        const tail = logTail();
+        if (/EADDRINUSE/.test(tail) && attempt < BOOT_ATTEMPTS) continue;
+        fail('bot-process-stays-up', `bot exited with ${exited} seconds after start\n${tail}`);
+        return failReport();
       }
-    };
-    child.stdout?.on('data', onData);
-    child.stderr?.on('data', onData);
-    let exited: number | null = null;
-    child.on('exit', (code) => {
-      exited = code;
-    });
+      pass('bot-process-stays-up', 'still running after boot');
 
-    const url = (p: string) => `http://127.0.0.1:${port}${p}`;
-    const logTail = () => lines.map((l) => l.raw).join('\n');
-
-    // 1. The process stays up through the whole check window. A boot crash is
-    //    the thing `systemctl status` would have shown as anything but active.
-    await sleep(1500);
-    if (exited !== null) {
-      fail('bot-process-stays-up', `bot exited with ${exited} seconds after start\n${logTail()}`);
-      return { checks, passed: false };
+      // 2 + 3. Liveness comes up first and does not wait for the gateway - that
+      //    ordering is the entire reason index.ts starts health before login.
+      //    The liveness budget is per attempt so retries cannot stack timeouts.
+      const live = await waitFor(async () => {
+        const res = await fetch(url('/healthz'));
+        return res.ok ? res : null;
+      }, Math.min(timeoutMs, 30_000)).catch(() => null);
+      if (!live) {
+        if (attempt < BOOT_ATTEMPTS) continue;
+        fail('liveness-200-ok', `GET /healthz never answered 200 after ${BOOT_ATTEMPTS} boot attempts\n${logTail()}`);
+        return failReport();
+      }
+      {
+        const body = (await live.text()).trim();
+        if (live.status !== 200 || body !== 'ok') {
+          if (attempt < BOOT_ATTEMPTS) {
+            // Wrong server on our port (a sibling's mock answers '{}', a stale
+            // bot answers 503) - retry with a fresh port, don't fail the run.
+            continue;
+          }
+          fail('liveness-200-ok', `GET /healthz -> ${live.status} ${body}`);
+          return failReport();
+        }
+        // Ownership: a 200 ok proves *a* server answers, not that it is ours.
+        // Only our own child logging health_listening for this port proves the
+        // bind is ours - a sibling squatting on our released port makes our
+        // child crash with EADDRINUSE instead, which never logs that line.
+        const ours = await waitFor(async () => {
+          const found = lines.find(
+            (l) => l.json?.msg === 'health_listening' && l.json?.port === port,
+          );
+          return found ?? null;
+        }, 15_000).catch(() => null);
+        if (!ours) {
+          if (attempt < BOOT_ATTEMPTS) continue;
+          fail('liveness-200-ok', `our bot never logged health_listening for port ${port}\n${logTail()}`);
+          return failReport();
+        }
+        pass('liveness-200-ok', 'GET /healthz -> 200 ok');
+      }
+      bootOk = true;
     }
-    pass('bot-process-stays-up', 'still running after boot');
-
-    // 2 + 3. Liveness comes up first and does not wait for the gateway - that
-    //    ordering is the entire reason index.ts starts health before login.
-    const live = await waitFor(async () => {
-      const res = await fetch(url('/healthz'));
-      return res.ok ? res : null;
-    }, timeoutMs).catch((e: unknown) => {
-      fail('liveness-200-ok', `GET /healthz never answered 200: ${String(e)}\n${logTail()}`);
-      return null;
-    });
-    if (live) {
-      const body = (await live.text()).trim();
-      if (live.status === 200 && body === 'ok') pass('liveness-200-ok', 'GET /healthz -> 200 ok');
-      else fail('liveness-200-ok', `GET /healthz -> ${live.status} ${body}`);
+    if (!bootOk || !child) {
+      fail('liveness-200-ok', `no boot attempt bound the health port (${BOOT_ATTEMPTS} tries)`);
+      return failReport();
+    }
+    const activeMock = mock;
+    if (!activeMock) {
+      fail('gateway-ready', 'mock harness missing after boot');
+      return failReport();
     }
 
     // 4. The gateway session comes up against the mock, exactly as it would
     //    against Discord's own servers and TLS aside.
-    await mock.waitForReady(Math.min(timeoutMs, 30_000)).catch((err: unknown) => {
+    await activeMock.waitForReady(Math.min(timeoutMs, 30_000)).catch((err: unknown) => {
       fail('gateway-ready', `mock gateway never saw IDENTIFY: ${String(err)}\n${logTail()}`);
     });
     if (checks.some((c) => c.id === 'gateway-ready' && c.status === 'fail')) {
-      return { checks, passed: false };
+      return failReport();
     }
     pass('gateway-ready', 'mock gateway completed IDENTIFY and sent READY');
 
@@ -297,30 +389,22 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
 
     // 9. SIGTERM is what a container stop sends. The bot must close the port
     //    rather than be killed holding it.
-    child.kill('SIGTERM');
-    const stopped = await waitFor(async () => (child.exitCode !== null ? true : null), 25_000).catch(
+    const activeChild = child;
+    activeChild.kill('SIGTERM');
+    const stopped = await waitFor(async () => (activeChild.exitCode !== null ? true : null), 25_000).catch(
       () => false,
     );
     if (!stopped) {
       fail('clean-sigterm-shutdown', 'bot did not exit on SIGTERM within 25s');
-      child.kill('SIGKILL');
+      activeChild.kill('SIGKILL');
     } else {
-      pass('clean-sigterm-shutdown', `bot exited on SIGTERM (code ${child.exitCode})`);
+      pass('clean-sigterm-shutdown', `bot exited on SIGTERM (code ${activeChild.exitCode})`);
       await assertPortReleased(url('/healthz'));
       pass('port-released', 'health port refused connections after shutdown');
     }
 
     // Host-only checks, explicitly skipped with the mock-side equivalent named.
-    checks.push({
-      id: 'systemctl-status',
-      status: 'skip',
-      detail: 'no systemd under the mock harness; covered by bot-process-stays-up + liveness-200-ok',
-    });
-    checks.push({
-      id: 'journalctl-tail',
-      status: 'skip',
-      detail: 'no journal under the mock harness; covered by captured stdio + logs-jsonl',
-    });
+    pushSkips();
 
     return { checks, passed: checks.every((c) => c.status !== 'fail') };
   } finally {
