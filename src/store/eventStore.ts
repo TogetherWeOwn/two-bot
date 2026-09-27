@@ -1,6 +1,7 @@
 import type { Db } from './driver.ts';
 import {
   idempotencyKey,
+  isMeasurableGateClearing,
   MESSAGE_RUNGS,
   type EventType,
   type FunnelEvent,
@@ -305,6 +306,43 @@ export class EventStore {
       .get<{ a: string | null; b: string | null }>(from, to, guildId, memberId, from, to);
     if (!row?.a || !row?.b) return null;
     return (Date.parse(row.b) - Date.parse(row.a)) / 1000;
+  }
+
+  /**
+   * Seconds from `member_join` to `gate_cleared` for one member, or null when
+   * there is no measurable clearing on file (TOG-6474).
+   *
+   * A backfilled clearing (`source` starting with `backfill:`, or
+   * `metadata.timestampIsJoinTime` - see `isMeasurableGateClearing`) says THAT
+   * the member is through the gate, never WHEN: its `occurred_at` is the join
+   * time, a placeholder. Feeding it to time-to-clear arithmetic would print
+   * members clearing in 0s. Such rows still count toward conversion - that is
+   * what the binary is for - they just never feed timing.
+   *
+   * The generic `secondsBetween` above stays source-blind on purpose: its
+   * other pairs (join -> channel_routed, join -> first_message) have no
+   * placeholder rows, so the exclusion belongs to the gate pair, not to it.
+   */
+  async timeToGateClearSeconds(guildId: string, memberId: string): Promise<number | null> {
+    const row = await this.db
+      .prepare(
+        `SELECT source, metadata, occurred_at FROM events
+         WHERE guild_id = ? AND member_id = ? AND event_type = 'gate_cleared'
+         ORDER BY occurred_at ASC
+         LIMIT 1`,
+      )
+      .get<{ source: string; metadata: string | null; occurred_at: string }>(guildId, memberId);
+    if (!row) return null;
+    let metadata: Record<string, unknown> | null = null;
+    if (row.metadata) {
+      try {
+        metadata = JSON.parse(row.metadata) as Record<string, unknown>;
+      } catch {
+        metadata = null;
+      }
+    }
+    if (!isMeasurableGateClearing(row.source, metadata)) return null;
+    return this.secondsBetween(guildId, memberId, 'member_join', 'gate_cleared');
   }
 
   /** Distinct members who reached a given stage. Repeatable events count once. */
