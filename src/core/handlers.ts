@@ -324,12 +324,49 @@ export class FunnelHandlers {
     return e;
   }
 
-  async onLeave(guildId: string, memberId: string, occurredAt?: string): Promise<FunnelEvent | null> {
+  /**
+   * A member left the server (TOG-6122).
+   *
+   * A server-leave is also a voice-leave: Discord drops them from voice at
+   * the same instant, but no VoiceStateUpdate follows, so without this the
+   * tracker entry stays open (leaking until the next ShardResume clear) and
+   * the member gets NO voice_session_end row at all. Worse, a later voice
+   * leave for a rejoined session reuses the stale start and invents a
+   * duration spanning the member's absence.
+   *
+   * The end is credited to the open channel with the duration measured to
+   * leave time. `isBot` is unknown on this path - the gateway hands
+   * GuildMemberRemove no reliable bot flag at this layer - so the voice half
+   * is read from the tracker, not from a parameter: the only session we can
+   * close is one we saw start, and starts are only recorded for non-bots.
+   */
+  async onLeave(
+    guildId: string,
+    memberId: string,
+    occurredAt?: string,
+    opts: { isBot?: boolean } = {},
+  ): Promise<FunnelEvent | null> {
+    const at = occurredAt ?? nowIso();
+    // Close any open voice session first, while the member row still reads
+    // pre-leave: the end proves presence up to the leave instant, and the
+    // member_leave row below is what marks them gone. No open session means
+    // no write - this is a no-op for the overwhelmingly common case, and a
+    // repeated GuildMemberRemove is idempotent: the second call peeks null.
+    const open = this.voiceSessions.peek(guildId, memberId);
+    if (open) {
+      await this.onVoiceLeave({
+        guildId,
+        memberId,
+        isBot: opts.isBot ?? false,
+        channelId: open.channelId,
+        occurredAt: at,
+      });
+    }
     const e: FunnelEvent = {
       guildId,
       memberId,
       eventType: 'member_leave',
-      occurredAt: occurredAt ?? nowIso(),
+      occurredAt: at,
       source: 'gateway',
     };
     await this.store.record(e);

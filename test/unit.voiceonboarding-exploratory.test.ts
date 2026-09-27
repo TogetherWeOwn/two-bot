@@ -1,7 +1,7 @@
 /**
  * TOG-5695: exploratory voice/onboarding coverage - the paths the existing
- * suites skip, pinned as passing behavior, with the two live bugs they
- * surfaced filed as child cards rather than fixed here.
+ * suites skip, pinned as passing behavior, with the live bugs they surfaced
+ * filed as child cards (one fixed and pinned in section G, one still open).
  *
  * Offline by design (node:sqlite behind the narrow Db surface the handlers
  * touch, `?` placeholders and UPSERT): no Postgres, no token, no gateway, no
@@ -32,12 +32,11 @@
  *      planSession/ack-text level pin mirroring the e2e.session.test.ts
  *      stale-selection case, kept offline.
  *
- * Bugs found (filed as child cards, NOT fixed here):
- *   - server-leave mid-voice orphans the tracker entry: GuildMemberRemove
- *     records member_leave but never closes the open voice session, so the
- *     tracker stays open and a later voice leave invents a duration spanning
- *     the member's absence. A member who leaves the server while in voice
- *     gets no voice_session_end row at all.
+ * Bugs found (filed as child cards):
+ *   - server-leave mid-voice orphaned the tracker entry: GuildMemberRemove
+ *     recorded member_leave but never closed the open voice session, so the
+ *     tracker stayed open and a later voice leave invented a duration spanning
+ *     the member's absence. Fixed by TOG-6122, pinned in section G below.
  *   - fresh-session reconnect never clears the tracker: only ShardResume
  *     drops open sessions; a new session (READY/ShardReady after an
  *     unresumable disconnect - InvalidSession with no session, Reconnect
@@ -276,4 +275,73 @@ test('session picker: stale keys are reported, never routed', () => {
   assert.deepEqual(planned.channelIds, [], 'nothing to route a stale key to');
   assert.deepEqual(planned.unknownKeys, ['survival-games']);
   assert.match(sessionAckText(planned), /stale/i, 'the member gets a retry message, not silence');
+});
+
+// --- G. server-leave mid-voice (TOG-6122) --------------------------------------
+// GuildMemberRemove used to record member_leave but never close the open voice
+// session: the tracker leaked one entry per such leave, the member got NO
+// voice_session_end row, and a later voice leave invented a duration spanning
+// the absence. onLeave now closes the session first (end credited to the open
+// channel, duration to leave time).
+
+test('server-leave mid-voice closes the session: end credited to the open channel, duration to leave time', async () => {
+  const { db, handlers } = await fixture();
+  try {
+    await handlers.onVoiceJoin({ guildId: G, memberId: 'leaver', isBot: false, channelId: 'chan-a', occurredAt: '2026-08-02T19:00:00.000Z' });
+    await handlers.onLeave(G, 'leaver', '2026-08-02T19:30:00.000Z');
+    const [end] = await endMetas(db, 'leaver');
+    assert.equal(end.startKnown, true, 'the bot saw this session start');
+    assert.equal(end.startedAt, '2026-08-02T19:00:00.000Z');
+    assert.equal(end.durationSeconds, 30 * 60, 'measured to leave time, not to a later frame');
+    const row = await db
+      .prepare(`SELECT source FROM events WHERE event_type='voice_session_end' AND member_id=?`)
+      .get<{ source: string }>('leaver');
+    assert.equal(row?.source, 'channel:chan-a', 'credited to the open channel');
+    assert.equal(handlers.voiceSessions.isOpen(G, 'leaver'), false, 'tracker entry closed, not leaked');
+    assert.equal(await countByType(db, 'member_leave', 'leaver'), 1, 'the gone marker still lands');
+  } finally {
+    await db.close();
+  }
+});
+
+test('server-leave with no open session writes no end row', async () => {
+  const { db, handlers } = await fixture();
+  try {
+    await handlers.onLeave(G, 'quiet', '2026-08-02T19:30:00.000Z');
+    assert.equal(await countByType(db, 'voice_session_end', 'quiet'), 0, 'no session open, nothing to close');
+    assert.equal(await countByType(db, 'member_leave', 'quiet'), 1);
+    assert.equal(handlers.voiceSessions.openCount, 0);
+  } finally {
+    await db.close();
+  }
+});
+
+test('a voice leave after a server-leave is unknown-start, not a duration spanning the absence', async () => {
+  const { db, handlers } = await fixture();
+  try {
+    // The issue's probe: join -> server-leave -> a stale voice frame 2h later.
+    await handlers.onVoiceJoin({ guildId: G, memberId: 'gone-then-frame', isBot: false, channelId: CH, occurredAt: '2026-08-02T19:00:00.000Z' });
+    await handlers.onLeave(G, 'gone-then-frame', '2026-08-02T19:30:00.000Z');
+    await handlers.onVoiceLeave({ guildId: G, memberId: 'gone-then-frame', isBot: false, channelId: CH, occurredAt: '2026-08-02T21:30:00.000Z' });
+    const ends = await endMetas(db, 'gone-then-frame');
+    assert.equal(ends.length, 2, 'the close-on-leave plus the stale frame');
+    assert.equal(ends[0].durationSeconds, 30 * 60, 'the real session, measured to leave time');
+    assert.equal(ends[1].startKnown, false, 'the bot never saw this session start');
+    assert.equal(ends[1].durationSeconds, null, 'no invented 7200s spanning the absence');
+  } finally {
+    await db.close();
+  }
+});
+
+test('a repeated server-leave writes one end row, not two', async () => {
+  const { db, handlers } = await fixture();
+  try {
+    await handlers.onVoiceJoin({ guildId: G, memberId: 'twice', isBot: false, channelId: CH, occurredAt: '2026-08-02T19:00:00.000Z' });
+    await handlers.onLeave(G, 'twice', '2026-08-02T19:30:00.000Z');
+    await handlers.onLeave(G, 'twice', '2026-08-02T19:30:00.000Z'); // Discord retrying the removal
+    assert.equal(await countByType(db, 'voice_session_end', 'twice'), 1, 'second leave peeks no open session');
+    assert.equal(await countByType(db, 'member_leave', 'twice'), 1, 'repeatable key dedupes');
+  } finally {
+    await db.close();
+  }
 });
