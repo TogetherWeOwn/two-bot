@@ -399,8 +399,17 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
       activeChild.kill('SIGKILL');
     } else {
       pass('clean-sigterm-shutdown', `bot exited on SIGTERM (code ${activeChild.exitCode})`);
-      await assertPortReleased(url('/healthz'));
-      pass('port-released', 'health port refused connections after shutdown');
+      // assertPortReleased throws rather than returning false, so an uncaught
+      // throw here would bubble out of runHealthCheck with no report at all -
+      // and the host-only skips with it. Record it as the port-released
+      // verdict instead; the skips ride along via failReport.
+      try {
+        await assertPortReleased(url('/healthz'));
+        pass('port-released', 'health port refused connections after shutdown');
+      } catch (err: unknown) {
+        fail('port-released', `health port still answered after shutdown: ${String(err)}`);
+        return failReport();
+      }
     }
 
     // Host-only checks, explicitly skipped with the mock-side equivalent named.

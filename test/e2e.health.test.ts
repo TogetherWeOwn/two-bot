@@ -180,8 +180,24 @@ test('no health port means no listener at all', { timeout: 90_000 }, async (t) =
     throw new Error(`${String(err)}\n--- bot output ---\n${botLog.join('')}`);
   });
 
-  // Fully booted, and still nothing listening on the port it would have used.
-  await assert.rejects(fetch(`http://127.0.0.1:${port}/healthz`));
+  // Fully booted, and still nothing listening on the probe port. The port
+  // comes from freePort() (bind-and-release) and node --test runs files in
+  // parallel, so a sibling bot or mock can claim it between release and probe
+  // (run 36301673171: Missing expected rejection). A fetch that succeeds is a
+  // squatter, never our bot - it opened nothing - so retry with a fresh port
+  // rather than failing the run.
+  const PROBE_ATTEMPTS = 3;
+  let squatter = '';
+  for (let attempt = 1; attempt <= PROBE_ATTEMPTS; attempt++) {
+    const probePort = attempt === 1 ? port : await freePort();
+    const res = await fetch(`http://127.0.0.1:${probePort}/healthz`).catch(() => null);
+    if (!res) {
+      squatter = '';
+      break;
+    }
+    squatter = `${res.status} ${await res.text().catch(() => '')}`.trim().slice(0, 80);
+  }
+  assert.equal(squatter, '', `a listener answered the probe port on every attempt (last: ${squatter})`);
   assert.ok(
     !botLog.join('').includes('health_listening'),
     `health server must not start without TWO_HEALTH_PORT\n${botLog.join('')}`,
