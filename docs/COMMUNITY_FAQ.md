@@ -1,12 +1,12 @@
-# Community FAQ refresh (source copy, pack 2)
+# Community FAQ (source copy, pack 2)
 
-> DRAFT ONLY — copy proposal. No page built, nothing posted, no bot change.
-> For CPO copy approval. Follow-up to [TOG-4823](/TOG/issues/TOG-4823)
-> (in_review). No live-guild action.
+> APPROVED copy — CPO sign-off 2026-09-27 (confirmation accepted, accuracy
+> spot-checked against `src/onboarding/session.ts` + `src/discord/sessionWelcome.ts`).
+> Follow-up to [TOG-4823](/TOG/issues/TOG-4823). No live-guild action in this pack.
 >
 > This file is the source of truth. The short help post
 > (`docs/COMMUNITY_HELP_POST.md`, same pack) is the pinned summary of it.
-> CPO picks the member-visible home: two-web FAQ page or second pinned post.
+> Member-visible home (CPO pick 2026-09-27): second pinned post beside the help post.
 
 ## FAQ — paste-ready copy
 
@@ -87,19 +87,18 @@ first reply — never message contents, never your user ID in the clear.
 - No `faq`/`help-post` file exists anywhere in the two-bot tree (grep across
   `*.md` empty) — this file establishes the FAQ.
 
-## Welcome-flow link proposal (needs CPO pick, then engineering if B)
+## Welcome-flow link (CPO pick 2026-09-27: Option A, pin-only, no code)
 
-- **Option A (no code change, shippable on merge):** pin the help post beside
-  the welcome; this FAQ lives at its CPO-chosen home (two-web page or second
-  pinned post) and the help post points at it.
-- **Option B (one-line bot change):** append `Stuck? See the pinned help post 👆`
-  to the welcome text. Touches the TOG-93 one-message shape — needs explicit
-  CPO blessing plus an engineering handoff.
-- Recommended: ship A now, decide B with the week-4 metrics read.
+- **Option A (shipped):** the help post is pinned beside the welcome; this FAQ
+  ships as the second pinned post and the help post points at it. Pinning +
+  filling the help post's `<link added on publish>` are live-guild steps at
+  publish time, outside this docs pack.
+- **Option B (deferred):** append `Stuck? See the pinned help post 👆` to the
+  welcome text. Touches the [TOG-93](/TOG/issues/TOG-93) one-message shape —
+  deferred to the week-4 metrics read per CPO.
 
 ## Acceptance for this file
 
-- CPO approves the Q&A above and picks the member-visible home (two-web page
-  or pinned post) plus A (or A+B) for the welcome link.
-- On approval: merge, publish to the chosen home, fill the help post's
-  `<link added on publish>` placeholder.
+- [x] CPO approved the Q&A above (2026-09-27, confirmation accepted).
+- [x] Member-visible home: second pinned post. Welcome link: Option A.
+- Merge this pack; publish both posts to the landing channel at publish time.

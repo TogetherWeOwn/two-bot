@@ -1,15 +1,16 @@
-# Help-post draft (pinned-post copy, pack 2)
+# Help-post (pinned-post copy, pack 2)
 
-> DRAFT ONLY — copy proposal. Nothing posted, nothing pinned, no bot change.
-> For CPO copy approval. Follow-up to [TOG-4823](/TOG/issues/TOG-4823)
-> (in_review). No live-guild action.
+> APPROVED copy — CPO sign-off 2026-09-27 (confirmation accepted, accuracy
+> spot-checked against `src/onboarding/session.ts` + `src/discord/sessionWelcome.ts`).
+> Follow-up to [TOG-4823](/TOG/issues/TOG-4823). No live-guild action in this pack;
+> pinning happens per Option A below.
 
 | | |
 |---|---|
 | Intended channel | Landing text channel, pinned beside the welcome post |
 | Intended use | "Need a hand?" pinned post: the first thing a confused newcomer reads |
 | Source of truth | `docs/COMMUNITY_FAQ.md` (same pack) — this post is the short version |
-| Member-visible FAQ home | TBD by CPO: two-web FAQ page or a second pinned post; this pack is the source copy either way |
+| Member-visible FAQ home | Second pinned post (CPO pick 2026-09-27); this pack is the source copy either way |
 
 ## Paste-ready copy
 
@@ -51,17 +52,18 @@ Longer answers live in the FAQ: <link added on publish>.
 - No FAQ exists anywhere in the two-bot tree today (grep for faq/help-post
   across `*.md` returns nothing) — the FAQ file in this pack establishes it.
 
-## Welcome-flow link proposal (needs CPO pick, then engineering)
+## Welcome-flow link (CPO pick 2026-09-27: Option A, pin-only, no code)
 
-- **Option A (no code change):** pin this post in the landing channel; the
-  welcome flow "links" to it by proximity. Shippable on merge.
-- **Option B (one-line bot change):** append `Stuck? See the pinned help post 👆`
-  to the welcome text. Needs engineering handoff after approval; note it touches
-  the TOG-93 one-message shape, so CPO must explicitly bless it.
-- Recommended: ship A now, decide B with the week-4 metrics read.
+- **Option A (shipped):** pin this post in the landing channel; the welcome
+  flow "links" to it by proximity. No bot change. Pinning + filling
+  `<link added on publish>` with the FAQ post's link are live-guild steps at
+  publish time, outside this docs pack.
+- **Option B (deferred):** append `Stuck? See the pinned help post 👆` to the
+  welcome text. Touches the [TOG-93](/TOG/issues/TOG-93) one-message shape —
+  deferred to the week-4 metrics read per CPO.
 
 ## Acceptance for this file
 
-- CPO approves the paste-ready copy above and picks A (or A+B) for the link.
-- On approval: merge, pin per the chosen option, add the FAQ link where
-  `<link added on publish>` sits.
+- [x] CPO approved the paste-ready copy above (2026-09-27, confirmation accepted).
+- [x] CPO picked Option A for the link; FAQ home is the second pinned post.
+- Merge this pack; pin per A and fill `<link added on publish>` at publish time.
