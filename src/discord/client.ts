@@ -32,17 +32,39 @@ import type { DiscordOnboardingRota } from './onboardingRota.ts';
  *   Guilds              - required for any guild event at all
  *   GuildMembers        - member_join / member_leave        (PRIVILEGED)
  *   GuildMessages       - first_message + tickets + automod events
- *   MessageContent      - ticket transcripts and enabled automod (PRIVILEGED)
+ *   MessageContent      - ticket transcripts and enabled automod (PRIVILEGED,
+ *                         requested only when it can be used - see below)
  *   GuildMessageReactions - reaction-role add/remove        (metadata only)
  *   GuildVoiceStates    - first_voice_session + voice_session_start/end
  *   GuildInvites        - invite create/delete for attribution
  *   GuildModeration     - authoritative destructive-action audit entries
  *
- * MessageContent is required for MEE6-equivalent ticket export. Enabled automod
- * also inspects public messages in memory but never stores or logs their content.
- * Ticket retention and both erasure boundaries are documented in docs/PRIVACY.md.
+ * MessageContent is requested ONLY when enabled automod inspects public
+ * messages in memory (TWO_AUTOMOD === '1', exact match) or tickets are
+ * configured (all three of DISCORD_TICKET_CATEGORY_ID,
+ * DISCORD_TICKET_STAFF_ROLE_ID and DISCORD_TICKET_PANEL_CHANNEL_ID set,
+ * non-empty - the same all-three-present check as the registration guard in
+ * src/index.ts). Otherwise the gateway never receives privileged message
+ * content, matching docs/SECRETS.md ("leave OFF - we count that a message
+ * happened; we never read it") and docs/PRIVACY.md. Ticket retention and both
+ * erasure boundaries are documented in docs/PRIVACY.md.
+ *
+ * Bitfields: full set 34503 (7-intent gated set 1735 + MessageContent 32768);
+ * gated set 1735 = Guilds 1 + GuildMembers 2 + GuildModeration 4 +
+ * GuildInvites 64 + GuildVoiceStates 128 + GuildMessages 512 +
+ * GuildMessageReactions 1024. Reduced/contained set (TOG-4011) stays 643.
  */
-const BASE_INTENTS = [
+const GATED_INTENTS = [
+  GatewayIntentBits.Guilds,
+  GatewayIntentBits.GuildModeration,
+  GatewayIntentBits.GuildMembers,
+  GatewayIntentBits.GuildMessages,
+  GatewayIntentBits.GuildMessageReactions,
+  GatewayIntentBits.GuildVoiceStates,
+  GatewayIntentBits.GuildInvites,
+];
+
+const FULL_INTENTS = [
   GatewayIntentBits.Guilds,
   GatewayIntentBits.GuildModeration,
   GatewayIntentBits.GuildMembers,
@@ -53,8 +75,31 @@ const BASE_INTENTS = [
   GatewayIntentBits.GuildInvites,
 ];
 
-export function intents(_automodEnabled = process.env.TWO_AUTOMOD === '1'): GatewayIntentBits[] {
-  return [...BASE_INTENTS];
+/**
+ * Registration guards are the source of truth for "tickets configured": the
+ * same all-three-present check as src/index.ts (`cfg.ticketCategoryId &&
+ * cfg.ticketStaffRoleId && cfg.ticketPanelChannelId`). Empty string counts as
+ * absent, matching `str()` in src/core/config.ts (`src.get(name) || null`).
+ */
+export function ticketsConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(
+    env.DISCORD_TICKET_CATEGORY_ID &&
+      env.DISCORD_TICKET_STAFF_ROLE_ID &&
+      env.DISCORD_TICKET_PANEL_CHANNEL_ID,
+  );
+}
+
+/** MessageContent is justified only by enabled automod or configured tickets. */
+export function needsMessageContent(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.TWO_AUTOMOD === '1' || ticketsConfigured(env);
+}
+
+export function intents(
+  automodEnabled = process.env.TWO_AUTOMOD === '1',
+  env: NodeJS.ProcessEnv = process.env,
+): GatewayIntentBits[] {
+  const need = automodEnabled || ticketsConfigured(env);
+  return need ? [...FULL_INTENTS] : [...GATED_INTENTS];
 }
 
 export const INTENTS = intents();
@@ -97,9 +142,15 @@ export function capabilityScoped(env: NodeJS.ProcessEnv = process.env): boolean 
   return env[STAGING_RESTART_CONTAINMENT_FLAG] === '1';
 }
 
-/** Message content is already required by tickets/automod on current main. */
+/**
+ * The Identify-frame capability for this run. Containment wins first; otherwise
+ * the passed `env` threads through the MessageContent gating decision, so a
+ * caller-supplied env never reads a stale module-load cache. `INTENTS` above
+ * remains the process-env evaluation at import for production.
+ */
 export function intentsFor(env: NodeJS.ProcessEnv = process.env): GatewayIntentBits[] {
-  return capabilityScoped(env) ? [...REDUCED_INTENTS] : [...INTENTS];
+  if (capabilityScoped(env)) return [...REDUCED_INTENTS];
+  return intents(env.TWO_AUTOMOD === '1', env);
 }
 
 export interface BotDeps {
@@ -151,8 +202,15 @@ export function createClient(
   automodEnabled = process.env.TWO_AUTOMOD === '1',
   env: NodeJS.ProcessEnv = process.env,
 ): Client {
+  // Containment wins first (see intentsFor). Otherwise the explicit automod
+  // flag and the passed env both thread through gating: an explicit `true`
+  // (tests, callers) justifies MessageContent even when `env` is an empty
+  // object, and ticket vars in `env` justify it even when the flag is false.
+  const mainIntents = capabilityScoped(env)
+    ? intentsFor(env)
+    : intents(automodEnabled || env.TWO_AUTOMOD === '1', env);
   return new Client({
-    intents: intentsFor(env),
+    intents: mainIntents,
     partials: automodEnabled
       ? [...new Set([...PARTIALS, Partials.Channel])]
       : PARTIALS,
