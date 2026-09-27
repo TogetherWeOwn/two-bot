@@ -42,6 +42,7 @@
     "preflight": "node scripts/preflight.ts",
     "verify:grant": "node scripts/verify-grant.ts",
     "verify:grant:selftest": "node scripts/verify-grant.ts --selftest",
+    "e2e:selftest": "node scripts/e2e-harness.ts --selftest",
     "check:snowflakes": "bash scripts/ci/check-src-snowflakes.sh",
     "check:snowflakes:selftest": "bash scripts/ci/check-src-snowflakes.test.sh",
     "check:script-targets": "node scripts/check-script-targets.ts",
