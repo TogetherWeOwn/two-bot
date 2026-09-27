@@ -58,6 +58,15 @@ test('planSession: both keys -> both destinations, deduped and ordered', () => {
   assert.deepEqual(plan.unavailable, []);
 });
 
+test('planSession: channelIds follow catalog order regardless of submission order (TOG-7439)', () => {
+  const plan = planSession(['join-voice', 'find-players'], anyVisible);
+  assert.deepEqual(plan.channelIds, [LOOKING_TO_PLAY_CHANNEL_ID, LOBBY_VOICE_CHANNEL_ID]);
+  assert.deepEqual(
+    plan.picks.map((p) => p.key),
+    ['find-players', 'join-voice'],
+  );
+});
+
 test('planSession: re-selecting the same option is idempotent', () => {
   const once = planSession(['find-players'], anyVisible);
   const twice = planSession(['find-players', 'find-players'], anyVisible);
