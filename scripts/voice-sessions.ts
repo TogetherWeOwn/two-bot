@@ -29,7 +29,10 @@ import {
 import {
   countUnknownStartsPerWindow,
   findBlindWindows,
+  formatVoiceDurationSeconds,
+  parseVoiceEndMetadata,
   renderReconcileReport,
+  summarizeVoiceDurations,
 } from '../src/core/voiceSessions.ts';
 
 const args = process.argv.slice(2);
@@ -183,16 +186,28 @@ const ends = await db
       WHERE event_type = 'voice_session_end' AND occurred_at >= ?`,
   )
   .all<{ occurred_at: string; metadata: string | null }>(since);
-const unknownEnds = ends.map((r) => {
-  let startKnown = true;
-  try {
-    const m = JSON.parse(r.metadata ?? '{}') as { startKnown?: unknown };
-    startKnown = m.startKnown !== false;
-  } catch {
-    startKnown = true; // unparseable metadata: do not claim the start is unknown
-  }
-  return { occurredAt: r.occurred_at, startKnown };
-});
+// One parse for both jobs below: the reconcile counts the unknown starts,
+// the average excludes them. Both go through the shared helper (TOG-5684).
+const durationRows = ends.map((r) => parseVoiceEndMetadata(r.metadata));
+const unknownEnds = ends.map((r, i) => ({ occurredAt: r.occurred_at, startKnown: durationRows[i]!.startKnown }));
+
+// --- average session length (TOG-5684) --------------------------------------
+//
+// Mean over known-start sessions only. `startKnown: false` ends are counted
+// in the reconcile below, never averaged here: we never saw the start, so any
+// number on those rows is unproven.
+const durationSummary = summarizeVoiceDurations(durationRows);
+console.log('  Average session length (known-start sessions only):');
+if (durationSummary.averageSeconds === null) {
+  console.log('    —  (no measured session in this window)');
+} else {
+  console.log(
+    `    ${formatVoiceDurationSeconds(durationSummary.averageSeconds)} ` +
+      `over ${durationSummary.measured} measured session(s); ` +
+      `${durationSummary.excludedUnknownStarts} unknown-start session(s) excluded, counted below.`,
+  );
+}
+console.log('');
 
 const reconcileCounts = countUnknownStartsPerWindow(findBlindWindows(heartbeatAt), unknownEnds);
 console.log('  Blind-window reconcile (bot-down gaps the log cannot recover):');
