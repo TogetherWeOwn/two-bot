@@ -57,9 +57,10 @@ retention pitch. Your messages and voice history stay on the books.
 
 ### Who runs this place, and where do the numbers go?
 
-Humans run the community; the bot only routes and counts. It logs anonymous
-funnel events (joined, welcomed, routed) to measure whether newcomers get a
-first reply — never message contents, never your user ID in the clear.
+Humans run the community; the bot only routes and counts. It logs funnel
+events (joined, welcomed, routed) keyed by your Discord user ID to measure
+whether newcomers get a first reply — never message contents. Full list of
+what's stored lives in `docs/PRIVACY.md`.
 
 ## Why this FAQ
 
