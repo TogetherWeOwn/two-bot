@@ -105,6 +105,19 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     minTests: 3,
     why: 'the runbook liveness verdict going green against the mock harness, or its skips going unlisted',
   },
+  {
+    // TOG-7198. The moderation kill-switch flip cycle: all nine verbs execute
+    // through the live signed endpoint, all nine refuse at the allowlist gate
+    // with zero Discord calls after a disable restart, and all nine recover
+    // on re-enable. Needs a real Postgres for the warn row and the durable
+    // idempotency claim. A run that quietly stopped including this file would
+    // leave the mid-flow disable unproved while the static gating in PR #216
+    // stays green.
+    // Measured 2026-09-27 against Postgres 17.11, at this commit.
+    file: 'test/e2e.moderation-killswitch-flip.test.ts',
+    minTests: 3,
+    why: 'the moderation kill-switch refuse/recover cycle through the live endpoint, or a half-disabled slice ships unnoticed',
+  },
 ];
 
 /**
