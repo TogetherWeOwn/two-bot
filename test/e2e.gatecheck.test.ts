@@ -215,7 +215,7 @@ test('an empty events table says so instead of reporting zero joins', { timeout:
   assert.match(join.detail, /the events table holds no member_join rows at all/);
 });
 
-test('backfill clearings count toward conversion but never toward time-to-clear', async () => {
+test('backfill clearings count toward conversion but never toward time-to-clear', { timeout: 60_000 }, async () => {
   await seedFixtures(harness.db, { guildId: GUILD, now: TEST_NOW });
   const store = new EventStore(harness.db);
 
@@ -245,7 +245,7 @@ test('backfill clearings count toward conversion but never toward time-to-clear'
   );
 });
 
-test('gate-check.ts reads the funnel with the invite:% / backfill split', () => {
+test('gate-check.ts reads the funnel with the invite:% / backfill split', { timeout: 60_000 }, () => {
   // Guards the wiring the acceptance above is only meaningful on: the script
   // must keep counting attributed joins by the invite: prefix (which is what
   // excludes backfill: rows) rather than re-implementing the split inline in
