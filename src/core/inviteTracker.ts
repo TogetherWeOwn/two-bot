@@ -110,6 +110,38 @@ export function attributeJoins(
 }
 
 /**
+ * Attribution-quality categories for the funnel report (TOG-5681).
+ *
+ * EVENTS.md documents `ambiguous:a+b` (several invites grew at once, genuinely
+ * indistinguishable) and `unknown` (nothing grew and no vanity URL - Discovery,
+ * or a join from while the bot was offline) as DIFFERENT facts with different
+ * fixes. Rounding one into the other hides which problem to work on, so the
+ * report keeps them in separate buckets and this module owns the split.
+ */
+export type AttributionCategory = 'ambiguous' | 'unknown' | 'other';
+
+/** Which funnel-report bucket one join `source` string belongs in. */
+export function attributionCategory(source: string): AttributionCategory {
+  if (source === 'unknown') return 'unknown';
+  if (source === 'ambiguous' || source.startsWith('ambiguous:')) return 'ambiguous';
+  return 'other';
+}
+
+/** Counts of the two honest-failure buckets over grouped join rows. */
+export function summarizeAttributionSplit(
+  rows: readonly { source: string; n: number | string }[],
+): { ambiguous: number; unknown: number } {
+  let ambiguous = 0;
+  let unknown = 0;
+  for (const r of rows) {
+    const n = Number(r.n);
+    if (attributionCategory(r.source) === 'ambiguous') ambiguous += n;
+    else if (attributionCategory(r.source) === 'unknown') unknown += n;
+  }
+  return { ambiguous, unknown };
+}
+
+/**
  * Discord does not tell you which invite a member used. The standard trick is
  * to keep a snapshot of every invite's use count and, on a join, find the code
  * whose count went up. That is what this does.
