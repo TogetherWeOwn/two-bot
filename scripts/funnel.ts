@@ -9,7 +9,13 @@
  */
 import { openDb } from '../src/store/db.ts';
 import { ANOMALIES, detectSpikes, excludeClause } from '../src/analytics/anomalies.ts';
-import { summarizeAttributionSplit } from '../src/core/inviteTracker.ts';
+import { findBlindWindows } from '../src/core/voiceSessions.ts';
+import {
+  countDowntimeUnknownJoins,
+  renderDowntimeReport,
+  summarizeAttributionSplit,
+  totalDowntimeUnknown,
+} from '../src/core/inviteTracker.ts';
 
 const days = Number(process.argv[2] ?? 7);
 const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
@@ -148,6 +154,51 @@ console.log(
 console.log(
   `    ${String(unknown).padStart(5)}  unknown (no invite grew, no vanity URL)`,
 );
+
+// --- join-downtime unknown attribution (TOG-5719) ---------------------------
+//
+// EVENTS.md limit 3: joins that happen while the bot is down are attributed
+// `unknown` with no accounting. This names each bot-down window - a gap in
+// the bot's own append-only write series (`events.recorded_at`: every row is
+// proof the bot was alive to write it, cf. scripts/voice-sessions.ts
+// TOG-5683) - and counts the `unknown` joins whose Discord timestamp
+// (`occurred_at`) falls inside each window. A count, never a
+// re-attribution: the rows stay `unknown`, and this says how many of them
+// the outage explains. An upper bound, not a proof - a quiet stretch with
+// no writes reads as a gap - and the report says so.
+//
+// Window detection is the shared `findBlindWindows`; the join side lives in
+// src/core/inviteTracker.ts so the reviewer verifies one gap function.
+const writeSeries = await db
+  .prepare(
+    `SELECT recorded_at AS at FROM events
+      WHERE occurred_at >= ?
+      ORDER BY recorded_at`,
+  )
+  .all<{ at: string }>(since)
+  .catch(() => [] as Array<{ at: string }>);
+const downtimeCounts = countDowntimeUnknownJoins(
+  findBlindWindows(writeSeries.map((r) => r.at)),
+  (
+    await db
+      .prepare(
+        `SELECT occurred_at, source FROM events
+          WHERE event_type = 'member_join' AND occurred_at >= ?${joinExcl.sql}
+            AND source = 'unknown'`,
+      )
+      .all<{ occurred_at: string; source: string }>(since, ...joinExcl.params)
+      .catch(() => [] as Array<{ occurred_at: string; source: string }>)
+  ).map((r) => ({ occurredAt: r.occurred_at, source: r.source })),
+);
+const downtimeUnknown = totalDowntimeUnknown(downtimeCounts);
+console.log(`\n  Join downtime (EVENTS.md limit 3 - unknown joins the outage explains):`);
+for (const line of renderDowntimeReport(downtimeCounts)) console.log(line);
+if (downtimeCounts.length > 0) {
+  console.log(
+    `    ${String(downtimeUnknown).padStart(5)} of ${unknown} unknown in-window ` +
+      `(upper bound - a quiet stretch with no writes reads as a gap)`,
+  );
+}
 
 // Clicks per tracked link, next to the joins that link's invite code produced.
 // This is the per-place breakdown TOG-116 exists for: it is what separates "a
