@@ -8,14 +8,15 @@ import type { SelfRolePanel } from './types.ts';
  * `src/discord/selfRoles.ts`).
  *
  * Pure in-memory role set: no Discord call, no guild lookup, no live guild
- * role touched. The member id is a fixture constant, never resolved against
- * any guild. Returns the proof lines for the dry-run output; throws on any
- * failure so the caller fails closed.
+ * role touched. The member label is a non-numeric fixture constant (kept out
+ * of the src/ snowflake budget on purpose), never resolved against any guild.
+ * Returns the proof lines for the dry-run output; throws on any failure so
+ * the caller fails closed.
  */
 export function proveGrantRevoke(panel: SelfRolePanel): string[] {
   const option = panel.options[0];
   if (!option) throw new Error(`panel "${panel.id}" has no options to prove`);
-  const memberId = '100000000000000001'; // disposable fixture member, never a guild lookup
+  const memberId = 'fixture-disposable-member'; // display label only, never a guild lookup
   const held = new Set<string>();
   const lines: string[] = [];
 

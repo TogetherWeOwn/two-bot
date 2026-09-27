@@ -35,8 +35,8 @@ for (const mode of ['button', 'select', 'reaction'] as const) {
   test(`proveGrantRevoke grants then revokes in ${mode} mode`, () => {
     const lines = proveGrantRevoke(panelFor(mode));
     assert.equal(lines.length, 2);
-    assert.match(lines[0], new RegExp(`^grant: disposable member \\d+ now holds role ${ROLE} \\("Red"\\)$`));
-    assert.match(lines[1], new RegExp(`^revoke: disposable member \\d+ no longer holds role ${ROLE}$`));
+    assert.match(lines[0], new RegExp(`^grant: disposable member \\S+ now holds role ${ROLE} \\("Red"\\)$`));
+    assert.match(lines[1], new RegExp(`^revoke: disposable member \\S+ no longer holds role ${ROLE}$`));
   });
 }
 
@@ -82,8 +82,8 @@ function env(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
 test('dry-run prints grant+revoke and touches no network', async () => {
   hits = 0;
   const { stdout } = await run(process.execPath, ['scripts/self-role-panel.ts', '--panel', 'proof'], { env: env() });
-  assert.match(stdout, new RegExp(`grant: disposable member \\d+ now holds role ${ROLE} \\("Red"\\)`));
-  assert.match(stdout, new RegExp(`revoke: disposable member \\d+ no longer holds role ${ROLE}`));
+  assert.match(stdout, new RegExp(`grant: disposable member \\S+ now holds role ${ROLE} \\("Red"\\)`));
+  assert.match(stdout, new RegExp(`revoke: disposable member \\S+ no longer holds role ${ROLE}`));
   assert.match(stdout, /Dry run\. Nothing was posted/);
   assert.equal(hits, 0);
 });
