@@ -95,8 +95,29 @@ async function fixture(t, seed = {}, hooks = {}) {
     await rm(root, { recursive: true, force: true });
   });
   const { networkInterfaces } = await import('node:os');
+  // Mirror the proof's own-private predicate exactly
+  // (ops/tog-4104/settings-signed-proof.mjs:isPrivateIPv4, cf.
+  // src/internal/bind.ts:isPrivateAddress): the fixture must feed the proof
+  // an address the proof accepts. Taking the first non-loopback IPv4 is
+  // wrong on hosts whose first NIC is public (self-hosted CI runners are
+  // VPS hosts): the proof correctly REFUSEs public URLs at preflight.url,
+  // which failed the roundtrip on main CI while passing on dev hosts whose
+  // first NIC is a private Docker address. Public and foreign-private
+  // endpoints still refuse via the negative cases below; the proof itself
+  // is unchanged.
+  const isPrivateIPv4 = (host) => {
+    const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (!v4) return false;
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    if (a === 10) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
+    if (a === 169 && b === 254) return true;
+    return false;
+  };
   const ownAddress = Object.values(networkInterfaces()).flat()
-    .find((a) => a?.family === 'IPv4' && !a.internal)?.address ?? null;
+    .find((a) => a?.family === 'IPv4' && !a.internal && isPrivateIPv4(a.address))?.address ?? null;
   // Same signed fixture server, reachable over this host's own private
   // interface address: mirrors the container-NIC topology in staging.
   const ownAddressUrl = ownAddress ? `http://${ownAddress}:${server.address().port}` : null;
@@ -252,7 +273,7 @@ test('container resource UUID grounds the app check without a forwarded app UUID
 test('own private interface address passes the URL check with full roundtrip', async (t) => {
   const f = await fixture(t);
   assert.ok(f.ownAddressUrl,
-    'this host must have a non-loopback IPv4 interface for the own-address case');
+    'this host must have its own private non-loopback IPv4 interface for the own-address case');
   // Same signed fixture server, dialed over the host's own private address
   // instead of loopback: mirrors the container-NIC topology in staging. Full
   // PROOF PASS with exact cleanup, so the new branch is not a preflight-only
