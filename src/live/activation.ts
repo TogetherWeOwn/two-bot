@@ -35,9 +35,9 @@ export type LiveCapability = (typeof LIVE_CAPABILITIES)[number];
 /**
  * Capabilities cleared to run in the live guild. Clearing one is a reviewed
  * code change to this line, one capability at a time, and clears nothing else.
- * Empty: nothing runs live.
+ * TOG-5356 clears self_roles only (unblocks TOG-2796); nothing else runs live.
  */
-export const LIVE_CLEARED_CAPABILITIES: readonly LiveCapability[] = [];
+export const LIVE_CLEARED_CAPABILITIES: readonly LiveCapability[] = ['self_roles'];
 
 export type ActivationDecision =
   | { permitted: true; environment: 'staging' | 'live'; applicationId: string }

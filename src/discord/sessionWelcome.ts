@@ -57,8 +57,10 @@ export interface SessionWelcomeDeps {
    * the next member without a restart.
    */
   landingChannelIds: () => string[];
-  /** Where goodbyes go. Same rule: first postable channel wins. */
-  goodbyeChannelIds: string[];
+  /** Where goodbyes go. Same rule: first postable channel wins. A thunk rather
+   * than a plain array so a settings-store reload (TOG-3314, following TOG-3536's
+   * landing-channel wire) is visible to the next leave without a restart. */
+  goodbyeChannelIds: () => string[];
   /** Per-guild picker destinations; channel ids must never be shared across guilds. */
   picks: SessionPick[];
   /**
@@ -162,8 +164,9 @@ export function registerSessionWelcome(client: Client, deps: SessionWelcomeDeps)
     // The funnel row is recorded by the core handlers; this is the
     // human-visible half. Joined-at survives on the member object Discord
     // hands us even as they leave.
+    const goodbyeChannelIds = deps.goodbyeChannelIds();
     const target =
-      deps.goodbyeChannelIds.map((id) => botCanPost(client, id, deps.guildId)).find(Boolean) ?? null;
+      goodbyeChannelIds.map((id) => botCanPost(client, id, deps.guildId)).find(Boolean) ?? null;
     if (!target) return;
     if (deps.dryRun) {
       log.info('session_goodbye_dry_run', { memberId: member.id });

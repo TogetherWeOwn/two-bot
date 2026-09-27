@@ -281,7 +281,7 @@ function makeSessionDeps(
       store: { async hasEvent() { return false; } },
       guildId: GUILD,
       landingChannelIds: () => [LANDING],
-      goodbyeChannelIds: [] as string[],
+      goodbyeChannelIds: () => [] as string[],
       picks: SESSION_PICKS,
       dryRun: opts.dryRun,
       onboardingRota: hook as any,
