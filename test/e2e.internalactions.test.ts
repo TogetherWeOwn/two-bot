@@ -972,11 +972,19 @@ test('automations.import requires a key and sequential retries replay once', asy
 test('concurrent automations.import retries run the importer once', async () => {
   let release: (() => void) | null = null;
   const held = new Promise<void>((resolve) => { release = resolve; });
+  // Deterministic gate: the overlap must arrive while the first request holds
+  // the idempotency claim. A fixed sleep bets the first request finished auth +
+  // DB claim in N ms; on a busy runner it loses and the overlap becomes the
+  // claim holder (run 36349151484). The claim is taken before runAction, so
+  // the importer's entry proves the claim is held.
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
   let imports = 0;
   const srv = await start({
     automations: {
       async importMee6() {
         imports++;
+        markStarted();
         await held;
         return { imported: 1, skipped: 0 };
       },
@@ -988,7 +996,7 @@ test('concurrent automations.import retries run the importer once', async () => 
   const body = { action: 'automations.import', commands: [{ command: 'faq', response: 'A' }] };
   const key = newKey();
   const first = call(srv, { body, idempotencyKey: key });
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await started;
   const overlap = await call(srv, { body, idempotencyKey: key });
   assert.equal(overlap.status, 409);
   assert.equal(overlap.body.error?.code, 'in_progress');
@@ -1078,9 +1086,15 @@ test('a concurrent retry gets in_progress, which is the one retryable 409', asyn
   const held = new Promise<void>((r) => {
     release = r;
   });
+  // Same deterministic gate as the concurrent-import test above: the claim is
+  // taken before runAction, so the action's entry proves the claim is held and
+  // the overlap deterministically sees in_flight instead of racing a sleep.
+  let markStarted!: () => void;
+  const started = new Promise<void>((r) => { markStarted = r; });
   const { client, calls } = recordingDiscord({
     async postMessage(c, _content) {
       calls.push(`postMessage:${c}`);
+      markStarted();
       await held;
       return 'msg-slow';
     },
@@ -1089,8 +1103,7 @@ test('a concurrent retry gets in_progress, which is the one retryable 409', asyn
   const key = newKey();
 
   const slow = call(srv, { body: announcement(), idempotencyKey: key });
-  // Let the first request claim the key before the second one arrives.
-  await new Promise((r) => setTimeout(r, 30));
+  await started;
   const overlapping = await call(srv, { body: announcement(), idempotencyKey: key });
 
   assert.equal(overlapping.status, 409);
