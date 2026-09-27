@@ -26,6 +26,11 @@ import {
   MIN_OBSERVED_DAYS_FOR_DOW,
   type SessionRow,
 } from '../src/analytics/voiceSessions.ts';
+import {
+  countUnknownStartsPerWindow,
+  findBlindWindows,
+  renderReconcileReport,
+} from '../src/core/voiceSessions.ts';
 
 const args = process.argv.slice(2);
 const days = Number(args.find((a) => /^\d+$/.test(a)) ?? 90);
@@ -132,6 +137,60 @@ for (let d = 0; d < 7; d++) {
     return (n ? String(n) : '.').padStart(3);
   }).join('');
   console.log(`    ${DAY_NAMES[d]}${cells}`);
+}
+console.log('');
+
+// --- blind-window reconcile (TOG-5683) --------------------------------------
+//
+// A voice gap while the bot is down can never be recovered (docs/EVENTS.md
+// limit 5): Discord serves no voice history over REST. This section does not
+// try. It names each blind window - a heartbeat gap from the slowest series we
+// keep, `presence_probe.observed_at`, falling back to the voice-session log
+// itself - and counts the `voice_session_end` rows with `startKnown: false`
+// attributed to each window. A count, never an average: the rows carry no
+// duration precisely because we never saw the start.
+
+const heartbeats = await db
+  .prepare(
+    `SELECT observed_at AS at FROM presence_probe
+      WHERE guild_id = ? AND observed_at >= ?
+      ORDER BY observed_at`,
+  )
+  .all<{ at: string }>(process.env.DISCORD_GUILD_ID?.trim() ?? '', since)
+  .catch(() => [] as Array<{ at: string }>);
+
+// No probe history for this guild yet (probe disabled, or a fresh database):
+// the voice-session starts are the only proof the listener was alive, so gaps
+// in them are the windows. Coarser than the probe - a quiet night reads as a
+// gap - and the report says so.
+const heartbeatAt =
+  heartbeats.length > 0
+    ? heartbeats.map((r) => r.at)
+    : starts.map((r) => r.occurred_at);
+
+const ends = await db
+  .prepare(
+    `SELECT occurred_at, metadata FROM events
+      WHERE event_type = 'voice_session_end' AND occurred_at >= ?`,
+  )
+  .all<{ occurred_at: string; metadata: string | null }>(since);
+const unknownEnds = ends.map((r) => {
+  let startKnown = true;
+  try {
+    const m = JSON.parse(r.metadata ?? '{}') as { startKnown?: unknown };
+    startKnown = m.startKnown !== false;
+  } catch {
+    startKnown = true; // unparseable metadata: do not claim the start is unknown
+  }
+  return { occurredAt: r.occurred_at, startKnown };
+});
+
+const reconcileCounts = countUnknownStartsPerWindow(findBlindWindows(heartbeatAt), unknownEnds);
+console.log('  Blind-window reconcile (bot-down gaps the log cannot recover):');
+for (const line of renderReconcileReport(reconcileCounts)) console.log(line);
+if (heartbeats.length === 0 && starts.length > 0) {
+  console.log('    (windows derived from session starts - the probe has no history for this guild,');
+  console.log('     so a quiet night reads as a gap. Enable the presence probe for sharper windows.)');
 }
 console.log('');
 
