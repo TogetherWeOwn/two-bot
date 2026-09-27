@@ -118,8 +118,17 @@ async function main(): Promise<number> {
     for (const tool of ['initdb', 'postgres']) await access(join(bin, tool), constants.X_OK);
     for (const file of STORAGE_FILES) await access(join(ROOT, file), constants.R_OK);
     const destination = join(work, 'report.ndjson');
+    // Both storage files bootstrap their own owned postgres cluster
+    // (freePort -> release -> postgres bind). Node runs test files in
+    // parallel by default, so the two clusters race for the same ephemeral
+    // port on the shared self-hosted host: one binds, the other fails at
+    // createRestartStorage setup while its sibling passes (TOG-6361: runs
+    // 36303845863 runner1 entrypoint setup refusal, 36306568799 runner12
+    // integration first-test setup refusal). Serialize the two files; the
+    // freePort/bind gap against other hosts' jobs remains, but the
+    // in-job collision that fails every PR run is gone.
     const rc = await command(process.execPath, [
-      '--test', '--test-reporter=spec', '--test-reporter-destination=stdout',
+      '--test', '--test-concurrency=1', '--test-reporter=spec', '--test-reporter-destination=stdout',
       `--test-reporter=${join(ROOT, 'scripts/test-report.ts')}`,
       `--test-reporter-destination=${destination}`, ...STORAGE_FILES,
     ], ROOT, childEnvironment(work, bin));
