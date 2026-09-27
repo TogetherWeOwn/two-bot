@@ -26,11 +26,13 @@
  * Attribution `unknown` is covered by member B joining with no invite delta,
  * same mechanism as e2e.funnel.test.ts.
  *
- * Bugs found by the exploratory probe are filed as child cards of TOG-5694,
- * not fixed here. Known at writing: TOG-5981 (back-to-back voice frames for
- * one member race - end rows land startKnown:false). That race is deliberately
- * NOT exercised here: this suite settles between frames, so it stays green
- * while the race card is open.
+ * Bugs found by the exploratory probe were filed as child cards of TOG-5694.
+ * TOG-5981 (back-to-back voice frames for one member raced to
+ * startKnown:false ends) is fixed by per-member serialization in the adapter
+ * plus channel-scoped voice idempotency keys, covered by
+ * unit.voiceburst.test.ts. That race is still deliberately NOT exercised
+ * here: this suite settles between frames and pins the settled path green
+ * regardless.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
