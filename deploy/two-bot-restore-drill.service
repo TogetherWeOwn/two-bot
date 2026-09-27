@@ -41,17 +41,39 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=two-bot-restore-drill
 
+# Same posture as the backup job: Postgres only, one read path for the dump
+# files. No Restart=: timer-started oneshots must stay failed when they fail so
+# a red drill is visible instead of looping.
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
+# Read-only: the drill reads the newest dump and writes to the scratch database
+# over the network. It must never modify the backup directory.
+ReadOnlyPaths=/var/backups/two-bot
 ProtectKernelTunables=true
 ProtectKernelModules=true
+ProtectKernelLogs=true
 ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
 RestrictNamespaces=true
 RestrictSUIDSGID=true
+RestrictRealtime=true
 LockPersonality=true
 UMask=0077
 CapabilityBoundingSet=
 AmbientCapabilities=
+# Co-tenancy: hide other services' processes; a drill never inspects /proc.
+ProtectProc=invisible
+ProcSubset=pid
+# Postgres only. A compromised dependency cannot open a raw socket.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+SystemCallArchitectures=native
+# Monthly and low-priority: half a core, 512M (restore buffers in memory).
+MemoryMax=512M
+CPUQuota=50%
+TasksMax=32

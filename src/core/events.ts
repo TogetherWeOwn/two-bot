@@ -153,7 +153,17 @@ export function idempotencyKey(e: FunnelEvent): string {
     // millisecond collapse into one row. `dedupeToken` is what makes them two.
     // See FunnelEvent.dedupeToken; nothing else sets it.
     const token = e.dedupeToken ? `:${e.dedupeToken}` : '';
-    return `${e.guildId}:${e.memberId ?? 'anon'}:${e.eventType}:${e.occurredAt}${token}`;
+    // Voice boundaries also carry their channel (TOG-5981): a move from A to B
+    // is an end for A and a start for B at the SAME instant, so without this
+    // both same-tick starts shared one key and the second silently deduped -
+    // the session vanished. The end keys on its credited channel (the session's
+    // channel, via source), so a replayed gateway event still dedupes: same
+    // member, same instant, same channel is still one key.
+    const channel =
+      e.eventType === 'voice_session_start' || e.eventType === 'voice_session_end'
+        ? `:${e.source}`
+        : '';
+    return `${e.guildId}:${e.memberId ?? 'anon'}:${e.eventType}:${e.occurredAt}${channel}${token}`;
   }
   return `${e.guildId}:${e.memberId}:${e.eventType}`;
 }
