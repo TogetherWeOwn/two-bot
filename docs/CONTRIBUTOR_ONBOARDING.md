@@ -11,7 +11,9 @@ the docs and small things they trip over. Humans come first; bots are labeled
 and stay under 20% of the chatter.
 
 Channel names move occasionally. If a channel below does not exist, follow the
-links in the server's welcome message — those are always current.
+links in the server's welcome message — those are always current. (`#general`
+and `#events` below are the usual names; the same fallback applies if they
+have moved.)
 
 ## 1. Join the pilot
 
@@ -19,21 +21,23 @@ links in the server's welcome message — those are always current.
    and join the Discord server.
 2. **Accept the rules** on the membership screen. This clears the gate and the
    bot records it (event `gate_cleared`) — it is how we know you are really in.
-3. **Follow the welcome message**: pick your games and follow the channel
-   links it hands you. Picking a game grants you its role and opens its
-   channels.
-4. **Say hi in general.** Your first message starts a friendly clock: we
-   measure how fast a newcomer gets their **first human reply**, and someone
-   will answer you. That reply-time number is one of the pilot's headline
-   metrics, so saying hi is genuinely contributing.
-5. **Come back once that week.** Showing up twice is what turns a join into a
-   regular. Voice counts too — ten minutes in a voice channel counts the same
-   as a message.
+3. **Follow the welcome message**: pick your games in the game picker and follow the channel
+   links it hands you. Picking a game grants you its role (each pick maps to
+   a role — see `src/onboarding/catalog.ts`) and opens its channels.
+4. **Say hi in general.** Your first message in welcome/general starts a friendly clock: we
+   measure how fast a newcomer gets their **first human reply** (counted from
+   rules acceptance when we have it — see [docs/COMMUNITY_SCORECARD.md](COMMUNITY_SCORECARD.md)).
+   Someone usually answers — and whether one does is itself a pilot number,
+   so saying hi is genuinely contributing either way.
+5. **Come back once that week.** Showing up again is what turns a join into a
+   habit. Voice counts too — the scorecard counts you active for the week with
+   one message or ten minutes of voice (600 unioned voice seconds).
 
-**Your privacy:** we store Discord user IDs, timestamps and channel IDs —
-never public message content, email, or anything else. (Private support
-tickets keep a staff-only transcript for 90 days.) Full detail:
-[docs/PRIVACY.md](PRIVACY.md).
+**Your privacy:** we store Discord user IDs, timestamps, channel IDs, and
+which invite (code + inviter) a join came from — never public message
+content or email. Automod inspects public messages in memory and stores no
+content. (Private support tickets keep a staff-only transcript for 90 days.)
+Full detail: [docs/PRIVACY.md](PRIVACY.md).
 
 ## 2. Host checklist
 
@@ -54,8 +58,11 @@ you need a co-host and this checklist.
 - [ ] Start on time, in the advertised voice channel.
 - [ ] Welcome every newcomer by name in the first minute. Nobody sits in
        silence while regulars catch up.
-- [ ] Mark attendance the way the event post says (host check-in). Headcount
-       is a pilot metric — a rough number beats none.
+- [ ] Record attendance with `/attendance event-occurrence:<id> member:<member>`
+       (needs Discord `Manage Events`; repeat check-ins for the same
+       event/member are idempotent). Headcount is a pilot metric — an RSVP
+       is not attendance, so check in each person who actually showed.
+       A rough number beats none.
 - [ ] Keep bot and automation chatter down. If a bot is spamming the channel,
        mute it for the event and tell staff after.
 - [ ] End on time. Thank people by name, say when the next one is.
@@ -70,8 +77,9 @@ you need a co-host and this checklist.
 **If something goes wrong**
 
 - A sudden burst of unknown joins, spam, or abuse: **do not engage**. Mute the
-  channel if you can, ping a moderator, keep hosting everyone else. There is a
-  join-burst detector that alerts staff, and a written raid playbook here:
+  channel if you can, ping a moderator, keep hosting everyone else. A
+  join-burst detector alerts staff automatically (`src/analytics/raidWatch.ts`),
+  and a written raid playbook is here:
   [docs/RAID-RESPONSE.md](RAID-RESPONSE.md).
 - Harassment directed at anyone: shut it down once, briefly, then escalate to
   a moderator. You are not expected to adjudicate.
@@ -91,9 +99,12 @@ Short version: **be someone a nervous newcomer is glad to meet.**
 - No raid behavior, alt-account games, or helping anyone evade moderation.
 - Spoilers for current games go in spoiler tags.
 - Staff and moderator calls are final in the moment. Disagree? Appeal
-  afterwards by DMing a moderator — calmly, once.
-- Enforcement uses warnings, timeouts, kicks and bans, every action logged
-  with a reason. Tooling context: [docs/MODERATION.md](MODERATION.md).
+  afterwards by DMing a moderator — calmly, once. Note: the bot never sends
+  DMs or mass messages (that needs CEO sign-off first — see
+  [CONTRIBUTING.md](../CONTRIBUTING.md)), so appeals to a human are the path.
+- Enforcement uses warnings, timeouts (the persistent escalation layer),
+  kicks and temporary/permanent bans, every action logged with a reason and
+  an idempotency key. Tooling context: [docs/MODERATION.md](MODERATION.md).
 
 Breaking conduct can end the pilot for you. That is the whole policy, and it
 is deliberately short.
@@ -112,25 +123,39 @@ Pick **one** lane. All three count, all three get reviewed by a human.
 [CONTRIBUTING.md](../CONTRIBUTING.md)):
 
 ```bash
-gh auth setup-git   # once per machine; the repos are private
+gh auth setup-git   # once per machine; without it git cannot reach the private repo
 git clone https://github.com/TogetherWeOwn/two-bot.git
 cd two-bot
 npm ci --include=dev
 git checkout -b docs/short-description
-# edit, then (needs a running Postgres 17+ with a scratch database):
+# edit, then (needs a running Postgres 17+ with a scratch database,
+# e.g. `createdb two_bot_test` — the repo does not provision one for you):
 TWO_TEST_DATABASE_URL=postgres://localhost:5432/two_bot_test npm test   # must pass before you open the PR
 ```
 
-Open the pull request against `main`. CI runs the check job (typecheck,
-`test:postgres` wrapper, restart-storage provisioning, grant self-test) and the
+Without `TWO_TEST_DATABASE_URL` the suite fails fast with
+`TWO_TEST_DATABASE_URL is required` (verified: `npm test` with no database
+errors out of `test/helpers/testDb.ts`, it never runs silently green).
+Open the PR from your branch against `main` **from inside this repo** —
+a fork's PR is refused on purpose (self-hosted runners execute workflow
+code, so `scripts/ci/refuse-fork-pr.sh` fails fork PRs; a maintainer can
+push your branch here instead). CI runs the check job (script-target and
+credential guards, typecheck, funnel-attribution eval, `test:postgres`
+wrapper, restart-storage provisioning, grant self-test) and the
 postgres job (migrate, web views, website-role checks), plus a secret scan —
 all must be green (full list: [CONTRIBUTING.md](../CONTRIBUTING.md)). A code
-owner reviews it; you cannot approve your own PR. Name branches
-`type/short-description` (`docs/…`, `fix/…`, `feat/…`). Never put a token or
-private key in a commit — a pushed secret gets rotated, not just deleted.
+owner reviews it; you cannot approve your own PR (note: review is
+auto-requested from the owner via `.github/CODEOWNERS` but not
+server-enforced on this plan — see [CONTRIBUTING.md](../CONTRIBUTING.md)).
+Name branches `type/short-description` (`docs/…`, `fix/…`, `feat/…`).
+Never put a token or private key in a commit — a pushed secret gets rotated,
+not just deleted (the secret scan walks full history, so removing it in a
+later commit does not help).
 
 **What happens after:** a reviewer reads it, you get comments or an approval,
-it merges, and your name is on the pilot's contributor list. Then pick the
+and it merges. Contributors are thanked in the irregular contributor
+spotlight (public merged-PR history only, with your OK to the final text —
+see `community/contributor-spotlight-template.md`). Then pick the
 next one — regulars are just newcomers who came back.
 
 ## Questions?
