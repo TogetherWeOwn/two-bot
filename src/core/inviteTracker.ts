@@ -110,6 +110,142 @@ export function attributeJoins(
 }
 
 /**
+ * Attribution-quality categories for the funnel report (TOG-5681).
+ *
+ * EVENTS.md documents `ambiguous:a+b` (several invites grew at once, genuinely
+ * indistinguishable) and `unknown` (nothing grew and no vanity URL - Discovery,
+ * or a join from while the bot was offline) as DIFFERENT facts with different
+ * fixes. Rounding one into the other hides which problem to work on, so the
+ * report keeps them in separate buckets and this module owns the split.
+ */
+export type AttributionCategory = 'ambiguous' | 'unknown' | 'other';
+
+/** Which funnel-report bucket one join `source` string belongs in. */
+export function attributionCategory(source: string): AttributionCategory {
+  if (source === 'unknown') return 'unknown';
+  if (source === 'ambiguous' || source.startsWith('ambiguous:')) return 'ambiguous';
+  return 'other';
+}
+
+/** Counts of the two honest-failure buckets over grouped join rows. */
+export function summarizeAttributionSplit(
+  rows: readonly { source: string; n: number | string }[],
+): { ambiguous: number; unknown: number } {
+  let ambiguous = 0;
+  let unknown = 0;
+  for (const r of rows) {
+    const n = Number(r.n);
+    if (attributionCategory(r.source) === 'ambiguous') ambiguous += n;
+    else if (attributionCategory(r.source) === 'unknown') unknown += n;
+  }
+  return { ambiguous, unknown };
+}
+
+// --- join-downtime unknown attribution (TOG-5719) ---------------------------
+//
+// EVENTS.md limit 3: joins that happen while the bot is down are attributed
+// `unknown` - the member still gets counted but the invite delta is lost -
+// with no accounting of how much of `unknown` that explains.
+//
+// What this DOES instead: it names each bot-down window (a gap in the bot's
+// own append-only write series, `events.recorded_at` - every row is proof the
+// bot was alive to write it, cf. src/core/voiceSessions.ts TOG-5683) and
+// counts the `unknown` joins whose Discord timestamp (`occurred_at`) falls
+// inside each window. A count, never a re-attribution: the rows stay
+// `unknown`, and this says how many of them the outage explains.
+//
+// Pure functions over caller-supplied rows, deliberately - same reasoning as
+// the voice blind-window reconcile. The funnel script feeds them the write
+// timestamps and the join rows; the tests feed them fixtures.
+//
+// Window detection itself lives in src/core/voiceSessions.ts
+// (`findBlindWindows`); this module owns only the join side so the reviewer
+// verifies one gap function, not two. The type is re-declared here rather
+// than imported so this module stays dependency-free and the shape stays
+// pinned for the funnel contract.
+//
+// Two honesty rules shape the counting:
+//   1. Only `unknown` counts. A join inside a window that still carries an
+//      invite code (e.g. via the host-less capture path) was attributed
+//      despite the gap and is not downtime-unknown. `ambiguous` and `vanity`
+//      are different facts with different fixes and stay out.
+//   2. The write series is coarse - a quiet stretch with no writes reads as a
+//      gap - so this is an UPPER BOUND on outage-caused unknowns, not a
+//      proof. The report says so.
+
+/** One interval in which the bot was not writing. Shape-matches BlindWindow. */
+export interface DowntimeWindow {
+  /** ISO-8601 UTC of the last write before the gap. */
+  start: string;
+  /** ISO-8601 UTC of the first write after the gap. */
+  end: string;
+  /** `end` minus `start` in milliseconds. */
+  gapMs: number;
+}
+
+/** A down window plus the unknown joins attributed to it. */
+export interface DowntimeWindowCount extends DowntimeWindow {
+  /** `member_join` rows with `source = 'unknown'` and `occurred_at` in-window. */
+  downtimeUnknown: number;
+}
+
+/** The only two fields the downtime count needs from a join row. */
+export interface DowntimeJoin {
+  /** ISO-8601 UTC (Discord's timestamp, not when we wrote the row). */
+  occurredAt: string;
+  /** Attribution string, e.g. `unknown`, `invite:abc`, `ambiguous:x+y`. */
+  source: string;
+}
+
+/**
+ * Attribute each `unknown` join to the window containing its `occurred_at`.
+ * Windows are half-open `[start, end)`: a join at exactly `end` was observed
+ * by the write that closed the gap. Known-source, ambiguous and vanity joins
+ * are ignored; malformed timestamps are skipped; joins outside every window
+ * are left unattributed (they still come back in the unattributed remainder
+ * the caller derives, so the numbers reconcile).
+ */
+export function countDowntimeUnknownJoins(
+  windows: readonly DowntimeWindow[],
+  joins: readonly DowntimeJoin[],
+): DowntimeWindowCount[] {
+  const counts: DowntimeWindowCount[] = windows.map((w) => ({ ...w, downtimeUnknown: 0 }));
+  const bounds = counts.map((w) => ({ start: Date.parse(w.start), end: Date.parse(w.end) }));
+  for (const j of joins) {
+    if (j.source !== 'unknown') continue;
+    const t = Date.parse(j.occurredAt);
+    if (Number.isNaN(t)) continue;
+    for (let i = 0; i < counts.length; i++) {
+      const b = bounds[i];
+      if (Number.isNaN(b.start) || Number.isNaN(b.end)) continue;
+      if (b.start <= t && t < b.end) {
+        counts[i].downtimeUnknown++;
+        break;
+      }
+    }
+  }
+  return counts;
+}
+
+/** Total downtime-unknown joins across all windows. Always <= total unknown. */
+export function totalDowntimeUnknown(counts: readonly DowntimeWindowCount[]): number {
+  return counts.reduce((a, w) => a + w.downtimeUnknown, 0);
+}
+
+/** One line per window, each naming the window and its count. */
+export function renderDowntimeReport(counts: readonly DowntimeWindowCount[]): string[] {
+  if (counts.length === 0) {
+    return ['  No bot-down windows in write history - nothing unknown that we can attribute to downtime.'];
+  }
+  return counts.map(
+    (w) =>
+      `  Down window ${w.start} -> ${w.end} ` +
+      `(${(w.gapMs / 3_600_000).toFixed(1)}h gap): ` +
+      `${w.downtimeUnknown} unknown join(s) in-window (still unknown, outage explains them)`,
+  );
+}
+
+/**
  * Discord does not tell you which invite a member used. The standard trick is
  * to keep a snapshot of every invite's use count and, on a join, find the code
  * whose count went up. That is what this does.

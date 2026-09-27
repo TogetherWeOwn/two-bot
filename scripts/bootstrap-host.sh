@@ -199,15 +199,19 @@ sudo -u "$APP_USER" sh -c "cd '$APP_DIR' && npm ci --omit=dev"
 say "Secrets"
 CRED_DIR="$ENV_DIR/credentials"
 TOKEN_FILE="$CRED_DIR/discord_token"
+DATABASE_URL_FILE="$CRED_DIR/database_url"
+INTERNAL_KEYS_FILE="$CRED_DIR/internal_keys"
 STAGING_TOKEN_FILE="$CRED_DIR/discord_staging_token"
 install -d -o root -g root -m 700 "$CRED_DIR"
 new_secrets=0
-if [ -s "$TOKEN_FILE" ]; then
-  echo "$TOKEN_FILE present - left alone"
-else
-  install -o root -g root -m 600 /dev/null "$TOKEN_FILE"
-  new_secrets=1
-fi
+for cred_file in "$TOKEN_FILE" "$DATABASE_URL_FILE" "$INTERNAL_KEYS_FILE"; do
+  if [ -s "$cred_file" ]; then
+    echo "$cred_file present - left alone"
+  else
+    install -o root -g root -m 600 /dev/null "$cred_file"
+    new_secrets=1
+  fi
+done
 if [ -s "$STAGING_TOKEN_FILE" ]; then
   echo "$STAGING_TOKEN_FILE present - left alone"
 else
@@ -272,6 +276,8 @@ if [ "$new_secrets" -eq 1 ]; then
   Secrets files are empty. Fill them in before this can start, then re-run me:
 
     sudo editor $TOKEN_FILE              # the live bot token, one line, nothing else
+    sudo editor $DATABASE_URL_FILE       # Postgres URL (carries the DB password); empty falls back to TWO_DATABASE_URL
+    sudo editor $INTERNAL_KEYS_FILE      # internal-actions signing keys; empty until TWO_INTERNAL_ACTIONS=1
     sudo editor $STAGING_TOKEN_FILE      # Owen QA Test token; required only for guild-config snapshots
     sudo editor $ENV_DIR/two-bot.env     # DISCORD_GUILD_ID, DISCORD_STAGING_GUILD_ID, TWO_DATABASE_URL - no token
     sudo editor $ENV_DIR/backup.env      # TWO_DATABASE_URL, TWO_RESTORE_URL, TWO_BACKUP_UPLOAD_CMD
