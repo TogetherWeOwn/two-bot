@@ -96,8 +96,12 @@ Reference the issue in the body when there is one (`TWO-9`).
 ## Pull requests
 
 1. Branch off `main`.
-2. Open the PR. CI runs `npm ci`, `npm run typecheck`, `npm test`, and a secret
-   scan. All four must be green.
+2. Open the PR. CI runs the check job (`npm run typecheck`, the
+   `npm run test:postgres` wrapper, restart-storage provisioning, grant
+   self-test) and the postgres job (`test:postgres` again, then `migrate`,
+   `web:views`, `web:role`, `verify:web-role`), plus a secret scan. All must
+   be green — the wrappers are checked-in scripts (`scripts/ci/run-check-job.sh`,
+   `scripts/ci/run-postgres-job.sh`), so reproduce a red run locally with those.
 3. A code owner reviews it — see [.github/CODEOWNERS](.github/CODEOWNERS).
    You cannot approve your own PR. That is deliberate and it applies to
    everyone.
