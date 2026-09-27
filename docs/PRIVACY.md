@@ -31,6 +31,27 @@ inspects public messages in memory but stores no content. No email.**
   resolved to names at the moment it is used, and thrown away after.
 - **Email, IP, location, voice audio.** Never collected.
 
+## Invite-redirect clicks
+
+`GET go.two.gg/<campaign>` records one `invite_click` row, then 302s to the
+Discord invite (`src/redirect/`, TOG-116). A click row is a campaign and a
+timestamp — the whole record:
+
+- `member_id` is always NULL. `source` is `invite:<code>` and `metadata` is
+  exactly `{"campaign": "<slug>"}` — both ours, never the visitor's.
+  `occurred_at`/`recorded_at` are server timestamps; `idempotency_key` is the
+  guild, the timestamp and a random per-request token.
+- No IP address, user agent, referrer, cookie, query string or fingerprint is
+  stored, logged or written to the event. The query string is dropped unparsed;
+  HEAD previews, health/favicon probes, unknown slugs, throttled (429),
+  outage-fallback and misconfigured-code paths record nothing.
+- The socket address is read to pick a rate-limit bucket and never leaves the
+  request handler — process memory only, never stored, logged or written.
+
+`test/unit.redirect.test.ts` asserts this with identifying headers in: a
+full-row allowlist (any extra populated column fails) plus error-path
+coverage.
+
 ## The historical backfill
 
 `scripts/backfill.ts` reads two things that already exist in the server, once,
