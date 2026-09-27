@@ -11,7 +11,7 @@
 |---|---|
 | Week | Sun 1 Nov → Sat 7 Nov 2026 · third regular run post-pilot |
 | Slot | Sundays 20:00–21:00 America/New_York, 🔊🏠 Lobby voice (`1175127344072118405`) |
-| Series | Sunday Squad regular run #3 (1 Nov 2026-11-02T00:00Z–01:00Z) |
+| Series | Sunday Squad regular run #3 (1 Nov 2026-11-02T01:00Z–02:00Z) |
 
 ## Kit items (owner + timebox)
 
