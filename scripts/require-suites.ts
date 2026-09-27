@@ -61,6 +61,15 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     why: 'a HOT key reloading without a restart, and the schema-level refusal of every env-only key',
   },
   {
+    // TOG-3471. Provenance-guarded deletion and cleanup recovery, atomic caps,
+    // serialized durable ownership, and permission refusal all need a real
+    // Postgres to enforce. A run that quietly stopped including this file
+    // would leave those guarantees unverified and green.
+    file: 'test/unit.tempvoice.test.ts',
+    minTests: 86,
+    why: 'provenance-guarded deletion and cleanup recovery, atomic caps, serialized durable ownership, and permission refusal',
+  },
+  {
     // TOG-3481. Registered for the same reason as the suite above: this is the
     // only place the reward probe's "writes nothing" property is enforced
     // rather than asserted by reading the source, and it needs a real Postgres
