@@ -47,7 +47,11 @@ inflate the funnel.
 
 For a repeatable type the key includes `occurred_at`, so counting *people*
 rather than *occurrences* means `COUNT(DISTINCT member_id)` - the same rule
-that already applies to `member_join`.
+that already applies to `member_join`. Voice keys additionally include the
+channel (`source`): a move is an end and a start at the same instant, so time
+alone cannot separate two visits and the second same-tick start would dedupe
+away (TOG-5981). Same member, same instant, same channel is still one key, so
+a replayed gateway event still dedupes.
 
 ### The rules gate
 

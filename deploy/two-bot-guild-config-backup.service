@@ -22,6 +22,9 @@ ExecStart=/usr/bin/node /opt/two-bot/scripts/guild-config-snapshot.ts
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=two-bot-guild-config-backup
+# Same posture as the backup job: Discord HTTPS + Postgres/upload, one write
+# directory. No Restart=: timer-started oneshots must stay failed when they
+# fail so a red snapshot is visible instead of looping.
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
@@ -30,10 +33,26 @@ ProtectHome=true
 ReadWritePaths=/var/backups/two-bot/guild-config
 ProtectKernelTunables=true
 ProtectKernelModules=true
+ProtectKernelLogs=true
 ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
 RestrictNamespaces=true
 RestrictSUIDSGID=true
+RestrictRealtime=true
 LockPersonality=true
 UMask=0077
 CapabilityBoundingSet=
 AmbientCapabilities=
+# Co-tenancy: hide other services' processes; a snapshot never inspects /proc.
+ProtectProc=invisible
+ProcSubset=pid
+# Discord HTTPS + Postgres only. A compromised dependency cannot open a raw socket.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+SystemCallArchitectures=native
+# Nightly and low-priority: half a core, 256M.
+MemoryMax=256M
+CPUQuota=50%
+TasksMax=32

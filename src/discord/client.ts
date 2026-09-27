@@ -418,7 +418,9 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
 
   client.on(Events.GuildMemberRemove, async (member) => {
     if (!accepts(member.guild.id, member.id)) return;
-    await handlers.onLeave(member.guild.id, member.id);
+    // A server-leave is also a voice-leave: Discord drops them from voice with
+    // no VoiceStateUpdate, so onLeave closes any open session (TOG-6122).
+    await handlers.onLeave(member.guild.id, member.id, undefined, { isBot: !!member.user?.bot });
   });
 
   const inspectAutomod = async (msg: {
@@ -534,7 +536,33 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     }
   });
 
-  client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
+  /**
+   * One chain per member for voice frames, not one concurrent handler per
+   * frame (TOG-5981). discord.js dispatches every gateway event to an async
+   * listener without awaiting the previous one, so two frames for one member
+   * on the same tick interleaved: the move's `onVoiceLeave` chain-read the
+   * tracker BEFORE the join's `onVoiceJoin` chain-wrote it, and the end
+   * landed startKnown:false with a null duration even though the bot saw the
+   * start. Same per-subject chaining precedent as TOG-3695: a stuck write for
+   * member A never stalls member B, and unrelated members stay concurrent.
+   * Scoped to this registerHandlers call so tests get a fresh map per bus.
+   */
+  const voiceChains = new Map<string, Promise<void>>();
+  const chainVoice = (guildId: string, memberId: string, work: () => Promise<void>): void => {
+    // Reserve synchronously at dispatch: both same-tick frames for one member
+    // are ordered in the chain before either awaits anything.
+    const subject = `${guildId}:${memberId}`;
+    const tail = (voiceChains.get(subject) ?? Promise.resolve()).then(work).catch(() => {
+      // Error strings can contain SQL binds or Discord payloads. Never log them.
+      log.error('voice_state_update_failed', { guildId, memberId, classification: 'measurement_gap' });
+    });
+    voiceChains.set(subject, tail);
+    void tail.finally(() => {
+      if (voiceChains.get(subject) === tail) voiceChains.delete(subject);
+    });
+  };
+
+  client.on(Events.VoiceStateUpdate, (oldState, newState) => {
     // Discord fires this for mute, deafen, camera and go-live too. Only a
     // change of channel is a session boundary.
     if (oldState.channelId === newState.channelId) return;
@@ -543,60 +571,75 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     const memberId = newState.id ?? oldState.id;
     if (!accepts(guild.id, memberId)) return;
     const isBot = !!(newState.member ?? oldState.member)?.user?.bot;
+    const oldChannelId = oldState.channelId;
+    const newChannelId = newState.channelId;
+    const member = oldState.member ?? newState.member;
+    const guildId = guild.id;
 
-    // One timestamp for both halves. On a move from A to B the end and the
-    // start are the same instant, and taking nowIso() twice would make the
-    // pair look like a gap.
-    const at = nowIso();
-    const voiceKind = oldState.channelId
-      ? newState.channelId
-        ? 'voice_move'
-        : 'voice_leave'
-      : 'voice_join';
-    auditSafely({
-      entryId: `${voiceKind}:${guild.id}:${memberId}:${oldState.channelId ?? 'none'}:${newState.channelId ?? 'none'}:${at}`,
-      kind: voiceKind,
-      channel: 'voice',
-      guildId: guild.id,
-      occurredAt: at,
-      targetId: memberId,
-      sourceChannelId: oldState.channelId,
-      destinationChannelId: newState.channelId,
-      metadata: { isBot },
+    chainVoice(guildId, memberId, async () => {
+      // One timestamp for both halves. On a move from A to B the end and the
+      // start are the same instant, and taking nowIso() twice would make the
+      // pair look like a gap. Taken inside the chain so a queued frame stamps
+      // after the frame ahead of it finished, never before its start.
+      const at = nowIso();
+      const voiceKind = oldChannelId
+        ? newChannelId
+          ? 'voice_move'
+          : 'voice_leave'
+        : 'voice_join';
+      auditSafely({
+        entryId: `${voiceKind}:${guildId}:${memberId}:${oldChannelId ?? 'none'}:${newChannelId ?? 'none'}:${at}`,
+        kind: voiceKind,
+        channel: 'voice',
+        guildId,
+        occurredAt: at,
+        targetId: memberId,
+        sourceChannelId: oldChannelId,
+        destinationChannelId: newChannelId,
+        metadata: { isBot },
+      });
+
+      // End first, so a move reads as end(A) then start(B) in occurred order.
+      if (oldChannelId) {
+        await handlers.onVoiceLeave({
+          guildId,
+          memberId,
+          isBot,
+          channelId: oldChannelId,
+          occurredAt: at,
+          onLevelUp: levelUpRoleHook(member),
+        });
+      }
+      if (newChannelId) {
+        await handlers.onVoiceJoin({
+          guildId,
+          memberId,
+          isBot,
+          channelId: newChannelId,
+          occurredAt: at,
+        });
+      }
     });
-
-    // End first, so a move reads as end(A) then start(B) in occurred order.
-    if (oldState.channelId) {
-      const member = oldState.member ?? newState.member;
-      await handlers.onVoiceLeave({
-        guildId: guild.id,
-        memberId,
-        isBot,
-        channelId: oldState.channelId,
-        occurredAt: at,
-        onLevelUp: levelUpRoleHook(member),
-      });
-    }
-    if (newState.channelId) {
-      await handlers.onVoiceJoin({
-        guildId: guild.id,
-        memberId,
-        isBot,
-        channelId: newState.channelId,
-        occurredAt: at,
-      });
-    }
   });
 
   // A reconnect means we may have missed leaves while we were away, so every
   // session we think is open is now unproven. Dropping them costs the duration
   // on those sessions (they end with startKnown: false) and is the only
   // alternative to reporting a duration that silently includes the outage.
-  client.on(Events.ShardResume, () => {
+  // This covers BOTH gateway recovery paths (TOG-6123): ShardResume after a
+  // successful resume, and ShardReady after a fresh session - a full
+  // re-identify following an unresumable disconnect (InvalidSession with no
+  // stored session, Reconnect opcode, unrecoverable close). ShardReady only
+  // follows a READY dispatch, never a RESUMED one, so the two handlers never
+  // double-drop; on first-ever connect the tracker is empty and this is a
+  // no-op.
+  const dropSessionsOnReconnect = (event: string) => {
     const dropped = handlers.voiceSessions.openCount;
     handlers.voiceSessions.clear();
-    if (dropped) log.info('voice_sessions_dropped_on_resume', { dropped });
-  });
+    if (dropped) log.info(event, { dropped });
+  };
+  client.on(Events.ShardResume, () => dropSessionsOnReconnect('voice_sessions_dropped_on_resume'));
+  client.on(Events.ShardReady, () => dropSessionsOnReconnect('voice_sessions_dropped_on_fresh_session'));
 
   client.on(Events.InviteCreate, async (invite) => {
     if (!contained && invite.guild) await snapshotInvites(invite.guild as Guild, invites);

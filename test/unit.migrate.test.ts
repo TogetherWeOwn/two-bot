@@ -114,3 +114,14 @@ test('automation lease columns are repaired by an immutable migration after 0015
   assert.match(claims.sql, /ALTER TABLE sticky_messages ADD COLUMN IF NOT EXISTS claim_token TEXT/);
   assert.match(claims.sql, /ALTER TABLE sticky_messages ADD COLUMN IF NOT EXISTS claimed_at TEXT/);
 });
+
+test('distinct-members index arrives as a new additive migration after 0037', () => {
+  const migrations = loadMigrations();
+  const latest = migrations.find((migration) => migration.id === '0037_temp_voice_owner_transition');
+  const index = migrations.find((migration) => migration.id === '0038_events_type_member');
+
+  assert.ok(latest);
+  assert.ok(index, 'the missing covering index belongs in a new migration, not an edit');
+  assert.ok(migrations.indexOf(index) > migrations.indexOf(latest));
+  assert.match(index.sql, /CREATE INDEX IF NOT EXISTS idx_events_type_member ON events \(event_type, member_id\)/);
+});

@@ -69,8 +69,23 @@ test('both session types are in the vocabulary and both repeat', () => {
   // a repeatable key carries the timestamp, a once-only key does not.
   const at = '2026-08-23T19:00:00.000Z';
   const base = { guildId: G, memberId: M, occurredAt: at, source: `channel:${CH}` };
-  assert.ok(idempotencyKey({ ...base, eventType: 'voice_session_start' }).endsWith(at));
-  assert.ok(idempotencyKey({ ...base, eventType: 'voice_session_end' }).endsWith(at));
+  // Voice keys also carry the channel (TOG-5981): a move is an end and a
+  // start at the SAME instant, so time alone cannot tell two starts apart and
+  // the second silently deduped. Same member, same instant, same channel is
+  // still one key, so a replayed gateway event still dedupes.
+  assert.equal(
+    idempotencyKey({ ...base, eventType: 'voice_session_start' }),
+    `${G}:${M}:voice_session_start:${at}:channel:${CH}`,
+  );
+  assert.equal(
+    idempotencyKey({ ...base, eventType: 'voice_session_end' }),
+    `${G}:${M}:voice_session_end:${at}:channel:${CH}`,
+  );
+  assert.notEqual(
+    idempotencyKey({ ...base, eventType: 'voice_session_start' }),
+    idempotencyKey({ ...base, eventType: 'voice_session_start', source: 'channel:chan-b' }),
+    'same instant, other channel: a different visit, a different key',
+  );
   assert.ok(!idempotencyKey({ ...base, eventType: 'first_voice_session' }).includes(at));
 });
 

@@ -153,11 +153,46 @@ export function idempotencyKey(e: FunnelEvent): string {
     // millisecond collapse into one row. `dedupeToken` is what makes them two.
     // See FunnelEvent.dedupeToken; nothing else sets it.
     const token = e.dedupeToken ? `:${e.dedupeToken}` : '';
-    return `${e.guildId}:${e.memberId ?? 'anon'}:${e.eventType}:${e.occurredAt}${token}`;
+    // Voice boundaries also carry their channel (TOG-5981): a move from A to B
+    // is an end for A and a start for B at the SAME instant, so without this
+    // both same-tick starts shared one key and the second silently deduped -
+    // the session vanished. The end keys on its credited channel (the session's
+    // channel, via source), so a replayed gateway event still dedupes: same
+    // member, same instant, same channel is still one key.
+    const channel =
+      e.eventType === 'voice_session_start' || e.eventType === 'voice_session_end'
+        ? `:${e.source}`
+        : '';
+    return `${e.guildId}:${e.memberId ?? 'anon'}:${e.eventType}:${e.occurredAt}${channel}${token}`;
   }
   return `${e.guildId}:${e.memberId}:${e.eventType}`;
 }
 
 export function nowIso(): string {
   return new Date().toISOString();
+}
+
+/**
+ * Whether a `gate_cleared` row may feed time-to-clear arithmetic (TOG-6474).
+ *
+ * A backfilled clearing says THAT a member is through the rules gate, never
+ * WHEN: Discord reports `pending` present-tense and keeps no history of the
+ * transition, so `scripts/backfill.ts` writes `occurred_at` as the member's
+ * join time - a placeholder, flagged in the row itself. Reading one as a real
+ * clearing would print members clearing in 0s and make onboarding-speed
+ * claims false. Counting them is fine and is exactly what conversion needs;
+ * only time arithmetic must exclude them (docs/EVENTS.md, limit 6).
+ *
+ * Either signal alone disqualifies: the `backfill:` source prefix (which
+ * `labelSource()` already marks unattributable) or
+ * `metadata.timestampIsJoinTime`. The writer sets both, but a row missing one
+ * is still a placeholder until proven otherwise.
+ */
+export function isMeasurableGateClearing(
+  source: string,
+  metadata?: Record<string, unknown> | null,
+): boolean {
+  if (source.startsWith('backfill:')) return false;
+  if (metadata?.timestampIsJoinTime === true) return false;
+  return true;
 }
