@@ -15,7 +15,7 @@ const PROBE = fileURLToPath(new URL('../ops/tog-4104/settings-signed-proof.mjs',
 const KEY = 'TWO_RAID_JOIN_THRESHOLD', MATE = 'TWO_RAID_WINDOW_SECONDS';
 const SECRET = 'offline-only-signing-material-not-a-real-key';
 const SOURCE = 'b03c6232a75fe4655964c1f0b523ff9c8e1ae7fe';
-const RUNTIME = '7995b3fb13feda26ae35356bc5227c67870370c9';
+const RUNTIME = '5f57256d41130b056389f3098f3b0c84a9d9e261';
 const kid = 'offline-key-id';
 
 async function fixture(t, seed = {}, hooks = {}) {
@@ -65,11 +65,15 @@ async function fixture(t, seed = {}, hooks = {}) {
     if (hooks.afterSet?.(ctx)) return;
     send(200, response);
   });
-  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  // Listen on all interfaces so the own-private-address case below dials the
+  // same signed fixture server over a non-loopback URL. The default proof URL
+  // stays loopback; only that one test overrides it.
+  await new Promise((resolve) => server.listen(0, resolve));
+  const internalUrl = `http://127.0.0.1:${server.address().port}`;
   const env = {
     STAGING_APP_UUID: 'uy4d9ndeygjcem6lgayhxgub', PROOF_RUNTIME_REVISION: RUNTIME,
     PROOF_SOURCE_SHA: SOURCE, PROOF_EXCLUSIVE_WINDOW: 'staging-writers-quiesced',
-    PROOF_STATE_DIR: stateDir, INTERNAL_ACTIONS_URL: `http://127.0.0.1:${server.address().port}`,
+    PROOF_STATE_DIR: stateDir, INTERNAL_ACTIONS_URL: internalUrl,
     TWO_INTERNAL_KEYS: `${kid}:${SECRET}`, TWO_INTERNAL_ACTIONS: '1', TWO_INTERNAL_ALLOW_SETTINGS: '1',
     DISCORD_GUILD_ID: '1545644954272137297',
   };
@@ -90,7 +94,14 @@ async function fixture(t, seed = {}, hooks = {}) {
     await new Promise((resolve) => server.close(resolve));
     await rm(root, { recursive: true, force: true });
   });
-  return { root, store, writes, stateDir, start, run: (extra, mode, nodeOptions) => start(extra, mode, nodeOptions).done };
+  const { networkInterfaces } = await import('node:os');
+  const ownAddress = Object.values(networkInterfaces()).flat()
+    .find((a) => a?.family === 'IPv4' && !a.internal)?.address ?? null;
+  // Same signed fixture server, reachable over this host's own private
+  // interface address: mirrors the container-NIC topology in staging.
+  const ownAddressUrl = ownAddress ? `http://${ownAddress}:${server.address().port}` : null;
+  return { root, store, writes, stateDir, start, ownAddress, ownAddressUrl,
+    run: (extra, mode, nodeOptions) => start(extra, mode, nodeOptions).done };
 }
 
 for (const [name, seed] of [
@@ -230,8 +241,33 @@ test('cache lag cannot turn a presence-only read into a successful roundtrip', a
   assert.deepEqual(f.store, new Map([[KEY, 9]]));
 });
 
+test('container resource UUID grounds the app check without a forwarded app UUID', async (t) => {
+  const f = await fixture(t);
+  const r = await f.run({ STAGING_APP_UUID: '', COOLIFY_RESOURCE_UUID: 'uy4d9ndeygjcem6lgayhxgub' });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.equal(r.receipt.verdict, 'PROOF PASS');
+  assert.deepEqual(f.store, new Map());
+});
+
+test('own private interface address passes the URL check with full roundtrip', async (t) => {
+  const f = await fixture(t);
+  assert.ok(f.ownAddressUrl,
+    'this host must have a non-loopback IPv4 interface for the own-address case');
+  // Same signed fixture server, dialed over the host's own private address
+  // instead of loopback: mirrors the container-NIC topology in staging. Full
+  // PROOF PASS with exact cleanup, so the new branch is not a preflight-only
+  // exemption.
+  const r = await f.run({ INTERNAL_ACTIONS_URL: f.ownAddressUrl });
+  assert.equal(r.code, 0, r.out + r.err);
+  assert.equal(r.receipt.verdict, 'PROOF PASS');
+  assert.equal(r.receipt.cleanup, 'exact-prestate-verified');
+  assert.deepEqual(f.store, new Map());
+  assert.equal(f.writes.length, 4);
+});
+
 for (const [name, overrides] of [
   ['wrong app', { STAGING_APP_UUID: 'production' }],
+  ['neither app UUID matches', { STAGING_APP_UUID: '', COOLIFY_RESOURCE_UUID: '00000000-0000-4000-8000-000000000000' }],
   ['wrong runtime', { PROOF_RUNTIME_REVISION: SOURCE }],
   ['missing runtime', { PROOF_RUNTIME_REVISION: '' }],
   ['missing source', { PROOF_SOURCE_SHA: '' }],
@@ -241,6 +277,8 @@ for (const [name, overrides] of [
   ['malformed signing key', { TWO_INTERNAL_KEYS: 'no-colon' }],
   ['no exclusive window', { PROOF_EXCLUSIVE_WINDOW: '' }],
   ['public endpoint', { INTERNAL_ACTIONS_URL: 'https://example.invalid' }],
+  ['foreign private endpoint', { INTERNAL_ACTIONS_URL: 'http://10.255.255.1:8787' }],
+  ['DNS endpoint', { INTERNAL_ACTIONS_URL: 'http://internal.example.invalid:8787' }],
   ['URL credentials', { INTERNAL_ACTIONS_URL: 'http://user:secret@127.0.0.1:8787' }],
 ]) {
   test(`${name} refuses before mutation`, async (t) => {
