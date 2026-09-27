@@ -44,7 +44,19 @@ whoever owns the box (TWO-79), not by a config file. The full accounting is the
 | Discord bot token | `discord_token` | `DISCORD_BOT_TOKEN`, then `DISCORD_TOKEN` |
 | Postgres URL | `database_url` | `TWO_DATABASE_URL` |
 | Internal-actions signing keys | `internal_keys` | `TWO_INTERNAL_KEYS` |
+| Staging bot token (Owen QA Test) | `discord_staging_token` | `DISCORD_STAGING_BOT_TOKEN` |
+| Moderation audit MAC secret | `moderation_audit_secret` | `TWO_MODERATION_AUDIT_SECRET` |
 | e2e test-account token | `two_e2e_user_token` | `TWO_E2E_USER_TOKEN` |
+
+`discord_staging_token` is wired only in
+`deploy/two-bot-guild-config-backup.service` — the staging snapshot is the only
+systemd unit that needs the staging bot, so the live bot unit never sees it.
+`moderation_audit_secret` is deliberately **env-only**: the MAC markers are not
+minted unless the secret is provisioned, `null` is the safe default, and wiring
+a `LoadCredential` for it is deferred until MAC enforcement lands. A missing
+source file fails a unit at start, so an unwired-until-needed secret stays out
+of every unit. `two_e2e_user_token` never runs under systemd at all — the e2e
+harness is staging-only and on-demand (TOG-3978 conditions below).
 
 The credential wins when present. The environment fallback is what makes local
 development, CI and the one-off scripts keep working unchanged — none of those

@@ -420,6 +420,47 @@ minutes and do it when nobody is mid-event.
    Both pick the new value up on their next start; neither loses data, because
    `capture.ts` is idempotent and the bot re-reads the invite counters at boot.
 
+### Rotating everything else (all manual)
+
+The portal Reset above covers `discord_token` only. Every other credential is a
+**manual** rotation — there is no portal button, so each step below is done by
+hand on the box, and each ends with `sudo systemctl restart` of the unit that
+reads it. Nothing here is automatic; the check
+`scripts/ci/check-systemd-credentials.sh` only asserts these steps are written
+down, not that they ran.
+
+- `database_url` (`/etc/two-bot/credentials/database_url`, fallback
+  `TWO_DATABASE_URL`): manual. Change the Postgres password / role, write the
+  new URL into the credential file, restart `two-bot`. The backup and dashboard
+  units read `TWO_DATABASE_URL` from `backup.env` / `two-bot.env` — update those
+  copies in the same window or the nightly backup keeps the old password.
+- `internal_keys` (`/etc/two-bot/credentials/internal_keys`, fallback
+  `TWO_INTERNAL_KEYS`): manual. Mint the replacement key id, append it to the
+  credential file alongside the old key, roll the website to the new id, then
+  delete the old key and restart `two-bot`. Overlap-then-remove keeps
+  in-flight signed actions verifying throughout.
+- `discord_staging_token`
+  (`/etc/two-bot/credentials/discord_staging_token`, fallback
+  `DISCORD_STAGING_BOT_TOKEN`): manual. Reset in the **Owen QA Test**
+  application (never the live `Owen` one), write the new value into the
+  credential file, restart `two-bot-guild-config-backup`.
+- `moderation_audit_secret` (env-only, `TWO_MODERATION_AUDIT_SECRET`, no
+  credential file by design): manual. Set a fresh random value in
+  `/etc/two-bot/two-bot.env`, restart `two-bot`. Old MAC markers stop verifying
+  — that is expected; markers are convergence hints, not durable proof.
+- `two_e2e_user_token` (env-only, `TWO_E2E_USER_TOKEN`, never under systemd):
+  manual and human-only. Log in as the throwaway account, reset its token,
+  re-provision the secret store; nothing in this repository can rotate a Discord
+  user credential. See `docs/SECRETS.md` TOG-3978 section.
+- `TWO_BACKUP_S3_*` (`TWO_BACKUP_S3_ENDPOINT`, `TWO_BACKUP_S3_BUCKET`,
+  `TWO_BACKUP_S3_ACCESS_KEY_ID`, `TWO_BACKUP_S3_SECRET_ACCESS_KEY` in
+  `/etc/two-bot/backup.env`): manual. Rotate in the R2 dashboard, update
+  `backup.env`, run one `systemctl start two-bot-backup` and confirm the upload
+  succeeded before the next nightly run.
+- `TWO_RESTORE_URL` (in `/etc/two-bot/backup.env`, scratch database only):
+  manual. Rotate the scratch role's password, update `backup.env`, run one
+  `systemctl start two-bot-restore-drill` to prove the new value restores.
+
 **If the reset would add risk to a first production bring-up, bring it up first
 and rotate the same day.** A working deploy carrying a token that had a bad
 neighbour for a week beats a broken deploy. What is not acceptable is the

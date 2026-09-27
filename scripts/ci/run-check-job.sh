@@ -11,6 +11,13 @@ report_failure() {
 }
 trap report_failure ERR
 
+# systemd credential wiring must match the code, the bootstrap and the docs
+# (TOG-5706). Needs neither node nor the database, so it runs first and a PR
+# that drifts a LoadCredential fails in seconds. The selftest runs alongside
+# for the same reason as the snowflake selftest: a ratchet is only worth its
+# line here if it still refuses things.
+npm run check:credentials
+npm run check:credentials:selftest
 npm run typecheck
 npm run test:postgres
 npm run test:restart-storage -- --provision
