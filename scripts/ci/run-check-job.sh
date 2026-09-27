@@ -12,6 +12,10 @@ report_failure() {
 trap report_failure ERR
 
 npm run typecheck
+# Offline and instant: the golden ambiguous-vs-unknown eval (TOG-5849). It
+# scores the fixture split against the real attribution code, so a report or
+# prompt change that merges the two buckets reds here, not in review.
+npm run eval:funnel-attribution
 npm run test:postgres
 npm run test:restart-storage -- --provision
 npm run verify:grant:selftest

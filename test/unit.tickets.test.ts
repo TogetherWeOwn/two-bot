@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { openEphemeralTestDb as openDb } from './helpers/testDb.ts';
-import { INTENTS } from '../src/discord/client.ts';
+import { intentsFor } from '../src/discord/client.ts';
 import { GatewayIntentBits } from 'discord.js';
 import {
   TicketStore,
@@ -37,7 +37,16 @@ test('ticket cooldown refuses only recent tickets', () => {
 });
 
 test('ticket transcripts request message content and expire after 90 days', () => {
-  assert.ok(INTENTS.includes(GatewayIntentBits.MessageContent));
+  // TOG-5258: MessageContent is requested exactly when tickets are configured
+  // (all three DISCORD_TICKET_* vars present) - the same guard as src/index.ts.
+  assert.ok(
+    intentsFor({
+      DISCORD_TICKET_CATEGORY_ID: '111111111111111111',
+      DISCORD_TICKET_STAFF_ROLE_ID: '222222222222222222',
+      DISCORD_TICKET_PANEL_CHANNEL_ID: '333333333333333333',
+    }).includes(GatewayIntentBits.MessageContent),
+  );
+  assert.ok(!intentsFor({}).includes(GatewayIntentBits.MessageContent));
   assert.equal(
     ticketTestHelpers.purgeAfter('2026-09-08T12:00:00.000Z'),
     '2026-12-07T12:00:00.000Z',

@@ -111,6 +111,7 @@ are tested without a network, a token, or a server.
 
 | | |
 |---|---|
+| [docs/CONTRIBUTOR_ONBOARDING.md](docs/CONTRIBUTOR_ONBOARDING.md) | New to the pilot? Start here: joining, hosting, conduct, first contribution |
 | [docs/STACK.md](docs/STACK.md) | What we chose, why, and when to revisit |
 | [docs/EVENTS.md](docs/EVENTS.md) | The event schema and its known limits |
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | Deploy, health checks, restore, common problems |
