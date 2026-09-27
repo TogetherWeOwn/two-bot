@@ -38,7 +38,8 @@ export const GOLDEN_FIXTURE_PATH = join(ROOT, 'test/fixtures/funnel-attribution-
 const FIXTURE_VERSION = 1;
 
 export type GoldenCategory = 'ambiguous' | 'unknown' | 'vanity' | 'invite-exact' | 'invite-placed';
-const CATEGORIES: readonly GoldenCategory[] = ['ambiguous', 'unknown', 'vanity', 'invite-exact', 'invite-placed'];
+/** Verdict-bucket taxonomy. Pinned to docs/FUNNEL_ATTRIBUTION_EVAL.md by the unit test. */
+export const CATEGORIES: readonly GoldenCategory[] = ['ambiguous', 'unknown', 'vanity', 'invite-exact', 'invite-placed'];
 
 export interface WindowScenario {
   prevUses: Record<string, number>;
