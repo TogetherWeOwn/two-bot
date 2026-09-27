@@ -27,13 +27,36 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** A port nobody is listening on, obtained by binding and immediately releasing. */
+/** A port nobody is listening on, obtained by binding and immediately releasing.
+ *
+ * The release-then-rebind is inherently racy: this file runs inside one
+ * `node --test` process alongside ~150 sibling files, and dozens of them bind
+ * loopback ports (mock Discord servers, spawned bots, internal-actions
+ * servers) in the gap between our close and our bind. Every caller below must
+ * therefore treat a freed port as a hint and retry with a fresh one when the
+ * bind loses the race — see PortStolenError.
+ */
 async function freePort(): Promise<number> {
   const s = createServer();
   await new Promise<void>((r) => s.listen(0, '127.0.0.1', () => r()));
   const { port } = s.address() as AddressInfo;
   await new Promise<void>((r) => s.close(() => r()));
   return port;
+}
+
+/**
+ * The port was stolen, not broken: a sibling test server rebound our freed
+ * port before our bot did. Retrying with a fresh port is correct; failing the
+ * suite on someone else's socket is not. (Red mains 2026-09-27: runs
+ * 36291840893/36290702929 fetched `{}` from a mock Discord catch-all that had
+ * taken the port; run 36288799921 died with EADDRINUSE on it.)
+ */
+class PortStolenError extends Error {
+  constructor(port: number, detail: string) {
+    super(
+      `loopback port ${port} was rebound by another test server (${detail}); retrying with a fresh port`,
+    );
+  }
 }
 
 /**
@@ -62,10 +85,12 @@ test('health endpoints answer on the real bot process', { timeout: 180_000 }, as
   // freePort() binds and releases, and node --test runs files in parallel,
   // so a sibling bot or mock can claim the port before our child binds (run
   // 36312762086: our liveness fetch answered '{}' - a sibling mock, not our
-  // bot). Retry the boot with a fresh port + mock; a 200 `ok` together with
-  // our own child's health_listening line proves the bind is ours. Five
-  // attempts to match scripts/health-check.ts: run 36314095503 exhausted
-  // three consecutive squats on the shared host.
+  // bot; red mains 36291840893/36290702929 hit the same squatter, and run
+  // 36288799921 died with EADDRINUSE on it). Retry the boot with a fresh port
+  // + mock; a 200 text/plain `ok` together with our own child's
+  // health_listening line proves the bind is ours. Five attempts to match
+  // scripts/health-check.ts: run 36314095503 exhausted three consecutive
+  // squats on the shared host.
   const BOOT_ATTEMPTS = 5;
   let mock: Awaited<ReturnType<typeof startMockDiscord>> | null = null;
   let bot: ChildProcess | null = null;
@@ -129,16 +154,30 @@ test('health endpoints answer on the real bot process', { timeout: 180_000 }, as
     }
 
     // Liveness comes up first and does not wait for the gateway - that ordering
-    // is the entire reason index.ts starts health before client.login. A body
-    // that is not `ok` is a squatter on our released port (a sibling mock
-    // answers '{}', a stale bot answers 503) - retry with a fresh port.
-    const live = await waitFor(async () => {
+    // is the entire reason index.ts starts health before client.login. The body
+    // is checked DURING the wait: `res.ok` alone also matches a squatter mock
+    // server's 200 with `{}`. A non-`ok` body is a squatter on our released
+    // port (a sibling mock answers '{}', a stale bot answers 503) - retry with
+    // a fresh port.
+    let foreignBody: string | null = null;
+    const liveBody = await waitFor(async (): Promise<string | null> => {
       const res = await fetch(bootUrl('/healthz'));
-      return res.ok ? res : null;
+      if (!res.ok) return null;
+      const ct = res.headers.get('content-type') ?? '';
+      const text = (await res.text()).trim();
+      if (ct.includes('text/plain') && text === 'ok') return 'ok';
+      if (text !== '' && text !== 'ok') foreignBody = text.slice(0, 80);
+      return null;
     }, 30_000).catch(() => null);
-    if (!live || (await live.text()).trim() !== 'ok') {
+    if (current.exitCode !== null) {
+      // Died mid-boot: a stolen port retries, a real crash fails fast.
+      if (/EADDRINUSE/.test(botLog.join('')) && attempt < BOOT_ATTEMPTS) continue;
+      throw new Error(`bot exited during boot\n--- bot output ---\n${botLog.join('')}`);
+    }
+    if (liveBody !== 'ok') {
       if (attempt < BOOT_ATTEMPTS) continue;
-      throw new Error(`liveness never answered 200 ok\n--- bot output ---\n${botLog.join('')}`);
+      if (foreignBody !== null) throw new PortStolenError(port, foreignBody);
+      throw new Error(`liveness never answered 200 text/plain ok\n--- bot output ---\n${botLog.join('')}`);
     }
     // Ownership: a 200 ok proves *a* server answers, not that it is ours.
     // Only our own child logging health_listening proves the bind is ours.
@@ -164,16 +203,23 @@ test('health endpoints answer on the real bot process', { timeout: 180_000 }, as
 
   // Readiness needs the gateway session AND a database that answers. This is
   // the check Coolify gates the deploy on, so it has to go green against the
-  // real wiring, not a stub.
-  const ready = await waitFor(async () => {
+  // real wiring, not a stub. The body is checked for the same squatter reason
+  // as liveness above: only our bot answers `ok`.
+  // The body is consumed during the check (it is what distinguishes our bot
+  // from a squatter), so the poll returns the verdict, not the Response.
+  const readyBody = await waitFor(async (): Promise<string | null> => {
     const res = await fetch(url('/readyz'));
-    return res.status === 200 ? res : null;
+    if (res.status !== 200) return null;
+    if (!(res.headers.get('content-type') ?? '').includes('text/plain')) return null;
+    return (await res.text()).trim() === 'ok' ? 'ok' : null;
   }).catch((e) => {
     throw new Error(`${String(e)}\n--- bot output ---\n${botLog.join('')}`);
   });
-  assert.equal((await ready.text()).trim(), 'ok');
+  assert.equal(readyBody, 'ok');
 
-  assert.equal((await fetch(url('/nope'))).status, 404);
+  const nope = await fetch(url('/nope'));
+  assert.equal(nope.status, 404);
+  assert.equal((await nope.text()).trim(), 'not found');
 
   // SIGTERM is what a container stop sends. The bot must close the port rather
   // than be killed holding it - otherwise a redeploy's new container races the
@@ -190,7 +236,6 @@ test('no health port means no listener at all', { timeout: 90_000 }, async (t) =
   // The systemd deployment in deploy/ must keep working exactly as before, and
   // "exactly as before" means the bot opens no port unless asked.
   const mock = await startMockDiscord();
-  const port = await freePort();
   let bot: ChildProcess | null = null;
   const botLog: string[] = [];
 
@@ -228,25 +273,34 @@ test('no health port means no listener at all', { timeout: 90_000 }, async (t) =
     throw new Error(`${String(err)}\n--- bot output ---\n${botLog.join('')}`);
   });
 
-  // Fully booted, and still nothing listening on the probe port. The port
-  // comes from freePort() (bind-and-release) and node --test runs files in
-  // parallel, so a sibling bot or mock can claim it between release and probe
-  // (run 36301673171: Missing expected rejection). A fetch that succeeds is a
-  // squatter, never our bot - it opened nothing - so retry with a fresh port
-  // rather than failing the run. Five attempts to match the boot retry above;
-  // each attempt is a single cheap fetch.
-  const PROBE_ATTEMPTS = 5;
-  let squatter = '';
-  for (let attempt = 1; attempt <= PROBE_ATTEMPTS; attempt++) {
-    const probePort = attempt === 1 ? port : await freePort();
-    const res = await fetch(`http://127.0.0.1:${probePort}/healthz`).catch(() => null);
-    if (!res) {
-      squatter = '';
-      break;
+  // Fully booted, and still nothing listening. A freed port proves nothing on
+  // a host where sibling test servers rebind loopback ports in milliseconds
+  // (red main 36290702929: a squatter answered this exact fetch, so "fetch
+  // rejects" passed or failed on someone else's socket). Instead, re-bind the
+  // candidate port ourselves: success means nobody - including our bot - is
+  // listening on it, which is airtight at that instant. EADDRINUSE means a
+  // third party won the race, so retry with a fresh port; the bot-log
+  // assertion below is what actually pins the bot's behavior either way.
+  const probeDeadline = Date.now() + 20_000;
+  let nobodyListening = false;
+  let probe = 0;
+  while (!nobodyListening && Date.now() < probeDeadline) {
+    probe += 1;
+    const candidate = await freePort();
+    const holder = createServer();
+    const bound = await new Promise<boolean>((resolve) => {
+      holder.once('error', () => resolve(false));
+      holder.listen(candidate, '127.0.0.1', () => resolve(true));
+    });
+    if (bound) {
+      await new Promise<void>((r) => holder.close(() => r()));
+      nobodyListening = true;
+    } else {
+      await sleep(250);
     }
-    squatter = `${res.status} ${await res.text().catch(() => '')}`.trim().slice(0, 80);
+    assert.ok(probe < 10, 'loopback ports kept being stolen; giving up the probe');
   }
-  assert.equal(squatter, '', `a listener answered the probe port on every attempt (last: ${squatter})`);
+  assert.ok(nobodyListening, 'could not find an unbound loopback port to prove silence on');
   assert.ok(
     !botLog.join('').includes('health_listening'),
     `health server must not start without TWO_HEALTH_PORT\n${botLog.join('')}`,
