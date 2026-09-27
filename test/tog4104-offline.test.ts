@@ -36,9 +36,11 @@ test('TOG-4104 shipped proof, recovery and operator wrapper fixtures', async () 
       'public endpoint', 'URL credentials'].map((name) => `${name} refuses before mutation`),
     'malformed stored value refuses rather than writes an unreviewed recovery value',
     'redirect is not followed with signing headers',
-    'unwired settings endpoint refuses before mutation with an explicit HOLD reason',
-    ...['run', 'recover'].map((mode) => `wrapper holds ${mode} before any Docker operation`),
-    ...['wrong runtime', 'wrong container', 'stopped container']
+    'unwired settings endpoint refuses before mutation with a settings-unavailable reason',
+    ...['run', 'recover'].map((mode) => `wrapper runs ${mode} through the immutable container ID`),
+    ...['wrong runtime', 'missing runtime declaration']
+      .map((name) => `wrapper refuses ${name} before any Docker operation`),
+    ...['wrong container', 'stopped container', 'wrong image', 'missing image receipt']
       .map((name) => `wrapper refuses ${name} before copying or executing`),
     'wrapper rejects dirty packet even with approved SHA',
     'wrapper requires explicit writer exclusion and full pinned source',
