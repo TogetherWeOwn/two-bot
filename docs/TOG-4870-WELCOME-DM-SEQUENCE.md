@@ -86,4 +86,4 @@ in member language and explains the picker path.
 
 | Date | Reviewer | Verdict |
 |---|---|---|
-| — | CPO or CEO (pending, see TOG-4870 interaction) | — |
+| 2026-09-27 | Chief Product Officer | Approved (interaction f9d8c4ce, accepted 2026-09-27T02:41:04Z) — all 3 drafts approved for future use |
