@@ -13,7 +13,7 @@ import { openTestDb, type TestDb } from './helpers/testDb.ts';
 import { EventStore } from '../src/store/eventStore.ts';
 import { FunnelHandlers } from '../src/core/handlers.ts';
 import { CampaignStore, isValidSlug, isValidInviteCode } from '../src/redirect/campaigns.ts';
-import { startRedirectServer, type RedirectServer } from '../src/redirect/server.ts';
+import { startRedirectServer, type ClickRecorder, type RedirectServer } from '../src/redirect/server.ts';
 import { idempotencyKey } from '../src/core/events.ts';
 
 const GUILD = '111222333444555666';
@@ -185,33 +185,33 @@ test('a stored click is campaign + timestamps and nothing else', async () => {
     },
   });
 
-  // Full-row shape, not just a leak scan: the record is allowed exactly these
-  // values, and every one of them is ours (campaign slug, invite code, guild,
-  // server timestamps), never the visitor's.
+  // Full-row shape, not just a leak scan: SELECT * (minus the surrogate id)
+  // so that any column added to the table in future fails this test instead
+  // of silently escaping an explicit column list. Every allowed value is ours
+  // (campaign slug, invite code, guild, server timestamps), never the visitor's.
   const rows = await t.db
-    .prepare(
-      `SELECT event_type, member_id, guild_id, occurred_at, recorded_at, source, metadata, idempotency_key
-         FROM events WHERE event_type='invite_click'`,
-    )
-    .all<{
-      event_type: string;
-      member_id: string | null;
-      guild_id: string;
-      occurred_at: string;
-      recorded_at: string;
-      source: string;
-      metadata: string | null;
-      idempotency_key: string;
-    }>();
+    .prepare(`SELECT * FROM events WHERE event_type='invite_click'`)
+    .all<Record<string, unknown>>();
   assert.equal(rows.length, 1);
-  const row = rows[0];
+  const { id, ...row } = rows[0];
+  assert.equal(typeof id, 'number');
+  assert.deepEqual(Object.keys(row).sort(), [
+    'event_type',
+    'guild_id',
+    'idempotency_key',
+    'member_id',
+    'metadata',
+    'occurred_at',
+    'recorded_at',
+    'source',
+  ]);
   assert.equal(row.event_type, 'invite_click');
   assert.equal(row.member_id, null);
   assert.equal(row.guild_id, GUILD);
   assert.equal(row.source, `invite:${CODE}`);
-  assert.deepEqual(JSON.parse(row.metadata ?? '{}'), { campaign: 'reddit' });
-  assert.match(row.occurred_at, /^\d{4}-\d{2}-\d{2}T/);
-  assert.match(row.recorded_at, /^\d{4}-\d{2}-\d{2}T/);
+  assert.deepEqual(JSON.parse(String(row.metadata ?? '{}')), { campaign: 'reddit' });
+  assert.match(String(row.occurred_at), /^\d{4}-\d{2}-\d{2}T/);
+  assert.match(String(row.recorded_at), /^\d{4}-\d{2}-\d{2}T/);
 
   // The socket address exists only to pick a rate-limit bucket (see
   // src/redirect/server.ts); it must not survive into the stored row. In this
@@ -229,6 +229,223 @@ test('the query string is dropped, not recorded', async () => {
   const rows = await clicks();
   assert.equal(rows.length, 1);
   assert.ok(!JSON.stringify(rows[0]).includes('fbclid'));
+});
+
+// --- error paths: still no PII, still no row ----------------------------------
+//
+// TOG-5705. The privacy assertion must hold when the request does NOT produce
+// a click: none of these paths may store, log or write anything about the
+// visitor, and none may leave a partial click row behind.
+
+/**
+ * Everything written to stdout/stderr while `fn` runs.
+ *
+ * The redirect logs lookup and record failures through src/core/log.ts, which
+ * writes JSON lines to these streams. Swallowing the streams would lose the
+ * test runner's own protocol (it shares them), so non-log lines are forwarded
+ * unmodified and only our log lines are held back.
+ */
+async function captureLogs(fn: () => Promise<void>): Promise<string> {
+  const lines: string[] = [];
+  const realOut = process.stdout.write.bind(process.stdout);
+  const realErr = process.stderr.write.bind(process.stderr);
+  const relay =
+    (real: (c: unknown, ...rest: unknown[]) => boolean) =>
+    ((chunk: unknown, ...rest: unknown[]) => {
+      const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+      lines.push(text);
+      if (text.includes('"msg":"invite_redirect_') || text.includes('"msg":"invite_click_')) return true;
+      return real(chunk, ...rest);
+    }) as typeof process.stdout.write;
+
+  process.stdout.write = relay(realOut as never);
+  process.stderr.write = relay(realErr as never);
+  try {
+    await fn();
+    // The record-failure log is written after the 302 is flushed; the
+    // lookup-failure log before it - either way, drain() only waits for the
+    // click write, so let the handler finish its tick before listening stops.
+    await new Promise((r) => setTimeout(r, 20));
+  } finally {
+    process.stdout.write = realOut;
+    process.stderr.write = realErr;
+  }
+  return lines.join('');
+}
+
+const PII = ['Mozilla', 'example.com/somewhere', 'session=secret', '203.0.113.44', '127.0.0.1'];
+
+const identifying = () => ({
+  headers: {
+    'user-agent': 'Mozilla/5.0 (very identifying)',
+    referer: 'https://example.com/somewhere',
+    cookie: 'session=secret',
+    'x-forwarded-for': '203.0.113.44',
+  },
+});
+
+test('a failed click write still redirects and leaks nothing to logs or rows', async () => {
+  await addCampaign('reddit');
+  const failing: ClickRecorder = {
+    onInviteClick: async () => {
+      throw new Error('simulated store outage');
+    },
+  };
+  const srv = await startRedirectServer({
+    host: '127.0.0.1',
+    port: 0,
+    guildId: GUILD,
+    campaigns,
+    recorder: failing,
+    fallbackInviteCode: 'fallbackCode',
+  });
+  try {
+    const logs = await captureLogs(async () => {
+      const res = await fetch(`${`http://127.0.0.1:${srv.port}`}/reddit`, {
+        redirect: 'manual',
+        ...identifying(),
+      });
+      // The member matters more than the measurement: a lost click is a
+      // slightly low number, a lost member is a lost member.
+      assert.equal(res.status, 302);
+      await srv.drain();
+    });
+    assert.equal((await clicks()).length, 0);
+    for (const leak of PII) {
+      assert.ok(!logs.includes(leak), `failure log must not contain ${leak}: ${logs}`);
+    }
+  } finally {
+    await srv.close();
+  }
+});
+
+test('a lookup outage redirects to the fallback and records nothing', async () => {
+  await addCampaign('reddit');
+  // Started outside the capture window: the listening line carries the bind
+  // address by design, and the leak check below is about request-time logs.
+  const down = await startRedirectServer({
+    host: '127.0.0.1',
+    port: 0,
+    guildId: GUILD,
+    // A store whose lookup always throws looks exactly like a dead database.
+    campaigns: { lookup: async () => { throw new Error('simulated outage'); } } as never,
+    recorder: handlers,
+    fallbackInviteCode: 'fallbackCode',
+  });
+  try {
+    const logs = await captureLogs(async () => {
+      const res = await fetch(`${`http://127.0.0.1:${down.port}`}/reddit`, {
+        redirect: 'manual',
+        ...identifying(),
+      });
+      assert.equal(res.status, 302);
+      assert.equal(res.headers.get('location'), 'https://discord.gg/fallbackCode');
+      await down.drain();
+    });
+    assert.equal((await clicks()).length, 0);
+    for (const leak of PII) {
+      assert.ok(!logs.includes(leak), `outage log must not contain ${leak}: ${logs}`);
+    }
+  } finally {
+    await down.close();
+  }
+});
+
+test('a lookup outage with no fallback is a 503 that records nothing', async () => {
+  // Started outside the capture window: see the fallback test above.
+  const down = await startRedirectServer({
+    host: '127.0.0.1',
+    port: 0,
+    guildId: GUILD,
+    campaigns: { lookup: async () => { throw new Error('simulated outage'); } } as never,
+    recorder: handlers,
+  });
+  try {
+    const logs = await captureLogs(async () => {
+      const res = await fetch(`${`http://127.0.0.1:${down.port}`}/reddit`, {
+        redirect: 'manual',
+        ...identifying(),
+      });
+      assert.equal(res.status, 503);
+      await down.drain();
+    });
+    assert.equal((await clicks()).length, 0);
+    for (const leak of PII) {
+      assert.ok(!logs.includes(leak), `503 log must not contain ${leak}: ${logs}`);
+    }
+  } finally {
+    await down.close();
+  }
+});
+
+test('a misconfigured campaign code is a 500 that records nothing', async () => {
+  // A code this bad cannot be written through add(), which validates — but a
+  // directly-inserted row (or a code Discord later rejects) reaches the
+  // handler, which refuses to put it in a Location header.
+  await t.db.exec(
+    `INSERT INTO invite_campaigns (slug, invite_code, label, disabled_at, created_at)
+     VALUES ('badcode', 'has space', 'hand-edited', NULL, '${NOW}')`,
+  );
+  const res = await get('/badcode', identifying());
+  assert.equal(res.status, 500);
+  assert.equal((await clicks()).length, 0);
+});
+
+test('throttled, malformed and unknown requests record nothing and leak nothing', async () => {
+  await addCampaign('reddit');
+  const tiny = await startRedirectServer({
+    host: '127.0.0.1',
+    port: 0,
+    guildId: GUILD,
+    campaigns,
+    recorder: handlers,
+    fallbackInviteCode: 'fallbackCode',
+    bucket: { capacity: 1, refillPerSecond: 0 },
+    now: () => 1_000_000,
+  });
+  try {
+    const burstGet = async (path: string, init?: RequestInit) => {
+      const res = await fetch(`${`http://127.0.0.1:${tiny.port}`}${path}`, { redirect: 'manual', ...init });
+      await tiny.drain();
+      return res;
+    };
+    assert.equal((await burstGet('/reddit', identifying())).status, 302);
+    // Second request from the same caller: 429, and the cap runs before the
+    // database is touched, so nothing is written.
+    assert.equal((await burstGet('/reddit', identifying())).status, 429);
+    assert.equal((await clicks()).length, 1);
+  } finally {
+    await tiny.close();
+  }
+
+  assert.equal((await get('/%E0%A4%A', identifying())).status, 404);
+  assert.equal((await get('/never-created', identifying())).status, 404);
+  assert.equal((await clicks()).length, 1);
+
+  // The one row in the table is still just campaign + timestamps: the error
+  // traffic above added no columns, no metadata keys, no visitor data. SELECT
+  // * again, so a future column fails here too (see the stored-click test).
+  const rows = await t.db
+    .prepare(`SELECT * FROM events WHERE event_type='invite_click'`)
+    .all<Record<string, unknown>>();
+  assert.equal(rows.length, 1);
+  const { id: _id, ...rest } = rows[0] ?? {};
+  assert.deepEqual(Object.keys(rest).sort(), [
+    'event_type',
+    'guild_id',
+    'idempotency_key',
+    'member_id',
+    'metadata',
+    'occurred_at',
+    'recorded_at',
+    'source',
+  ]);
+  assert.equal(rows[0]?.member_id, null);
+  assert.deepEqual(JSON.parse(String(rows[0]?.metadata ?? '{}')), { campaign: 'reddit' });
+  const blob = JSON.stringify(rows[0]);
+  for (const leak of PII) {
+    assert.ok(!blob.includes(leak), `stored row must not contain ${leak}: ${blob}`);
+  }
 });
 
 // --- things that are not people ---------------------------------------------
