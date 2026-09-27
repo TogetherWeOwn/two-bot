@@ -96,12 +96,14 @@ async function fixture(t, seed = {}, hooks = {}) {
   });
   const { networkInterfaces } = await import('node:os');
   // Mirror the engine's allowlist (ops/tog-4104/settings-signed-proof.mjs):
-  // literal loopback plus this process's own *private* interface addresses.
-  // Selecting the first non-internal address unfiltered picks the runner's
-  // public NIC on self-hosted CI, which the engine correctly REFUSEs at
-  // preflight.url (main red at #209, run 36333108881). Select the first own
-  // *private* IPv4 instead, so the fixture measures an address the engine
-  // recognizes as its own interface.
+  // any 127/8 loopback alias plus this process's own *private* interface
+  // addresses. Selecting the first non-internal address unfiltered picks the
+  // runner's public NIC on self-hosted CI, which the engine correctly REFUSEs
+  // at preflight.url (main red at #209, run 36333108881); filtering to private
+  // alone fails on runners with no private NIC at all (PR #220, runner4).
+  // Prefer the first own *private* IPv4 (mirrors the container-NIC topology in
+  // staging); fall back to deterministic 127.0.0.2, a distinct loopback alias
+  // in 127/8 that never leaves the host.
   const isPrivateIPv4 = (host) => {
     const v4 = String(host ?? '').match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
     if (!v4) return false;
@@ -113,11 +115,17 @@ async function fixture(t, seed = {}, hooks = {}) {
     if (a === 169 && b === 254) return true;
     return false;
   };
-  const ownAddress = Object.values(networkInterfaces()).flat()
+  const all = Object.values(networkInterfaces()).flat();
+  const ownPrivate = all
     .find((a) => (a?.family === 'IPv4' || a?.family === 4) && !a.internal && isPrivateIPv4(a?.address))?.address ?? null;
+  // Distinct loopback alias: exercises the non-127.0.0.1 branch on hosts with
+  // no private NIC. Distinct from the default 127.0.0.1 fixture URL, so the
+  // case still covers more than the default path.
+  const ownAddress = ownPrivate ?? '127.0.0.2';
   // Same signed fixture server, reachable over this host's own private
-  // interface address: mirrors the container-NIC topology in staging.
-  const ownAddressUrl = ownAddress ? `http://${ownAddress}:${server.address().port}` : null;
+  // interface address (or a loopback alias where there is none): mirrors the
+  // container-NIC topology in staging.
+  const ownAddressUrl = `http://${ownAddress}:${server.address().port}`;
   return { root, store, writes, stateDir, start, ownAddress, ownAddressUrl,
     run: (extra, mode, nodeOptions) => start(extra, mode, nodeOptions).done };
 }
@@ -269,12 +277,11 @@ test('container resource UUID grounds the app check without a forwarded app UUID
 
 test('own private interface address passes the URL check with full roundtrip', async (t) => {
   const f = await fixture(t);
-  assert.ok(f.ownAddressUrl,
-    'this host must have a non-loopback IPv4 interface for the own-address case');
   // Same signed fixture server, dialed over the host's own private address
-  // instead of loopback: mirrors the container-NIC topology in staging. Full
-  // PROOF PASS with exact cleanup, so the new branch is not a preflight-only
-  // exemption.
+  // (or a 127/8 loopback alias where the host has no private NIC) instead of
+  // the default 127.0.0.1: mirrors the container-NIC topology in staging.
+  // Full PROOF PASS with exact cleanup, so the new branch is not a
+  // preflight-only exemption.
   const r = await f.run({ INTERNAL_ACTIONS_URL: f.ownAddressUrl });
   assert.equal(r.code, 0, r.out + r.err);
   assert.equal(r.receipt.verdict, 'PROOF PASS');
