@@ -213,6 +213,61 @@ const perCampaign =
       }))
     : [];
 
+// Per-campaign click-spike flags (TOG-6232, follow-up to TOG-5895).
+//
+// TOG-5895 decided against a request-time per-campaign ceiling; the protection
+// is a reporting flag instead. One `detectSpikes` pass per campaign over the
+// stored `invite_click` rows - campaign slug plus server timestamps only, no
+// visitor PII (`metadata` is exactly `{"campaign": "<slug>"}`, ours never the
+// visitor's; see docs/PRIVACY.md, docs/INVITE_TRACKING.md). Bucketed in JS
+// like the join/leave spike section below so the query stays in one tested
+// code path. Reporting only: rows are never deleted, excluded, or set aside.
+// Computed once here so the text and `--json` renderers read the same object.
+const clickRows = await db
+  .prepare(
+    `SELECT occurred_at, source, metadata FROM events
+      WHERE event_type='invite_click' AND occurred_at >= ?`,
+  )
+  .all<{ occurred_at: string; source: string; metadata: string | null }>(since)
+  .catch(() => [] as Array<{ occurred_at: string; source: string; metadata: string | null }>);
+const slugForCode = new Map<string, string>();
+for (const c of perCampaign) {
+  // First slug wins when two campaigns share a code; the shared-code note in
+  // the formatter already warns that counts repeat. Clicks carrying a metadata
+  // slug still separate cleanly via the campaign key below.
+  if (!slugForCode.has(c.inviteCode)) slugForCode.set(c.inviteCode, c.slug);
+}
+const clicksByCampaign = new Map<string, string[]>();
+for (const r of clickRows) {
+  let campaign: string | null = null;
+  if (r.metadata) {
+    try {
+      const v = (JSON.parse(r.metadata) as { campaign?: unknown }).campaign;
+      if (typeof v === 'string' && v.length > 0) campaign = v;
+    } catch {
+      // A metadata blob we cannot read is not evidence of anything.
+    }
+  }
+  if (!campaign) {
+    const code = r.source.startsWith('invite:') ? r.source.slice('invite:'.length) : null;
+    campaign = (code && slugForCode.get(code)) ?? r.source;
+  }
+  const arr = clicksByCampaign.get(campaign);
+  if (arr) arr.push(r.occurred_at);
+  else clicksByCampaign.set(campaign, [r.occurred_at]);
+}
+const clickSpikes: Array<{ slug: string; spikes: Array<{ day: string; count: number; factor: number }> }> = [];
+for (const [slug, stamps] of [...clicksByCampaign.entries()].sort(([a], [b]) => (a < b ? -1 : 1))) {
+  // No anomaly windows exist for clicks, so every hit is unlabelled by
+  // construction - still counted above, flagged here.
+  const spikes = detectSpikes(stamps, 'invite_click', { anomalies: [] });
+  if (spikes.length === 0) continue;
+  clickSpikes.push({
+    slug,
+    spikes: spikes.map((s) => ({ day: s.day, count: s.count, factor: s.factor })),
+  });
+}
+
 // Retention: of members who joined N days ago, how many were still active later?
 // The same windows are excluded here. 1,015 raid accounts that never posted
 // would otherwise sit in every denominator and read as catastrophic retention.
@@ -292,6 +347,10 @@ const report = {
     unknownInWindow: downtimeUnknown,
   },
   campaigns: perCampaign,
+  // Reporting flag only (TOG-6232): per-campaign per-day click spikes. Every
+  // entry is unlabelled by construction (no click anomaly windows exist) and
+  // stays counted above - this names the day, nothing more.
+  clickSpikes,
   voice: {
     firstVoiceSessions: firstVoice,
     avgSessionSeconds: voiceDurationSummary.averageSeconds,
@@ -372,6 +431,22 @@ if (asJson) {
         console.log(`    ${s.day}  ${how}  -- set aside, cause NOT confirmed by a human`);
       } else {
         console.log(`    ${s.day}  ${how}  -- set aside: ${known.label}`);
+      }
+    }
+    console.log('');
+  }
+
+  // Click-anomaly flags, one line per campaign (TOG-6232). Same `detectSpikes`
+  // shape as the join/leave section above, bucketed per campaign from the
+  // already-read click rows - no new query, no PII. Flag only: every click
+  // stays counted above.
+  if (clickSpikes.length > 0) {
+    console.log('  Unusual days (clicks, per campaign):');
+    for (const { slug, spikes } of clickSpikes) {
+      for (const s of spikes) {
+        console.log(
+          `    ${s.day}  ${slug}: ${s.count} in one day, ${s.factor.toFixed(0)}x a normal day  -- UNLABELLED, still counted above`,
+        );
       }
     }
     console.log('');
