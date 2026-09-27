@@ -38,8 +38,11 @@ async function until<T>(read: () => T | Promise<T>, what: string, timeout = 15_0
 /**
  * Identify capability of the connection `src/index.ts` actually opens, by
  * intent name. Pinned as literals so a rename cannot move the boundary.
+ * TOG-5258: this fixture sets neither TWO_AUTOMOD nor any DISCORD_TICKET_*
+ * var, so the gateway must receive the gated 7-intent set (34503 - 32768),
+ * never the privileged MessageContent bit.
  */
-const MAIN_INTENT_BITS = 34503;
+const MAIN_INTENT_BITS = 1735;
 
 function environment(mock: MockDiscord, db: TestDb, mode: Mode): NodeJS.ProcessEnv {
   // This opt-in test URL must identify a disposable local database. Never use
