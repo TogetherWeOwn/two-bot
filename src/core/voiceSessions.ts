@@ -55,6 +55,16 @@ export class VoiceSessionTracker {
     return session;
   }
 
+  /**
+   * Look at the open session without closing it. `null` when none is open.
+   * Read-only: the caller only ever needs the channel to credit an end to
+   * (TOG-6122 closes the session on server-leave via `onVoiceLeave`, which
+   * does the actual ending).
+   */
+  peek(guildId: string, memberId: string): OpenSession | null {
+    return this.open.get(key(guildId, memberId)) ?? null;
+  }
+
   /** Whether we are holding an open session for this member. */
   isOpen(guildId: string, memberId: string): boolean {
     return this.open.has(key(guildId, memberId));

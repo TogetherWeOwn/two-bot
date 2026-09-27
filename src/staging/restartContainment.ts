@@ -188,9 +188,9 @@ export class StagingRestartFunnelFirewall extends FunnelHandlers {
     return guildId === TWO_STAGING_GUILD_ID && this.syntheticActorIds.has(memberId);
   }
 
-  override async onLeave(guildId: string, memberId: string, occurredAt?: string): Promise<FunnelEvent | null> {
+  override async onLeave(guildId: string, memberId: string, occurredAt?: string, opts: { isBot?: boolean } = {}): Promise<FunnelEvent | null> {
     if (!this.synthetic(guildId, memberId)) return null;
-    return super.onLeave(guildId, memberId, occurredAt);
+    return super.onLeave(guildId, memberId, occurredAt, opts);
   }
 
   override async onJoin(i: JoinInput): Promise<FunnelEvent | null> {

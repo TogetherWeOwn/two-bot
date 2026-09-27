@@ -418,7 +418,9 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
 
   client.on(Events.GuildMemberRemove, async (member) => {
     if (!accepts(member.guild.id, member.id)) return;
-    await handlers.onLeave(member.guild.id, member.id);
+    // A server-leave is also a voice-leave: Discord drops them from voice with
+    // no VoiceStateUpdate, so onLeave closes any open session (TOG-6122).
+    await handlers.onLeave(member.guild.id, member.id, undefined, { isBot: !!member.user?.bot });
   });
 
   const inspectAutomod = async (msg: {
