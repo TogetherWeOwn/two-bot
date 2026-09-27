@@ -244,7 +244,10 @@ Backups are **not** part of this container. The production database is backed up
 by Coolify's scheduled backup service to Cloudflare R2 bucket `paperclip-backups`
 (`r2-paperclip-backups` in the panel, `save_s3=true`, daily 03:00 UTC, 7 local /
 30 S3 copies). The operator enabled this on 2026-09-06 (TOG-1189) and confirmed
-objects are visible in the bucket.
+objects are visible in the bucket. The staging database `two-bot-staging-db`
+(`twobot_staging`) carries the same schedule — daily 03:00 UTC to the same R2
+bucket, 7 local / 30 S3 copies — enabled 2026-09-27 (TOG-7079); first execution
+succeeded with S3 upload confirmed.
 
 The repo still ships `deploy/two-bot-backup.*` and `scripts/bootstrap-host.sh`
 still installs the wrapper and timer, but that path is for a plain systemd host,
