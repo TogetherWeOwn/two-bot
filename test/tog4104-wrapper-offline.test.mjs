@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 const exec = promisify(execFile);
 const packet = fileURLToPath(new URL('../ops/tog-4104/', import.meta.url));
 const APP = 'uy4d9ndeygjcem6lgayhxgub';
-const RUNTIME = 'f5fd3e1d6d08847589d3bf48ebc0b0e198196e90';
+const RUNTIME = '7995b3fb13feda26ae35356bc5227c67870370c9';
 const image = `sha256:${'a'.repeat(64)}`;
 const container = 'b'.repeat(64);
 
@@ -25,7 +25,8 @@ async function fixture(t) {
     GIT_AUTHOR_NAME: 'Offline Fixture', GIT_AUTHOR_EMAIL: 'offline@example.invalid',
     GIT_COMMITTER_NAME: 'Offline Fixture', GIT_COMMITTER_EMAIL: 'offline@example.invalid',
     MOCK_LOG: log, MOCK_IDENTITY: `${container}|/bot-${APP}|${APP}_bot:${RUNTIME}|true|${image}`,
-    PROOF_EXCLUSIVE_WINDOW: 'staging-writers-quiesced' };
+    PROOF_EXCLUSIVE_WINDOW: 'staging-writers-quiesced',
+    PROOF_RUNTIME_REVISION: RUNTIME, PROOF_IMAGE_ID: image };
   await writeFile(join(bin, 'docker'), `#!/bin/sh
 printf '%s\\n' "$*" >> "$MOCK_LOG"
 case "$1" in
@@ -49,26 +50,53 @@ esac
 }
 
 for (const mode of ['run', 'recover']) {
-  test(`wrapper holds ${mode} before any Docker operation`, async (t) => {
+  test(`wrapper runs ${mode} through the immutable container ID`, async (t) => {
     const f = await fixture(t);
     const r = await f.run({}, f.sha, mode);
-    assert.equal(r.code, 2, r.stderr);
-    assert.match(r.stderr, /HOLD: runtime .* has no internal settings wiring/);
-    assert.ok(r.stderr.includes(RUNTIME));
-    assert.equal(await f.calls(), '', 'not even Docker inspection is authorized by this held packet');
-    assert.equal(r.stdout, '');
+    assert.equal(r.code, 0, r.stderr);
+    assert.match(r.stderr, new RegExp(
+      `PROOF TARGET app=${APP} container=${container} image=${image} ref=\\S+ runtime=${RUNTIME} source=${f.sha} mode=${mode}`));
+    assert.ok(r.stdout.includes('OFFLINE-EXECUTED'), 'the engine exec actually ran');
+    const lines = (await f.calls()).trim().split('\n');
+    assert.ok(lines[0].startsWith('inspect '), 'the container is resolved by exact name exactly once');
+    const post = lines.slice(1);
+    assert.ok(post.length >= 3, 'mkdir, copy and engine exec all run');
+    for (const line of post) {
+      assert.ok(line.includes(container), `post-resolve Docker op addresses the container ID: ${line}`);
+      assert.ok(!line.includes(`bot-${APP}`), `mutable name is never reused after resolve: ${line}`);
+    }
+    assert.ok(post.some((l) => l.startsWith('cp ')), 'the proof file is copied into the container');
+    assert.ok((await f.calls()).includes(`PROOF_SOURCE_SHA=${f.sha}`),
+      'the only injected value is the validated packet source SHA');
   });
 }
-for (const [name, identity] of [
-  ['wrong runtime', `${container}|/bot-${APP}|${APP}_bot:wrong|true|${image}`],
-  ['wrong container', `${container}|/bot-production|${APP}_bot:${RUNTIME}|true|${image}`],
-  ['stopped container', `${container}|/bot-${APP}|${APP}_bot:${RUNTIME}|false|${image}`],
+for (const [name, overrides] of [
+  ['wrong runtime', { PROOF_RUNTIME_REVISION: 'f5fd3e1d6d08847589d3bf48ebc0b0e198196e90' }],
+  ['missing runtime declaration', { PROOF_RUNTIME_REVISION: '' }],
+]) {
+  test(`wrapper refuses ${name} before any Docker operation`, async (t) => {
+    const f = await fixture(t);
+    const r = await f.run(overrides);
+    assert.equal(r.code, 2, r.stderr);
+    assert.match(r.stderr, /REFUSED/);
+    assert.equal(await f.calls(), '', 'a runtime mismatch refuses before even Docker inspection');
+    assert.ok(!r.stdout.includes('OFFLINE-EXECUTED'));
+  });
+}
+for (const [name, identity, overrides] of [
+  ['wrong container', `${container}|/bot-production|${APP}_bot:${RUNTIME}|true|${image}`, {}],
+  ['stopped container', `${container}|/bot-${APP}|${APP}_bot:${RUNTIME}|false|${image}`, {}],
+  ['wrong image', `${container}|/bot-${APP}|${APP}_bot:${RUNTIME}|true|sha256:${'0'.repeat(64)}`, {}],
+  ['missing image receipt', `${container}|/bot-${APP}|${APP}_bot:${RUNTIME}|true|${image}`, { PROOF_IMAGE_ID: '' }],
 ]) {
   test(`wrapper refuses ${name} before copying or executing`, async (t) => {
     const f = await fixture(t);
-    const r = await f.run({ MOCK_IDENTITY: identity });
+    const r = await f.run({ MOCK_IDENTITY: identity, ...overrides });
     assert.equal(r.code, 2);
-    assert.ok(!(await f.calls()).includes('cp ')); assert.ok(!(await f.calls()).includes('exec '));
+    const lines = (await f.calls()).trim().split('\n');
+    assert.ok(lines[0].startsWith('inspect '));
+    assert.ok(!lines.slice(1).some((l) => l.startsWith('cp ') || l.startsWith('exec ')),
+      'nothing is copied or executed after a failed identity check');
   });
 }
 test('wrapper rejects dirty packet even with approved SHA', async (t) => {
