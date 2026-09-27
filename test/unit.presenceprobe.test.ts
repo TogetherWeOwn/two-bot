@@ -93,11 +93,22 @@ describe('presence probe containment', () => {
         'If this instrument seems to need it, the issue has been misread.',
     );
 
-    // Ticket transcripts and automod reuse MessageContent; self roles add
-    // reaction metadata, but none of these features adds GuildPresences.
-    assert.equal(intents(false).length, 8, 'the default intent list changed - see client.ts');
-    assert.equal(intents(true).length, 8, 'automod must reuse the existing MessageContent intent');
-    assert.deepEqual(INTENTS, [
+    // TOG-5258: MessageContent is requested only when automod is enabled or
+    // tickets are configured; the default is the 7-intent gated set. Self
+    // roles add reaction metadata, but none of these features adds
+    // GuildPresences.
+    assert.equal(intents(false, {}).length, 7, 'the default intent list changed - see client.ts');
+    assert.equal(intents(true, {}).length, 8, 'automod must reuse the existing MessageContent intent');
+    assert.deepEqual(intents(false, {}), [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildModeration,
+      GatewayIntentBits.GuildMembers,
+      GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.GuildMessageReactions,
+      GatewayIntentBits.GuildVoiceStates,
+      GatewayIntentBits.GuildInvites,
+    ]);
+    assert.deepEqual(intents(true, {}), [
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildModeration,
       GatewayIntentBits.GuildMembers,
@@ -107,6 +118,7 @@ describe('presence probe containment', () => {
       GatewayIntentBits.GuildVoiceStates,
       GatewayIntentBits.GuildInvites,
     ]);
+    assert.deepEqual(INTENTS, intents());
     assert.deepEqual(PARTIALS, [Partials.Message, Partials.Reaction, Partials.User]);
     const client = createClient(false);
     assert.deepEqual(client.options.partials, PARTIALS);
