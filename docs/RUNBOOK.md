@@ -331,6 +331,18 @@ journalctl -u two-bot -f          # follow
 A healthy start logs `{"msg":"ready","user":"...","guilds":1}` within a few
 seconds. If you see `ready` you are connected to Discord.
 
+The same checks run automated, against the mock-Discord harness rather than
+the host (TOG-5689):
+
+```bash
+TWO_DATABASE_URL=postgres://... node scripts/health-check.ts
+```
+
+It boots the real bot, asserts the `ready` line shape, the health-before-ready
+ordering and one-JSON-object-per-line logs, and reports pass/fail per check.
+`systemctl status` and `journalctl` are listed as skipped with their mock-side
+equivalents, because there is no systemd or journal under the mock.
+
 ## Stop the audit mirror right now (kill switch)
 
 When the audit mirror is misbehaving — posting to the wrong place, spamming,
