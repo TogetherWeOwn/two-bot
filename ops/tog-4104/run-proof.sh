@@ -10,7 +10,7 @@
 # secret.
 set -euo pipefail
 APP=uy4d9ndeygjcem6lgayhxgub
-RUNTIME=7995b3fb13feda26ae35356bc5227c67870370c9
+RUNTIME=5f57256d41130b056389f3098f3b0c84a9d9e261
 C="bot-$APP"
 MODE="${1:-}"
 SOURCE="${2:-}"
@@ -40,7 +40,31 @@ RUNNING="${REST%%|*}"; IMAGE_ID="${REST##*|}"
 # exact pinned runtime. Tags and revision labels alone are not attestation.
 [[ -n "${PROOF_IMAGE_ID:-}" ]] || refuse
 [[ "$IMAGE_ID" == "$PROOF_IMAGE_ID" ]] || refuse
-printf '%s\n' "PROOF TARGET app=$APP container=$CID image=$IMAGE_ID ref=$IMAGE_REF runtime=$RUNTIME source=$SOURCE mode=$MODE" >&2
+# The engine runs inside the container netns, so it reaches the listener at the
+# container's own interface address — never loopback-by-assumption. Derive the
+# address from the inspected container (first non-internal interface, Docker
+# lists them in the container's own network namespace) and the port from the
+# container's own environment. Both are measured, not operator-declared: an
+# operator-supplied URL could point the proof at an impostor that always
+# passes. The engine still refuses anything that is not loopback or one of its
+# own private interface addresses.
+CONTAINER_IP="$(docker inspect --format '{{range $k, $v := .NetworkSettings.Networks}}{{$v.IPAddress}} {{end}}' "$CID" | tr ' ' '\n' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1)" || refuse
+[[ "$CONTAINER_IP" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || refuse
+CONTAINER_PORT="$(docker exec "$CID" printenv TWO_INTERNAL_PORT 2>/dev/null || true)"
+[[ -z "$CONTAINER_PORT" ]] && CONTAINER_PORT=8787
+[[ "$CONTAINER_PORT" =~ ^[0-9]+$ ]] && (( CONTAINER_PORT >= 1 && CONTAINER_PORT <= 65535 )) || refuse
+URL="http://$CONTAINER_IP:$CONTAINER_PORT"
+printf '%s\n' "PROOF TARGET app=$APP container=$CID image=$IMAGE_ID ref=$IMAGE_REF runtime=$RUNTIME source=$SOURCE mode=$MODE url=$URL" >&2
 docker exec "$CID" mkdir -p /tmp/tog-4104-proof
 docker cp "$ROOT/ops/tog-4104/settings-signed-proof.mjs" "$CID:/tmp/tog-4104-proof/settings-signed-proof.mjs"
-docker exec -e "PROOF_SOURCE_SHA=$SOURCE" "$CID" node /tmp/tog-4104-proof/settings-signed-proof.mjs "$MODE"
+# Forward only values already validated above against the packet pin: the app
+# (exact container name), the pinned runtime, the writer-exclusion declaration
+# and the measured listener URL. Signing keys stay inside the container: this
+# script never reads or passes TWO_INTERNAL_KEYS. None of these is a secret.
+docker exec \
+  -e "PROOF_SOURCE_SHA=$SOURCE" \
+  -e "STAGING_APP_UUID=$APP" \
+  -e "PROOF_RUNTIME_REVISION=$RUNTIME" \
+  -e "PROOF_EXCLUSIVE_WINDOW=staging-writers-quiesced" \
+  -e "INTERNAL_ACTIONS_URL=$URL" \
+  "$CID" node /tmp/tog-4104-proof/settings-signed-proof.mjs "$MODE"

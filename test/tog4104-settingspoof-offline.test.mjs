@@ -15,7 +15,7 @@ const PROBE = fileURLToPath(new URL('../ops/tog-4104/settings-signed-proof.mjs',
 const KEY = 'TWO_RAID_JOIN_THRESHOLD', MATE = 'TWO_RAID_WINDOW_SECONDS';
 const SECRET = 'offline-only-signing-material-not-a-real-key';
 const SOURCE = 'b03c6232a75fe4655964c1f0b523ff9c8e1ae7fe';
-const RUNTIME = '7995b3fb13feda26ae35356bc5227c67870370c9';
+const RUNTIME = '5f57256d41130b056389f3098f3b0c84a9d9e261';
 const kid = 'offline-key-id';
 
 async function fixture(t, seed = {}, hooks = {}) {

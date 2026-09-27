@@ -10,7 +10,7 @@ import { fileURLToPath } from 'node:url';
 const exec = promisify(execFile);
 const packet = fileURLToPath(new URL('../ops/tog-4104/', import.meta.url));
 const APP = 'uy4d9ndeygjcem6lgayhxgub';
-const RUNTIME = '7995b3fb13feda26ae35356bc5227c67870370c9';
+const RUNTIME = '5f57256d41130b056389f3098f3b0c84a9d9e261';
 const image = `sha256:${'a'.repeat(64)}`;
 const container = 'b'.repeat(64);
 

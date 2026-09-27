@@ -9,12 +9,13 @@ import { createHash, createHmac, randomUUID, randomBytes, hkdfSync, createCipher
 import { open, mkdir, lstat, rename, unlink, readFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { join } from 'node:path';
+import { networkInterfaces } from 'node:os';
 import { isDeepStrictEqual } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 const APP = 'uy4d9ndeygjcem6lgayhxgub';
 const GUILD = '1545644954272137297';
-const RUNTIME = '7995b3fb13feda26ae35356bc5227c67870370c9';
+const RUNTIME = '5f57256d41130b056389f3098f3b0c84a9d9e261';
 const PATH = '/internal/actions';
 const ACTOR = '900000000000009999';
 const KEYS = ['TWO_RAID_JOIN_THRESHOLD', 'TWO_RAID_WINDOW_SECONDS'];
@@ -34,9 +35,39 @@ const validValue = (value) => (typeof value === 'string' && /^\d{1,6}$/.test(val
   Number.isSafeInteger(Number(value)) && Number(value) > 0 && Number(value) <= 3600;
 const uuid = (v) => typeof v === 'string' && /^[0-9a-f-]{36}$/.test(v);
 
+/** This process's own non-loopback IPv4 addresses, normalised. The proof runs
+ * inside the container netns, so its own interface addresses are the only
+ * non-loopback destinations it may ever dial. */
+function ownInterfaceAddresses() {
+  const out = [];
+  for (const addresses of Object.values(networkInterfaces())) {
+    for (const a of addresses ?? []) {
+      if (a.family === 'IPv4' && !a.internal) out.push(a.address);
+    }
+  }
+  return out;
+}
+
+/** RFC1918, CGNAT and link-local IPv4. Mirrors src/internal/bind.ts; anything
+ * else is a public address the proof must never dial. */
+function isPrivateIPv4(host) {
+  const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!v4) return false;
+  const [a, b] = [Number(v4[1]), Number(v4[2])];
+  if (a === 10) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  if (a === 169 && b === 254) return true;
+  return false;
+}
+
 function preflight() {
   check(['run', 'recover'].includes(mode), 'preflight.mode');
-  check(process.env.STAGING_APP_UUID === APP, 'preflight.app');
+  // Coolify sets COOLIFY_RESOURCE_UUID inside the container; the wrapper
+  // additionally forwards STAGING_APP_UUID after exact-name validation. Either
+  // grounds the app check in container-measured identity.
+  check(process.env.STAGING_APP_UUID === APP || process.env.COOLIFY_RESOURCE_UUID === APP, 'preflight.app');
   check(process.env.PROOF_RUNTIME_REVISION === RUNTIME, 'preflight.runtime');
   check(process.env.DISCORD_GUILD_ID === GUILD, 'preflight.guild');
   check(/^[a-f0-9]{40}$/.test(process.env.PROOF_SOURCE_SHA ?? ''), 'preflight.source');
@@ -48,7 +79,14 @@ function preflight() {
   kid = entry.slice(0, at); secret = entry.slice(at + 1);
   check(/^[A-Za-z0-9_-]+$/.test(kid), 'preflight.keys');
   url = new URL(process.env.INTERNAL_ACTIONS_URL ?? 'http://127.0.0.1:8787');
-  check(url.protocol === 'http:' && ['127.0.0.1', '[::1]'].includes(url.hostname) &&
+  // Literal loopback, or one of this process's own private interface addresses
+  // (the staging listener binds the container NIC, not loopback). DNS names,
+  // public addresses and foreign private addresses still refuse: the proof must
+  // talk to the local bot, never a remote impostor that always passes.
+  const host = url.hostname;
+  const loopback = ['127.0.0.1', '[::1]'].includes(host);
+  const ownPrivate = isPrivateIPv4(host) && ownInterfaceAddresses().includes(host);
+  check(url.protocol === 'http:' && (loopback || ownPrivate) &&
     !url.username && !url.password && !url.search && !url.hash && url.pathname === '/', 'preflight.url');
   url.pathname = PATH;
   encryptionKey = hkdfSync('sha256', secret, APP, 'tog-4104-private-recovery-v2', 32);
