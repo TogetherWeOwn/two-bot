@@ -59,9 +59,10 @@ for (const capability of LIVE_CAPABILITIES) {
   });
 }
 
-test('the shipped clearance list is empty: this module activates nothing', () => {
-  assert.deepEqual([...LIVE_CLEARED_CAPABILITIES], []);
-  for (const capability of LIVE_CAPABILITIES) {
+test('the shipped clearance list clears self_roles only (TOG-5356)', () => {
+  assert.deepEqual([...LIVE_CLEARED_CAPABILITIES], ['self_roles']);
+  assert.equal(assertActivationPermitted('self_roles', LIVE_GUILD, LIVE_TOKEN), 'live');
+  for (const capability of LIVE_CAPABILITIES.filter((c) => c !== 'self_roles')) {
     assert.throws(() => assertActivationPermitted(capability, LIVE_GUILD, LIVE_TOKEN), /not cleared/);
   }
 });
