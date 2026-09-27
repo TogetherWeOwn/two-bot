@@ -775,7 +775,7 @@ if (stagingRestartArmed) {
     guildId: cfg.guildId!,
     store,
     landingChannelIds: () => liveCfg.landingChannelIds,
-    goodbyeChannelIds: cfg.goodbyeChannelIds,
+    goodbyeChannelIds: () => liveCfg.goodbyeChannelIds,
     picks: buildSessionPicks({
       lookingToPlay: cfg.sessionLookingToPlayChannelId!,
       lobbyVoice: cfg.sessionLobbyVoiceChannelId!,
