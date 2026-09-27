@@ -597,6 +597,28 @@ to this repository, so the claim could not be reproduced here. It has been
 replaced rather than kept, because a runbook entry that cannot be re-run is
 worse than none.
 
+**Drilled 2026-09-27 (TOG-5711), backup→restore→verify unattended on a local
+database.** Against an ephemeral PostgreSQL 17.11 (user-space binaries, no
+system install): 180 events / 120 members / 1 invite snapshot plus moderation
+(5 warnings, 5 audit rows, 1 pending unban), 1 automation command and 1 ticket,
+all written through `EventStore` and the bot's own tables — then
+`scripts/pg-backup.ts` dumped `two-funnel-<stamp>.ndjson.gz`, `--dry-run`
+verified it both file-only (no URL) and against the scratch target, and the
+restore into an empty scratch database (migrations applied first, as the
+dry-run's "no such table" probe predicted) ended `RESTORE VERIFIED`. Checked:
+
+- all 22 tables row-count `ok` against the dump manifest
+- order-independent MD5 of the full row sets identical for `events` and
+  `members`; the `events.idempotency_key` set hashed identically
+- the `events` id sequence resumed at 181, and a replayed join still recorded
+  `inserted=false`
+- `scripts/funnel.ts 30` byte-identical on source vs restored
+- `test/e2e.backup.test.ts` 11/11 and `test/unit.dumpread.test.ts` 14/14 on the
+  same ephemeral Postgres
+
+No script fixes: the backup, restore and drill units needed no change, so none
+was made. Full log attached as the work product on TOG-5711.
+
 ### Off-box destination
 
 > **Production path:** the Coolify VPS runs scheduled database backups through
