@@ -281,7 +281,10 @@ test('exploratory funnel flow: gate, ladder, voice leave, leave and rejoin', { t
   // Discord re-screens on rejoin, so the live path records a second clearing -
   // but conversion is "of the people who joined, how many got in", and counting
   // one person's two clearings as two would push it over 100%. The key is
-  // once-per-member, so the second write dedupes.
+  // once-per-member, so the second write dedupes. Settle first (review note on
+  // TOG-6027): the rejoin's join handler and its gate write race, and asserting
+  // immediately could pass before a (wrong) second clearing lands.
+  await sleep(1200);
   const gateCount = (
     (await harness.db
       .prepare(`SELECT COUNT(*) AS n FROM events WHERE event_type = 'gate_cleared' AND member_id = ?`)
