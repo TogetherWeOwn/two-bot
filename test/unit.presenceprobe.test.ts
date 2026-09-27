@@ -188,6 +188,9 @@ describe('presence probe containment', () => {
       // migrations to catch named-check drift; neither file has a rendering path.
       join('src', 'store', 'webRoleCheck.ts'),
       join('test', 'unit.webroletables.test.ts'),
+      // TOG-5718 privacy-retention doc test names the table once, in a comment
+      // documenting the deliberate out-of-scope exclusion. No rendering path.
+      join('test', 'unit.privacyretention.test.ts'),
     ]);
     // The BARE identifier only. `\b` on both sides deliberately does not match
     // `presence_probe_enabled` (a log event name) or `0004_presence_probe.sql`
