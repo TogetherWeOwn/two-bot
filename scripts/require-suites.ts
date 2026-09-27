@@ -36,6 +36,16 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     why: 'the whole web_v1 contract the website reads, including the role grants',
   },
   {
+    // TOG-6492. The two website-role CLIs executed end to end through the
+    // real scripts: the provision grant list equals the contract, verify
+    // passes on its own exit code, and a real over-grant fails it. Counted
+    // from the 4 top-level test() blocks; CI's postgres job confirms the
+    // count on the first run after this commit.
+    file: 'test/e2e.webrole.test.ts',
+    minTests: 4,
+    why: 'the provision/verify website-role CLIs themselves, not just the library calls underneath them',
+  },
+  {
     file: 'test/e2e.backup.test.ts',
     minTests: 7,
     why: 'the dump/restore round trip - the only thing standing behind a restore',
