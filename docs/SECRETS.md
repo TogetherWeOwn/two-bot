@@ -78,7 +78,10 @@ Scoped to what the funnel actually needs. Not Administrator.
 - Message Content Intent — **leave OFF.** We count that a message happened; we
   never read it.
 
-**OAuth2 scopes:** `bot`
+**OAuth2 scopes:** `bot applications.commands` — the second scope is what
+lets `guild.commands.set` (`src/discord/commandRegistry.ts`) publish slash
+commands. Inviting with `bot` alone registers the bot but 403s command
+registration. Matches the staging invite in `src/staging/spec.ts`.
 
 **Permissions:** `View Channels`, `Manage Server`, `Manage Roles`,
 `Manage Events`, `Create Instant Invite`, `Send Messages`.
@@ -88,7 +91,7 @@ Scoped to what the funnel actually needs. Not Administrator.
 the live application id:
 
 ```
-https://discord.com/api/oauth2/authorize?client_id=1539711683898118154&permissions=8858373153&scope=bot
+https://discord.com/api/oauth2/authorize?client_id=1539711683898118154&permissions=8858373153&scope=bot%20applications.commands
 ```
 
 `Manage Server` is the uncomfortable one, so to be explicit about why: it is the
