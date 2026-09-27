@@ -147,7 +147,7 @@ test('--json parses and its counts equal the text output on fixtures', async () 
   assert.equal(r.funnel.gateCleared, num(/cleared rules gate\s+(\d+)/, text.stdout, 'gate clearings'));
   assert.equal(r.funnel.firstMessage, num(/posted first message\s+(\d+)/, text.stdout, 'first messages'));
   assert.equal(r.funnel.firstVoice, num(/first voice session\s+(\d+)/, text.stdout, 'first voice'));
-  assert.equal(r.funnel.leaves, num(/^  left\s+(\d+)\s*$/m, text.stdout, 'leaves'));
+  assert.equal(r.funnel.leaves, num(/^  left\s+(\d+) leaves/m, text.stdout, 'leaves'));
 
   // The fixture's known values, so a passing test means the right numbers and
   // not two renderers agreeing on a wrong one.
@@ -187,7 +187,7 @@ test('--json parses and its counts equal the text output on fixtures', async () 
   // for D7/D30. A (2d active) and C (36h) retained; B (12h) and D (2h) not.
   const d1 = r.retention.find((x) => x.day === 1)!;
   assert.ok(d1, 'retention should carry D1');
-  const textD1 = text.stdout.match(/D1\s+(\d+)\s+\/\s+(\d+)/);
+  const textD1 = text.stdout.match(/D1\s+\(1 day\)\s+(\d+)\s+\/\s+(\d+)/);
   assert.ok(textD1, 'text report should print the D1 line');
   assert.equal(d1.retained, Number(textD1[1]));
   assert.equal(d1.cohort, Number(textD1[2]));
