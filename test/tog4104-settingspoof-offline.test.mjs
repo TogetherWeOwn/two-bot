@@ -15,7 +15,7 @@ const PROBE = fileURLToPath(new URL('../ops/tog-4104/settings-signed-proof.mjs',
 const KEY = 'TWO_RAID_JOIN_THRESHOLD', MATE = 'TWO_RAID_WINDOW_SECONDS';
 const SECRET = 'offline-only-signing-material-not-a-real-key';
 const SOURCE = 'b03c6232a75fe4655964c1f0b523ff9c8e1ae7fe';
-const RUNTIME = 'f5fd3e1d6d08847589d3bf48ebc0b0e198196e90';
+const RUNTIME = '7995b3fb13feda26ae35356bc5227c67870370c9';
 const kid = 'offline-key-id';
 
 async function fixture(t, seed = {}, hooks = {}) {
@@ -256,7 +256,7 @@ test('malformed stored value refuses rather than writes an unreviewed recovery v
   assert.equal(r.code, 2); assert.equal(f.writes.length, 0);
 });
 
-test('unwired settings endpoint refuses before mutation with an explicit HOLD reason', async (t) => {
+test('unwired settings endpoint refuses before mutation with a settings-unavailable reason', async (t) => {
   const f = await fixture(t, {}, { get({ deny }) {
     deny(403, 'action_not_allowed'); return true;
   } });
