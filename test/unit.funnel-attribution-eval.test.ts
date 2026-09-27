@@ -15,15 +15,20 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import {
+  CATEGORIES,
+  categoryOf,
   evaluateCase,
   loadFixture,
   scoreRun,
   type GoldenCase,
 } from '../scripts/funnel-attribution-eval.ts';
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** A window case shaped like the fixture's, overridden per test. */
 function windowCase(over: Partial<GoldenCase> & { id: string }): GoldenCase {
@@ -172,6 +177,71 @@ test('the per-bucket tally scores the fixture split, not just a pass count', () 
   assert.deepEqual(summary.byCategory.ambiguous, { passed: 1, total: 1 });
   assert.deepEqual(summary.byCategory.unknown, { passed: 1, total: 1 });
   assert.deepEqual(summary.byCategory.vanity, { passed: 0, total: 0 });
+});
+
+/**
+ * Doc↔fixture↔script taxonomy pin (TOG-6503, gap landed after round-1 via
+ * TOG-5849 PR #206).
+ *
+ * The `expectCategory` row in docs/FUNNEL_ATTRIBUTION_EVAL.md is the
+ * authoritative bucket list. This test pins all three surfaces to it: the
+ * eval script's CATEGORIES, the fixture's expectCategory values, and the
+ * script's verdict mapping. Rename one label in the doc row and this fails.
+ * It deliberately does NOT re-check attribution logic (TOG-5681 owns that) —
+ * expected sources are categorized directly, without driving the real code.
+ */
+test('doc taxonomy pins fixture buckets and script verdict labels (TOG-6503)', () => {
+  const doc = readFileSync(join(ROOT, 'docs/FUNNEL_ATTRIBUTION_EVAL.md'), 'utf8');
+
+  // 1. The doc's authoritative taxonomy row lists exactly the script buckets.
+  const row = doc.split('\n').find((l) => l.includes('`expectCategory`'));
+  assert.ok(row, 'doc no longer defines the `expectCategory` taxonomy row');
+  const bucketsInDoc = [...row.matchAll(/`([^`]+)`/g)]
+    .map((m) => m[1] as string)
+    .filter((t) => t !== 'expectCategory');
+  assert.deepEqual(
+    [...bucketsInDoc].sort(),
+    [...CATEGORIES].sort(),
+    `doc taxonomy drift: doc lists [${bucketsInDoc.join(', ')}], script has [${[...CATEGORIES].join(', ')}]`,
+  );
+
+  // 2. The fixture uses exactly the doc taxonomy — no silent bucket add/drop.
+  const cases = loadFixture();
+  const bucketsInFixture = [...new Set(cases.map((c) => c.expectCategory))].sort();
+  assert.deepEqual(
+    bucketsInFixture,
+    [...bucketsInDoc].sort(),
+    `fixture buckets [${bucketsInFixture.join(', ')}] disagree with doc taxonomy [${bucketsInDoc.join(', ')}]`,
+  );
+
+  // 3. The script's verdict mapping matches the doc's stated meanings.
+  assert.equal(categoryOf('ambiguous:a+b', false), 'ambiguous');
+  assert.equal(categoryOf('unknown', false), 'unknown');
+  assert.equal(categoryOf('vanity', false), 'vanity');
+  assert.equal(categoryOf('invite:abc', true), 'invite-exact');
+  assert.equal(categoryOf('invite:abc', false), 'invite-placed');
+
+  // 4. Every fixture expectation sits in its claimed bucket (taxonomy only —
+  // no attribution code runs here; evaluateCase covers the live path above).
+  for (const c of cases) {
+    const exp = c.expect;
+    if ('sources' in exp) {
+      exp.sources.forEach((s, i) => {
+        assert.equal(
+          categoryOf(s, exp.exact[i] as boolean),
+          c.expectCategory,
+          `case ${c.id}: expected source ${s} (exact=${exp.exact[i]}) is outside bucket ${c.expectCategory}`,
+        );
+      });
+    } else {
+      // Legacy single-join path records no exactness: placement by construction.
+      assert.equal(
+        categoryOf(exp.source, false),
+        c.expectCategory,
+        `case ${c.id}: expected source ${exp.source} is outside bucket ${c.expectCategory}`,
+      );
+    }
+  }
 });
 
 test('fixture validation rejects version drift, duplicates, and an empty set', () => {
