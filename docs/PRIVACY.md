@@ -112,17 +112,61 @@ DELETE FROM xp_cooldowns               WHERE member_id = '<id>';
 DELETE FROM member_levels              WHERE member_id = '<id>';
 DELETE FROM events                     WHERE member_id = '<id>';
 DELETE FROM members                    WHERE member_id = '<id>';
+DELETE FROM member_ranks               WHERE member_id = '<id>';
+DELETE FROM member_exclusions          WHERE member_id = '<id>';
+DELETE FROM invite_snapshots           WHERE inviter_id = '<id>';
+DELETE FROM community_facts            WHERE actor_id = '<id>';
 DELETE FROM automod_violations         WHERE user_id = '<id>';
 DELETE FROM automod_processed_messages WHERE user_id = '<id>';
-DELETE FROM moderation_warnings        WHERE user_id = '<id>';
+DELETE FROM moderation_warnings        WHERE user_id = '<id>' OR actor_id = '<id>';
+DELETE FROM moderation_scheduled_unbans WHERE user_id = '<id>';
 DELETE FROM moderation_audit           WHERE target_id = '<id>' OR actor_id = '<id>';
 DELETE FROM operational_audit_log      WHERE target_id = '<id>' OR actor_id = '<id>';
+DELETE FROM containment_events         WHERE target_id = '<id>' OR executor_id = '<id>';
+DELETE FROM containment_incidents      WHERE executor_id = '<id>';
+DELETE FROM join_risk_flags            WHERE member_id = '<id>';
+DELETE FROM event_rsvps                WHERE user_id = '<id>';
+DELETE FROM lfg_signups                WHERE user_id = '<id>';
+DELETE FROM self_role_audit            WHERE member_id = '<id>';
+DELETE FROM self_role_panel_claims     WHERE member_id = '<id>';
+DELETE FROM temp_voice_creates         WHERE user_id = '<id>';
+DELETE FROM temp_voice_audit           WHERE actor_id = '<id>';
+DELETE FROM temp_voice_channels        WHERE owner_id = '<id>' OR generator_id = '<id>'
+                                        OR pending_owner_id = '<id>';
+DELETE FROM announcements_audit_log    WHERE actor_id = '<id>';
+DELETE FROM automation_audit_log       WHERE actor_id = '<id>';
 ```
 
 `TicketStore.eraseMember()` performs the ticket-table portion in one transaction.
 `OperationalAuditStore.eraseMember()` performs the operational-audit portion in one transaction;
 its opaque `entry_id` may still contain a member ID for event identity, so matching rows are deleted rather than anonymized.
 This makes historical counts drop slightly, which is correct.
+
+What the block above deliberately does not touch, and why:
+
+- **Inviter IDs inside other members' join rows.** `events.metadata` on a
+  `member_join` row can carry `{inviterId}`. Deleting the member's own rows
+  leaves that attribution inside somebody else's join record, where it belongs
+  — it is that member's funnel history, and removing it would corrupt their
+  row. Erasure removes what the member *is*, not what they caused.
+- **Staff-admin attribution** (`created_by`/`updated_by` on automation,
+  scheduled/sticky, feed, LFG-post and temp-voice-channel definitions;
+  `guild_settings.updated_by` and `guild_settings_audit.actor`). These name
+  the admin who saved a definition, not the member being erased. When the
+  requester was themselves the admin author, reassign or remove those rows
+  case by case; there is no blanket DELETE because most of the time the two
+  people are not the same.
+- **Free-form audit keys** (`target_key` on the automation/announcements
+  audit logs, `source_id` on self-role audit rows). These are not provably
+  member IDs, so no DELETE line can match them reliably; review the rows by
+  hand when the action that wrote them could have named the member.
+- **`presence_probe`** holds one guild-wide number per hour with no
+  per-member data (see `docs/PRESENCE_PROBE.md`). Nothing to delete.
+
+`test/unit.privacyretention.test.ts` pins this section: the 90-day
+`purge_after` arithmetic, the startup-purge predicate, both `eraseMember`
+implementations, and a schema sweep that fails when a new per-member column
+lands without a DELETE line (or a written reason it needs none).
 
 ## Boundaries this codebase enforces
 
