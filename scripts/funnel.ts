@@ -15,7 +15,12 @@
  */
 import { openDb } from '../src/store/db.ts';
 import { ANOMALIES, detectSpikes, excludeClause } from '../src/analytics/anomalies.ts';
-import { findBlindWindows } from '../src/core/voiceSessions.ts';
+import {
+  findBlindWindows,
+  formatVoiceDurationSeconds,
+  parseVoiceEndMetadata,
+  summarizeVoiceDurations,
+} from '../src/core/voiceSessions.ts';
 import {
   countDowntimeUnknownJoins,
   renderDowntimeReport,
@@ -97,6 +102,21 @@ const leaves = await one(
   ...leaveExcl.params,
 );
 const leavesSetAside = leavesAll - leaves;
+
+// Average voice session length, over known-start sessions only (TOG-5684).
+// `startKnown: false` ends carry no measured start, so they are counted in
+// the voice-sessions reconcile and excluded here via the shared helper.
+const voiceDurationSummary = summarizeVoiceDurations(
+  (
+    await db
+      .prepare(
+        `SELECT metadata FROM events
+          WHERE event_type = 'voice_session_end' AND occurred_at >= ?`,
+      )
+      .all<{ metadata: string | null }>(since)
+      .catch(() => [] as Array<{ metadata: string | null }>)
+  ).map((r) => parseVoiceEndMetadata(r.metadata)),
+);
 
 // Clicks only exist for invites posted as a go.two.gg link (TOG-116). A raw
 // discord.gg link is clicked off-platform where nothing can observe it, so it
@@ -275,6 +295,9 @@ const report = {
   campaigns: perCampaign,
   voice: {
     firstVoiceSessions: firstVoice,
+    avgSessionSeconds: voiceDurationSummary.averageSeconds,
+    measuredSessions: voiceDurationSummary.measured,
+    excludedUnknownStarts: voiceDurationSummary.excludedUnknownStarts,
   },
   retention,
   neverPosted: never,
@@ -320,6 +343,15 @@ if (asJson) {
   }
   console.log(`  posted first message ${String(firstMsg).padStart(6)}   ${pct(firstMsg, joins)} of joins`);
   console.log(`  first voice session  ${String(firstVoice).padStart(6)}   ${pct(firstVoice, joins)} of joins`);
+  // Known-start sessions only (TOG-5684): unknown starts carry no measured
+  // duration and are excluded via the shared helper, counted in
+  // `npm run voice` instead of averaged in here.
+  console.log(
+    `  avg voice session    ${voiceDurationSummary.averageSeconds === null ? '     —' : String(formatVoiceDurationSeconds(voiceDurationSummary.averageSeconds)).padStart(6)}` +
+      (voiceDurationSummary.averageSeconds === null
+        ? '   (no measured session in window)'
+        : `   over ${voiceDurationSummary.measured} measured, ${voiceDurationSummary.excludedUnknownStarts} unknown-start excluded`),
+  );
   console.log(`  left                 ${String(leaves).padStart(6)}`);
   if (leavesSetAside > 0) {
     console.log(`   +${String(leavesSetAside).padStart(5)} set aside as a one-off event, see below`);

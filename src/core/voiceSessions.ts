@@ -190,3 +190,111 @@ export function renderReconcileReport(counts: readonly BlindWindowCount[]): stri
       `${w.unknownStarts} session(s) with unknown start (counted, never averaged)`,
   );
 }
+
+// --- duration averages (TOG-5684) -------------------------------------------
+//
+// EVENTS.md warns to filter on `startKnown` before averaging durations, but a
+// warning is not enforcement: every averaging query has to remember it, and
+// the one that forgets silently includes nulls (or outage-shortened numbers)
+// in a mean. This section is the single enforcement point. Every report that
+// averages voice durations - scripts/voice-sessions.ts, scripts/funnel.ts and
+// scripts/dashboard.ts (via src/analytics/dashboard.ts) - parses its end rows
+// with `parseVoiceEndMetadata` and averages with `averageKnownVoiceDuration`.
+// There is no other supported path from an end row to a mean.
+//
+// The filter is on the FLAG, not on the duration being null. An unknown-start
+// end carries `durationSeconds: null` today, but the enforcement must not
+// depend on that staying true: a row with `startKnown: false` and a numeric
+// duration is still excluded, because we never saw the start and any number
+// on it is unproven.
+
+/** The only two fields any duration average may read from an end row. */
+export interface VoiceDurationRow {
+  /** False means the bot never saw the start - excluded from every average. */
+  startKnown: boolean;
+  /** Seconds, or null when unmeasured. */
+  durationSeconds: number | null;
+}
+
+/**
+ * Parse one `voice_session_end` metadata blob into the shape averages read.
+ *
+ * Unparseable metadata defaults to `startKnown: true` with no duration: we
+ * must not claim the start is unknown when the row itself is unreadable, and
+ * a row with no duration contributes nothing to a mean either way. This
+ * matches the reconcile path's long-standing rule in scripts/voice-sessions.ts.
+ */
+export function parseVoiceEndMetadata(metadata: string | null): VoiceDurationRow {
+  try {
+    const m = JSON.parse(metadata ?? '{}') as { startKnown?: unknown; durationSeconds?: unknown };
+    const raw = m.durationSeconds;
+    const durationSeconds =
+      typeof raw === 'number' ? raw : raw === null || raw === undefined ? null : Number(raw);
+    return {
+      startKnown: m.startKnown !== false,
+      durationSeconds: typeof durationSeconds === 'number' ? durationSeconds : null,
+    };
+  } catch {
+    return { startKnown: true, durationSeconds: null };
+  }
+}
+
+/**
+ * The durations that may enter a mean: known-start ends with a finite,
+ * non-negative duration. Everything else - unknown starts (even with a
+ * number), nulls, negatives, NaNs - is dropped, never zero-filled. A
+ * zero-filled unknown would drag the mean down with invented data; dropping
+ * it keeps the mean a statement about measured sessions only.
+ */
+export function knownVoiceDurations(rows: readonly VoiceDurationRow[]): number[] {
+  const out: number[] = [];
+  for (const r of rows) {
+    if (r.startKnown === false) continue;
+    // Explicit null check BEFORE Number(): Number(null) is 0, and an
+    // unmeasured duration entering a mean as a zero is exactly the silent
+    // corruption this helper exists to prevent.
+    if (r.durationSeconds === null || r.durationSeconds === undefined) continue;
+    const d = Number(r.durationSeconds);
+    if (!Number.isFinite(d) || d < 0) continue;
+    out.push(d);
+  }
+  return out;
+}
+
+/**
+ * Mean duration over known-start sessions only. Null when no measured
+ * session exists - "no measured sessions" is not a zero-second average.
+ */
+export function averageKnownVoiceDuration(rows: readonly VoiceDurationRow[]): number | null {
+  const known = knownVoiceDurations(rows);
+  if (known.length === 0) return null;
+  return known.reduce((a, b) => a + b, 0) / known.length;
+}
+
+/** One call per report: the mean plus the two counts that prove it is honest. */
+export interface VoiceDurationSummary {
+  /** Mean over known-start sessions only; null when none measured. */
+  averageSeconds: number | null;
+  /** Known-start sessions with a usable duration that entered the mean. */
+  measured: number;
+  /** `startKnown: false` ends excluded before averaging. Counted, never averaged. */
+  excludedUnknownStarts: number;
+}
+
+export function summarizeVoiceDurations(rows: readonly VoiceDurationRow[]): VoiceDurationSummary {
+  return {
+    averageSeconds: averageKnownVoiceDuration(rows),
+    measured: knownVoiceDurations(rows).length,
+    excludedUnknownStarts: rows.filter((r) => r.startKnown === false).length,
+  };
+}
+
+/** `47m`, `2h05m`, `45s` - compact enough for a report column. */
+export function formatVoiceDurationSeconds(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  return `${h}h${String(m % 60).padStart(2, '0')}m`;
+}

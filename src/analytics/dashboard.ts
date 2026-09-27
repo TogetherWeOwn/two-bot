@@ -22,6 +22,7 @@
  */
 import type { Db } from '../store/db.ts';
 import { ANOMALIES, isExcluded, type Anomaly } from './anomalies.ts';
+import { parseVoiceEndMetadata, summarizeVoiceDurations } from '../core/voiceSessions.ts';
 
 const DAY_MS = 86_400_000;
 
@@ -155,6 +156,17 @@ export interface DashboardData {
   memberCountAsOf: string | null;
   /** Joined, never posted, never spoke, still here. */
   joinedNeverSpoke: number;
+  /**
+   * Mean voice session length in seconds, over known-start sessions only.
+   * `startKnown: false` ends carry no measured start and are excluded via the
+   * shared helper (TOG-5684) - see `excludedUnknownStarts` for how many were
+   * left out. Null when no session was measured, which is not a zero average.
+   */
+  avgVoiceSessionSeconds: number | null;
+  /** Known-start sessions with a usable duration that entered the mean. */
+  measuredVoiceSessions: number;
+  /** `startKnown: false` ends excluded before averaging. Counted, never averaged. */
+  excludedUnknownStarts: number;
   weeks: WeekRow[];
   cohorts: CohortRow[];
   /** All-time roll-up of the cohort table, for the headline retention numbers. */
@@ -422,6 +434,18 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
   const leaveEvents = await db
     .prepare(`SELECT occurred_at FROM events WHERE event_type = 'member_leave'`)
     .all<{ occurred_at: string }>();
+
+  // Average voice session length, over known-start sessions only (TOG-5684).
+  // Raw rows in, one tested code path out: the shared helper parses each
+  // metadata blob and drops `startKnown: false` ends before averaging, so a
+  // bot-down gap can never silently shorten the mean. Rule 1 holds - the DB
+  // is asked for rows, the arithmetic stays here in JS where tests reach it.
+  const voiceEnds = await db
+    .prepare(`SELECT metadata FROM events WHERE event_type = 'voice_session_end'`)
+    .all<{ metadata: string | null }>();
+  const voiceDurationSummary = summarizeVoiceDurations(
+    voiceEnds.map((r) => parseVoiceEndMetadata(r.metadata)),
+  );
 
   const channelEvents = await db
     .prepare(
@@ -713,6 +737,9 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
     memberCountSource,
     memberCountAsOf,
     joinedNeverSpoke,
+    avgVoiceSessionSeconds: voiceDurationSummary.averageSeconds,
+    measuredVoiceSessions: voiceDurationSummary.measured,
+    excludedUnknownStarts: voiceDurationSummary.excludedUnknownStarts,
     weeks,
     cohorts,
     retentionOverall,
