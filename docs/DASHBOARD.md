@@ -162,3 +162,74 @@ a web page for a reason.
 the caveats it renders. `npm run funnel` prints the same numbers from the same
 tables in the terminal — if those two disagree, one of them has a bug and the
 event log is the tiebreaker.
+
+---
+
+## The `--json` contract
+
+`npm run dashboard -- --json` prints the `DashboardData` object defined in
+`src/analytics/dashboard.ts` — the exact object `renderHtml` builds the page
+from, so the page and the JSON cannot disagree. `--serve` mode serves the same
+object at `/dashboard.json`. The output is JSON-safe: it survives
+`JSON.parse(JSON.stringify(data))` unchanged.
+
+**Stability promise:** downstream consumers parse this output, so keys are
+never renamed or removed without updating this section AND
+`test/unit.dashboard-json.test.ts` in the same commit. That test pins the full
+key set and every field's type on seeded data and fails on any rename, removal
+or undocumented addition. `null` means "not measurable", never zero — see the
+per-field notes.
+
+Top-level fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `generatedAt` | string (ISO instant) | When the numbers were built; `thisWeek` covers `[thisWeek.start, generatedAt)` |
+| `guildId` | string \| null | Discord guild the events came from; null when the log is empty |
+| `thisWeek` / `lastWeek` | `{ start, joins, leaves, net }` | `start` is the Monday (`YYYY-MM-DD`) of the week; `net` = joins − leaves, counted numbers only |
+| `active7d` / `active30d` | number | Members still here with `last_active_at` in the window; leavers never count |
+| `humansInServer` | number | Non-bot members who have not left (Discord's member-list number) |
+| `raidAccountsStillCounted` | number | Of those, accounts that arrived in a known raid window |
+| `realHumans` | number | `humansInServer` − `raidAccountsStillCounted`; the headline community size |
+| `memberCountSource` | `'funnel'` \| `'snapshot'` \| `'none'` | `funnel`: live members table; `snapshot`: dated audit census, used only when the table is empty; `none`: neither has anything |
+| `memberCountAsOf` | string \| null | Census instant, set only when `memberCountSource` is `'snapshot'` |
+| `joinedNeverSpoke` | number | Still here, joined, no first message or voice session on record |
+| `avgVoiceSessionSeconds` | number \| null | Mean over known-start sessions only; null when none measured — not a zero average |
+| `measuredVoiceSessions` | number | Known-start sessions with a usable duration that entered the mean |
+| `excludedUnknownStarts` | number | `startKnown: false` ends left out before averaging; counted, never averaged |
+| `weeks` | `WeekRow[]` | Per-week history, oldest first |
+| `cohorts` | `CohortRow[]` | One row per week in `weeks` |
+| `retentionOverall` | `{ d1, d7, d30 }` | All-time roll-up of the cohort table; each a `RetentionCell` or null |
+| `gateOverall` | `GateConversion` \| null | All-time rules-gate conversion; null when never observed — not 0% |
+| `sourcesAllTime` | `SourceCount[]` | Joins by human-readable source, biggest first |
+| `channels` | `ChannelRow[]` | Channel activity, busiest first |
+| `channelSnapshotAt` | string \| null | When the channel snapshot was taken; null when there is none |
+| `caveats` | string[] | Honest caveats, rendered on the page |
+| `anomalies` | `Anomaly[]` | `unconfirmed` and `confirmed` windows only |
+
+Nested shapes:
+
+- `WeekRow`: `weekStart` (string, Monday `YYYY-MM-DD`), `joins`, `setAside`
+  (joins inside anomaly windows — reported, never averaged in), `leaves`, `net`,
+  `bySource` (`SourceCount[]` for that week).
+- `SourceCount`: `source` (raw string as recorded), `label` (what a human
+  reads), `unattributed` (boolean — true means "we do not know", not a real
+  channel), `joins`.
+- `CohortRow`: `weekStart`, `size` (non-bot, non-anomaly joins that week), `d1`
+  / `d7` / `d30` (`RetentionCell`, or null when the cohort has not aged that
+  far), `gate` (`GateConversion`, or null when never observed).
+- `RetentionCell`: `eligible` (members whose Nth day has happened),
+  `stayed` (still in the server on day N — exact), `active` (recorded active on
+  or after day N — under-reports pre-bot history).
+- `GateConversion`: `observed` (the denominator: cleared + stuck +
+  leftAtTheGate), `cleared`, `stuck` (never cleared, still here — the action
+  list), `leftAtTheGate` (never cleared, gone, joined while watched),
+  `unknowable` (left out of the percentage: joined and left before we watched).
+- `ChannelRow`: `channelId`, `name`, `category` (string \| null),
+  `humanMsgs30d` / `humanMsgs90d` / `uniqueHumans30d` (number \| null — null
+  with no snapshot), `lastMessageAt` (string \| null), `daysSilent` (number \|
+  null), `events30d` (funnel events attributed to the channel — always known),
+  `state` (`'alive'` \| `'quiet'` \| `'silent'`).
+- `Anomaly`: `id`, `kind` (`'raid'` \| `'cleanup'` \| `'prune'`), `start` /
+  `end` (`YYYY-MM-DD`, inclusive), `eventTypes`, `status` (`'confirmed'` \|
+  `'unconfirmed'`), `label`, `note`.
