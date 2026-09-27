@@ -174,6 +174,54 @@ test('nothing about the visitor is stored', async () => {
   assert.equal((await get('/reddit')).headers.get('set-cookie'), null);
 });
 
+test('a stored click is campaign + timestamps and nothing else', async () => {
+  await addCampaign('reddit');
+  await get('/reddit', {
+    headers: {
+      'user-agent': 'Mozilla/5.0 (very identifying)',
+      referer: 'https://example.com/somewhere',
+      cookie: 'session=secret',
+      'x-forwarded-for': '203.0.113.44',
+    },
+  });
+
+  // Full-row shape, not just a leak scan: the record is allowed exactly these
+  // values, and every one of them is ours (campaign slug, invite code, guild,
+  // server timestamps), never the visitor's.
+  const rows = await t.db
+    .prepare(
+      `SELECT event_type, member_id, guild_id, occurred_at, recorded_at, source, metadata, idempotency_key
+         FROM events WHERE event_type='invite_click'`,
+    )
+    .all<{
+      event_type: string;
+      member_id: string | null;
+      guild_id: string;
+      occurred_at: string;
+      recorded_at: string;
+      source: string;
+      metadata: string | null;
+      idempotency_key: string;
+    }>();
+  assert.equal(rows.length, 1);
+  const row = rows[0];
+  assert.equal(row.event_type, 'invite_click');
+  assert.equal(row.member_id, null);
+  assert.equal(row.guild_id, GUILD);
+  assert.equal(row.source, `invite:${CODE}`);
+  assert.deepEqual(JSON.parse(row.metadata ?? '{}'), { campaign: 'reddit' });
+  assert.match(row.occurred_at, /^\d{4}-\d{2}-\d{2}T/);
+  assert.match(row.recorded_at, /^\d{4}-\d{2}-\d{2}T/);
+
+  // The socket address exists only to pick a rate-limit bucket (see
+  // src/redirect/server.ts); it must not survive into the stored row. In this
+  // suite every request arrives from loopback, so its absence here is the proof.
+  const blob = JSON.stringify(row);
+  for (const leak of ['Mozilla', 'example.com/somewhere', 'secret', '203.0.113.44', '127.0.0.1']) {
+    assert.ok(!blob.includes(leak), `recorded event must not contain ${leak}: ${blob}`);
+  }
+});
+
 test('the query string is dropped, not recorded', async () => {
   await addCampaign('reddit');
   const res = await get('/reddit?fbclid=abc123&utm_source=somewhere');
@@ -214,11 +262,76 @@ test('a non-GET method is refused', async () => {
   assert.equal((await clicks()).length, 0);
 });
 
+// --- abuse bursts -----------------------------------------------------------
+
+// Per-caller (IP), not per-campaign: this bucket is keyed by socket address,
+// so a burst from many addresses against one campaign is NOT throttled today.
+// Throttling that would need cross-IP campaign counters; the gap is tracked
+// as TOG-5895 and documented in docs/INVITE_TRACKING.md (Design notes).
+
+test('an abuse burst from one caller is throttled at 429 and never recorded', async () => {
+  await addCampaign('reddit');
+  // A private listener with a tiny bucket and a frozen clock: every request
+  // lands in the same instant, so refill cannot rescue the burst and the
+  // verdict is deterministic instead of timing-dependent.
+  let now = 1_000_000;
+  const burst = await startRedirectServer({
+    host: '127.0.0.1',
+    port: 0,
+    guildId: GUILD,
+    campaigns,
+    recorder: handlers,
+    fallbackInviteCode: 'fallbackCode',
+    bucket: { capacity: 5, refillPerSecond: 1 },
+    now: () => now,
+  });
+  try {
+    const burstGet = async (path: string) => {
+      const res = await fetch(`http://127.0.0.1:${burst.port}${path}`, { redirect: 'manual' });
+      await burst.drain();
+      return res;
+    };
+    const statuses: number[] = [];
+    for (let i = 0; i < 8; i++) statuses.push((await burstGet('/reddit')).status);
+    assert.deepEqual(statuses, [302, 302, 302, 302, 302, 429, 429, 429]);
+
+    const throttled = await burstGet('/no-such-campaign');
+    assert.equal(throttled.status, 429);
+    assert.equal(throttled.headers.get('retry-after'), '1');
+
+    // The refused requests never touched the database: the cap runs before
+    // lookup, so a crawler cannot turn a burst into load OR into rows.
+    assert.equal((await clicks()).length, 5);
+
+    // A minute later the bucket has refilled and a human clicks again.
+    now += 61_000;
+    assert.equal((await burstGet('/reddit')).status, 302);
+    assert.equal((await clicks()).length, 6);
+  } finally {
+    await burst.close();
+  }
+});
+
 // --- unknown and malformed slugs --------------------------------------------
 
-test('an unknown slug is a 404 and records nothing', async () => {
+test('an unknown slug is a 404 with no redirect target and records nothing', async () => {
   const res = await get('/never-created');
   assert.equal(res.status, 404);
+  // No Location header: an unknown slug must not bounce anywhere an attacker
+  // chooses — there is no open redirect here to launder a phishing link through.
+  assert.equal(res.headers.get('location'), null);
+  assert.equal((await clicks()).length, 0);
+});
+
+test('an unknown slug under burst stays 404 and still records nothing', async () => {
+  await addCampaign('reddit');
+  const seen = new Set<number>();
+  for (let i = 0; i < 10; i++) {
+    const res = await get(`/no-such-campaign-${i}`);
+    seen.add(res.status);
+    assert.equal(res.headers.get('location'), null);
+  }
+  assert.deepEqual([...seen].sort(), [404]);
   assert.equal((await clicks()).length, 0);
 });
 
