@@ -42,10 +42,24 @@ function ownInterfaceAddresses() {
   const out = [];
   for (const addresses of Object.values(networkInterfaces())) {
     for (const a of addresses ?? []) {
-      if (a.family === 'IPv4' && !a.internal) out.push(a.address);
+      // Node reports family as 'IPv4' (string) on modern runtimes and 4
+      // (numeric) on older ones; accept both so the own-interface allowlist
+      // cannot silently come back empty on one runtime variant.
+      if ((a.family === 'IPv4' || a.family === 4) && !a.internal) out.push(a.address);
     }
   }
   return out;
+}
+
+/** Entire 127.0.0.0/8 is loopback (RFC 1122 §3.2.1.3), not just 127.0.0.1.
+ * The default fixture URL uses 127.0.0.1, but the own-address case may use
+ * another 127/8 alias where the host has no private NIC — still strictly
+ * local. Mirrors src/internal/bind.ts treating 127/8 as private. */
+function isLoopbackIPv4(host) {
+  const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!v4) return false;
+  const octets = v4.slice(1).map(Number);
+  return octets[0] === 127 && octets.every((n) => n >= 0 && n <= 255);
 }
 
 /** RFC1918, CGNAT and link-local IPv4. Mirrors src/internal/bind.ts; anything
@@ -79,12 +93,13 @@ function preflight() {
   kid = entry.slice(0, at); secret = entry.slice(at + 1);
   check(/^[A-Za-z0-9_-]+$/.test(kid), 'preflight.keys');
   url = new URL(process.env.INTERNAL_ACTIONS_URL ?? 'http://127.0.0.1:8787');
-  // Literal loopback, or one of this process's own private interface addresses
-  // (the staging listener binds the container NIC, not loopback). DNS names,
-  // public addresses and foreign private addresses still refuse: the proof must
-  // talk to the local bot, never a remote impostor that always passes.
+  // Any 127/8 loopback alias, literal [::1], or one of this process's own
+  // private interface addresses (the staging listener binds the container
+  // NIC, not loopback). DNS names, public addresses and foreign private
+  // addresses still refuse: the proof must talk to the local bot, never a
+  // remote impostor that always passes.
   const host = url.hostname;
-  const loopback = ['127.0.0.1', '[::1]'].includes(host);
+  const loopback = host === '[::1]' || isLoopbackIPv4(host);
   const ownPrivate = isPrivateIPv4(host) && ownInterfaceAddresses().includes(host);
   check(url.protocol === 'http:' && (loopback || ownPrivate) &&
     !url.username && !url.password && !url.search && !url.hash && url.pathname === '/', 'preflight.url');
