@@ -847,12 +847,20 @@ test('access_token appears in no log line: success, rejection, or thrown excepti
 test('the structured log line names the caller, the action and the outcome', async () => {
   const srv = await start();
   let line: Record<string, unknown> | undefined;
+  let requestId: string | undefined;
 
   const logs = await captureLogs(async () => {
-    await call(srv, { body: roleAssign });
+    const res = await call(srv, { body: roleAssign });
+    requestId = res.body.request_id;
   });
+  // Match on the request_id join key, not last-match-wins: the unknown_route
+  // 404 probe (keyId null) shares this stream whenever the runner overlaps
+  // tests, and last-match-wins picked it up (run 36344199113:
+  // null !== 'web-prod'). request_id is unique per request, so this selects
+  // exactly our line.
+  assert.ok(requestId, 'no request_id in response');
   for (const parsed of jsonLines(logs)) {
-    if (parsed.msg === 'internal_action') line = parsed;
+    if (parsed.msg === 'internal_action' && parsed.requestId === requestId) line = parsed;
   }
 
   assert.ok(line, 'no internal_action log line');
@@ -866,10 +874,15 @@ test('the structured log line names the caller, the action and the outcome', asy
 
 test('a rejection logs its reason code, so a run of them is diagnosable', async () => {
   const srv = await start();
+  let requestId: string | undefined;
   const logs = await captureLogs(async () => {
-    await call(srv, { body: roleAssign, timestamp: String(Math.floor(Date.now() / 1000) - 300) });
+    const res = await call(srv, { body: roleAssign, timestamp: String(Math.floor(Date.now() / 1000) - 300) });
+    requestId = res.body.request_id;
   });
-  const line = jsonLines(logs).find((l) => l.msg === 'internal_action');
+  // Same join-key selection as above: without it a concurrent test's
+  // internal_action line can satisfy `.find()` first.
+  assert.ok(requestId, 'no request_id in response');
+  const line = jsonLines(logs).find((l) => l.msg === 'internal_action' && l.requestId === requestId);
 
   assert.equal(line?.code, 'stale_request');
   assert.equal(line?.reason, 'stale_timestamp', 'a pile of these is a clock problem, and should read like one');
