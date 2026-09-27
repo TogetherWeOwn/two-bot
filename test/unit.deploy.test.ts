@@ -149,6 +149,115 @@ function checkUnit(unit: ParsedUnit, deployFiles: string[]): string[] {
   return problems;
 }
 
+// ---------------------------------------------------------------------------
+// TOG-5688. Hardening invariants: every unit carries the same sandbox, restart
+// policy is deliberate per type, and secrets never bake into Environment=.
+// ---------------------------------------------------------------------------
+
+/** Secret env names that must never appear as `Environment=NAME=` literals. */
+// Twin of SECRET_ENV in scripts/ci/check-systemd-credentials.sh (R1): the
+// shell guard runs in CI, these parser checks run under `npm test`. Adding a
+// secret means updating both lists.
+const SECRET_ENV_NAMES = new Set([
+  'DISCORD_TOKEN',
+  'DISCORD_BOT_TOKEN',
+  'TWO_DATABASE_URL',
+  'TWO_RESTORE_URL',
+  'TWO_INTERNAL_KEYS',
+  'DISCORD_STAGING_BOT_TOKEN',
+  'TWO_E2E_USER_TOKEN',
+  'TWO_MODERATION_AUDIT_SECRET',
+  'TWO_BACKUP_S3_ENDPOINT',
+  'TWO_BACKUP_S3_BUCKET',
+  'TWO_BACKUP_S3_ACCESS_KEY_ID',
+  'TWO_BACKUP_S3_SECRET_ACCESS_KEY',
+]);
+
+// Directives every service carries. Values differ per unit (MemoryMax 192M vs
+// 512M), so entries without a `value` assert presence only: the number is a
+// capacity decision, the presence is the invariant.
+const REQUIRED_SANDBOX: ReadonlyArray<{ key: string; value?: string }> = [
+  { key: 'NoNewPrivileges', value: 'true' },
+  { key: 'PrivateTmp', value: 'true' },
+  { key: 'ProtectSystem', value: 'strict' },
+  { key: 'ProtectHome', value: 'true' },
+  { key: 'UMask', value: '0077' },
+  { key: 'CapabilityBoundingSet', value: '' },
+  { key: 'MemoryMax' },
+];
+
+/**
+ * The hardening-tier checks. Pure function of the parsed unit, so the
+ * broken-fixture tests below exercise it without touching disk.
+ */
+function checkHardening(unit: ParsedUnit): string[] {
+  const problems: string[] = [];
+  const name = unit.path.split('/').pop() ?? unit.path;
+  if (!name.endsWith('.service')) return problems;
+  const svc = (key: string) => getAll(unit, 'Service', key);
+
+  for (const { key, value } of REQUIRED_SANDBOX) {
+    const found = svc(key)[0];
+    if (!found) {
+      problems.push(`${name}: [Service] ${key} is missing - every unit carries the shared sandbox baseline`);
+    } else if (value !== undefined && found.value.trim() !== value) {
+      problems.push(
+        `${name}: [Service] ${key}=${found.value} must be ${value === '' ? 'empty' : value} - the baseline is identical everywhere`,
+      );
+    }
+  }
+
+  // Secrets travel as LoadCredential files or EnvironmentFile entries, never
+  // baked into the unit (docs/SECRETS.md rule 3).
+  for (const env of svc('Environment')) {
+    const varName = env.value.split('=')[0]?.trim() ?? '';
+    if (SECRET_ENV_NAMES.has(varName)) {
+      problems.push(
+        `${name}: [Service] Environment=${varName}=... bakes a secret into the unit - use LoadCredential, never env`,
+      );
+    }
+  }
+
+  // Credential source files are root-owned 600 under one directory, provisioned
+  // by scripts/bootstrap-host.sh. A credential pointing anywhere else is either
+  // a typo or a file nobody provisions.
+  for (const cred of svc('LoadCredential')) {
+    const src = cred.value.split(':')[1]?.trim() ?? '';
+    if (!src.startsWith('/etc/two-bot/credentials/')) {
+      problems.push(
+        `${name}: [Service] LoadCredential source ${src || '(empty)'} is outside /etc/two-bot/credentials/`,
+      );
+    }
+  }
+
+  const type = getOne(unit, 'Service', 'Type')?.value.trim() ?? 'simple';
+  const restart = getOne(unit, 'Service', 'Restart')?.value.trim();
+  if (type === 'oneshot') {
+    // Timer-started oneshots must stay failed when they fail: the timer refires
+    // on schedule, and a Restart= loop would hide the failure.
+    if (restart !== undefined) {
+      problems.push(
+        `${name}: [Service] oneshot units carry no Restart= (got ${restart}) - the timer refires; a failed run must stay failed`,
+      );
+    }
+  } else {
+    if (restart !== 'always' && restart !== 'on-failure') {
+      problems.push(
+        `${name}: [Service] long-running units need Restart=always (got ${restart ?? 'missing'}) - the bot comes back without anyone noticing`,
+      );
+    }
+    for (const key of ['RestartSec', 'StartLimitIntervalSec', 'StartLimitBurst']) {
+      if (!getOne(unit, 'Service', key)) {
+        problems.push(
+          `${name}: [Service] ${key} is missing - restart without backoff and a crash-loop cap burns the Discord identify budget silently`,
+        );
+      }
+    }
+  }
+
+  return problems;
+}
+
 /** `systemd-analyze verify` where the binary exists; null when it does not. */
 function systemdVerifyAvailable(): boolean {
   try {
@@ -197,6 +306,7 @@ test('every unit in deploy/ parses and satisfies the structural checks', () => {
       continue;
     }
     problems.push(...checkUnit(unit, files));
+    problems.push(...checkHardening(unit));
   }
   assert.deepEqual(problems, [], `deploy/ unit problems:\n${problems.join('\n')}`);
 });
@@ -277,6 +387,110 @@ test('a timer pointing Unit= at nothing fails', () => {
 
 test('a unit with content outside any section fails to parse', () => {
   assert.throws(() => parseUnit('ExecStart=/usr/bin/node x.ts\n', 'stray.service'), /outside any section/);
+});
+
+// ---------------------------------------------------------------------------
+// TOG-5688 fixtures: each hardening rule must fail on a deliberately broken
+// unit. Assertions name the rule, not just non-zero: a guard that fails for
+// the wrong reason goes vacuous the same way.
+// ---------------------------------------------------------------------------
+
+const HARDENED_ONESHOT = [
+  '[Unit]',
+  'Description=hardened',
+  '',
+  '[Service]',
+  'Type=oneshot',
+  'ExecStart=/usr/bin/node scripts/x.ts',
+  'NoNewPrivileges=true',
+  'PrivateTmp=true',
+  'ProtectSystem=strict',
+  'ProtectHome=true',
+  'UMask=0077',
+  'CapabilityBoundingSet=',
+  'MemoryMax=512M',
+  '',
+  '[Install]',
+  'WantedBy=multi-user.target',
+  '',
+].join('\n');
+
+const HARDENED_LONG_RUNNING = HARDENED_ONESHOT.replace('Type=oneshot', 'Type=simple').replace(
+  'MemoryMax=512M',
+  'Restart=always\nRestartSec=5\nStartLimitIntervalSec=300\nStartLimitBurst=10\nMemoryMax=512M',
+);
+
+function hardeningProblems(name: string, text: string): string[] {
+  return checkHardening(parseUnit(text, name));
+}
+
+test('a service missing the sandbox baseline fails', () => {
+  const problems = hardeningProblems(
+    'bare.service',
+    '[Unit]\nDescription=bare\n\n[Service]\nType=simple\nExecStart=/usr/bin/node x.ts\nRestart=always\nRestartSec=5\nStartLimitIntervalSec=300\nStartLimitBurst=10\n\n[Install]\nWantedBy=multi-user.target\n',
+  );
+  for (const key of ['NoNewPrivileges', 'ProtectSystem', 'CapabilityBoundingSet', 'MemoryMax']) {
+    assert.ok(
+      problems.some((p) => p.includes(key)),
+      `expected a ${key} problem, got: ${problems}`,
+    );
+  }
+});
+
+test('a secret baked into Environment= fails', () => {
+  const text = HARDENED_LONG_RUNNING.replace(
+    'Restart=always',
+    'Environment=DISCORD_TOKEN=live-value-that-must-never-be-here\nRestart=always',
+  );
+  const problems = hardeningProblems('leaky.service', text);
+  assert.ok(
+    problems.some((p) => p.includes('DISCORD_TOKEN') && p.includes('LoadCredential')),
+    `expected a baked-secret problem, got: ${problems}`,
+  );
+});
+
+test('a credential pointing outside /etc/two-bot/credentials/ fails', () => {
+  const text = HARDENED_LONG_RUNNING.replace(
+    'MemoryMax=512M',
+    'LoadCredential=discord_token:/tmp/somewhere-else\nMemoryMax=512M',
+  );
+  const problems = hardeningProblems('stray-cred.service', text);
+  assert.ok(
+    problems.some((p) => p.includes('/etc/two-bot/credentials/')),
+    `expected a credential-path problem, got: ${problems}`,
+  );
+});
+
+test('a long-running service with no Restart= fails', () => {
+  const text = HARDENED_LONG_RUNNING.replace('Restart=always\n', '');
+  const problems = hardeningProblems('norestart.service', text);
+  assert.ok(
+    problems.some((p) => p.includes('Restart=always')),
+    `expected a Restart problem, got: ${problems}`,
+  );
+});
+
+test('a long-running service with no crash-loop cap fails', () => {
+  const text = HARDENED_LONG_RUNNING.replace('StartLimitBurst=10\n', '');
+  const problems = hardeningProblems('nocap.service', text);
+  assert.ok(
+    problems.some((p) => p.includes('StartLimitBurst')),
+    `expected a crash-loop-cap problem, got: ${problems}`,
+  );
+});
+
+test('an oneshot with Restart= fails', () => {
+  const text = HARDENED_ONESHOT.replace('MemoryMax=512M', 'Restart=always\nMemoryMax=512M');
+  const problems = hardeningProblems('looping.service', text);
+  assert.ok(
+    problems.some((p) => p.includes('oneshot')),
+    `expected an oneshot-restart problem, got: ${problems}`,
+  );
+});
+
+test('fully hardened units pass', () => {
+  assert.deepEqual(hardeningProblems('ok-long.service', HARDENED_LONG_RUNNING), []);
+  assert.deepEqual(hardeningProblems('ok-oneshot.service', HARDENED_ONESHOT), []);
 });
 
 // ---------------------------------------------------------------------------
