@@ -28,10 +28,12 @@ import { AutomationStore, type StickyMessageRow } from '../src/automations/store
 import { registerAutomationGateway, triggerWord } from '../src/automations/gateway.ts';
 import { CommandRegistry, mergedCommandData } from '../src/discord/commandRegistry.ts';
 import { MODERATION_COMMAND_DATA } from '../src/moderation/commands.ts';
+import { ROTA_ACKNOWLEDGEMENT_COMMAND } from '../src/discord/rotaAcknowledgement.ts';
 import {
   ANNOUNCEMENT_COMMAND_DATA,
   AUTOMATION_COMMAND_DATA,
   COMMUNITY_COMMAND_DATA,
+  TEMP_VOICE_COMMAND_DATA,
   MAX_CUSTOM_COMMANDS,
 } from '../src/discord/commandNames.ts';
 import { openTestDb, TEST_PG_URL, type TestDb } from './helpers/testDb.ts';
@@ -217,6 +219,8 @@ test('command registry rejects overflow instead of silently truncating definitio
       ...AUTOMATION_COMMAND_DATA,
       ...ANNOUNCEMENT_COMMAND_DATA,
       ...MODERATION_COMMAND_DATA,
+      ...TEMP_VOICE_COMMAND_DATA,
+      ROTA_ACKNOWLEDGEMENT_COMMAND,
     ] as ApplicationCommandDataResolvable[]),
     /above Discord's guild limit/,
   );

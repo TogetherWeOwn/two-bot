@@ -54,6 +54,8 @@ export const NAMES: Record<number, string> = {
   16: 'Read Message History',
   28: 'Manage Roles',
   33: 'Manage Events',
+  40: 'Moderate Members',
+  44: 'Create Events',
 };
 
 /** Why each expected bit is held, so a reviewer can challenge it by name
