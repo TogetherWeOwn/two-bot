@@ -18,6 +18,7 @@
  *    distinct humans; only the counts are written to disk.
  */
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { stripUsers } from './audit-scrub.ts';
 
 const TOKEN = process.env.DISCORD_TOKEN ?? process.env.DISCORD_BOT_TOKEN;
 const GUILD = process.env.DISCORD_GUILD_ID;
@@ -71,23 +72,8 @@ async function get<T>(path: string): Promise<T | null> {
 
 const log = (m: string) => process.stdout.write(m + '\n');
 
-/**
- * Discord attaches whole user objects to invites and integrations. We need the
- * id to attribute an invite; we do not need anyone's username or avatar in the
- * repo. Reduce every embedded user to `{ id }` on the way to disk.
- */
-function stripUsers(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(stripUsers);
-  if (value && typeof value === 'object') {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      const isUser = (k === 'user' || k === 'inviter' || k === 'target_user') && v && typeof v === 'object';
-      out[k] = isUser ? { id: (v as { id?: string }).id ?? null } : stripUsers(v);
-    }
-    return out;
-  }
-  return value;
-}
+// PII scrubbing lives in ./audit-scrub.ts (TOG-7216) so the rule is pinned by
+// a unit test instead of hiding inside the collector. See that module for why.
 
 const save = (name: string, data: unknown) => {
   writeFileSync(`${OUT}/${name}.json`, JSON.stringify(stripUsers(data), null, 2) + '\n');
