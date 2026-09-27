@@ -49,7 +49,10 @@ Without it you get `could not read Username for 'https://github.com'`.
 `git push` — the clone it leaves behind has no credential helper configured, so
 setup-git is the step that actually matters. Do it first.
 
-Then point the suite at an isolated Postgres database:
+Then point the suite at an isolated Postgres database. This needs a running
+Postgres 17+ with a scratch database of your own (e.g. `createdb two_bot_test`)
+— CI supplies its own throwaway service, the repo does not provision one.
+Without it the suite fails fast with `TWO_TEST_DATABASE_URL is required`.
 
 ```bash
 npm ci --include=dev
@@ -57,8 +60,8 @@ TWO_TEST_DATABASE_URL=postgres://localhost:5432/two_bot_test npm test
 ```
 
 CI runs the stricter wrapper below. It executes the same full suite and fails if
-`e2e.webcontract`, `e2e.backup` or `e2e.concurrency` reports no tests, skips, or
-comes back short:
+any required Postgres-backed suite reports no tests, skips, or comes back short
+(the list lives in `scripts/require-suites.ts` as `POSTGRES_SUITES`):
 
 ```bash
 TWO_TEST_DATABASE_URL=postgres://localhost:5432/two_bot_test npm run test:postgres
@@ -84,11 +87,14 @@ project was built and verified before the live token existed.
 
 ```bash
 node tools/mock-discord/run.ts
-# prints DISCORD_API_BASE; in another shell:
-DISCORD_TOKEN=mock DISCORD_API_BASE=http://127.0.0.1:<port>/api node src/index.ts
+# prints DISCORD_API_BASE and DISCORD_GUILD_ID; in another shell, with a
+# scratch Postgres of your own (same requirement as the suite above):
+TWO_DATABASE_URL=postgres://localhost:5432/two_bot_dev DISCORD_TOKEN=mock DISCORD_API_BASE=http://127.0.0.1:<port>/api DISCORD_GUILD_ID=<printed-id> node src/index.ts
 ```
 
-It exercises everything except Discord's own servers and TLS.
+Without `TWO_DATABASE_URL` the bot exits at boot with `Missing database URL`
+— the mock replaces Discord, not Postgres. It exercises everything except
+Discord's own servers and TLS.
 
 ## Layout
 
