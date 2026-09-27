@@ -17,16 +17,15 @@ import { openDb } from '../src/store/db.ts';
 import { ANOMALIES, detectSpikes, excludeClause } from '../src/analytics/anomalies.ts';
 import {
   findBlindWindows,
-  formatVoiceDurationSeconds,
   parseVoiceEndMetadata,
   summarizeVoiceDurations,
 } from '../src/core/voiceSessions.ts';
 import {
   countDowntimeUnknownJoins,
-  renderDowntimeReport,
   summarizeAttributionSplit,
   totalDowntimeUnknown,
 } from '../src/core/inviteTracker.ts';
+import { formatFunnelText } from '../src/analytics/cliFormat.ts';
 
 const rawArgs = process.argv.slice(2);
 const asJson = rawArgs.includes('--json');
@@ -311,111 +310,43 @@ if (asJson) {
   console.log(JSON.stringify(report));
   await db.close();
 } else {
-  const pct = (a: number, b: number) => (b === 0 ? '  n/a' : `${((a / b) * 100).toFixed(0).padStart(4)}%`);
-
-  console.log(`\nTWO funnel - last ${days} days (since ${since.slice(0, 10)})\n`);
+  // Text layout lives in src/analytics/cliFormat.ts (TOG-5723) so fixture
+  // tests cover it without a live DB. The rules gate sits between joining and
+  // doing anything at all (TOG-76), directly under joins and above every
+  // stage it gates - that ordering is pinned in the formatter, not here.
   console.log(
-    `  invite clicks        ${String(clicks).padStart(6)}` +
-      (trackedLinks === 0 ? '   (no tracked links yet - see npm run campaigns)' : ''),
+    formatFunnelText({
+      days,
+      since,
+      clicks,
+      joins,
+      joinsSetAside,
+      gateCleared,
+      joiners,
+      stuckAtGate,
+      firstMessage: firstMsg,
+      firstVoice,
+      leaves,
+      leavesSetAside,
+      trackedLinks,
+      bySource,
+      ambiguous,
+      unknown,
+      downtime: downtimeCounts,
+      downtimeUnknown,
+      campaigns: perCampaign,
+      // Known-start sessions only (TOG-5684): unknown starts carry no
+      // measured duration and are excluded via the shared helper, counted in
+      // `npm run voice` instead of averaged in here.
+      avgSessionSeconds: voiceDurationSummary.averageSeconds,
+      measuredSessions: voiceDurationSummary.measured,
+      excludedUnknownStarts: voiceDurationSummary.excludedUnknownStarts,
+      retention,
+      neverPosted: never,
+      strandedRaid,
+      totalEvents,
+    }),
   );
-  console.log(`  joins                ${String(joins).padStart(6)}   ${pct(joins, clicks)} of clicks`);
-  if (clicks > 0 && joins > clicks) {
-    // Over 100% is expected while some invites are tracked and some are raw.
-    // Stated, because otherwise it reads as a bug in the report.
-    console.log(`                                 (>100%: some invites are posted as raw discord.gg links)`);
-  }
-  if (joinsSetAside > 0) {
-    console.log(`   +${String(joinsSetAside).padStart(5)} set aside as a one-off event, see below`);
-  }
-  // The rules gate sits between joining and doing anything at all (TOG-76), so
-  // it goes here, directly under joins and above every stage it gates. A member
-  // who never cleared it is a guaranteed zero on every line below this one.
-  console.log(
-    `  cleared rules gate   ${String(gateCleared).padStart(6)}   ${pct(gateCleared, joiners)} of joiners` +
-      (gateCleared === 0 && joiners > 0
-        ? '   (no clearing recorded - run npm run backfill)'
-        : ''),
-  );
-  if (stuckAtGate > 0) {
-    console.log(
-      `   ${String(stuckAtGate).padStart(5)} in the server right now, never accepted the rules`,
-    );
-  }
-  console.log(`  posted first message ${String(firstMsg).padStart(6)}   ${pct(firstMsg, joins)} of joins`);
-  console.log(`  first voice session  ${String(firstVoice).padStart(6)}   ${pct(firstVoice, joins)} of joins`);
-  // Known-start sessions only (TOG-5684): unknown starts carry no measured
-  // duration and are excluded via the shared helper, counted in
-  // `npm run voice` instead of averaged in here.
-  console.log(
-    `  avg voice session    ${voiceDurationSummary.averageSeconds === null ? '     —' : String(formatVoiceDurationSeconds(voiceDurationSummary.averageSeconds)).padStart(6)}` +
-      (voiceDurationSummary.averageSeconds === null
-        ? '   (no measured session in window)'
-        : `   over ${voiceDurationSummary.measured} measured, ${voiceDurationSummary.excludedUnknownStarts} unknown-start excluded`),
-  );
-  console.log(`  left                 ${String(leaves).padStart(6)}`);
-  if (leavesSetAside > 0) {
-    console.log(`   +${String(leavesSetAside).padStart(5)} set aside as a one-off event, see below`);
-  }
-
-  console.log(`\n  Where joins came from:`);
-  if (bySource.length === 0) console.log('    (no joins yet)');
-  for (const r of bySource) console.log(`    ${String(r.joins).padStart(5)}  ${r.source}`);
-  console.log(
-    `    ${String(ambiguous).padStart(5)}  ambiguous (several invites grew at once)`,
-  );
-  console.log(
-    `    ${String(unknown).padStart(5)}  unknown (no invite grew, no vanity URL)`,
-  );
-
-  console.log(`\n  Join downtime (EVENTS.md limit 3 - unknown joins the outage explains):`);
-  for (const line of renderDowntimeReport(downtimeCounts)) console.log(line);
-  if (downtimeCounts.length > 0) {
-    console.log(
-      `    ${String(downtimeUnknown).padStart(5)} of ${unknown} unknown in-window ` +
-        `(upper bound - a quiet stretch with no writes reads as a gap)`,
-    );
-  }
-
-  if (trackedLinks > 0) {
-    console.log(`\n  Tracked links (clicks -> joins on the same invite code):`);
-    const w = Math.max(...perCampaign.map((c) => c.slug.length), 4);
-    for (const c of perCampaign) {
-      console.log(
-        `    ${c.slug.padEnd(w)}  ${String(c.clicks).padStart(5)} clicks  ${String(c.joins).padStart(4)} joins  ` +
-          `${pct(c.joins, c.clicks)}  ${c.label}${c.retired ? '  (retired)' : ''}`,
-      );
-    }
-    // Two campaigns on one invite code cannot be told apart by joins - a join
-    // only ever carries the code. Say so rather than print the same join count
-    // on two lines as if each had earned it.
-    const shared = new Map<string, string[]>();
-    for (const c of perCampaign) {
-      const arr = shared.get(c.inviteCode);
-      if (arr) arr.push(c.slug);
-      else shared.set(c.inviteCode, [c.slug]);
-    }
-    for (const [code, slugs] of shared) {
-      if (slugs.length > 1) {
-        console.log(
-          `    note: ${slugs.join(', ')} share invite code ${code}, so the join counts above ` +
-            `repeat one number. Give each its own code to split them.`,
-        );
-      }
-    }
-  }
-
-  console.log(`\n  Retention (of members who joined in the window):`);
-  for (const { day: d, retained, cohort } of retention) {
-    console.log(
-      `    D${String(d).padEnd(2)}  ${String(retained).padStart(4)} / ${String(cohort).padEnd(4)}  ${pct(retained, cohort)}`,
-    );
-  }
-
-  console.log(`\n  Joined but never posted (all time, still in server): ${never}`);
-  if (strandedRaid > 0) {
-    console.log(`  Raid accounts never cleaned up, still in the member count: ${strandedRaid}`);
-  }
-  console.log(`  Total events on file: ${totalEvents}\n`);
 
   // Days that are not community behaviour. Bucketing happens in JS so the query
   // stays in one tested code path - a few thousand timestamps is nothing.
