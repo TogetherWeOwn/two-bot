@@ -458,4 +458,102 @@ describe('scheduled events poller', () => {
       ],
     );
   });
+
+  test('DST fall-back: the same wall time with different offsets stores two distinct instants', async () => {
+    // Europe/London ends DST on 2026-10-25: 01:30 happens twice, once at
+    // +01:00 (BST) and once at +00:00 (GMT). Both must survive as distinct rows.
+    const { rest } = stubRest(() => [
+      {
+        id: 'dst-fall-bst',
+        name: 'Before the clocks change',
+        scheduled_start_time: '2026-10-25T01:30:00+01:00',
+        status: 1,
+      },
+      {
+        id: 'dst-fall-gmt',
+        name: 'After the clocks change',
+        scheduled_start_time: '2026-10-25T01:30:00+00:00',
+        status: 1,
+      },
+    ]);
+
+    const result = await runScheduledEventsCycle({ db, rest, guildId: GUILD, now: () => OBSERVED_AT });
+    assert.equal(result.recorded, true);
+    assert.equal(result.eventCount, 2);
+    assert.deepEqual(
+      (await db.prepare(`SELECT event_id, starts_at FROM scheduled_events ORDER BY starts_at`).all()),
+      [
+        { event_id: 'dst-fall-bst', starts_at: '2026-10-25T00:30:00.000Z' },
+        { event_id: 'dst-fall-gmt', starts_at: '2026-10-25T01:30:00.000Z' },
+      ],
+    );
+    // Next-run computation: the BST instance is the earlier UTC instant.
+    const next = await db
+      .prepare(`SELECT event_id FROM scheduled_events ORDER BY starts_at LIMIT 1`)
+      .get<{ event_id: string }>();
+    assert.equal(next?.event_id, 'dst-fall-bst');
+  });
+
+  test('DST spring-forward: events across the gap keep distinct UTC instants', async () => {
+    // Europe/London starts DST on 2026-03-29: 01:30 GMT (+00:00) and 03:30 BST
+    // (+01:00) are different instants on either side of the skipped hour.
+    const { rest } = stubRest(() => [
+      {
+        id: 'dst-spring-gmt',
+        name: 'Before the gap',
+        scheduled_start_time: '2026-03-29T01:30:00+00:00',
+        status: 1,
+      },
+      {
+        id: 'dst-spring-bst',
+        name: 'After the gap',
+        scheduled_start_time: '2026-03-29T03:30:00+01:00',
+        status: 1,
+      },
+    ]);
+
+    const result = await runScheduledEventsCycle({ db, rest, guildId: GUILD, now: () => OBSERVED_AT });
+    assert.equal(result.recorded, true);
+    assert.equal(result.eventCount, 2);
+    assert.deepEqual(
+      (await db.prepare(`SELECT event_id, starts_at FROM scheduled_events ORDER BY starts_at`).all()),
+      [
+        { event_id: 'dst-spring-gmt', starts_at: '2026-03-29T01:30:00.000Z' },
+        { event_id: 'dst-spring-bst', starts_at: '2026-03-29T02:30:00.000Z' },
+      ],
+    );
+  });
+
+  test('re-polling the same payload replaces without duplicating rows', async () => {
+    const payload = () => [
+      {
+        id: 'event-a',
+        name: 'Morning Raid',
+        scheduled_start_time: '2026-09-06T18:00:00.000Z',
+        status: 1,
+      },
+      {
+        id: 'event-b',
+        name: 'Evening Raid',
+        scheduled_start_time: '2026-09-06T19:00:00.000Z',
+        status: 1,
+      },
+    ];
+    const first = stubRest(payload);
+    await runScheduledEventsCycle({ db, rest: first.rest, guildId: GUILD, now: () => OBSERVED_AT });
+
+    const LATER = '2026-09-04T19:00:00.000Z';
+    const second = stubRest(payload);
+    const result = await runScheduledEventsCycle({ db, rest: second.rest, guildId: GUILD, now: () => LATER });
+
+    assert.equal(result.recorded, true);
+    assert.equal(result.eventCount, 2);
+    assert.deepEqual(
+      (await db.prepare(`SELECT event_id, updated_at FROM scheduled_events ORDER BY event_id`).all()),
+      [
+        { event_id: 'event-a', updated_at: LATER },
+        { event_id: 'event-b', updated_at: LATER },
+      ],
+    );
+  });
 });
