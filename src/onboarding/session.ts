@@ -110,19 +110,19 @@ export function planSession(
   visible: (channelId: string) => boolean,
   catalog: SessionPick[] = SESSION_PICKS,
 ): SessionPlan {
-  const picks: SessionPick[] = [];
   const unknownKeys: string[] = [];
-  const seen = new Set<string>();
+  const wanted = new Set<string>();
   for (const k of keys) {
     const p = pickByKey(k, catalog);
     if (!p) {
       unknownKeys.push(k);
       continue;
     }
-    if (seen.has(p.key)) continue;
-    seen.add(p.key);
-    picks.push(p);
+    wanted.add(p.key);
   }
+  // Catalog order: the interface promises channelIds in catalog order, so
+  // resolve picks by walking the catalog, not the submission.
+  const picks: SessionPick[] = catalog.filter((p) => wanted.has(p.key));
 
   const channelIds: string[] = [];
   const unavailable: SessionPick[] = [];
