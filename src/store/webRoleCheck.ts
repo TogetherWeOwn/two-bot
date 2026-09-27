@@ -107,6 +107,10 @@ export const BOT_TABLES = [
   // 0018+ — private self-role mutation and recovery evidence.
   'self_role_audit',
   'self_role_panel_claims',
+  // 0026 — who owns which generated voice channel, and what they did with it.
+  'temp_voice_channels',
+  'temp_voice_creates',
+  'temp_voice_audit',
   // 0018 — private community classification inputs, heartbeat state and alerts.
   'community_facts',
   'community_stream_heartbeats',
