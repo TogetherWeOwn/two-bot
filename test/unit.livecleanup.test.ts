@@ -22,12 +22,15 @@ import { join } from 'node:path';
 import {
   ACTIVE_CATEGORY_IDS,
   ACTIVE_CHANNEL_IDS,
+  ADMINISTRATOR,
   ARCHIVE_PHASE,
   AUTO_VOICE_CATEGORY_ID,
   LEGACY_CATEGORY_IDS,
   LEGACY_CHANNEL_IDS,
   OVERWRITE_CEILING_PER_CHANNEL,
   PINNED_GUILD_REFERENCES,
+  SNAPSHOT_MAX_AGE_MS,
+  VIEW_CHANNEL,
   appendJournalWitness,
   applyOperationOverwrites,
   archiveEveryoneOverwrite,
@@ -858,6 +861,9 @@ test('stable is order-insensitive for objects and sha256 is a 64-hex keyed diges
 test('phase and id-list constants pin the reviewed live-cleanup scope', () => {
   assert.equal(ARCHIVE_PHASE, 'archive-legacy');
   assert.equal(OVERWRITE_CEILING_PER_CHANNEL, 500);
+  assert.equal(SNAPSHOT_MAX_AGE_MS, 24 * 60 * 60 * 1000);
+  assert.equal(VIEW_CHANNEL, 1n << 10n);
+  assert.equal(ADMINISTRATOR, 1n << 3n);
   assert.equal(LEGACY_CHANNEL_IDS.length, 105);
   assert.equal(LEGACY_CATEGORY_IDS.length, 18);
   assert.equal(ACTIVE_CHANNEL_IDS.length, 17);
