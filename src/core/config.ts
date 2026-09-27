@@ -210,6 +210,7 @@ export const HOT_WIRED_FIELDS: Record<string, (c: Config) => string | number | b
   TWO_RAID_JOIN_THRESHOLD: (c) => c.raidJoinThreshold,
   TWO_RAID_WINDOW_SECONDS: (c) => c.raidWindowSeconds,
   DISCORD_LANDING_CHANNEL_IDS: (c) => c.landingChannelIds.join(','),
+  DISCORD_GOODBYE_CHANNEL_IDS: (c) => c.goodbyeChannelIds.join(','),
   TWO_AUTOMOD_REPEAT_COUNT: (c) => c.automodRepeatedMessageCount,
 };
 
