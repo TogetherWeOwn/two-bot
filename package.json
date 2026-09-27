@@ -23,6 +23,7 @@
     "campaigns": "node scripts/campaigns.ts",
     "voice": "node scripts/voice-sessions.ts",
     "attribution": "node scripts/attribution.ts",
+    "eval:funnel-attribution": "node scripts/funnel-attribution-eval.ts",
     "gate:check": "node scripts/gate-check.ts",
     "review": "node scripts/growth-review.ts",
     "dashboard": "node scripts/dashboard.ts",
