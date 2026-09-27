@@ -10,8 +10,9 @@ was never exercised. The dry-run now runs the panel's first option through
 `src/discord/selfRoles.ts`) — applies the resulting deltas to an in-memory
 fixture role set, and fails closed if the grant does not take or the revoke
 does not clear. No live guild role is touched: no Discord call is made, and
-the member id (`100000000000000001`) is a fixture constant never resolved
-against any guild.
+the member label (`fixture-disposable-member`) is a non-numeric display
+string never resolved against any guild — deliberately outside the src/
+snowflake budget.
 
 Staging was unavailable in this sandbox (no staging token, no network path to
 Discord), so the proof runs on the fixture harness per the card's fallback.
@@ -31,8 +32,8 @@ Expected tail of output (exit 0):
 
 ```text
 grant+revoke proof (fixture member, no Discord calls):
-  grant: disposable member 100000000000000001 now holds role 333333333333333333 ("Red")
-  revoke: disposable member 100000000000000001 no longer holds role 333333333333333333
+  grant: disposable member fixture-disposable-member now holds role 333333333333333333 ("Red")
+  revoke: disposable member fixture-disposable-member no longer holds role 333333333333333333
 
 Dry run. Nothing was posted. Re-run with --apply.
 ```
