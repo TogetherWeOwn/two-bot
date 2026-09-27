@@ -156,7 +156,7 @@ async function main(): Promise<void> {
       store,
       guildId,
       landingChannelIds: () => [],
-      goodbyeChannelIds,
+      goodbyeChannelIds: () => goodbyeChannelIds,
       picks: [],
       dryRun: false,
     });
