@@ -45,6 +45,8 @@
     "verify:grant:selftest": "node scripts/verify-grant.ts --selftest",
     "check:snowflakes": "bash scripts/ci/check-src-snowflakes.sh",
     "check:snowflakes:selftest": "bash scripts/ci/check-src-snowflakes.test.sh",
+    "check:credentials": "bash scripts/ci/check-systemd-credentials.sh",
+    "check:credentials:selftest": "bash scripts/ci/check-systemd-credentials.test.sh",
     "backup": "node scripts/pg-backup.ts",
     "verify:catalog": "node scripts/verify-catalog.ts",
     "event:sunday-squad": "node scripts/sunday-squad-event.ts",
