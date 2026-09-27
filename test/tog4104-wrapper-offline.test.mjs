@@ -25,14 +25,24 @@ async function fixture(t) {
     GIT_AUTHOR_NAME: 'Offline Fixture', GIT_AUTHOR_EMAIL: 'offline@example.invalid',
     GIT_COMMITTER_NAME: 'Offline Fixture', GIT_COMMITTER_EMAIL: 'offline@example.invalid',
     MOCK_LOG: log, MOCK_IDENTITY: `${container}|/bot-${APP}|${APP}_bot:${RUNTIME}|true|${image}`,
+    MOCK_IP: '10.0.10.3', MOCK_PORT: '8787',
     PROOF_EXCLUSIVE_WINDOW: 'staging-writers-quiesced',
     PROOF_RUNTIME_REVISION: RUNTIME, PROOF_IMAGE_ID: image };
   await writeFile(join(bin, 'docker'), `#!/bin/sh
 printf '%s\\n' "$*" >> "$MOCK_LOG"
 case "$1" in
- inspect) printf '%s\\n' "$MOCK_IDENTITY" ;;
+ inspect)
+  case "$*" in
+   *NetworkSettings*) printf '%s \\n' "$MOCK_IP" ;;
+   *) printf '%s\\n' "$MOCK_IDENTITY" ;;
+  esac ;;
  cp) : ;;
- exec) printf '%s\\n' 'OFFLINE-EXECUTED' ;;
+ exec)
+  case "$*" in
+   *printenv*) printf '%s\\n' "$MOCK_PORT" ;;
+   *node*settings-signed-proof*) printf '%s\\n' 'OFFLINE-EXECUTED' ;;
+   *) : ;;
+  esac ;;
  *) exit 99 ;;
 esac
 `, { mode: 0o755 });
@@ -55,7 +65,7 @@ for (const mode of ['run', 'recover']) {
     const r = await f.run({}, f.sha, mode);
     assert.equal(r.code, 0, r.stderr);
     assert.match(r.stderr, new RegExp(
-      `PROOF TARGET app=${APP} container=${container} image=${image} ref=\\S+ runtime=${RUNTIME} source=${f.sha} mode=${mode}`));
+      `PROOF TARGET app=${APP} container=${container} image=${image} ref=\\S+ runtime=${RUNTIME} source=${f.sha} mode=${mode} url=http://10\\.0\\.10\\.3:8787`));
     assert.ok(r.stdout.includes('OFFLINE-EXECUTED'), 'the engine exec actually ran');
     const lines = (await f.calls()).trim().split('\n');
     assert.ok(lines[0].startsWith('inspect '), 'the container is resolved by exact name exactly once');
@@ -66,8 +76,15 @@ for (const mode of ['run', 'recover']) {
       assert.ok(!line.includes(`bot-${APP}`), `mutable name is never reused after resolve: ${line}`);
     }
     assert.ok(post.some((l) => l.startsWith('cp ')), 'the proof file is copied into the container');
-    assert.ok((await f.calls()).includes(`PROOF_SOURCE_SHA=${f.sha}`),
-      'the only injected value is the validated packet source SHA');
+    const engineExec = post.filter((l) => l.startsWith('exec ') && l.includes('settings-signed-proof'));
+    assert.equal(engineExec.length, 1, 'exactly one engine exec runs');
+    for (const value of [`PROOF_SOURCE_SHA=${f.sha}`, `STAGING_APP_UUID=${APP}`,
+      `PROOF_RUNTIME_REVISION=${RUNTIME}`, 'PROOF_EXCLUSIVE_WINDOW=staging-writers-quiesced',
+      'INTERNAL_ACTIONS_URL=http://10.0.10.3:8787']) {
+      assert.ok(engineExec[0].includes(value), `the engine exec forwards the validated value: ${value}`);
+    }
+    assert.ok(!engineExec[0].includes('TWO_INTERNAL_KEYS'),
+      'signing keys are never forwarded into the container');
   });
 }
 for (const [name, overrides] of [
@@ -99,6 +116,16 @@ for (const [name, identity, overrides] of [
       'nothing is copied or executed after a failed identity check');
   });
 }
+test('wrapper refuses unresolvable container address before copying or executing', async (t) => {
+  const f = await fixture(t);
+  const r = await f.run({ MOCK_IP: '' });
+  assert.equal(r.code, 2, r.stderr);
+  assert.match(r.stderr, /REFUSED/);
+  const lines = (await f.calls()).trim().split('\n');
+  assert.ok(lines[0].startsWith('inspect '));
+  assert.ok(!lines.slice(1).some((l) => l.startsWith('cp ') || l.includes('settings-signed-proof')),
+    'nothing is copied and the engine never executes without a measured listener address');
+});
 test('wrapper rejects dirty packet even with approved SHA', async (t) => {
   const f = await fixture(t);
   await writeFile(join(f.ops, 'settings-signed-proof.mjs'), 'throw new Error("edited");');

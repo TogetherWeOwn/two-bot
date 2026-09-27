@@ -4,10 +4,12 @@
 #
 # Resolves the running staging container exactly once by exact name, records
 # the immutable container and image IDs, then copies and executes only through
-# the container ID. Signing keys stay inside the container: this script never
-# reads or passes TWO_INTERNAL_KEYS. The only value injected into the
-# container is PROOF_SOURCE_SHA, the validated packet commit, which is not a
-# secret.
+# the container ID. Forwarded into the container are only values already
+# validated below against the packet pin: the app UUID (exact container name),
+# the pinned runtime, the writer-exclusion declaration, the measured listener
+# URL and the validated packet source SHA. Signing keys stay inside the
+# container: this script never reads or passes TWO_INTERNAL_KEYS. None of the
+# forwarded values is a secret.
 set -euo pipefail
 APP=uy4d9ndeygjcem6lgayhxgub
 RUNTIME=5f57256d41130b056389f3098f3b0c84a9d9e261
