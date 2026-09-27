@@ -76,13 +76,19 @@ export class VoiceSessionTracker {
 // EVENTS.md limit 5: a voice gap while the bot is down can never be recovered.
 // Discord serves no voice history over REST, so sessions that happened mid-gap
 // are gone, not merely unrecorded. What CAN be quantified is the gap itself:
-// the heartbeat series (`presence_probe`, one row per successful read) shows
-// exactly when the bot stopped looking, and every `voice_session_end` with
-// `startKnown: false` after a gap is a session that gap made unmeasurable.
+// the bot's own append-only write series (`events.recorded_at` - every row is
+// proof the bot was alive to write it) shows exactly when it stopped looking,
+// and every `voice_session_end` with `startKnown: false` after a gap is a
+// session that gap made unmeasurable.
 //
 // Pure functions over caller-supplied rows, deliberately - same reasoning as
 // the analytics in src/analytics/voiceSessions.ts. The script feeds them the
-// heartbeat timestamps and the end rows; the tests feed them fixtures.
+// event timestamps and the end rows; the tests feed them fixtures.
+//
+// NOTE (TOG-469 containment): the hourly instrument table is deliberately NOT
+// a source here - only its collector, reader, migration and own script/test
+// may name it. The events write series is coarser - a quiet stretch with no
+// writes reads as a gap - and the report says so.
 //
 // Two honesty rules shape the counting:
 //   1. An unknown-start end is ATTRIBUTED, never averaged. The functions below
@@ -120,11 +126,12 @@ export interface UnknownEnd {
 }
 
 /**
- * Heartbeat cadence breach that declares a blind window.
+ * Write-series cadence breach that declares a blind window.
  *
- * The presence probe reads hourly, so a breach at twice the cadence tolerates
- * one missed tick plus jitter without declaring an outage. Callers with a
- * faster heartbeat (the 60s live counter) pass their own value.
+ * The default suits an approximately hourly write series: a breach at twice
+ * the cadence tolerates one missed tick plus jitter without declaring an
+ * outage. Callers over a denser series (every bot write) pass their own
+ * value; callers over a sparser one do the same.
  */
 export const DEFAULT_BLIND_WINDOW_MAX_GAP_MS = 2 * 60 * 60 * 1000;
 

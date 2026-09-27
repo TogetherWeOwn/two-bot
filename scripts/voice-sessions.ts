@@ -144,25 +144,34 @@ console.log('');
 //
 // A voice gap while the bot is down can never be recovered (docs/EVENTS.md
 // limit 5): Discord serves no voice history over REST. This section does not
-// try. It names each blind window - a heartbeat gap from the slowest series we
-// keep, `presence_probe.observed_at`, falling back to the voice-session log
-// itself - and counts the `voice_session_end` rows with `startKnown: false`
-// attributed to each window. A count, never an average: the rows carry no
-// duration precisely because we never saw the start.
+// try. It names each blind window - a gap in the bot's own append-only write
+// series (`events.recorded_at`: every row is proof the bot was alive to write
+// it, cf. src/analytics/dashboard.ts) - and counts the `voice_session_end`
+// rows with `startKnown: false` attributed to each window. A count, never an
+// average: the rows carry no duration precisely because we never saw the
+// start.
+//
+// NOTE (TOG-469 containment): the hourly instrument table is deliberately NOT
+// a source here. Gaps in the write series are coarser - a quiet stretch with
+// no writes reads as a gap - and the report says so.
 
+// Every write is proof the bot was alive. Gaps in this series are the blind
+// windows. `recorded_at` (when WE wrote the row), not `occurred_at` (when
+// Discord says it happened): a backfilled row has a fresh recorded_at, so the
+// series measures bot liveness, not event time.
 const heartbeats = await db
   .prepare(
-    `SELECT observed_at AS at FROM presence_probe
-      WHERE guild_id = ? AND observed_at >= ?
-      ORDER BY observed_at`,
+    `SELECT recorded_at AS at FROM events
+      WHERE guild_id = ? AND recorded_at >= ?
+      ORDER BY recorded_at`,
   )
   .all<{ at: string }>(process.env.DISCORD_GUILD_ID?.trim() ?? '', since)
   .catch(() => [] as Array<{ at: string }>);
 
-// No probe history for this guild yet (probe disabled, or a fresh database):
-// the voice-session starts are the only proof the listener was alive, so gaps
-// in them are the windows. Coarser than the probe - a quiet night reads as a
-// gap - and the report says so.
+// No write history for this guild yet (a fresh database): the voice-session
+// starts are the only proof the listener was alive, so gaps in them are the
+// windows. Coarser still - a quiet night reads as a gap - and the report
+// says so.
 const heartbeatAt =
   heartbeats.length > 0
     ? heartbeats.map((r) => r.at)
