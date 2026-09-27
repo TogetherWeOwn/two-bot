@@ -9,6 +9,7 @@
  */
 import { openDb } from '../src/store/db.ts';
 import { ANOMALIES, detectSpikes, excludeClause } from '../src/analytics/anomalies.ts';
+import { summarizeAttributionSplit } from '../src/core/inviteTracker.ts';
 
 const days = Number(process.argv[2] ?? 7);
 const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
@@ -135,6 +136,18 @@ const bySource = await db
   .all<{ source: string; n: number }>(since, ...joinExcl.params);
 if (bySource.length === 0) console.log('    (no joins yet)');
 for (const r of bySource) console.log(`    ${String(r.n).padStart(5)}  ${r.source}`);
+// Ambiguous (several invites grew at once) and unknown (nothing grew, no
+// vanity URL) are different facts with different fixes (TOG-5681, EVENTS.md),
+// so they get their own lines rather than disappearing into the table above.
+const { ambiguous, unknown } = summarizeAttributionSplit(
+  bySource.map((r) => ({ source: r.source, n: Number(r.n) })),
+);
+console.log(
+  `    ${String(ambiguous).padStart(5)}  ambiguous (several invites grew at once)`,
+);
+console.log(
+  `    ${String(unknown).padStart(5)}  unknown (no invite grew, no vanity URL)`,
+);
 
 // Clicks per tracked link, next to the joins that link's invite code produced.
 // This is the per-place breakdown TOG-116 exists for: it is what separates "a
