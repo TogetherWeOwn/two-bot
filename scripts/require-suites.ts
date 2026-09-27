@@ -51,6 +51,16 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     why: 'growth-review CLI golden scores, kill/scale citations, red-gate refusal and sustained-effort guard',
   },
   {
+    // TOG-6491. The restore script that can wipe a database: three refusals
+    // (no --force, no TWO_RESTORE_URL, no fallback to TWO_DATABASE_URL), a
+    // dry run that writes nothing, and a target + --force restore of a canned
+    // dump with identical rows back. Counted from the 5 top-level test()
+    // blocks; 5/5 green in CI postgres runs 36344199113 and 36351823205.
+    file: 'test/e2e.pgrestore.test.ts',
+    minTests: 5,
+    why: 'the pg-restore safety refusals - without this floor a silent skip re-opens the wrong-database data-loss gap',
+  },
+  {
     file: 'test/e2e.backup.test.ts',
     minTests: 7,
     why: 'the dump/restore round trip - the only thing standing behind a restore',
