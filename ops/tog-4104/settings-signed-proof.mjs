@@ -42,7 +42,10 @@ function ownInterfaceAddresses() {
   const out = [];
   for (const addresses of Object.values(networkInterfaces())) {
     for (const a of addresses ?? []) {
-      if (a.family === 'IPv4' && !a.internal) out.push(a.address);
+      // Node reports family as 'IPv4' (string) on modern runtimes and 4
+      // (numeric) on older ones; accept both so the own-interface allowlist
+      // cannot silently come back empty on one runtime variant.
+      if ((a.family === 'IPv4' || a.family === 4) && !a.internal) out.push(a.address);
     }
   }
   return out;

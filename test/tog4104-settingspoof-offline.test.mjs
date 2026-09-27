@@ -95,8 +95,26 @@ async function fixture(t, seed = {}, hooks = {}) {
     await rm(root, { recursive: true, force: true });
   });
   const { networkInterfaces } = await import('node:os');
+  // Mirror the engine's allowlist (ops/tog-4104/settings-signed-proof.mjs):
+  // literal loopback plus this process's own *private* interface addresses.
+  // Selecting the first non-internal address unfiltered picks the runner's
+  // public NIC on self-hosted CI, which the engine correctly REFUSEs at
+  // preflight.url (main red at #209, run 36333108881). Select the first own
+  // *private* IPv4 instead, so the fixture measures an address the engine
+  // recognizes as its own interface.
+  const isPrivateIPv4 = (host) => {
+    const v4 = String(host ?? '').match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (!v4) return false;
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    if (a === 10) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true;
+    if (a === 169 && b === 254) return true;
+    return false;
+  };
   const ownAddress = Object.values(networkInterfaces()).flat()
-    .find((a) => a?.family === 'IPv4' && !a.internal)?.address ?? null;
+    .find((a) => (a?.family === 'IPv4' || a?.family === 4) && !a.internal && isPrivateIPv4(a?.address))?.address ?? null;
   // Same signed fixture server, reachable over this host's own private
   // interface address: mirrors the container-NIC topology in staging.
   const ownAddressUrl = ownAddress ? `http://${ownAddress}:${server.address().port}` : null;
