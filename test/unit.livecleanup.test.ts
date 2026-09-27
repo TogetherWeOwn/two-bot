@@ -389,6 +389,33 @@ test('planArchiveOperations hides a directly-visible member with a member deny, 
   }
 });
 
+test('planArchiveOperations refuses a write past the per-channel overwrite ceiling', () => {
+  // 600 members holding a role with a channel-level VIEW allow each force their
+  // own member deny onto 1146611215511081012's write, pushing it past
+  // OVERWRITE_CEILING_PER_CHANNEL and reaching the throw at live-cleanup.ts:825-826.
+  // (The fixture on its own stays under the ceiling, so the happy-path test
+  // above can never exercise that refusal.)
+  const TARGET = '1146611215511081012';
+  const base = toSnapshot(loadState());
+  const floodRole: Role = { id: 'role-flood', name: 'Flood', managed: false, permissions: '0', position: 1 };
+  const flood: Member[] = Array.from({ length: 600 }, (_, index) => ({
+    id: `flood-member-${index}`, bot: false, username: `flood-${index}`, roles: ['role-flood'], premiumSince: null, pending: false,
+  }));
+  const snapshot = toSnapshot(loadState(), {
+    roles: [...base.roles, floodRole],
+    members: [...base.members, ...flood],
+    channels: base.channels.map((channel) =>
+      channel.id === TARGET
+        ? { ...channel, permission_overwrites: [...channel.permission_overwrites, { id: 'role-flood', type: 0, allow: '1024', deny: '0' }] }
+        : channel,
+    ),
+  });
+  assert.throws(
+    () => planArchiveOperations(snapshot),
+    new RegExp(`Planned overwrites for ${TARGET}.*exceed this phase's per-channel ceiling of ${OVERWRITE_CEILING_PER_CHANNEL}`),
+  );
+});
+
 test('unreadableRole, unreadableMemberRoles and unreadableGuildReferences name the unreadable field', () => {
   assert.equal(unreadableRole({ id: 'r', name: 'r', managed: false, permissions: '0', position: 1 }), null);
   assert.match(unreadableRole({ id: 'r', name: 'r', managed: false, permissions: '0', position: NaN })!, /finite/);
@@ -603,7 +630,10 @@ test('syncedChildIds covers exactly the value-synchronized children of a categor
 test('inFlightDriftIsOurs allows before/write/live values on children, never a third-party move', () => {
   const overwrites = (deny: string): Overwrite[] => [{ id: LIVE_GUILD, type: 0, allow: '0', deny }];
   const snapshot = {
-    channels: [{ id: 'cat-1', name: 'cat', type: 4, parent_id: null, permission_overwrites: overwrites('1024') }],
+    channels: [
+      { id: 'cat-1', name: 'cat', type: 4, parent_id: null, permission_overwrites: overwrites('1024') },
+      { id: 'ch-sync', name: 's', type: 0, parent_id: 'cat-1', permission_overwrites: overwrites('1024') },
+    ],
   } as Pick<LiveCleanupSnapshot, 'channels'>;
   const op = {
     objectId: 'cat-1', objectType: 'category',
@@ -611,8 +641,20 @@ test('inFlightDriftIsOurs allows before/write/live values on children, never a t
     write: { permission_overwrites: overwrites('2048') },
     expectedBefore: { permission_overwrites: overwrites('1024') },
   } as CleanupOperation;
+  assert.deepEqual(syncedChildIds(snapshot, op), ['ch-sync'], 'the child is synchronized, so the asserts below check a real value');
   assert.equal(inFlightDriftIsOurs(snapshot, op, new Map()), false);
-  assert.equal(inFlightDriftIsOurs(snapshot, op, new Map([['cat-1', overwrites('1024')]])), true);
+  // The category's own live value is unconstrained — not knowing whether the
+  // write landed is what "in flight" means — while the synchronized child may
+  // sit at the pre-write value, the post-write value, or whatever the category
+  // now holds (the sync followed a torn write down).
+  assert.equal(inFlightDriftIsOurs(snapshot, op, new Map([['cat-1', overwrites('1024')], ['ch-sync', overwrites('1024')]])), true);
+  assert.equal(inFlightDriftIsOurs(snapshot, op, new Map([['cat-1', overwrites('1024')], ['ch-sync', overwrites('2048')]])), true);
+  assert.equal(inFlightDriftIsOurs(snapshot, op, new Map([['cat-1', overwrites('3072')], ['ch-sync', overwrites('3072')]])), true);
+  // A synchronized child holding a value outside the before/write/live
+  // explicable set was moved by a third party: the exception must not cover it.
+  assert.equal(inFlightDriftIsOurs(snapshot, op, new Map([['cat-1', overwrites('1024')], ['ch-sync', overwrites('4096')]])), false);
+  // A missing live read for the child is not explicable either.
+  assert.equal(inFlightDriftIsOurs(snapshot, op, new Map([['cat-1', overwrites('1024')]])), false);
 });
 
 test('applyOperationOverwrites carries a category PATCH to synchronized children only, and names missing targets', () => {
