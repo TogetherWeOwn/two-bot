@@ -450,8 +450,8 @@ test('an empty database renders honest zero-states, not zeros', async () => {
   assert.equal(wrote.code, 0, wrote.stdout + wrote.stderr);
   const html = await readFile(outPath, 'utf8');
   assert.ok(html.includes('The three questions'));
-  assert.ok(html.includes('No joins on record.'));
-  assert.ok(html.includes('No channel activity data.'));
+  assert.ok(html.includes('No joins on record'), 'sources section names the empty log');
+  assert.ok(html.includes('No channel activity'), 'channel section names its empty state');
   assert.ok(html.includes('not measured yet'));
   assert.ok(
     wrote.stdout.includes('no members on record - run npm run backfill'),
