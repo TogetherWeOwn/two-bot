@@ -445,6 +445,71 @@ test('pollFeeds records a redirect refusal distinctly from a fetch failure', asy
   assert.match(row?.reason ?? '', /^Feed redirect refused: cross-host redirect/);
 });
 
+test('pollFeeds isolates a poison post failure: later items still deliver (TOG-9346 B2a)', async () => {
+  await reset();
+  class PoisonDiscord extends FakeDiscord {
+    override async postMessage(channelId: string, content: string, options: { nonce?: string; components?: unknown[] } = {}) {
+      if (content.includes('POISON')) throw new Error('discord send exploded');
+      return super.postMessage(channelId, content, options);
+    }
+  }
+  const discord = new PoisonDiscord();
+  // Reader order is newest-first; the loop delivers oldest-first, so the
+  // poison item sits mid-batch with a healthy newer item behind it.
+  const items: FeedItem[] = [
+    { key: 'newest', title: 'Newest ok', url: 'https://example.com/newest' },
+    { key: 'poison', title: 'POISON item', url: 'https://example.com/poison' },
+    { key: 'oldest', title: 'Oldest ok', url: 'https://example.com/oldest' },
+  ];
+  const service = new AnnouncementsService(store, discord, readerFor(items));
+  await service.addFeed({
+    id: 'feed-poison', guildId: GUILD, channelId: CHANNEL, kind: 'rss',
+    source: 'https://example.com/feed.xml', actorId: USER, now: NOW,
+  });
+  assert.equal(await service.pollFeeds(GUILD, NOW), 2);
+  assert.equal(discord.posts.length, 2);
+  assert.ok(discord.posts[0]?.content.includes('Oldest ok'), 'oldest posts first');
+  assert.ok(discord.posts[1]?.content.includes('Newest ok'), 'healthy item behind the poison still delivers');
+  assert.equal(await auditCount('feed.item', 'failed'), 1);
+  assert.equal(await auditCount('feed.poll', 'failed'), 0, 'per-item isolation keeps the per-feed catch clear');
+  // Second poll: poison fails again but healthy items stay delivered — no permanent starvation.
+  assert.equal(await service.pollFeeds(GUILD, NOW), 0);
+  assert.equal(discord.posts.length, 2);
+  assert.equal(await auditCount('feed.item', 'failed'), 2);
+  const checked = await db.prepare(
+    `SELECT last_checked_at AS v FROM feed_relays WHERE id = ?`,
+  ).get<{ v: string | null }>('feed-poison');
+  assert.equal(checked?.v, NOW.toISOString(), 'markFeedChecked still runs despite the poison item');
+});
+
+test('pollFeeds skips a keyless item and still delivers the healthy items behind it (TOG-9346 B2b)', async () => {
+  await reset();
+  const discord = new FakeDiscord();
+  const items: FeedItem[] = [
+    { key: 'healthy-new', title: 'Healthy new', url: 'https://example.com/new' },
+    { key: '   ', title: 'Keyless', url: '   ' },
+    { key: 'healthy-old', title: 'Healthy old', url: 'https://example.com/old' },
+  ];
+  const service = new AnnouncementsService(store, discord, readerFor(items));
+  await service.addFeed({
+    id: 'feed-keyless', guildId: GUILD, channelId: CHANNEL, kind: 'rss',
+    source: 'https://example.com/feed.xml', actorId: USER, now: NOW,
+  });
+  assert.equal(await service.pollFeeds(GUILD, NOW), 2);
+  assert.equal(discord.posts.length, 2);
+  assert.ok(discord.posts[0]?.content.includes('Healthy old'));
+  assert.ok(discord.posts[1]?.content.includes('Healthy new'));
+  assert.equal(await auditCount('feed.item', 'skipped'), 1);
+  const row = await db.prepare(
+    `SELECT outcome, reason FROM announcements_audit_log WHERE action = ? AND outcome = ?`,
+  ).get<{ outcome: string; reason: string | null }>('feed.item', 'skipped');
+  assert.match(row?.reason ?? '', /no stable key/);
+  assert.equal(await auditCount('feed.poll', 'failed'), 0);
+  // Next poll delivers nothing new and keeps the healthy items delivered.
+  assert.equal(await service.pollFeeds(GUILD, NOW), 0);
+  assert.equal(discord.posts.length, 2);
+});
+
 // --- pure validators ---------------------------------------------------------------
 
 test('normalizeFeedSource refuses credentials, plain HTTP and loopback', () => {
