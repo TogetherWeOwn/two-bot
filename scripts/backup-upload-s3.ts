@@ -33,6 +33,15 @@ if (process.argv.includes('--help')) {
   console.log('usage: node scripts/backup-upload-s3.ts <dump-path>');
   console.log('');
   console.log('Copy one nightly dump off the box to S3-compatible object storage.');
+  console.log('');
+  console.log('Flags:');
+  console.log('  <dump-path>  Nightly dump file to upload (required, exactly one argument).');
+  console.log('  --help       Show this help and exit.');
+  console.log('');
+  console.log('Examples:');
+  console.log('  node scripts/backup-upload-s3.ts --help');
+  console.log('  node scripts/backup-upload-s3.ts /var/backups/two-bot/two-funnel-<stamp>.ndjson.gz');
+  console.log('');
   console.log('Needs TWO_BACKUP_S3_ENDPOINT, TWO_BACKUP_S3_BUCKET, TWO_BACKUP_S3_ACCESS_KEY_ID,');
   console.log('TWO_BACKUP_S3_SECRET_ACCESS_KEY (see docs/RUNBOOK.md, "Off-box destination").');
   console.log('--help reads and uploads nothing.');

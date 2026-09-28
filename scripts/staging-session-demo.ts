@@ -638,7 +638,16 @@ async function main(): Promise<void> {
     console.log('usage: node scripts/staging-session-demo.ts [--verify]');
     console.log('');
     console.log('TOG-1644 staging demo driver: post the welcome panel into #welcome, write the');
-    console.log('owner invite, then verify zero role writes. --verify re-checks the last walk.');
+    console.log('owner invite, then verify zero role writes.');
+    console.log('');
+    console.log('Flags:');
+    console.log('  --verify  Re-check the last walk instead of posting a new one.');
+    console.log('  --help    Show this help and exit.');
+    console.log('');
+    console.log('Examples:');
+    console.log('  node scripts/staging-session-demo.ts --help');
+    console.log('  node scripts/staging-session-demo.ts --verify');
+    console.log('');
     console.log('Staging only. Requires DISCORD_STAGING_BOT_TOKEN; --help needs no token.');
     return;
   }

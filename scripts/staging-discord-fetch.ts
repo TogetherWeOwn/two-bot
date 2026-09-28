@@ -10,6 +10,13 @@ if (isMain) {
   console.log('');
   console.log('Shared proof-only Discord 429 transport (library, no direct invocation).');
   console.log('Imported by scripts/staging-announcements-proof.ts and scripts/staging-announcements-verify.ts.');
+  console.log('');
+  console.log('Flags:');
+  console.log('  --help  Show this help and exit.');
+  console.log('');
+  console.log('Examples:');
+  console.log('  node scripts/staging-discord-fetch.ts --help');
+  console.log('');
   console.log('No token, no network, no side effects on --help.');
   process.exit(process.argv.includes('--help') ? 0 : 2);
 }

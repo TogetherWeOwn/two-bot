@@ -51,6 +51,16 @@ if (process.argv.includes('--help')) {
   console.log('');
   console.log('Mutation harness for the temp-voice delete path (TOG-3052): relaxes one guard');
   console.log('at a time and requires the unit suite to go red for every one.');
+  console.log('');
+  console.log('Flags:');
+  console.log('  --staging           Confirm the staging scratch-database target (required).');
+  console.log('  --only <substring>  Run only mutations whose name contains the substring.');
+  console.log('  --help              Show this help and exit.');
+  console.log('');
+  console.log('Examples:');
+  console.log('  node scripts/mutate-tempvoice.ts --help');
+  console.log('  TWO_TEST_DATABASE_URL=postgres://.../two_scratch node scripts/mutate-tempvoice.ts --staging');
+  console.log('');
   console.log('Refuses without --staging plus a scratch TWO_TEST_DATABASE_URL; --help performs');
   console.log('no mutation and runs no suite.');
   process.exit(0);

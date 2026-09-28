@@ -55,6 +55,17 @@ if (process.argv.includes('--help')) {
   console.log('');
   console.log('TOG-463 step 1: internal-actions host wired to the REAL Discord REST API and staging token.');
   console.log('Prints one JSON line `acceptance_host_ready`, then serves until SIGTERM.');
+  console.log('');
+  console.log('Flags:');
+  console.log('  --help  Show this help and exit.');
+  console.log('');
+  console.log('Env: TWO_HOST_DB, TWO_HOST_SECRET, TWO_HOST_CHANNEL_KEY (throwaway required),');
+  console.log('TWO_HOST_KEY_ID (default web-staging), TWO_HOST_PORT (default 8787), DISCORD_STAGING_BOT_TOKEN.');
+  console.log('');
+  console.log('Examples:');
+  console.log('  node scripts/internal-actions-host-real.ts --help');
+  console.log('  TWO_HOST_DB=postgres://... TWO_HOST_SECRET=... TWO_HOST_CHANNEL_KEY=qa-throwaway:<thread> DISCORD_STAGING_BOT_TOKEN=... node scripts/internal-actions-host-real.ts');
+  console.log('');
   console.log('The channel key MUST name a throwaway: announcement.post puts a real message in the staging guild.');
   process.exit(0);
 }

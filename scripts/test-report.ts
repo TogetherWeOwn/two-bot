@@ -32,7 +32,16 @@ if (isMain) {
   console.log('usage: node --test --test-reporter=./scripts/test-report.ts --test-reporter-destination=<results.ndjson> ...');
   console.log('');
   console.log('A node:test reporter that writes one JSON object per test point.');
-  console.log('Not invoked directly: it runs as a --test-reporter. No token, no network, no side effects on --help.');
+  console.log('Not invoked directly: it runs as a --test-reporter.');
+  console.log('');
+  console.log('Flags:');
+  console.log('  --help  Show this help and exit.');
+  console.log('');
+  console.log('Examples:');
+  console.log('  node scripts/test-report.ts --help');
+  console.log('  node --test --test-reporter=./scripts/test-report.ts --test-reporter-destination=<results.ndjson> ...');
+  console.log('');
+  console.log('No token, no network, no side effects on --help.');
   process.exit(process.argv.includes('--help') ? 0 : 2);
 }
 
