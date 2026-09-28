@@ -28,6 +28,7 @@ import { startInternalActions } from '../src/internal/server.ts';
 import { KeyRing } from '../src/internal/signing.ts';
 import { DiscordActions } from '../src/internal/discordActions.ts';
 import { InternalActionStore } from '../src/internal/store.ts';
+import { SettingsStore } from '../src/core/settings.ts';
 import { buildRoleKeys, buildChannelKeys, IMPLEMENTED_ACTIONS } from '../src/internal/actions.ts';
 import { openDb } from '../src/store/db.ts';
 import { startMockDiscord } from '../tools/mock-discord/server.ts';
@@ -75,6 +76,12 @@ const db = await openDb(DB_SPEC, { schema: SCHEMA, applicationName: `two-bot-qa:
 
 const store = new InternalActionStore(db);
 
+// Same composition as src/index.ts (TOG-4230): the config store behind
+// settings.get / settings.set. Without it both verbs refuse with
+// action_not_allowed, and this host would not be measuring the bot.
+const settings = new SettingsStore(db);
+await settings.load();
+
 const srv = await startInternalActions({
   host: '127.0.0.1',
   port: PORT,
@@ -85,6 +92,7 @@ const srv = await startInternalActions({
   channelKeys: buildChannelKeys(`${CHANNEL_KEY}:1045943373007171674`),
   enabled: new Set<string>(IMPLEMENTED_ACTIONS),
   store,
+  settings,
 });
 
 console.log(
