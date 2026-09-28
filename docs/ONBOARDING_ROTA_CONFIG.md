@@ -26,7 +26,7 @@ Only the exact string `1` opts in, matching the existing feature loaders.
 | `TWO_ONBOARDING_ROTA_PSEUDONYM_KEY` | When enabled, dedicated UTF-8 HMAC key of at least 32 bytes, not all whitespace. Use a securely generated key; the length check does not establish entropy. |
 | `DISCORD_STAFF_ALERT_CHANNEL_ID` | Required valid id only when notices are enabled. No member-facing fallback. |
 | `TWO_ONBOARDING_ROTA_PRIMARY_ACTOR_ID` | Optional explicit accepted primary binding, 17–20 digits when set. Enables the authenticated, ephemeral acknowledgement command only while measurement is on. Required (with channel and readers) for notices. No owner/staff inference. Unset to omit command publication/input. Master-off ignores stale values. |
-| `TWO_ONBOARDING_ROTA_READER_IDS` | Optional comma-separated explicit authorized notice readers (accepted primary, Community Manager, President & COO principals), 17–20 digits each, deduped. Required for notices. Never inferred from staff roles. Master-off ignores stale values. |
+| `TWO_ONBOARDING_ROTA_READER_IDS` | Optional comma-separated explicit authorized notice readers (accepted primary, Community Manager, President & COO principals), 17–20 digits each; duplicates are refused at boot (not silently deduped). Required for notices. Never inferred from staff roles. Master-off ignores stale values. |
 
 Prefer the systemd credential `onboarding_rota_pseudonym_key` over the environment
 key. The existing credential reader controls precedence and normalization. Do
