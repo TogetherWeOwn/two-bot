@@ -46,6 +46,35 @@ export interface ActionDiscord {
   updateEvent(guildId: string, eventId: string, input: ScheduledEventInput): Promise<void>;
   /** Cancel a scheduled event without deleting its identity. */
   cancelEvent(guildId: string, eventId: string): Promise<void>;
+  /**
+   * Read back one scheduled event, fresh from Discord.
+   *
+   * The only fields the website's verifier may see: the mirror's identity,
+   * name, start, place and lifecycle. No attendees, no other guild events, no
+   * member data. A 404 (mirror gone) surfaces as `discord_rejected` through
+   * the shared status mapping, exactly like every other Discord "no".
+   */
+  readEvent(guildId: string, eventId: string): Promise<ScheduledEventMirror>;
+}
+
+/**
+ * A Discord scheduled event as `event.read` reports it.
+ *
+ * `location` is the external place text, or null for a voice-channel event:
+ * Discord's payload names the voice channel by id, and resolving that id
+ * would be a second call spent on guild structure the verifier must not see.
+ * `status` is Discord's lifecycle name (`SCHEDULED`, `ACTIVE`, `COMPLETED`,
+ * `CANCELED`); an unrecognised code is returned as its number, never dropped.
+ * `observedAt` is this process's clock at read time, since Discord stamps no
+ * "when I told you" on the object.
+ */
+export interface ScheduledEventMirror {
+  eventId: string;
+  name: string;
+  startsAt: string;
+  location: string | null;
+  status: string;
+  observedAt: string;
 }
 
 /** GUILD_ONLY. The only privacy level Discord accepts for a guild event. */
@@ -205,6 +234,44 @@ export class DiscordActions implements ActionDiscord {
     throwForStatus(res);
   }
 
+  /**
+   * `event.read`. One GET, nothing retained: the mirror object is built from
+   * the response and handed back, never stored. Unknown or mistyped fields
+   * fail the read rather than half-verify: a verification that accepts a
+   * nameless or timeless mirror proves nothing.
+   */
+  async readEvent(guildId: string, eventId: string): Promise<ScheduledEventMirror> {
+    const res = await this.call(
+      'GET',
+      `/guilds/${guildId}/scheduled-events/${eventId}`,
+      undefined,
+      this.contentTimeout,
+    );
+    throwForStatus(res);
+    const body = (await readJson(res)) as {
+      id?: unknown;
+      name?: unknown;
+      scheduled_start_time?: unknown;
+      entity_metadata?: unknown;
+      status?: unknown;
+    } | null;
+    const id = typeof body?.id === 'string' ? body.id : null;
+    const name = typeof body?.name === 'string' ? body.name : null;
+    const startsAt = typeof body?.scheduled_start_time === 'string' ? body.scheduled_start_time : null;
+    const status = eventStatusName(body?.status);
+    const metadata =
+      typeof body?.entity_metadata === 'object' && body?.entity_metadata !== null
+        ? (body.entity_metadata as { location?: unknown })
+        : null;
+    const location = typeof metadata?.location === 'string' ? metadata.location : null;
+    if (!id || !name || !startsAt || !status) {
+      throw new ActionError('discord_unavailable', 'Discord answered the event read without its identity', {
+        logReason: 'discord_mirror_unreadable',
+      });
+    }
+    return { eventId: id, name, startsAt, location, status, observedAt: new Date().toISOString() };
+  }
+
   private async call(
     method: string,
     path: string,
@@ -249,6 +316,29 @@ async function readJson(res: Response): Promise<unknown> {
     return await res.json();
   } catch {
     return null;
+  }
+}
+
+/**
+ * Discord's scheduled-event lifecycle, by its wire code.
+ *
+ * An unrecognised code is returned as its number, never dropped: the read
+ * reports what Discord said, and the website decides what that means. A
+ * non-numeric status is null, which fails the read above.
+ */
+export function eventStatusName(status: unknown): string | null {
+  if (typeof status !== 'number') return null;
+  switch (status) {
+    case 1:
+      return 'SCHEDULED';
+    case 2:
+      return 'ACTIVE';
+    case 3:
+      return 'COMPLETED';
+    case 4:
+      return 'CANCELED';
+    default:
+      return String(status);
   }
 }
 
