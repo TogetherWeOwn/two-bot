@@ -167,7 +167,7 @@ export function registerOnboarding(client: Client, deps: OnboardingDeps): void {
         allowedMentions: { users: [member.id] },
       });
       void deps.onboardingRota?.promptShown({
-        member, message, variant: 'legacy', actionChannelId: INTRO_CHANNEL_ID,
+        member, message, variant: 'legacy', actionChannelId: target.id,
       });
       await recorder.prompted(member.guild.id, member.id, target.id);
     } catch (err) {
