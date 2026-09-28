@@ -26,6 +26,13 @@ import { announcementsProofConfig, assertProofIdentity, ownsProofMessage, proofS
 import { proofDiscordFetch } from './staging-discord-fetch.ts';
 
 const discordFetch = proofDiscordFetch({ onRateLimit: ms => console.log(`WAIT Discord 429: ${ms}ms before bounded retry`) });
+if (process.argv.includes('--help')) {
+  console.log('usage: node scripts/staging-announcements-proof.ts --output=<new-report.json>');
+  console.log('');
+  console.log('TOG-3845: real REST + isolated staging Postgres, never the deployed bot DB schema.');
+  console.log('Requires DISCORD_STAGING_BOT_TOKEN and TWO_STAGING_DATABASE_URL; --help needs neither.');
+  process.exit(0);
+}
 const { token, dbUrl } = announcementsProofConfig(process.env);
 const output = process.argv.find(a => a.startsWith('--output='))?.slice(9);
 if (!output) throw new Error('A new --output=<report.json> file is required.');

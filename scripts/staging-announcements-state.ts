@@ -4,6 +4,20 @@ import {
   STAGING_BOT_APPLICATION_ID,
   STAGING_SERVER_NAME,
 } from '../src/staging/spec.ts';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// Library: announcements proof config/validators. Importing this file never
+// reads argv and never exits; the block below only runs on direct invocation.
+const isMain = process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  console.log('usage: node scripts/staging-announcements-state.ts --help');
+  console.log('');
+  console.log('Announcements proof config and validators (library, no direct invocation).');
+  console.log('Imported by scripts/staging-announcements-proof.ts and scripts/staging-announcements-verify.ts.');
+  console.log('No token, no database, no side effects on --help.');
+  process.exit(process.argv.includes('--help') ? 0 : 2);
+}
 
 export interface ProofCheck {
   name: string;

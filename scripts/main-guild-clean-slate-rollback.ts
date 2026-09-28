@@ -18,6 +18,14 @@ import { LIVE_BOT_APPLICATION_ID, LIVE_GUILD_ID, LIVE_GUILD_NAME } from '../src/
 const token = process.env.DISCORD_BOT_TOKEN;
 const guildId = process.env.DISCORD_GUILD_ID ?? LIVE_GUILD_ID;
 const argv = process.argv.slice(2);
+// --help boots with no token, no manifest read, no network.
+if (argv.includes('--help')) {
+  console.log('usage: node scripts/main-guild-clean-slate-rollback.ts --manifest <rollback.json> --confirm-main-guild --apply');
+  console.log('');
+  console.log('Deterministically undo an applied main-guild clean-slate manifest, in reverse.');
+  console.log('Requires both --confirm-main-guild and --apply; --help contacts nothing and needs no token.');
+  process.exit(0);
+}
 const APPLY = argv.includes('--apply');
 const CONFIRMED = argv.includes('--confirm-main-guild');
 const ADMINISTRATOR = 1n << 3n;

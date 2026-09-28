@@ -47,6 +47,18 @@ function env(name: string, fallback?: string): string {
   return v;
 }
 
+// First statement of the body: imports above are side-effect-free, so this
+// runs before env() can exit(2) on missing TWO_HOST_DB. --help needs no env,
+// no database, no Discord, no socket.
+if (process.argv.includes('--help')) {
+  console.log('usage: TWO_HOST_DB=postgres://... TWO_HOST_SECRET=... TWO_HOST_CHANNEL_KEY=qa-throwaway:<thread> DISCORD_STAGING_BOT_TOKEN=... node scripts/internal-actions-host-real.ts');
+  console.log('');
+  console.log('TOG-463 step 1: internal-actions host wired to the REAL Discord REST API and staging token.');
+  console.log('Prints one JSON line `acceptance_host_ready`, then serves until SIGTERM.');
+  console.log('The channel key MUST name a throwaway: announcement.post puts a real message in the staging guild.');
+  process.exit(0);
+}
+
 const DB_SPEC = env('TWO_HOST_DB');
 const KEY_ID = env('TWO_HOST_KEY_ID', 'web-staging');
 const SECRET = env('TWO_HOST_SECRET');
