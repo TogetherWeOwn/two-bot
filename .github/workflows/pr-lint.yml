@@ -22,14 +22,47 @@ concurrency:
   group: pr-lint-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
-env:
-  REQUIRE_CARD_REF: "true"
-
 jobs:
-  pr-lint:
-    name: pr-lint
+  # Same trusted gate as ci.yml: an outside contributor's pull request must not
+  # execute on our self-hosted runners (TOG-3103). It checks out the BASE
+  # commit, so the fork cannot supply the script that decides whether to trust
+  # it; scripts/ci/check-fork-gate-coverage.mjs pins the exact step list.
+  fork-gate:
     runs-on: [self-hosted, two-selfhosted]
     timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          persist-credentials: false
+      - name: Refuse fork pull requests
+        env:
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: ./scripts/ci/refuse-fork-pr.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install trusted workflow parser
+        run: npm ci --ignore-scripts --prefix scripts/ci
+      - name: Read candidate workflows
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: candidate
+          sparse-checkout: .github/workflows
+          persist-credentials: false
+      - name: Verify the fork gate against candidate wiring
+        run: ./scripts/ci/refuse-fork-pr.test.sh "$GITHUB_WORKSPACE/candidate"
+
+  pr-lint:
+    name: pr-lint
+    needs: fork-gate
+    runs-on: [self-hosted, two-selfhosted]
+    timeout-minutes: 5
+    # Job-level, not workflow-wide: the fork-gate coverage check rejects
+    # workflow env because it would also reach the trusted gate.
+    env:
+      REQUIRE_CARD_REF: "true"
     steps:
       - name: Check title, body and commits
         env:
