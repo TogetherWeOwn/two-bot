@@ -52,6 +52,117 @@ environment file.
 | `npm run funnel` | Prints the current funnel numbers. |
 | `npm run preflight` | Checks credentials and bot permissions before a deploy. |
 
+## Hermetic offline suites (no database, no network)
+
+Most `unit.*` suites need `TWO_TEST_DATABASE_URL` (running Postgres 17+).
+Files named `test/unit.<area>-offline.test.ts` are the exception: they run
+with plain `node --test` and no env, no database, no token, no network. The
+pattern comes from PR #283 (`test/unit.announcements-offline.test.ts`);
+`unit.selfrolestore-offline`, `unit.containment-store-discord-offline` and
+`unit.feed-redirect-offline` follow it.
+
+Run one with the database explicitly unset:
+
+```bash
+env -u TWO_TEST_DATABASE_URL node --test test/unit.announcements-offline.test.ts
+```
+
+Which seam each layer uses:
+
+| Layer | Seam (constructor / interface) | Offline stand-in |
+|---|---|---|
+| Database | Narrow `Db` surface (`src/store/driver.ts`: `prepare` → `get`/`all`/`run`, plus `exec`, `transaction`, `close`; SQL uses `?` placeholders) | `node:sqlite` `DatabaseSync(':memory:')` behind a `wrapStatement` adapter; `CREATE TABLE` mirrors the relevant `migrations/*.sql` in sqlite types |
+| Discord transport | Constructor-injected interface (`AnnouncementsService(store, discord, feedReader?)`, `ContainmentDiscord({ fetchImpl })`) | `FakeDiscord` class recording `posts`/`edits` with counters; never the real client in `tools/mock-discord/` |
+| Feeds / network | `FeedReader.read(feed, signal?)`, `PublicFeedFetcher(lookup, fetchImpl)` | Stub reader (`{ read: async () => items }`); stub DNS lookup (public IP unless told otherwise) plus URL-keyed `fetchStub` (unknown URLs throw); `redirect: 'manual'` preserved |
+| Ambient network | Global `fetch` | `before()` swaps in a trap that records and throws; `after()` restores; final test asserts `fetchCalls` is empty |
+
+Copy-paste skeleton:
+
+```ts
+import { after, before, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
+import type { Db, Statement } from '../src/store/driver.ts';
+
+before(() => {
+  // Pin the hermetic guarantee: this suite must stay green with no database.
+  delete process.env.TWO_TEST_DATABASE_URL;
+});
+
+// Fail the run on any real network call.
+const fetchCalls: string[] = [];
+let originalFetch: typeof fetch;
+before(() => {
+  originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    fetchCalls.push(String(input));
+    throw new Error(`offline suite attempted a network call to ${String(input)}`);
+  }) as unknown as typeof fetch;
+});
+after(() => { globalThis.fetch = originalFetch; });
+
+// sqlite behind the narrow Db surface. Mirror the needed migrations/*.sql
+// tables here; emulate pg_advisory_xact_lock as a no-op (single-threaded,
+// so there is no rival transaction to serialize against).
+function wrapStatement(db: DatabaseSync, sql: string): Statement {
+  if (sql.includes('pg_advisory_xact_lock')) {
+    return {
+      get: async <T>(): Promise<T | undefined> => ({}) as T,
+      all: async <T>(): Promise<T[]> => [],
+      run: async () => ({ changes: 0 }),
+    };
+  }
+  const stmt = db.prepare(sql);
+  return {
+    get: async <T>(...params: unknown[]): Promise<T | undefined> =>
+      stmt.get(...(params as never[])) as T | undefined,
+    all: async <T>(...params: unknown[]): Promise<T[]> =>
+      stmt.all(...(params as never[])) as T[],
+    run: async (...params: unknown[]): Promise<{ changes: number }> => {
+      const r = stmt.run(...(params as never[]));
+      return { changes: Number(r.changes) };
+    },
+  };
+}
+
+function openOfflineDb(): Db {
+  const db = new DatabaseSync(':memory:');
+  db.exec(`CREATE TABLE example_things (id TEXT PRIMARY KEY, guild_id TEXT NOT NULL)`);
+  const facade: Db = {
+    prepare: (sql) => wrapStatement(db, sql),
+    exec: async (sql) => { db.exec(sql); },
+    transaction: async <T>(fn: (tx: Db) => Promise<T>): Promise<T> => fn(facade),
+    close: async () => { db.close(); },
+  };
+  return facade;
+}
+
+// Fake transport: record, never send. Assert counters per test
+// (e.g. zero posts on every refusal path).
+class FakeDiscord {
+  posts: Array<{ channelId: string; content: string }> = [];
+  edits: Array<{ channelId: string; messageId: string; content: string }> = [];
+  async postMessage(channelId: string, content: string) {
+    this.posts.push({ channelId, content });
+    return String(1600000000000000000n + BigInt(this.posts.length));
+  }
+  async editMessage(channelId: string, messageId: string, content: string) {
+    this.edits.push({ channelId, messageId, content });
+  }
+}
+
+test('offline suite made zero live network calls', () => {
+  assert.deepEqual(fetchCalls, [], 'every transport in this file is a mock');
+});
+```
+
+Rules: name the file `unit.<area>-offline.test.ts`; never reference
+`openTestDb`; use fixed snowflake IDs and a fixed clock (`NOW`/`FUTURE`);
+`reset()` with `DELETE FROM` between tests; assert transport counters
+explicitly (refusals send nothing). The Postgres-backed suite still covers
+the same code against the real driver in CI — the offline file covers the
+validation and outcome branches a reviewer runs with no database.
+
 ## Branches
 
 Nothing lands on `main` except through a pull request. That applies to me too.
