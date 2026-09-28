@@ -16,7 +16,7 @@
  * message in the channel" is checked against the mock, not against Discord.
  * Do not read a green run of this as the staging acceptance TOG-463 asks for.
  *
- *   TWO_HOST_DB=postgres://.../two_bot_staging \
+ *   TWO_HOST_DB=postgres://.../twobot_staging \
  *   TWO_HOST_KEY_ID=web-staging TWO_HOST_SECRET=... \
  *   TWO_HOST_PORT=8787 \
  *   node scripts/internal-actions-host.ts

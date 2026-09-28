@@ -189,19 +189,20 @@ function databaseCheck(env: Env): ReadinessCheck {
 
   if (!url) {
     // This used to be `blocked` on the founder, for a Postgres host that did
-    // not exist. It does now: TOG-45 provisioned `two_bot_staging` on the
-    // shared server on 2026-08-25 and applied all four migrations. So an unset
-    // variable is no longer a wait on anybody - it is one export, by whoever
-    // is at the keyboard. Leaving it `blocked` would send QA to queue behind a
-    // founder for something already done, which is the exact failure this
-    // module exists to prevent.
+    // not exist. It does now: TOG-45 provisioned staging on 2026-08-25 (then
+    // `two_bot_staging` on the shared server; canonical since TOG-7033 is
+    // `twobot_staging` on Coolify Postgres) and applied the migrations. So an
+    // unset variable is no longer a wait on anybody - it is one export, by
+    // whoever is at the keyboard. Leaving it `blocked` would send QA to queue
+    // behind a founder for something already done, which is the exact failure
+    // this module exists to prevent.
     return {
       ...base,
       status: 'fix',
       detail: 'TWO_STAGING_DATABASE_URL is not set.',
       action:
-        'export it to the provisioned staging database - `two_bot_staging` on the same ' +
-        'Postgres server as the rest of the estate. See docs/STAGING.md',
+        'export it to the canonical staging database - `twobot_staging` on Coolify ' +
+        'Postgres (TOG-7033). See docs/STAGING.md',
     };
   }
   if (!/^postgres(ql)?:\/\//.test(url)) {

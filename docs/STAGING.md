@@ -12,7 +12,7 @@ green:
 |---|---|
 | staging bot token | **ok** — `Owen QA Test` (`1469137636663758888`) |
 | staging Discord server | **ok** — `TWO Staging` (`1545644954272137297`) |
-| staging database | **ok** — `two_bot_staging` |
+| staging database | **ok** — `twobot_staging` (canonical, Coolify Postgres — see [The staging database](#the-staging-database)) |
 | schema | **ok** — 9 migrations applied |
 | fixtures | **ok** — the known state |
 
@@ -20,7 +20,7 @@ Set both of these and you can run the suite:
 
 ```bash
 export DISCORD_STAGING_GUILD_ID=1545644954272137297   # not a secret
-export TWO_STAGING_DATABASE_URL=...                   # the two_bot_staging database
+export TWO_STAGING_DATABASE_URL=...                   # the canonical twobot_staging database (Coolify Postgres; TOG-7033)
 ```
 
 The server was provisioned on 2026-09-05: `#welcome`, `#general`, `#events`,
@@ -110,7 +110,7 @@ unresolvable role id also answers `discord_404`.
 
 | Variable | What it is | Where it comes from |
 |---|---|---|
-| `TWO_STAGING_DATABASE_URL` | Postgres URL for the staging database | the `two_bot_staging` database, already provisioned and migrated — see [The staging database](#the-staging-database) |
+| `TWO_STAGING_DATABASE_URL` | Postgres URL for the staging database | the canonical `twobot_staging` database (Coolify Postgres, role `two_staging`), already provisioned and migrated — see [The staging database](#the-staging-database) |
 | `DISCORD_STAGING_GUILD_ID` | id of the `TWO Staging` server | copied from Discord by the human who created the server (right-click → Copy Server ID) and posted on TWO-25 — not secret |
 | `DISCORD_STAGING_BOT_TOKEN` | the `Owen QA Test` bot token | secrets store as `discord_staging_bot_token`, bound to you and to me |
 
@@ -180,24 +180,33 @@ your job, not a queue behind anyone.
 
 ## The staging database
 
-`two_bot_staging`, on the same Postgres server as the rest of the estate — a
-second database, not a second server, so it costs nothing. Provisioned and
-migrated on 2026-08-25 under TOG-45.
+Canonical target (TOG-7033): database `twobot_staging` on Coolify Postgres —
+the same database the deployed Owen QA staging bot uses. Agent runs reach it
+through the bound `TWO_BOT_STAGING_DATABASE_URL` secret as role `two_staging`
+(narrowed grant, TOG-6026). That secret resolves over a private transport, so
+take the connection string from your own bound environment — never from another
+run's logs — and never treat a local tunnel address as a public endpoint.
+
+For local QA, point `TWO_STAGING_DATABASE_URL` at the same canonical database:
 
 ```bash
-export TWO_STAGING_DATABASE_URL="postgres://<user>:<pw>@<host>:5432/two_bot_staging"
+export TWO_STAGING_DATABASE_URL="postgres://<user>:<pw>@<host>:5432/twobot_staging"
 ```
 
-Take the user, password and host from the `DATABASE_URL` already in your
-environment and swap the database name — that is the whole derivation. The name
+Do not derive this by swapping the database name on another URL. The name
 matters: `staging` in it is what satisfies guard 2, and the reset script wipes
 what it is given.
 
-All four migrations (`0001_initial` … `0004_presence_probe`) are applied. It is
-deliberately **left unseeded** — fixtures are written scoped to a guild id, and
-seeding it under a placeholder before the real `TWO Staging` guild exists would
-leave rows that no later reset deletes. See [One database, one
-guild](#one-database-one-guild) for why that matters more than it looks.
+The schema is applied. The database is deliberately **left unseeded** —
+fixtures are written scoped to a guild id, and seeding it under a placeholder
+before the real `TWO Staging` guild exists would leave rows that no later reset
+deletes. See [One database, one guild](#one-database-one-guild) for why that
+matters more than it looks.
+
+History: on 2026-08-25 under TOG-45 the staging binding pointed at a second
+database, `two_bot_staging`, on paperclip-db. That target is non-canonical
+since TOG-7033 — its narrowed grant stands, but rows written there are not
+live-staging proof.
 
 ## Applying the schema to the staging database
 
@@ -234,7 +243,7 @@ node scripts/staging-reset.ts --check    # print the counts, change nothing
 Expected output on a good reset:
 
 ```
-staging database : two_staging
+staging database : twobot_staging
 guild            : <staging guild id>
 reset            : 34 events written, 10 member rows
 
@@ -620,7 +629,7 @@ Report absence; do not improvise around it.
 
 ~~The second, also the founder, via TWO-11: a Postgres host.~~ **Done
 2026-08-25 (TOG-45).** The host was already reachable and already had an empty
-`two_bot_staging` database on it; nobody had ever applied a schema to it, so
+`two_bot_staging` database on it (historical — paperclip-db, non-canonical since TOG-7033); nobody had ever applied a schema to it, so
 from the outside it looked identical to "no host yet". All four migrations are
 now applied and the full QA loop has been exercised against it end to end — see
 the note below. This no longer waits on the founder, on TWO-11, or on the

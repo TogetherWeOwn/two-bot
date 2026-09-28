@@ -13,9 +13,15 @@ Requirements:
 
 - `DISCORD_STAGING_BOT_TOKEN` bound to Owen QA Test application
   `1469137636663758888`. Both token identity and remote application are checked.
-- `TWO_STAGING_DATABASE_URL` bound to database **two_bot_staging**. No fallback to
+- `TWO_STAGING_DATABASE_URL` bound to the canonical staging database
+  **twobot_staging** (Coolify Postgres, TOG-7033). No fallback to
   `DATABASE_URL`/`TWO_DATABASE_URL`, no routing query parameters, no public-schema
   migration. Every run creates a fresh `tog3845_ann_<24 hex characters>` schema.
+  (Note: the proof scripts still pin the old name in code —
+  `scripts/staging-announcements-state.ts` (pathname guard),
+  `scripts/staging-announcements-proof.ts` and
+  `scripts/staging-announcements-verify.ts` (identity asserts).
+  Updating those is an engineering follow-up, not this doc.)
 - Exact guild **1545644954272137297**, named TWO Staging. An explicit mismatching
   `DISCORD_STAGING_GUILD_ID` is rejected. Live guild **326474832151838730** is never
   a selectable target.

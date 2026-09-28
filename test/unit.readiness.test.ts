@@ -115,14 +115,15 @@ test('the live guild id in the staging variable is a fix, not a wait', () => {
 });
 
 test('a missing database is the keyboard-holder\'s job, not a wait on anyone', () => {
-  // Was `blocked` on the founder until TOG-45 provisioned `two_bot_staging`
-  // (2026-08-25). The host exists and the schema is applied, so an unset
+  // Was `blocked` on the founder until TOG-45 provisioned staging
+  // (2026-08-25; then `two_bot_staging`, canonical `twobot_staging` since TOG-7033).
+  // The host exists and the schema is applied, so an unset
   // variable is one export - naming an owner here would park QA behind a
   // person who has nothing left to do.
   const c = get({ ...GOOD, TWO_STAGING_DATABASE_URL: undefined }, 'database');
   assert.equal(c.status, 'fix');
   assert.equal(c.owner, undefined);
-  assert.match(c.action ?? '', /two_bot_staging/);
+  assert.match(c.action ?? '', /twobot_staging/);
 });
 
 test('a SQLite path is refused - staging runs the same engine as live', () => {
