@@ -13,6 +13,9 @@
  * more access than the feature needs. Exit code is non-zero only on FAIL, so
  * this is safe to wire into a deploy step.
  *
+ * Exit-code contract (CONTRIBUTING.md §CLI exit-code contract): 0 ready,
+ * 1 a check failed, 2 the token is missing so nothing ran.
+ *
  * The token is never printed. See docs/SECRETS.md.
  */
 import { readSecret } from '../src/core/credentials.ts';

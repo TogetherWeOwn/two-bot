@@ -21,15 +21,20 @@ import { loadMigrations, migrate } from '../src/store/migrate.ts';
 const args = new Set(process.argv.slice(2));
 const statusOnly = args.has('--status');
 
+// Exit-code contract: CONTRIBUTING.md §CLI exit-code contract. Missing or
+// non-Postgres URL is a precondition failure (2, never ran), not a verdict.
+// scripts/coolify-deploy.sh's migration gate selftest pins this: rc 2 here
+// maps to "known-unknown, continue on boot-time migration", while rc 1 with a
+// CHANGED/ORPHAN line is drift and aborts the roll.
 const url = process.env.TWO_DATABASE_URL?.trim();
 if (!url) {
   console.error('migrate: TWO_DATABASE_URL is not set.');
   console.error('migrate: this script is Postgres-only. See docs/RUNBOOK.md.');
-  process.exit(1);
+  process.exit(2);
 }
 if (!isPostgresSpec(url)) {
   console.error('migrate: TWO_DATABASE_URL must use postgres:// or postgresql://.');
-  process.exit(1);
+  process.exit(2);
 }
 
 // skipMigrations, or opening the database would silently do the very thing we

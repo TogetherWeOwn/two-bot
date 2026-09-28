@@ -27,6 +27,9 @@
  * FAIL = staging cannot support the integration suite. WARN = it works but
  * differs from the spec. Exit code is non-zero only on FAIL.
  *
+ * Exit-code contract (CONTRIBUTING.md §CLI exit-code contract): 0 all pass,
+ * 1 a check failed, 2 a usage/environment precondition failed so nothing ran.
+ *
  * The token is read from the environment and never printed.
  */
 import {

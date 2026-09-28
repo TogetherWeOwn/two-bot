@@ -121,6 +121,47 @@ routing around it.
 - A new runtime dependency without a sentence in the PR saying why the standard
   library will not do.
 
+## CLI exit-code contract (scripts/*)
+
+Every `scripts/*.ts` and `scripts/*.sh` an operator or CI step scripts
+against uses the same four codes, so a wrapper can act without parsing text.
+Full operator reference: `scripts/coolify-deploy.sh` header (the original
+contract). Summary:
+
+| Exit | Meaning | Operator action |
+|---|---|---|
+| `0` | Success / green / ready. | Proceed. |
+| `1` | Ran, verdict is red: a check failed, drift found, verification refused. Artefacts may still be written (e.g. wave0 drift report). | Read the output, fix the thing checked, re-run. |
+| `2` | Never ran: bad usage or unmet environment precondition (bad flags, missing/invalid env, missing token, wrong DB shape, refused live guild). Nothing was checked or written. | Fix the invocation, not the thing checked. |
+| `3` | Blocked on someone/something else: waiting on a human, an empty-read safety stop, a tampered backup, a deploy that never went healthy. Retrying the same command changes nothing. | Escalate to the named owner, do not re-run. |
+
+Rules for new scripts: usage/env guards exit `2`, check verdicts exit `0`/`1`,
+waiting-on-a-human exits `3`. Never use `2` for a verdict — see grandfathered
+variances below.
+
+Five most operator-facing scripts (aligned, TOG-9127):
+
+- `scripts/coolify-deploy.sh` — the reference: `0` deployed, `2` precondition unmet, `3` triggered-but-unhealthy, `1` unexpected API failure.
+- `scripts/preflight.ts` — `0` ready, `1` FAIL, `2` missing token.
+- `scripts/health-check.ts` — `0` all pass, `1` a check failed, `2` usage/env.
+- `scripts/migrate.ts` — `2` missing/non-Postgres URL, `1` drift (`CHANGED`/`ORPHAN`) on `--status`.
+- `scripts/staging-doctor.ts` — `0` ready, `1` fixable, `3` waiting on someone.
+
+Also aligned: `scripts/staging-verify.ts` (`2` usage/env, `1` FAIL), `scripts/web-views.ts`
+(`2` missing/non-Postgres URL, `1` missing views), `scripts/staging-reset.ts` and
+`scripts/guild-config-restore.ts` (guard refusals exit `2`, tampered backup exits `3`).
+
+Grandfathered variances (do not copy into new scripts):
+
+- `scripts/bootstrap-host.sh` exits `4` (system Node), `5` (foreign app dir),
+  `6` (token in env file) — host-setup stops documented in `docs/RUNBOOK.md` §Deploy.
+- `scripts/presence-trend.ts` and `scripts/community-scorecard.ts` exit `2` on a
+  firing/incomplete verdict. That predates this contract and cron reads it
+  literally; changing it breaks callers. New verdict-carrying scripts use `1`.
+- `scripts/wave0-export.ts` exits `1` with artefacts written on drift — correct
+  per this contract, but callers under `set -e`/CI must not read it as a crash.
+  See `docs/RUNBOOK.md` §Wave 0.
+
 ## Where things live
 
 `src/core/` has no Discord dependency and is where the funnel rules are. If you

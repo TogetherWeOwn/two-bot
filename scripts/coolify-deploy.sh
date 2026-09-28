@@ -51,7 +51,7 @@ case "${1:-}" in
   --check) CHECK_ONLY=1 ;;
   --selftest) SELFTEST=1 ;;
   "") ;;
-  *) echo "usage: scripts/coolify-deploy.sh [--check|--selftest]" >&2; exit 1 ;;
+  *) echo "usage: scripts/coolify-deploy.sh [--check|--selftest]" >&2; exit 2 ;;
 esac
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

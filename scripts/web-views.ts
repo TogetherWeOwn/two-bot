@@ -25,14 +25,17 @@ import {
 const args = new Set(process.argv.slice(2));
 const statusOnly = args.has('--status');
 
+// Exit-code contract: CONTRIBUTING.md §CLI exit-code contract. Missing or
+// non-Postgres URL is a precondition failure (2, never ran); missing views
+// after a successful read are a red verdict (1).
 const url = process.env.TWO_DATABASE_URL?.trim();
 if (!url) {
   console.error('web-views: TWO_DATABASE_URL is not set.');
-  process.exit(1);
+  process.exit(2);
 }
 if (!isPostgresSpec(url)) {
   console.error('web-views: TWO_DATABASE_URL must use postgres:// or postgresql://.');
-  process.exit(1);
+  process.exit(2);
 }
 
 const db = await openDb(url, { skipMigrations: true, applicationName: 'two-bot-web-views' });
