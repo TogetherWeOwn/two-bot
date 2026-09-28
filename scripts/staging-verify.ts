@@ -63,7 +63,11 @@ import { requestDiscordJson } from '../src/discord/rateLimit.ts';
 import { openDb } from '../src/store/db.ts';
 import { hasAuditEventIdentity } from '../src/audit/events.ts';
 
-const API = 'https://discord.com/api/v10';
+// Staging-only mock seam (TOG-8295), same shape as scripts/staging-session-demo.ts.
+// Default-off: unset means discord.com. Accepts the base with or without the
+// /v10 suffix; every request below appends its own path to API.
+const RAW_API = (process.env.DISCORD_API_BASE ?? 'https://discord.com/api/v10').replace(/\/+$/, '');
+const API = RAW_API.endsWith('/v10') ? RAW_API : `${RAW_API}/v10`;
 
 const configuredToken = process.env.DISCORD_STAGING_BOT_TOKEN;
 if (!configuredToken) {
