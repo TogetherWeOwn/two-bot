@@ -66,7 +66,7 @@ jobs:
   check:
     needs: fork-gate
     runs-on: [self-hosted, two-selfhosted]
-    timeout-minutes: 10
+    timeout-minutes: 20
 
     services:
       postgres:
@@ -78,7 +78,7 @@ jobs:
         ports:
           - 5432
         options: >-
-          --health-cmd "pg_isready -U two"
+          --health-cmd "pg_isready -U two -d two_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
@@ -128,7 +128,7 @@ jobs:
   postgres:
     needs: [fork-gate, check]
     runs-on: [self-hosted, two-selfhosted]
-    timeout-minutes: 10
+    timeout-minutes: 20
 
     services:
       postgres:
@@ -140,7 +140,7 @@ jobs:
         ports:
           - 5432
         options: >-
-          --health-cmd "pg_isready -U two"
+          --health-cmd "pg_isready -U two -d two_test"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
