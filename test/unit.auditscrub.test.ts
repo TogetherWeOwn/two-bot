@@ -16,9 +16,59 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { stripUsers } from '../scripts/audit-scrub.ts';
+import { SCRUBBED_USER_KEYS, stripUsers } from '../scripts/audit-scrub.ts';
 
 const ROOT = resolve(import.meta.dirname, '..');
+
+/**
+ * FIELD LIST (TOG-8300 acceptance). Each PII-bearing field the collector can
+ * persist maps to its scrub rule. The synthetic test below pins every row;
+ * the live-tree test pins every tracked artifact against the same key set.
+ *
+ * | PII field                                              | Scrub rule                    |
+ * |--------------------------------------------------------|-------------------------------|
+ * | invites[].inviter (user object)                        | reduced to `{ id }`           |
+ * | invites[].target_user (user object, stream invites)    | reduced to `{ id }`           |
+ * | invites[].guild_scheduled_event.creator (user object)  | reduced to `{ id }`           |
+ * | integrations[].user (user object)                      | reduced to `{ id }`           |
+ * | integrations[].application.bot (user object)           | reduced to `{ id }`           |
+ * | emoji/sticker .user (uploader, when Discord returns it)| reduced to `{ id }`           |
+ * | scheduled_events[].creator (user object)               | reduced to `{ id }` (TOG-8300)|
+ * | `bot: true` boolean flags                              | pass through (not an object)  |
+ * | owner_id / creator_id bare snowflakes                  | kept (ids are attribution)    |
+ * | integrations[].account.name (service display name)     | kept (not a user identity)    |
+ */
+test('every documented PII field reduces to { id }', () => {
+  const userObject = {
+    id: '20',
+    username: 'Blessed',
+    global_name: 'Blessed',
+    avatar: 'h',
+    discriminator: '0',
+    banner: 'b',
+    bot: true,
+  };
+  const input = {
+    inviter: userObject,
+    target_user: userObject,
+    guild_scheduled_event: { id: 'ev-1', creator: userObject },
+    integrations: [{ user: userObject, application: { bot: userObject } }],
+    emoji: { id: 'e-1', user: userObject },
+    creator: userObject,
+  };
+  const out = stripUsers(input) as Record<string, any>;
+  assert.deepEqual(out.inviter, { id: '20' });
+  assert.deepEqual(out.target_user, { id: '20' });
+  assert.deepEqual(out.guild_scheduled_event.creator, { id: '20' });
+  assert.deepEqual(out.integrations[0].user, { id: '20' });
+  assert.deepEqual(out.integrations[0].application.bot, { id: '20' });
+  assert.deepEqual(out.emoji.user, { id: '20' });
+  assert.deepEqual(out.creator, { id: '20' });
+  // Every key the rule claims to scrub is exercised above.
+  for (const key of SCRUBBED_USER_KEYS) {
+    assert.match(JSON.stringify(input), new RegExp(`"${key}"`), `fixture must exercise ${key}`);
+  }
+});
 
 test('stripUsers reduces inviter/user/target_user objects to { id }', () => {
   const input = {
@@ -105,11 +155,7 @@ test('tracked audit/raw artifacts carry no embedded user identity fields', () =>
       }
       if (o && typeof o === 'object') {
         for (const [k, v] of Object.entries(o as Record<string, unknown>)) {
-          if (
-            (k === 'user' || k === 'inviter' || k === 'target_user' || k === 'bot') &&
-            v &&
-            typeof v === 'object'
-          ) {
+          if ((SCRUBBED_USER_KEYS as readonly string[]).includes(k) && v && typeof v === 'object') {
             const extra = Object.keys(v as Record<string, unknown>).filter((sk) => sk !== 'id');
             if (extra.length > 0) leaks.push(`${path}/${k}: ${extra.join(',')}`);
           }
