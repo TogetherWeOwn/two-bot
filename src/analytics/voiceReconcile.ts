@@ -262,10 +262,10 @@ export function reconcileVoiceHalves(
           // is unusable; the earlier start row on file is what saves it - the
           // same shape as a restart loss, so the same resolution name.
           result.resolved.push({
-            guildId: open.guildId,
-            memberId: open.memberId,
+            guildId: openUsable.guildId,
+            memberId: openUsable.memberId,
             channel: end.channel,
-            startAt: open.occurredAt,
+            startAt: openUsable.occurredAt,
             endAt: end.occurredAt,
             durationSeconds: Math.max(0, Math.round((ev.at - started!) / 1000)),
             resolution: 'restart-gap',
@@ -293,10 +293,10 @@ export function reconcileVoiceHalves(
       // before the end.
       if (openUsable) {
         result.resolved.push({
-          guildId: open.guildId,
-          memberId: open.memberId,
+          guildId: openUsable.guildId,
+          memberId: openUsable.memberId,
           channel: end.channel,
-          startAt: open.occurredAt,
+          startAt: openUsable.occurredAt,
           endAt: end.occurredAt,
           durationSeconds: Math.max(0, Math.round((ev.at - started!) / 1000)),
           resolution: 'restart-gap',

@@ -351,11 +351,11 @@ function fakeDb(canned: CannedRows, writes: string[]): Db {
           ? canned.ends
           : canned.leaves;
       return {
-        async get(..._params: unknown[]) {
-          return rows[0];
+        async get<T>(..._params: unknown[]): Promise<T | undefined> {
+          return rows[0] as unknown as T | undefined;
         },
-        async all(..._params: unknown[]) {
-          return [...rows];
+        async all<T>(..._params: unknown[]): Promise<T[]> {
+          return [...rows] as unknown as T[];
         },
         async run(..._params: unknown[]) {
           writes.push(sql);
