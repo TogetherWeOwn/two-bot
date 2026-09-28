@@ -214,6 +214,67 @@ is reached by the compose healthcheck *inside* the container, which is what
 makes `running:healthy` meaningful: it means the gateway is connected and the
 database answered.
 
+## 6.2 Deploy-on-merge gates (`.github/workflows/deploy.yml`)
+
+Merges to `main` deploy themselves — no manual trigger needed. The workflow has
+two jobs, and every step in them is unconditional: a missing target fails the
+job red on purpose (TOG-913 — a gate that once skipped-and-passed told the
+owner a page was live when nothing had shipped, so no step here may gain a
+"skip and pass" branch).
+
+**Staging deploys automatically.** `deploy-staging` runs when the `ci` workflow
+completes green on `main` (`workflow_run`), so "main moved" is never confused
+with "main passed". A manual re-deploy of staging uses `workflow_dispatch`.
+There is deliberately no environment picker: a choice list with `production` on
+it is how the ignored gate gets rebuilt by accident.
+
+**Production deploys only by operator dispatch.** `deploy-production` runs on
+`workflow_dispatch` only — never automatically — after `deploy-staging` on the
+same dispatch, behind the `production` environment and its required reviewer.
+It stays gated until TOG-6903 says the Community Platform may go live; the
+first production launch needs owner approval. Plan caveat: on GitHub Free with
+a private repo, environment protection rules are ignored, so the real gate
+today is the human click plus the required reviewer the operator sets on the
+production environment. If the plan cannot enforce the reviewer, keep
+production manual from the Coolify dashboard (§6.1) instead of weakening the
+workflow file.
+
+Each deploy — staging or production — runs the same five gates in order:
+
+1. **Wait for the host mirror** (`scripts/wait-for-host-mirror.mjs`). Coolify
+   clones the host mirror (§2), never github.com, and the box re-mirrors
+   roughly every 2 minutes. This step waits out one mirror interval so the
+   deploy builds the merged commit rather than its parent; the log records the
+   merge SHA so a stale deploy can be told apart from a lagging mirror. Same
+   rule as §6.1, automated.
+2. **Deploy-target gate** (`scripts/check-deploy-target.mjs`). Fails the job
+   when the Coolify bearer credential, panel URL, or app UUID secrets are
+   missing — printing secret NAMES only, never values. A missing deploy target
+   is red, naming the secrets that clear it.
+3. **Record deploy start time.** A freshness anchor: the smoke step's `ready`
+   line must prove THIS deploy, not the previous release's surviving log tail.
+4. **Trigger Coolify deploy and wait for healthy**
+   (`scripts/wait-for-coolify-deploy.mjs`). POSTs the bearer-header trigger
+   (§6.1), then polls until the deployment reports `finished` AND the app
+   reports `running:healthy` — the compose healthcheck hits `/readyz`
+   in-container, which returns 200 only when the gateway is connected and
+   Postgres answers. A 200 from the trigger only queued the deploy; green here
+   means it is live. Never skips: an unanswered panel or an app that never
+   reports healthy fails.
+5. **Post-deploy smoke** (`scripts/smoke-staging-deploy.mjs`). Through the
+   panel, not a URL — the bot publishes no ports, so the sslip.io address 404s
+   by design (§6.1). Three checks: `running:healthy`; a FRESH
+   `{"msg":"ready","guilds":N>=1}` log line timestamped at or after the deploy
+   start; and log timestamps advancing between two reads a minute apart. Any of
+   them missing fails.
+
+Migrations need no gate step: the bot migrates at startup under an advisory
+lock, so a normal deploy applies pending migrations before serving.
+
+Rollback for either environment is §7: `git revert` on `main`, wait for the
+mirror, re-run the deploy. Migrations do not roll back; every migration here
+is additive.
+
 ## 7. Rollback
 
 Coolify keeps previous deployments. **Deployments → the previous entry →
