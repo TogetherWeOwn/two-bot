@@ -72,9 +72,9 @@ test('the other two raid rows match the anomaly labels', () => {
 });
 
 test('the audit envelope (84 humans, 31 pending, 30 raid accounts) agrees', () => {
-  const audit = JSON.parse(read('data/server-audit-2026-08-19.json'));
-  assert.equal(audit.summary.members.human_members, 84);
-  assert.equal(audit.summary.members.stuck_at_rules_screening, 31);
+  const audit = JSON.parse(read('audit/summary.json'));
+  assert.equal(audit.members.human_members, 84);
+  assert.equal(audit.members.stuck_at_rules_screening, 31);
   assert.match(RAID_DOC, /84 human members, 31 stuck at the rules gate/);
   assert.match(anomaly('2025-12-15-raid').note, /30 of the server's 84 "humans" are raid accounts/);
   assert.match(RAID_DOC, /30 of those accounts are still members today/);
@@ -163,36 +163,29 @@ test('the staged guild and application ids in the doc match the staging spec', (
 // Alert path and operating numbers
 // ---------------------------------------------------------------------------
 
-test('the staff alert channel id matches .env.example and the guild safety channel', () => {
+// Publication scrub (TOG-4817, PR #192): `.env.example` leaves the staff
+// channel blank and the operator sources the live id at deploy time, so no
+// live id may be checked in here. Pin the scrubbed shape instead: the
+// example stays blank while the doc still routes to the guild safety
+// channel. Reads no raw dump (audit/raw/ is gitignored since TOG-8963).
+test('the staff alert channel is staff-only and the live id is never committed', () => {
   const envExample = read('.env.example');
-  const match = envExample.match(/DISCORD_STAFF_ALERT_CHANNEL_ID=(\d{17,20})/);
-  const guild = JSON.parse(read('audit/raw/guild.json'));
-  if (!match) {
-    // Publication scrub (TOG-4817, PR #192): `.env.example` leaves the staff
-    // channel blank and the operator sources the live id at deploy time, so
-    // no live id may be checked in here. Pin the scrubbed shape instead: the
-    // example stays blank while the doc still routes to the guild safety
-    // channel.
-    assert.match(
-      envExample,
-      /DISCORD_STAFF_ALERT_CHANNEL_ID=\s*(?:\n|$)/,
-      'env example leaves the alert channel blank for the operator',
-    );
-    assert.ok(
-      RAID_DOC.includes('safety_alerts_channel_id'),
-      'the doc routes alerts to the guild safety channel by name, never a live id',
-    );
-    assert.ok(
-      !/\d{17,20}/.test(
-        RAID_DOC.slice(RAID_DOC.indexOf('### Turning it on'), RAID_DOC.indexOf('## Removing the accounts')),
-      ),
-      'the alert-setup section names no live channel id',
-    );
-    assert.ok(guild.safety_alerts_channel_id, 'the guild fixture still pins the live route');
-    return;
-  }
-  assert.ok(RAID_DOC.includes(match[1]), 'the doc routes alerts to the same channel');
-  assert.equal(guild.safety_alerts_channel_id, match[1]);
+  assert.match(
+    envExample,
+    /DISCORD_STAFF_ALERT_CHANNEL_ID=\s*(?:\n|$)/,
+    'env example leaves the alert channel blank for the operator',
+  );
+  assert.ok(
+    RAID_DOC.includes('safety_alerts_channel_id'),
+    'the doc routes alerts to the guild safety channel by name, never a live id',
+  );
+  assert.ok(
+    !/\d{17,20}/.test(
+      RAID_DOC.slice(RAID_DOC.indexOf('### Turning it on'), RAID_DOC.indexOf('## Removing the accounts')),
+    ),
+    'the alert-setup section names no live channel id',
+  );
+  assert.match(RAID_DOC, /staff-only/, 'the doc requires a staff-only channel');
 });
 
 test('the rules-gate timeout (14 days, 04:43 UTC report, 30-day report-only) matches code', () => {

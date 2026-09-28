@@ -16,10 +16,11 @@
  *      `writeFileSync(` whose value passes through `stripUsers` from
  *      `./audit-scrub.ts`;
  *   3. audit-report renders the golden sample: `--root` at a copy of the
- *      committed `audit/raw` dump reproduces every committed output byte for
+ *      scrubbed `test/fixtures/audit-raw` dump (TOG-8963; member ids
+ *      remapped, structure identical) reproduces every kept table byte for
  *      byte (channels/roles/invites/categories CSVs, summary.json,
- *      new-member-walkthrough.txt, data/server-audit-*.csv + *.json) and the
- *      same stdout;
+ *      new-member-walkthrough.txt, data/server-audit-2026-08-19.csv) and
+ *      the same stdout;
  *   4. the golden verdicts themselves: the one merge, the two rewrite-topics,
  *      the 109 archives, the A1/A3 headcounts and the dead-air ratio;
  *   5. the probe is live, not hardcoded: giving the Lobby fixture a topic
@@ -123,14 +124,34 @@ test('audit-collect is GET-only with no message-content read and one scrubbed wr
 
 // --- audit-report: the golden sample ----------------------------------------------
 
-/** A fixture tree on disk: <dir>/audit/raw/*.json, the only read the report does. */
+/**
+ * A fixture tree on disk: <dir>/audit/raw/*.json, the only read the report does.
+ *
+ * The fixture is `test/fixtures/audit-raw/` — the 2026-08-19 dump with every
+ * community member user id remapped into the synthetic 9000000000000000xx
+ * block (TOG-8963 removed the real dump from HEAD). Structure, counts and
+ * verdicts are byte-identical to the live run; only user-id positions
+ * (thread owner_ids, automod creator_ids, guild owner_id, invite inviters,
+ * integration users) differ. Structural ids (guild, channels, roles,
+ * overwrites) are untouched.
+ */
 function writeFixtureRoot(): string {
   const dir = mkdtempSync(join(tmpdir(), 'two-audit-report-'));
-  cpSync(join(ROOT, 'audit', 'raw'), join(dir, 'audit', 'raw'), { recursive: true });
+  cpSync(join(ROOT, 'test', 'fixtures', 'audit-raw'), join(dir, 'audit', 'raw'), {
+    recursive: true,
+  });
   return dir;
 }
 
-/** Every committed render output, as repo-relative paths. */
+/**
+ * Every committed render output, as repo-relative paths.
+ *
+ * `data/server-audit-2026-08-19.json` is NOT in this list: TOG-8963 removed
+ * the full JSON snapshot from HEAD (member user IDs), so there is no
+ * committed file to compare against. The report still writes it (rollback
+ * source for operators with a local raw/ dump); the byte-identity pin covers
+ * the kept tables plus the spec-shaped CSV.
+ */
 const GOLDEN_FILES = [
   'audit/channels.csv',
   'audit/roles.csv',
@@ -139,7 +160,6 @@ const GOLDEN_FILES = [
   'audit/summary.json',
   'audit/new-member-walkthrough.txt',
   'data/server-audit-2026-08-19.csv',
-  'data/server-audit-2026-08-19.json',
 ];
 
 test('audit-report renders the golden sample byte for byte', async (t) => {
@@ -167,11 +187,15 @@ test('audit-report renders the golden sample byte for byte', async (t) => {
   );
 });
 
-test('the exported report function renders the golden summary without a subprocess', () => {
+test('the exported report function renders the golden summary without a subprocess', async (t) => {
   // Proves the export the CLI runs is the code under test — library and CLI
-  // cannot drift. Importing is already the side-effect pin: every file read
-  // sits inside runAuditReport, so this line would exit or throw otherwise.
-  const { summaryJson, walk } = runAuditReport(ROOT);
+  // cannot drift. Aims at a copy of the scrubbed fixture (the repo itself
+  // holds no audit/raw/ since TOG-8963); importing is already the
+  // side-effect pin — every file read sits inside runAuditReport, so a stray
+  // top-level read would exit or throw at import.
+  const dir = writeFixtureRoot();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const { summaryJson, walk } = runAuditReport(dir);
   assert.equal(summaryJson, readFileSync(join(ROOT, 'audit', 'summary.json'), 'utf8'));
   assert.equal(walk, readFileSync(join(ROOT, 'audit', 'new-member-walkthrough.txt'), 'utf8'));
 });

@@ -3,8 +3,10 @@
  * Builds audit/role-consolidation.csv — the per-role diff behind the
  * `role-consolidation` document on TWO-55.
  *
- * No network. Reads the TWO-13 snapshot in audit/raw/ and nothing else, so the
- * rubric can be argued with and re-run for free. Every row is keyed by role id.
+ * No network. Reads the TWO-13 snapshot from a local audit/raw/ (rebuilt with
+ * `node scripts/audit-collect.ts`; gitignored since TOG-8963, never committed)
+ * and nothing else, so the rubric can be argued with and re-run for free.
+ * Every row is keyed by role id.
  *
  * Verdicts:
  *   keep      leave exactly as it is

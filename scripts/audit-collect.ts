@@ -4,7 +4,9 @@
  *   DISCORD_TOKEN=... DISCORD_GUILD_ID=... node scripts/audit-collect.ts
  *
  * Writes audit/raw/*.json. Nothing else. Run it again in a month and diff the
- * files instead of redoing the audit by hand.
+ * files instead of redoing the audit by hand. The dumps stay on the
+ * maintainer machine: audit/raw/ is gitignored (TOG-8963) — commit only the
+ * tables `node scripts/audit-report.ts` rebuilds from them.
  *
  * TWO RULES THIS FILE ENFORCES, not by convention but by construction:
  *

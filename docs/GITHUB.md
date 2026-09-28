@@ -7,7 +7,7 @@ for the contributor workflow (fork, branch `type/short-description`, PR).
 The detailed org runbook that used to live in this file — org membership,
 token provisioning (`GH_TOKEN`/`setup-github.sh`), plan history, and the
 pre-launch hardening log — was internal operations history. It was removed
-from the public tree on the 2026-09-28 public-readiness pass ([TOG-8963]).
+from the public tree on the 2026-09-28 public-readiness pass ([TOG-8963](/TOG/issues/TOG-8963)).
 Maintainers who need it: it is in git history before that commit.
 
 Live facts, briefly:
