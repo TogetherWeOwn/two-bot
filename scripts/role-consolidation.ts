@@ -12,25 +12,33 @@
  *   delete    removed; holder list exported first if it has any holders
  *   decision  CEO owns this one; `recommended` carries the default
  *   untouchable  owned by a bot integration — deleting the bot is the only way
+ *
+ * Library + CLI (TOG-6483): the consolidation plan below is exported and
+ * pinned by test/unit.roleconsolidation.test.ts on seeded fixtures. Importing
+ * this file never reads env, never exits and never touches the network; the
+ * audit/raw/ read and the CSV write only run under direct invocation (the
+ * invokedDirectly block at the bottom). There is no Discord client anywhere
+ * in this file — the only inputs are the snapshot JSON, the only outputs are
+ * the CSV plus the stdout summary, and `--dry-run` skips the write.
+ *
+ *   node scripts/role-consolidation.ts                    # write audit/role-consolidation.csv
+ *   node scripts/role-consolidation.ts --dry-run          # print the plan, write nothing
+ *   node scripts/role-consolidation.ts --root <dir>       # read <dir>/audit/raw/, write <dir>/audit/role-consolidation.csv
+ *   node scripts/role-consolidation.ts --root <dir> --dry-run  # reviewer acceptance: zero writes + expected plan
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-// --help prints usage without touching audit/raw (the reads below run at import time).
-if (process.argv.includes('--help')) {
-  console.log('usage: node scripts/role-consolidation.ts');
-  console.log('');
-  console.log('Build audit/role-consolidation.csv: the per-role keep/merge/delete plan (TOG-55).');
-  console.log('No network, reads audit/raw/ only; --help reads nothing.');
-  process.exit(0);
-}
+export const GUILD_ID = '326474832151838730'; // @everyone shares the guild snowflake
 
-const ROOT = resolve(import.meta.dirname, '..');
-const raw = (f: string) => JSON.parse(readFileSync(resolve(ROOT, 'audit/raw', f), 'utf8'));
+// --- The survivors, named once so merge targets can't drift ------------------
+export const MEMBER = '1078755185423286372';
+export const SUPPORTER = '1051260775995551784'; // "Supporters" — kept as the one supporter role
 
-type Verdict = 'keep' | 'merge' | 'delete' | 'decision' | 'untouchable';
+export type Verdict = 'keep' | 'merge' | 'delete' | 'decision' | 'untouchable';
 
-interface Plan {
+export interface Plan {
   verdict: Verdict;
   group: string;
   /** role id of the survivor for `merge`, else '' */
@@ -40,40 +48,33 @@ interface Plan {
   why: string;
 }
 
-const roles: any[] = raw('roles.json');
-const channels: any[] = raw('channels.json');
-const onboarding: any = raw('onboarding.json');
-const members: any = raw('members.json');
-
-const byId = new Map<string, any>(roles.map((r) => [r.id, r]));
-const holders = (id: string): number => members.role_headcount[id] ?? 0;
-
-// Role ids referenced by a channel/category permission overwrite (type 0 = role).
-const overwrites = new Map<string, string[]>();
-for (const c of channels) {
-  for (const o of c.permission_overwrites ?? []) {
-    if (Number(o.type) !== 0) continue;
-    if (!overwrites.has(o.id)) overwrites.set(o.id, []);
-    overwrites.get(o.id)!.push(c.name);
-  }
+export interface ConsolidationSnapshot {
+  roles: any[];
+  channels: any[];
+  onboarding: any;
+  members: any;
 }
 
-// Role ids handed out by an onboarding prompt option, with the option that does it.
-const grantedBy = new Map<string, string[]>();
-for (const p of onboarding.prompts ?? []) {
-  for (const opt of p.options ?? []) {
-    for (const rid of opt.role_ids ?? []) {
-      if (!grantedBy.has(rid)) grantedBy.set(rid, []);
-      grantedBy.get(rid)!.push(`${p.title} → ${opt.title}`);
-    }
-  }
+export interface PlanRow {
+  role_id: string;
+  name: string;
+  group: string;
+  verdict: Verdict;
+  recommended: string;
+  merge_into_id: string;
+  merge_into_name: string;
+  holders: number;
+  holders_move: number;
+  needs_holder_export: string;
+  wave: string;
+  hoisted: string;
+  overwrite_count: number;
+  overwrite_channels: string;
+  granted_by_onboarding: string;
+  onboarding_options: string;
+  permission_class: string;
+  why: string;
 }
-
-const GUILD_ID = '326474832151838730'; // @everyone shares the guild snowflake
-
-// --- The survivors, named once so merge targets can't drift ------------------
-const MEMBER = '1078755185423286372';
-const SUPPORTER = '1051260775995551784'; // "Supporters" — kept as the one supporter role
 
 // --- Explicit plan, one entry per human-assignable role ----------------------
 // Anything not listed here is derived: bot-managed → untouchable, @everyone → keep.
@@ -235,13 +236,12 @@ set(['1092823497924956300'], {
   verdict: 'keep', group: 'colour',
   why: '6 holders and the only role that can see 🌈〢color-change. If the colour feature is fixed rather than removed, this is the door.',
 });
-const COLOURS = roles
-  .filter((r) => !r.managed && r.color !== 0 && !PLAN[r.id] && r.id !== GUILD_ID && r.permissions === '0')
-  .map((r) => r.id);
-set(COLOURS, {
+
+/** Color-Chan's palette: derived per snapshot, never a fixed list. */
+const COLOUR_DECISION: Plan = {
   verdict: 'decision', group: 'colour', recommended: 'keep',
   why: 'Color-Chan\'s palette. 51 roles, 6 holders between them, and the channel that drives it is unusable — @everyone is denied and the one role allowed to view it is denied send, so nobody can run the command. Recommend fixing the door (one overwrite) rather than 51 irreversible deletions; measure in 30 days. Deleting instead also means removing Color-Chan, or it recreates them.',
-});
+};
 
 // --- Waves and exports -------------------------------------------------------
 /** Does this row is retired under the recommended plan? */
@@ -254,7 +254,7 @@ const retires = (p: Plan) =>
  * so exporting ~330 member-role pairs to restore twelve decorations is a privacy
  * cost with no rollback value.
  */
-function exportReason(p: Plan, r: any, h: number): string {
+function exportReason(p: Plan, h: number): string {
   if (!retires(p) || h === 0) return 'no';
   if (p.group === 'separator') return 'no — decoration, nothing to restore';
   if (p.verdict === 'merge') return 'yes — to verify every holder got the survivor';
@@ -265,7 +265,7 @@ function exportReason(p: Plan, r: any, h: number): string {
  * Migration wave. Lowest risk first: nothing that touches a live holder or a
  * live permission happens before everything that touches neither.
  */
-function wave(p: Plan, r: any, h: number, ows: number, onb: number): string {
+function wave(p: Plan, h: number, ows: number, onb: number): string {
   if (!retires(p)) return '';
   if (onb > 0 && p.group !== 'separator') return 'R3 — edit the onboarding option first';
   if (p.group === 'separator') return onb > 0 ? 'R4a — separator, onboarding-granted' : 'R4b — separator';
@@ -275,96 +275,202 @@ function wave(p: Plan, r: any, h: number, ows: number, onb: number): string {
   return 'R1 — dead weight, no holders, no wiring';
 }
 
-// --- Emit --------------------------------------------------------------------
-const rows = roles
-  .slice()
-  .sort((a, b) => b.position - a.position || Number(b.id) - Number(a.id))
-  .map((r) => {
-    const ows = overwrites.get(r.id) ?? [];
-    const onb = grantedBy.get(r.id) ?? [];
-    let plan: Plan;
-    if (r.managed) {
-      plan = { verdict: 'untouchable', group: 'bot', why: 'Owned by a bot integration. Discord will not let us delete it; it goes when the bot goes (TWO-42).' };
-    } else if (r.id === GUILD_ID) {
-      plan = { verdict: 'keep', group: 'baseline', why: '@everyone.' };
-    } else if (PLAN[r.id]) {
-      plan = PLAN[r.id];
-    } else {
-      throw new Error(`unclassified role ${r.id} ${r.name}`);
+/**
+ * Pure consolidation plan for one guild snapshot. No env, no network, no
+ * logging, no file reads: the same PLAN table the CLI runs against audit/raw/.
+ * Throws on an unclassified role — a role the rubric never named must fail
+ * loudly, never silently keep or delete.
+ */
+export function buildConsolidationPlan(snap: ConsolidationSnapshot): PlanRow[] {
+  const { roles, channels, onboarding, members } = snap;
+  const byId = new Map<string, any>(roles.map((r) => [r.id, r]));
+  const holders = (id: string): number => members.role_headcount[id] ?? 0;
+
+  // Role ids referenced by a channel/category permission overwrite (type 0 = role).
+  const overwrites = new Map<string, string[]>();
+  for (const c of channels) {
+    for (const o of c.permission_overwrites ?? []) {
+      if (Number(o.type) !== 0) continue;
+      if (!overwrites.has(o.id)) overwrites.set(o.id, []);
+      overwrites.get(o.id)!.push(c.name);
     }
-    const survivor = plan.mergeInto ? byId.get(plan.mergeInto) : undefined;
-    return {
-      role_id: r.id,
-      name: r.name,
-      group: plan.group,
-      verdict: plan.verdict,
-      recommended: plan.recommended ?? '',
-      merge_into_id: plan.mergeInto ?? '',
-      merge_into_name: survivor?.name ?? '',
-      holders: holders(r.id),
-      holders_move: plan.verdict === 'merge' ? holders(r.id) : 0,
-      needs_holder_export: exportReason(plan, r, holders(r.id)),
-      wave: wave(plan, r, holders(r.id), ows.length, onb.length),
-      hoisted: r.hoist ? 'yes' : 'no',
-      overwrite_count: ows.length,
-      overwrite_channels: ows.slice(0, 6).join(' | '),
-      granted_by_onboarding: onb.length ? 'yes' : 'no',
-      onboarding_options: onb.join(' | '),
-      permission_class: r.managed
-        ? 'bot'
-        : String(r.permissions) === '0'
-          ? 'cosmetic'
-          : 'has-permissions',
-      why: plan.why,
-    };
-  });
+  }
 
-const cols = Object.keys(rows[0]);
-const esc = (v: unknown) => {
-  const s = String(v ?? '');
-  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-};
-writeFileSync(
-  resolve(ROOT, 'audit/role-consolidation.csv'),
-  [cols.join(','), ...rows.map((r) => cols.map((c) => esc((r as any)[c])).join(','))].join('\n') + '\n',
-);
+  // Role ids handed out by an onboarding prompt option, with the option that does it.
+  const grantedBy = new Map<string, string[]>();
+  for (const p of onboarding.prompts ?? []) {
+    for (const opt of p.options ?? []) {
+      for (const rid of opt.role_ids ?? []) {
+        if (!grantedBy.has(rid)) grantedBy.set(rid, []);
+        grantedBy.get(rid)!.push(`${p.title} → ${opt.title}`);
+      }
+    }
+  }
 
-// --- Totals, printed so the document's numbers come from here ----------------
-const human = rows.filter((r) => r.verdict !== 'untouchable' && r.role_id !== GUILD_ID);
-const count = (v: Verdict) => human.filter((r) => r.verdict === v).length;
-const decisionsIf = (rec: string) => human.filter((r) => r.verdict === 'decision' && r.recommended === rec).length;
+  // Color-Chan's palette, derived per snapshot so a new colour role can never
+  // slip through unclassified: cosmetic, unplanned, not @everyone.
+  const colourIds = new Set(
+    roles
+      .filter((r) => !r.managed && r.color !== 0 && !PLAN[r.id] && r.id !== GUILD_ID && r.permissions === '0')
+      .map((r) => r.id),
+  );
 
-console.log(`total roles                 ${rows.length}`);
-console.log(`  bot-managed (untouchable) ${rows.filter((r) => r.verdict === 'untouchable').length}`);
-console.log(`  @everyone                 1`);
-console.log(`  human-assignable          ${human.length}`);
-console.log(`    keep                    ${count('keep')}`);
-console.log(`    merge                   ${count('merge')}`);
-console.log(`    delete                  ${count('delete')}`);
-console.log(`    decision                ${count('decision')}  (recommended keep ${decisionsIf('keep')}, delete ${decisionsIf('delete')})`);
-console.log(`\nif every recommendation is taken:`);
-const survives = count('keep') + decisionsIf('keep');
-console.log(`  human-assignable roles    ${human.length} -> ${survives}`);
-console.log(`  roles deleted             ${count('merge') + count('delete') + decisionsIf('delete')}`);
-console.log(`  ...of which hold nobody   ${human.filter((r) => (r.verdict === 'merge' || r.verdict === 'delete' || (r.verdict === 'decision' && r.recommended === 'delete')) && r.holders === 0).length}`);
-console.log(`  members needing a regrant ${human.filter((r) => r.verdict === 'merge').reduce((a, r) => a + r.holders, 0)} role-holdings`);
-console.log(`  roles needing an export   ${human.filter((r) => r.needs_holder_export.startsWith('yes')).length}`);
-console.log(`  hoisted sidebar groups    ${human.filter((r) => r.hoisted === 'yes' && r.holders > 0).length} render today -> ${human.filter((r) => r.hoisted === 'yes' && r.holders > 0 && (r.verdict === 'keep' || (r.verdict === 'decision' && r.recommended === 'keep'))).length} after`);
-console.log(`\nwaves:`);
-{
-  const w = new Map<string, number>();
-  for (const r of human) if (r.wave) w.set(r.wave, (w.get(r.wave) ?? 0) + 1);
-  for (const [k, v] of [...w].sort()) console.log(`  ${k.padEnd(48)} ${v} roles`);
+  return roles
+    .slice()
+    .sort((a, b) => b.position - a.position || Number(b.id) - Number(a.id))
+    .map((r) => {
+      const ows = overwrites.get(r.id) ?? [];
+      const onb = grantedBy.get(r.id) ?? [];
+      let plan: Plan;
+      if (r.managed) {
+        plan = { verdict: 'untouchable', group: 'bot', why: 'Owned by a bot integration. Discord will not let us delete it; it goes when the bot goes (TWO-42).' };
+      } else if (r.id === GUILD_ID) {
+        plan = { verdict: 'keep', group: 'baseline', why: '@everyone.' };
+      } else if (PLAN[r.id]) {
+        plan = PLAN[r.id];
+      } else if (colourIds.has(r.id)) {
+        plan = COLOUR_DECISION;
+      } else {
+        throw new Error(`unclassified role ${r.id} ${r.name}`);
+      }
+      const survivor = plan.mergeInto ? byId.get(plan.mergeInto) : undefined;
+      return {
+        role_id: r.id,
+        name: r.name,
+        group: plan.group,
+        verdict: plan.verdict,
+        recommended: plan.recommended ?? '',
+        merge_into_id: plan.mergeInto ?? '',
+        merge_into_name: survivor?.name ?? '',
+        holders: holders(r.id),
+        holders_move: plan.verdict === 'merge' ? holders(r.id) : 0,
+        needs_holder_export: exportReason(plan, holders(r.id)),
+        wave: wave(plan, holders(r.id), ows.length, onb.length),
+        hoisted: r.hoist ? 'yes' : 'no',
+        overwrite_count: ows.length,
+        overwrite_channels: ows.slice(0, 6).join(' | '),
+        granted_by_onboarding: onb.length ? 'yes' : 'no',
+        onboarding_options: onb.join(' | '),
+        permission_class: r.managed
+          ? 'bot'
+          : String(r.permissions) === '0'
+            ? 'cosmetic'
+            : 'has-permissions',
+        why: plan.why,
+      };
+    });
 }
-console.log(`\nif the colour block is deleted too:`);
-console.log(`  human-assignable roles    ${human.length} -> ${survives - decisionsIf('keep')}`);
-console.log(`\nonboarding options touching a retired role:`);
-for (const r of human) {
-  const dies = r.verdict === 'delete' || r.verdict === 'merge' || (r.verdict === 'decision' && r.recommended === 'delete');
-  if (dies && r.granted_by_onboarding === 'yes') console.log(`  ${r.role_id} ${r.name}  <-  ${r.onboarding_options}`);
+
+/** The CSV body for one plan: header plus one row per role. */
+export function renderCsv(rows: PlanRow[]): string {
+  const cols = Object.keys(rows[0]!);
+  const esc = (v: unknown) => {
+    const s = String(v ?? '');
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  return [cols.join(','), ...rows.map((r) => cols.map((c) => esc((r as any)[c])).join(','))].join('\n') + '\n';
 }
-console.log(`\ndeletions that carry a channel overwrite:`);
-for (const r of human) {
-  const dies = r.verdict === 'delete' || r.verdict === 'merge' || (r.verdict === 'decision' && r.recommended === 'delete');
-  if (dies && r.overwrite_count > 0) console.log(`  ${r.role_id} ${r.name} (${r.holders} holders) -> ${r.overwrite_count}: ${r.overwrite_channels}`);
+
+/**
+ * The stdout summary, as lines so `--dry-run` and the writing run print the
+ * same plan. The document's numbers come from here.
+ */
+export function summarizePlan(rows: PlanRow[]): string[] {
+  const human = rows.filter((r) => r.verdict !== 'untouchable' && r.role_id !== GUILD_ID);
+  const count = (v: Verdict) => human.filter((r) => r.verdict === v).length;
+  const decisionsIf = (rec: string) => human.filter((r) => r.verdict === 'decision' && r.recommended === rec).length;
+  const out: string[] = [];
+
+  out.push(`total roles                 ${rows.length}`);
+  out.push(`  bot-managed (untouchable) ${rows.filter((r) => r.verdict === 'untouchable').length}`);
+  out.push(`  @everyone                 1`);
+  out.push(`  human-assignable          ${human.length}`);
+  out.push(`    keep                    ${count('keep')}`);
+  out.push(`    merge                   ${count('merge')}`);
+  out.push(`    delete                  ${count('delete')}`);
+  out.push(`    decision                ${count('decision')}  (recommended keep ${decisionsIf('keep')}, delete ${decisionsIf('delete')})`);
+  out.push('');
+  out.push(`if every recommendation is taken:`);
+  const survives = count('keep') + decisionsIf('keep');
+  out.push(`  human-assignable roles    ${human.length} -> ${survives}`);
+  out.push(`  roles deleted             ${count('merge') + count('delete') + decisionsIf('delete')}`);
+  out.push(`  ...of which hold nobody   ${human.filter((r) => (r.verdict === 'merge' || r.verdict === 'delete' || (r.verdict === 'decision' && r.recommended === 'delete')) && r.holders === 0).length}`);
+  out.push(`  members needing a regrant ${human.filter((r) => r.verdict === 'merge').reduce((a, r) => a + r.holders, 0)} role-holdings`);
+  out.push(`  roles needing an export   ${human.filter((r) => r.needs_holder_export.startsWith('yes')).length}`);
+  out.push(`  hoisted sidebar groups    ${human.filter((r) => r.hoisted === 'yes' && r.holders > 0).length} render today -> ${human.filter((r) => r.hoisted === 'yes' && r.holders > 0 && (r.verdict === 'keep' || (r.verdict === 'decision' && r.recommended === 'keep'))).length} after`);
+  out.push('');
+  out.push(`waves:`);
+  {
+    const w = new Map<string, number>();
+    for (const r of human) if (r.wave) w.set(r.wave, (w.get(r.wave) ?? 0) + 1);
+    for (const [k, v] of [...w].sort()) out.push(`  ${k.padEnd(48)} ${v} roles`);
+  }
+  out.push('');
+  out.push(`if the colour block is deleted too:`);
+  out.push(`  human-assignable roles    ${human.length} -> ${survives - decisionsIf('keep')}`);
+  out.push('');
+  out.push(`onboarding options touching a retired role:`);
+  for (const r of human) {
+    const dies = r.verdict === 'delete' || r.verdict === 'merge' || (r.verdict === 'decision' && r.recommended === 'delete');
+    if (dies && r.granted_by_onboarding === 'yes') out.push(`  ${r.role_id} ${r.name}  <-  ${r.onboarding_options}`);
+  }
+  out.push('');
+  out.push(`deletions that carry a channel overwrite:`);
+  for (const r of human) {
+    const dies = r.verdict === 'delete' || r.verdict === 'merge' || (r.verdict === 'decision' && r.recommended === 'delete');
+    if (dies && r.overwrite_count > 0) out.push(`  ${r.role_id} ${r.name} (${r.holders} holders) -> ${r.overwrite_count}: ${r.overwrite_channels}`);
+  }
+  return out;
+}
+
+/** The four TWO-13 snapshot files under one root. The only file read in this script. */
+export function loadSnapshot(root: string): ConsolidationSnapshot {
+  const raw = (f: string) => JSON.parse(readFileSync(resolve(root, 'audit/raw', f), 'utf8'));
+  return {
+    roles: raw('roles.json'),
+    channels: raw('channels.json'),
+    onboarding: raw('onboarding.json'),
+    members: raw('members.json'),
+  };
+}
+
+const invokedDirectly =
+  process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (invokedDirectly) {
+  // --help prints usage without touching audit/raw (the reads below run at CLI time, never at import).
+  if (process.argv.includes('--help')) {
+    console.log('usage: node scripts/role-consolidation.ts [--dry-run] [--root <dir>] [--out <file>]');
+    console.log('');
+    console.log('Build audit/role-consolidation.csv: the per-role keep/merge/delete plan (TOG-55).');
+    console.log('No network, reads audit/raw/ only; --help reads nothing.');
+    console.log('--dry-run prints the plan and writes nothing; --root reads <dir>/audit/raw/ instead of the repo.');
+    process.exit(0);
+  }
+
+  const flagValue = (name: string): string | undefined => {
+    const argv = process.argv.slice(2);
+    for (let i = 0; i < argv.length; i++) {
+      if (argv[i] === `--${name}`) return argv[i + 1];
+      if (argv[i]!.startsWith(`--${name}=`)) return argv[i]!.slice(name.length + 3);
+    }
+    return undefined;
+  };
+
+  const dryRun = process.argv.includes('--dry-run');
+  const root = flagValue('root') ?? resolve(import.meta.dirname, '..');
+
+  const rows = buildConsolidationPlan(loadSnapshot(root));
+
+  if (dryRun) console.log('# role-consolidation DRY RUN - nothing written.\n');
+  for (const line of summarizePlan(rows)) console.log(line);
+  if (dryRun) {
+    console.log('\ndry run: nothing was written.');
+    process.exit(0);
+  }
+
+  writeFileSync(
+    flagValue('out') ?? resolve(root, 'audit/role-consolidation.csv'),
+    renderCsv(rows),
+  );
 }
