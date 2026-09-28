@@ -17,7 +17,14 @@
 # why there is no builder stage here: there is nothing to compile.
 
 # Pinned by digest (TOG-8680) so rebuilds do not drift when the rolling tag
-# moves. Refresh the digest with:
+# moves. A pin that is never refreshed goes stale silently, so this comment
+# is the refresh record: update the digest AND the date below together.
+#
+# Digest refreshed: 2026-09-28 (TOG-9126; live tag digest verified identical
+# the same day, tag last pushed 2026-09-19 — the pin was already current, so
+# this refresh changed the record, not the digest).
+# Cadence: monthly. scripts/ci/check-docker-digest-age.sh fails red when the
+# recorded date is older than 35 days (see docs/DEPLOY.md §9). Refresh with:
 #   crane digest node:24-bookworm-slim   (or Docker Hub API digest lookup)
 FROM node:24-bookworm-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6
 

@@ -27,6 +27,13 @@ npm run check:credentials:selftest
 # token, no target — the interesting cases are the ones where none exists
 # (TOG-913). Runs before the slow suites so a broken guard fails in seconds.
 npm run deploy:selftest
+# Base-image digest pin is fresh, and the guard that proves it still refuses
+# things (TOG-9126). Hermetic: reads only the Dockerfile and the calendar —
+# the live-upstream digest comparison is the monthly human step
+# (docs/DEPLOY.md §9), not a CI step, so this never reds an offline run.
+# Runs before the slow suites so a stale pin fails in seconds.
+npm run check:docker-digest
+npm run check:docker-digest:selftest
 npm run typecheck
 # Offline and instant: the golden ambiguous-vs-unknown eval (TOG-5849). It
 # scores the fixture split against the real attribution code, so a report or

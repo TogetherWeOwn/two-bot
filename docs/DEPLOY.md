@@ -314,3 +314,25 @@ host-timer variables if you ever need it.
 
 A backup that lives on the same disk as the database does not survive losing the
 machine. Verify the off-box destination in the Coolify panel.
+
+## 9. Base-image digest refresh (monthly cadence)
+
+The Dockerfile pins `node:24-bookworm-slim` by digest (TOG-8680) so rebuilds
+do not drift when the rolling tag moves. A pin that is never refreshed goes
+stale silently — the tag moves on, the image keeps building last season's
+userland. So the pin is refreshed **monthly**:
+
+1. Look up the current digest (no Docker daemon needed):
+   `crane digest node:24-bookworm-slim`, or the Docker Hub tag page for
+   `library/node:24-bookworm-slim`.
+2. If it differs from the Dockerfile `FROM` line, update the digest.
+3. **Either way, update the `Digest refreshed:` date** in the `FROM` comment
+   to today. A refresh that finds the pin already current still records the
+   date — that is what proves the check happened.
+4. CI enforces the cadence: `scripts/ci/check-docker-digest-age.sh` (wired
+   into the required `check` job) fails red when the recorded date is older
+   than 35 days. The script never touches the network — comparing against the
+   live upstream digest is this monthly human step, not a CI step.
+
+Last refresh: 2026-09-28 (TOG-9126 — live tag digest verified identical, so
+the refresh changed the record, not the digest).

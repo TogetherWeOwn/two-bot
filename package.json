@@ -51,6 +51,8 @@
     "check:credentials": "bash scripts/ci/check-systemd-credentials.sh",
     "check:credentials:selftest": "bash scripts/ci/check-systemd-credentials.test.sh",
     "check:script-targets": "node scripts/check-script-targets.ts",
+    "check:docker-digest": "bash scripts/ci/check-docker-digest-age.sh",
+    "check:docker-digest:selftest": "bash scripts/ci/check-docker-digest-age.test.sh",
     "deploy:selftest": "node --test scripts/deploy-target-selftest.mjs",
     "backup": "node scripts/pg-backup.ts",
     "verify:catalog": "node scripts/verify-catalog.ts",
