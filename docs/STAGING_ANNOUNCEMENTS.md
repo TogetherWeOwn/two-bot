@@ -107,7 +107,7 @@ the staging proof above does not directly exercise:
   service layer; the next scheduled poll tries again.
 
 **What the operator sees in audit.** Every poll writes one
-`announcement_audit` row per feed with `action = 'feed.poll'`,
+`announcements_audit_log` row per feed with `action = 'feed.poll'`,
 `actor_id = NULL` (system poll), and the feed id as target. Success rows
 carry `outcome = 'read N'`; failure rows carry `outcome = 'failed'` with
 `reason` set to the first 500 characters of the error (SSRF rejection,
