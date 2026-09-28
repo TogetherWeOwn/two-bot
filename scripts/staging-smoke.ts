@@ -475,6 +475,23 @@ const invokedDirectly =
   process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (invokedDirectly) {
+  if (process.argv.includes('--help')) {
+    console.log('usage: node scripts/staging-smoke.ts [--timeout-ms <n>]');
+    console.log('');
+    console.log('Post-deploy staging smoke: health plus the onboarding funnel, mock-safe.');
+    console.log('');
+    console.log('Flags:');
+    console.log('  --timeout-ms <n>  Per-check timeout in ms (default 120000).');
+    console.log('  --help            Show this help and exit.');
+    console.log('');
+    console.log('Examples:');
+    console.log('  node scripts/staging-smoke.ts --help');
+    console.log('  TWO_SMOKE_DATABASE_URL=postgres://two:two@localhost:5432/twobot_smoke \\');
+    console.log('    node scripts/staging-smoke.ts');
+    console.log('');
+    console.log('Requires TWO_SMOKE_DATABASE_URL pointing at a throwaway Postgres database; --help needs none.');
+    process.exit(0);
+  }
   const timeoutArg = process.argv.find((a) => a.startsWith('--timeout-ms='))?.slice('--timeout-ms='.length);
   const timeoutMs = timeoutArg !== undefined ? Number(timeoutArg) : 120_000;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
