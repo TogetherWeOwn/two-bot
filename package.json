@@ -23,6 +23,7 @@
     "redirect": "node scripts/redirect.ts",
     "campaigns": "node scripts/campaigns.ts",
     "voice": "node scripts/voice-sessions.ts",
+    "voice:reconcile": "node scripts/voice-reconcile.ts",
     "attribution": "node scripts/attribution.ts",
     "unknown-attribution": "node scripts/unknown-attribution.ts",
     "eval:funnel-attribution": "node scripts/funnel-attribution-eval.ts",
