@@ -27,6 +27,81 @@ What a gap in coverage actually costs, precisely: **invite attribution and
 first-message timing are lost for good**, because Discord keeps no per-member
 record of either. **Join dates are not lost** — see the next section.
 
+## Staging checks cadence: staging-doctor + preflight
+
+Two scripts, two different questions. Run the right one:
+
+| Script | Question it answers | Needs | Side effects |
+|---|---|---|---|
+| `node scripts/staging-doctor.ts` | "Can I run the integration suite yet?" | the staging trio below, plus the staging DB reachable | none — writes nothing, never contacts Discord, never prints a token |
+| `node scripts/preflight.ts` | "Will the funnel actually collect data?" | live bot token + network to Discord | read-only against Discord; writes nothing to the DB |
+
+The staging trio (see `docs/STAGING.md` for where each comes from):
+`TWO_STAGING_DATABASE_URL`, `DISCORD_STAGING_GUILD_ID`,
+`DISCORD_STAGING_BOT_TOKEN`. These names are deliberately different from the
+live ones — a staging run must not be one forgotten variable away from writing
+into the real funnel.
+
+When to run each:
+
+- **doctor, at the start of every staging session.** Then again after every
+  `staging-reset.ts` and after every suite run — a suite that leaves state
+  behind is the normal way fixtures drift, and the doctor is how you notice.
+- **doctor, before opening a staging PR.** Green doctor output is the
+  "reproduced on the known state" half of the evidence.
+- **preflight, before every deploy.** `bootstrap-host.sh` already runs it and
+  refuses to start the service on a FAIL — a bot that is `active (running)`
+  while recording every join as `unknown` is worse than one that never started.
+- **preflight, after any portal change** (intents, roles, channels) and any
+  time joins start recording as `unknown`.
+
+What green looks like (both verified 2026-09-27, TOG-7192):
+
+```bash
+node scripts/staging-doctor.ts
+#   ok      staging bot token      Owen QA Test (1469137636663758888).
+#   ok      staging Discord server guild 1545644954272137297.
+#   ok      staging database       two_staging_test.
+#   ok      schema                 NN migration(s) applied.  (the count grows
+#                                  with migrations/ — green means zero pending)
+#   ok      fixtures               the known state.
+# Ready. `node scripts/staging-reset.ts` then run the suite.
+# exit 0 — five oks, then reset and run your suite.
+```
+
+```bash
+DISCORD_TOKEN=... DISCORD_GUILD_ID=... node scripts/preflight.ts
+# Ready to deploy.  0 fail, 3 warn
+# exit 0 — WARNs are fine (Administrator over-grant, unused Message Content
+# Intent, alert-channel-via-Administrator). Only FAIL blocks a deploy.
+```
+
+What red looks like, and whose job it is:
+
+- doctor exit `1` — a `FIX` line, yours. It carries the command, usually
+  `node scripts/staging-reset.ts` (a previous suite left state behind) or the
+  `TWO_DATABASE_URL="$TWO_STAGING_DATABASE_URL" node scripts/migrate.ts`
+  mapping. Run it, re-run the doctor. Proven: deleting the 7
+  `first_message` rows prints
+  `FIX fixtures 1 funnel count(s) off: first_message 0/7`, and a reset
+  recovers to green.
+- doctor exit `3` — `WAITING`, someone else's. The line names the owner and
+  the issue (e.g. founder, TWO-21). Raise it on TWO-25; do not work around it.
+- preflight exit `2` — no token at all
+  (`Missing bot token. Set DISCORD_TOKEN ...`). Nothing ran; supply it.
+- preflight exit `1` — a `FAIL` line. The funnel is broken or silently lying
+  (intents off, missing Manage Server, unreadable invite list). Fix it in the
+  developer portal before starting the service.
+
+Where to log it:
+
+- Green: one line on the card you are working —
+  `doctor exit 0 (5 ok) / preflight 0 fail 3 warn`. That is the whole record.
+- Red that you fixed: the FIX line plus the command that cleared it, same card.
+- Red that blocks: keep the card `blocked` against the real blocker, with the
+  red output quoted. Neither script prints a token — keep it that way and
+  never paste one alongside.
+
 ## Recover the history (one-off, no host needed)
 
 ```bash
