@@ -20,6 +20,7 @@
  */
 import { formatVoiceDurationSeconds } from '../core/voiceSessions.ts';
 import { renderDowntimeReport } from '../core/inviteTracker.ts';
+import type { CommunityScorecard } from './communityScorecard.ts';
 
 // ---------------------------------------------------------------------------
 // Shared pieces
@@ -496,6 +497,92 @@ export function formatRosterText(rows: RosterTextRow[], days: number, since: str
   }
   if (silent > 0) {
     out.push(`\n  ${silent} members still in the server and have never posted - the re-engagement list.`);
+  }
+  out.push('');
+  return out.join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Community scorecard
+// ---------------------------------------------------------------------------
+
+/**
+ * The one-screen summary `scripts/community-scorecard.ts` prints before the
+ * full JSON (TOG-8986). The JSON carries every per-class zero row for
+ * machines; this carries what a reviewer checks by eye: week, coverage,
+ * evidence, the key counts, and the intervention. Null metrics (incomplete
+ * coverage) print `n/a` with the repair pointer, never a bare blank.
+ */
+export function formatCommunityScorecardSummary(s: CommunityScorecard): string {
+  const out: string[] = [];
+  out.push(`\nTWO community scorecard - week of ${s.weekStart.slice(0, 10)} (${s.weekStart.slice(0, 10)}..${s.weekEnd.slice(0, 10)})\n`);
+  out.push(
+    `  coverage: ${s.coverageState} · evidence: ${s.evidenceState} · ` +
+      `${s.rawFactCount} facts (watermark ${s.watermark})`,
+  );
+  if (s.coverageState === 'incomplete') {
+    out.push('  (counts below are partial - repair ingestion/reconciliation first)');
+  }
+  const metric = (label: string, value: number | null, unit: string, extra = ''): string => {
+    if (value === null) {
+      return `  ${label.padEnd(HEADLINE_LABEL_WIDTH)}  ${'n/a'.padStart(HEADLINE_COUNT_WIDTH)} ${unit}  (incomplete coverage - see ingestion errors)`;
+    }
+    return headline(label, value, unit, extra);
+  };
+  out.push(metric('weekly active humans', s.weeklyActiveHumans, 'humans'));
+  out.push(metric('human messages', s.humanMessages, 'messages'));
+  out.push(
+    metric(
+      'eligible joins',
+      s.eligibleJoins,
+      'joins',
+      s.joinSources ? `(${s.joinSources.known} known source, ${s.joinSources.unknown} unknown)` : '',
+    ),
+  );
+  if (s.eventAttendance) {
+    out.push(
+      headline('event attendance', s.eventAttendance.participations, 'participations', `by ${s.eventAttendance.distinctHumans} humans`),
+    );
+  } else {
+    out.push(metric('event attendance', null, 'participations'));
+  }
+  if (s.botNoise) {
+    const b = s.botNoise;
+    out.push(
+      `  ${'bot noise'.padEnd(HEADLINE_LABEL_WIDTH)}  ` +
+        `${`${b.numerator}/${b.denominator}`.padStart(HEADLINE_COUNT_WIDTH)} automated  ` +
+        `${formatPct(b.numerator, b.denominator)} of human-space messages` +
+        (b.alert ? '  (ALERT: over 20% - pause one automated source)' : ''),
+    );
+  } else {
+    out.push(metric('bot noise', null, 'automated'));
+  }
+  const r = s.firstHumanReply;
+  if (!r) {
+    out.push(metric('first reply median', null, 'median'));
+  } else {
+    const med = r.medianSeconds === null ? 'n/a' : formatVoiceDurationSeconds(r.medianSeconds);
+    out.push(
+      `  ${'first reply median'.padEnd(HEADLINE_LABEL_WIDTH)}  ` +
+        `${med.padStart(HEADLINE_COUNT_WIDTH)} median  ` +
+        `(${r.resolvedCount} resolved of ${r.eligibleJoinCount} eligible joins)`,
+    );
+    if (r.noReplyWithin24hCount > 0) {
+      out.push(`    ${r.noReplyWithin24hCount} joins with no reply within 24h - tighten the welcome rota`);
+    }
+    if (r.pendingCount > 0) {
+      out.push(`    ${r.pendingCount} joins still within the 24h window`);
+    }
+  }
+  out.push(`\n  intervention: ${s.intervention.code} - ${s.intervention.reason}`);
+  if (s.killSwitchActive) {
+    out.push('  (kill switch active - recommendations suppressed)');
+  } else if (!s.recommendationsEnabled) {
+    out.push('  (recommendations disabled)');
+  }
+  if (s.ingestionErrors.length > 0) {
+    out.push(`\n${sectionHeader('Ingestion errors')}`);
+    for (const e of s.ingestionErrors) out.push(`    ${e}`);
   }
   out.push('');
   return out.join('\n');

@@ -29,6 +29,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { CommunityClassifier, loadCommunityClassifierConfig } from '../src/analytics/communityClassifier.ts';
+import { formatCommunityScorecardSummary } from '../src/analytics/cliFormat.ts';
 import { CommunityFactStore, COMMUNITY_FACT_TYPES } from '../src/analytics/communityFacts.ts';
 import {
   COMMUNITY_INTERVENTION_CODES,
@@ -404,7 +405,21 @@ test('scorecard dry-run: exact scorecard JSON, persisted verbatim, zero network'
       assert.equal(stored?.run_status, 'completed');
       assert.deepEqual(JSON.parse(stored!.scorecard_json), JSON.parse(JSON.stringify(scorecard)));
 
-      // 3. Nothing left the process.
+      // 3. The fixture path prints a one-screen summary alongside (not
+      //    instead of) the exact JSON: week, coverage, evidence, key counts,
+      //    intervention. Pinned here so a renderer drift fails first.
+      const summary = formatCommunityScorecardSummary(scorecard);
+      assert.ok(summary.includes('TWO community scorecard - week of 2026-08-31'), 'summary names the week');
+      assert.ok(summary.includes('coverage: complete'), 'summary names coverage');
+      assert.ok(summary.includes('evidence: sufficient'), 'summary names evidence');
+      assert.ok(summary.includes('weekly active humans'), 'summary carries per-metric values');
+      assert.ok(summary.includes('5 humans'), 'summary pins weekly active humans');
+      assert.ok(summary.includes('5 messages'), 'summary pins human messages');
+      assert.ok(summary.includes('0 joins'), 'summary pins eligible joins');
+      assert.ok(summary.includes('intervention: HOLD'), 'summary pins the intervention');
+      assert.ok(!summary.includes('exclusionCounts'), 'summary stays one screen, not the JSON dump');
+
+      // 4. Nothing left the process.
       assert.deepEqual(trap.calls, [], 'dry-run made a network call');
 
       console.log(`SCORECARD_DRYRUN_EVIDENCE ${JSON.stringify({

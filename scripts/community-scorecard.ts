@@ -1,5 +1,6 @@
 import { openDb } from '../src/store/db.ts';
 import { runPreviousClosedCommunityWeek } from '../src/analytics/communityScorecard.ts';
+import { formatCommunityScorecardSummary } from '../src/analytics/cliFormat.ts';
 import { CommunityClassifier, loadCommunityClassifierConfig } from '../src/analytics/communityClassifier.ts';
 
 const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
@@ -14,6 +15,7 @@ try {
     recommendationsEnabled: process.env.TWO_COMMUNITY_RECOMMENDATIONS !== '0',
     correctionCycles: Number(process.env.TWO_COMMUNITY_CORRECTION_CYCLES ?? 0),
   });
+  console.log(formatCommunityScorecardSummary(result.scorecard));
   console.log(JSON.stringify(result, null, 2));
   if (result.scorecard.coverageState === 'incomplete') process.exitCode = 2;
 } finally {
