@@ -127,11 +127,41 @@ gh auth setup-git   # once per machine; without it git cannot reach the private 
 git clone https://github.com/TogetherWeOwn/two-bot.git
 cd two-bot
 npm ci --include=dev
+npm run e2e:selftest   # first green run: no token, no database, loopback only
 git checkout -b docs/short-description
 # edit, then (needs a running Postgres 17+ with a scratch database,
 # e.g. `createdb two_bot_test` — the repo does not provision one for you):
 TWO_TEST_DATABASE_URL=postgres://localhost:5432/two_bot_test npm test   # must pass before you open the PR
 ```
+
+`npm run e2e:selftest` boots `tools/mock-discord/`, runs one canned
+`gateway-bot` probe, and exits 0 (`ok gateway-bot -> ws://127.0.0.1:<port>/gw`,
+then `self-test passed`). It needs no Discord token and no Postgres — this is
+the green mock-transport run a fresh checkout should reach first. If it fails,
+stop here; the suite and the mock-bot flow below both build on it.
+
+Batch-2 staging/dev scripts boot the same credential-free way:
+`npm run <name> -- --help` exits 0 with no token, no database, no network
+(`staging:discord-fetch`, `staging:session-demo`, `staging:temp-voice-demo`,
+`staging:voice-occupant`, `staging:clean-slate`,
+`staging:announcements-proof/state/verify`, `mutate:tempvoice`, `e2e:harness`,
+`test:report`, `backup:upload-s3`, `internal-actions:host`,
+`internal-actions:host-real`). Guard: `node scripts/check-script-targets.ts` —
+every `node scripts/<x>` target in `package.json` must exist on disk.
+
+To watch the unmodified bot against the mock (needs a scratch Postgres of your
+own, separate from the test database — e.g. `createdb two_bot_dev`; the mock
+replaces Discord, not Postgres, and the bot auto-applies migrations on boot):
+
+```bash
+node tools/mock-discord/run.ts
+# prints DISCORD_API_BASE and DISCORD_GUILD_ID; in another shell:
+TWO_DATABASE_URL=postgres://localhost:5432/two_bot_dev DISCORD_TOKEN=mock DISCORD_API_BASE=http://127.0.0.1:<port>/api DISCORD_GUILD_ID=<printed-id> node src/index.ts
+```
+
+Full mock-bot detail lives in the [README](../README.md) (`Running it with no
+Discord token at all`); live staging stays in [docs/STAGING.md](STAGING.md)
+and needs the staging token, never the live one.
 
 Without `TWO_TEST_DATABASE_URL` the suite fails fast with
 `TWO_TEST_DATABASE_URL is required` (verified: `npm test` with no database

@@ -70,6 +70,26 @@ TWO_TEST_DATABASE_URL=postgres://localhost:5432/two_bot_test npm run test:postgr
 (`--include=dev` matters: if `NODE_ENV=production` is set, npm quietly skips
 devDependencies and `npm run typecheck` then fails with `tsc: not found`.)
 
+### First green run (no token, no database)
+
+```bash
+npm run e2e:selftest
+```
+
+Boots `tools/mock-discord/`, runs one canned `gateway-bot` probe, and exits
+0 (`ok gateway-bot -> ws://127.0.0.1:<port>/gw`, then `self-test passed`).
+No Discord token, no Postgres, no network beyond loopback. If this fails,
+stop here — the full suite and the mock-bot flow below both build on it.
+
+Batch-2 staging/dev scripts all boot the same way: `npm run <name> -- --help`
+exits 0 with no credentials (14 entries: `staging:discord-fetch`,
+`staging:session-demo`, `staging:temp-voice-demo`, `staging:voice-occupant`,
+`staging:clean-slate`, `staging:announcements-proof/state/verify`,
+`mutate:tempvoice`, `e2e:harness`, `test:report`, `backup:upload-s3`,
+`internal-actions:host`, `internal-actions:host-real`). Guard:
+`node scripts/check-script-targets.ts` — every `node scripts/<x>` target in
+`package.json` must exist on disk.
+
 To run it against a real server, put a bot token in `.env`
 (copy `.env.example`) and:
 
@@ -88,13 +108,15 @@ project was built and verified before the live token existed.
 ```bash
 node tools/mock-discord/run.ts
 # prints DISCORD_API_BASE and DISCORD_GUILD_ID; in another shell, with a
-# scratch Postgres of your own (same requirement as the suite above):
+# scratch Postgres of your own (e.g. `createdb two_bot_dev` — separate from
+# the `two_bot_test` suite database; the repo provisions neither):
 TWO_DATABASE_URL=postgres://localhost:5432/two_bot_dev DISCORD_TOKEN=mock DISCORD_API_BASE=http://127.0.0.1:<port>/api DISCORD_GUILD_ID=<printed-id> node src/index.ts
 ```
 
-Without `TWO_DATABASE_URL` the bot exits at boot with `Missing database URL`
-— the mock replaces Discord, not Postgres. It exercises everything except
-Discord's own servers and TLS.
+Without `TWO_DATABASE_URL` the bot exits at boot (`Missing database URL`
+from `src/core/config.ts`) — the mock replaces Discord, not Postgres. The bot
+auto-applies migrations on boot, so an empty scratch database is enough. It
+exercises everything except Discord's own servers and TLS.
 
 ## Layout
 
