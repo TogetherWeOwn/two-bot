@@ -60,6 +60,8 @@
     "staging:goodbye-live-verify": "node scripts/staging-goodbye-live-verify.ts",
     "staging:anti-nuke": "node scripts/staging-anti-nuke-acceptance.ts",
     "staging:provision": "node scripts/staging-provision.ts",
+    "levels:roles:acceptance": "bash scripts/levels-reward-role-acceptance.sh",
+    "levels:roles:acceptance:selftest": "bash scripts/levels-reward-role-acceptance.sh --selftest",
     "self-role:panel": "node scripts/self-role-panel.ts",
     "hooks:install": "bash scripts/install-hooks.sh",
     "prepare": "bash scripts/install-hooks.sh >/dev/null 2>&1 || true",
