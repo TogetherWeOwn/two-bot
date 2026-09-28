@@ -336,7 +336,7 @@ function selectIntervention(
   if (reply.noReplyWithin24hCount > 0) {
     return { code: 'FIRST_REPLY_BREACH', reason: 'tighten the human welcome rota for the next week' };
   }
-  return { code: 'HOLD', reason: 'no threshold crossed; continue the current one intervention' };
+  return { code: 'HOLD', reason: 'no threshold crossed; continue the current intervention' };
 }
 
 function hashInputs(facts: ParsedFact[]): string {

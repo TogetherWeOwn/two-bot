@@ -135,7 +135,7 @@ export const EXPECTED_SCORECARD = {
     pendingCount: 0,
   },
   ingestionErrors: [],
-  intervention: { code: 'HOLD', reason: 'no threshold crossed; continue the current one intervention' },
+  intervention: { code: 'HOLD', reason: 'no threshold crossed; continue the current intervention' },
   recommendationsEnabled: true,
   killSwitchActive: false,
 };
