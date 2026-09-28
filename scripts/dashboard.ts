@@ -20,6 +20,7 @@ import { createServer } from 'node:http';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { openDb } from '../src/store/db.ts';
+import { formatDashboardSummary } from '../src/analytics/cliFormat.ts';
 import { buildDashboard, type ChannelSnapshot } from '../src/analytics/dashboard.ts';
 import { renderHtml } from '../src/analytics/render.ts';
 
@@ -134,9 +135,14 @@ if (flag('serve')) {
     await mkdir(dirname(outPath), { recursive: true });
     await writeFile(outPath, renderHtml(data), 'utf8');
     console.log(`wrote ${outPath}`);
+    // Console shape (units, zero-state guidance) lives in cliFormat.ts
+    // (TOG-5723) so fixture tests cover it without a live DB.
     console.log(
-      `  joined this week ${data.thisWeek.joins} · active last 7 days ${data.active7d} · ` +
-        `real members ${data.realHumans}`,
+      formatDashboardSummary({
+        joinsThisWeek: data.thisWeek.joins,
+        active7d: data.active7d,
+        realHumans: data.realHumans,
+      }),
     );
   }
 }

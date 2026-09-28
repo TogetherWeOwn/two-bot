@@ -57,6 +57,12 @@ memory only long enough to count distinct people, including for the server-wide
 counts inside the collection loop, per spec 2.6. Nothing message-derived that
 identifies a person is written to disk. This matches `docs/PRIVACY.md`.
 
+Embedded user objects (invite inviters, integration users, integration
+application bots) are reduced to `{ id }` by `scripts/audit-scrub.ts` before
+anything is written - no usernames, avatars, or discriminators land in `raw/`.
+`test/unit.auditscrub.test.ts` pins this over every tracked raw artifact, so a
+new collector endpoint that embeds an identity fails the suite the day it lands.
+
 ## The rubric
 
 From `audit-spec` section 3. Verdicts turn on **unique human authors**, not
