@@ -198,21 +198,33 @@ export async function runStagingSmoke(opts: RunStagingSmokeOptions): Promise<Sta
     const port = (holder.address() as AddressInfo).port;
     const url = (p: string) => `http://127.0.0.1:${port}${p}`;
 
+    // Hermetic child env: ambient real credentials must not leak into the
+    // "mock-safe" boot. requiredToken() prefers DISCORD_BOT_TOKEN over
+    // DISCORD_TOKEN, and systemd credential files win over both (hence the
+    // CREDENTIALS_DIRECTORY scrub, same as e2e.stagingverify.test.ts); staging
+    // restart containment re-arms from ambient TWO_STAGING_* alone.
+    const botEnv: Record<string, string | undefined> = {
+      ...process.env,
+      DISCORD_TOKEN: 'mock.token.value',
+      DISCORD_BOT_TOKEN: 'mock.token.value',
+      CREDENTIALS_DIRECTORY: '',
+      DISCORD_API_BASE: activeMock.apiBase,
+      DISCORD_GUILD_ID: activeMock.guildId,
+      DISCORD_LANDING_CHANNEL_IDS: activeMock.textChannelId,
+      TWO_DATABASE_URL: opts.databaseUrl,
+      PGOPTIONS: `-c search_path=${SMOKE_SCHEMA}`,
+      TWO_HEALTH_PORT: String(port),
+      TWO_HEALTH_BIND_HOST: '127.0.0.1',
+      LOG_LEVEL: 'debug',
+    };
+    delete botEnv.TWO_STAGING_DATABASE_URL;
+    delete botEnv.TWO_STAGING_RESTART_CONTAINMENT;
+    delete botEnv.TWO_STAGING_RESTART_SYNTHETIC_ACTORS;
+
     bot = spawn(process.execPath, ['src/index.ts'], {
       cwd: ROOT,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: {
-        ...process.env,
-        DISCORD_TOKEN: 'mock.token.value',
-        DISCORD_API_BASE: activeMock.apiBase,
-        DISCORD_GUILD_ID: activeMock.guildId,
-        DISCORD_LANDING_CHANNEL_IDS: activeMock.textChannelId,
-        TWO_DATABASE_URL: opts.databaseUrl,
-        PGOPTIONS: `-c search_path=${SMOKE_SCHEMA}`,
-        TWO_HEALTH_PORT: String(port),
-        TWO_HEALTH_BIND_HOST: '127.0.0.1',
-        LOG_LEVEL: 'debug',
-      },
+      env: botEnv,
     });
     await new Promise<void>((r) => holder.close(() => r()));
     const child = bot;
