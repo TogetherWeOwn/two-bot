@@ -40,6 +40,15 @@ import {
 } from '../src/redesign/live-cleanup.ts';
 import { LIVE_BOT_APPLICATION_ID } from '../src/staging/spec.ts';
 
+// --help prints usage without reading the fixture or rewriting the pin.
+if (process.argv.includes('--help')) {
+  console.log('usage: node scripts/derive-live-cleanup-pins.ts');
+  console.log('');
+  console.log('Re-derive test/fixtures/live-cleanup-expected-operations.json from the production-shaped state fixture.');
+  console.log('Run after any planner change and commit the result; --help reads and writes nothing.');
+  process.exit(0);
+}
+
 type FixtureMember = { user: { id: string; username: string; bot: boolean }; roles: string[]; premium_since: string | null; pending: boolean };
 type FixtureState = {
   guild: JsonObject;

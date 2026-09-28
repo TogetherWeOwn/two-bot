@@ -5,6 +5,21 @@ import pg from 'pg';
 import { announcementsProofConfig, assertProofIdentity, parseAnnouncementsProof } from './staging-announcements-state.ts';
 
 import { proofDiscordFetch } from './staging-discord-fetch.ts';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// Read-only acceptance readback library (exported verifyAnnouncementsProof).
+// Importing this file never reads argv and never exits; the block below only
+// runs on direct invocation.
+const isMain = process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  console.log('usage: node scripts/staging-announcements-verify.ts --proof=<report.json>');
+  console.log('');
+  console.log('Read-only acceptance readback for a staging-announcements proof report.');
+  console.log('Never migrates, posts or repairs anything. Requires DISCORD_STAGING_BOT_TOKEN');
+  console.log('and TWO_STAGING_DATABASE_URL for a real verify; --help needs neither.');
+  process.exit(process.argv.includes('--help') ? 0 : 2);
+}
 
 export async function verifyAnnouncementsProof(path: string): Promise<void> {
   const discordFetch = proofDiscordFetch({ onRateLimit: ms => console.log(`WAIT Discord 429: ${ms}ms before bounded retry`) });

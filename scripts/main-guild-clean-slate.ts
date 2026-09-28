@@ -43,6 +43,15 @@ import {
   desiredEveryoneOverwrite,
 } from '../src/redesign/clean-slate.ts';
 
+// --help boots with no token, no guild, no network.
+if (process.argv.includes('--help')) {
+  console.log('usage: node scripts/main-guild-clean-slate.ts [--confirm-main-guild --apply]');
+  console.log('');
+  console.log('Apply the owner-accepted clean-slate structure to the live guild (additive: creates only, never removes).');
+  console.log('Live writes need both --confirm-main-guild and --apply; --help contacts nothing and needs no token.');
+  process.exit(0);
+}
+
 const APPLY = process.argv.includes('--apply');
 const CONFIRMED = process.argv.includes('--confirm-main-guild');
 const token = process.env.DISCORD_BOT_TOKEN;

@@ -33,20 +33,22 @@ export function renderHtml(d: DashboardData): string {
 <style>${CSS}</style>
 </head>
 <body>
-<main class="page">
+<a class="skip" href="#content">Skip to dashboard content</a>
+<main class="page" id="content">
   <header class="head">
     <h1>TWO growth dashboard</h1>
     <p class="meta">Generated ${esc(fmtStamp(d.generatedAt))} · covers the last ${d.weeks.length} weeks${
       d.guildId ? ` · guild ${esc(d.guildId)}` : ''
     }</p>
   </header>
+  ${freshNotice(d)}
 
-  ${section('The three questions', headline(d))}
-  ${section('How many joined, and when', weeklyChart(d.weeks))}
-  ${section('Where they came from', sourceChart(d))}
-  ${section('How many are still here', retention(d))}
-  ${section('Which channels are alive', channels(d))}
-  ${section('What these numbers do not tell you', caveats(d))}
+  ${section('questions', 'The three questions', headline(d))}
+  ${section('weekly', 'How many joined, and when', weeklyChart(d.weeks))}
+  ${section('sources', 'Where they came from', sourceChart(d))}
+  ${section('retention', 'How many are still here', retention(d))}
+  ${section('channels', 'Which channels are alive', channels(d))}
+  ${section('caveats', 'What these numbers do not tell you', caveats(d))}
 
   <footer class="foot">
     <p>Built by <code>npm run dashboard</code> from the bot's own event log. Every
@@ -84,7 +86,7 @@ function headline(d: DashboardData): string {
   const attributed = d.sourcesAllTime.filter((s) => !s.unattributed).reduce((n, s) => n + s.joins, 0);
 
   return `
-  <div class="tiles">
+  <dl class="tiles">
     ${tile('Joined this week', String(d.thisWeek.joins), joinNote, joinTone)}
     ${tile(
       'Where they came from',
@@ -102,8 +104,8 @@ function headline(d: DashboardData): string {
         : `posted or spoke in the last 7 days, out of ${d.realHumans} real members`,
       snap ? 'warning' : d.active7d > 0 ? 'good' : 'critical',
     )}
-  </div>
-  <div class="tiles secondary">
+  </dl>
+  <dl class="tiles secondary">
     ${tile('Members Discord shows', String(d.humansInServer), memberNote(d, 'humans, excluding bots'), 'plain')}
     ${tile(
       snap ? 'Of those, stuck at the rules screen' : 'Of those, raid accounts',
@@ -120,7 +122,7 @@ function headline(d: DashboardData): string {
       'still in the server, never said a word',
       'plain',
     )}
-  </div>`;
+  </dl>`;
 }
 
 function weeklyChart(weeks: WeekRow[]): string {
@@ -138,21 +140,23 @@ function weeklyChart(weeks: WeekRow[]): string {
     .join('\n');
   const totalJoins = weeks.reduce((n, w) => n + w.joins, 0);
   const totalLeaves = weeks.reduce((n, w) => n + w.leaves, 0);
-  return `
+  const table = `
   <table class="chart">
     <thead><tr><th scope="col">Week of</th><th scope="col">Joined</th><th scope="col">Left</th><th scope="col">Net</th></tr></thead>
     <tbody>${rows}</tbody>
     <tfoot><tr><th scope="row">Total</th><td class="num">${totalJoins}</td><td class="num">${totalLeaves}</td><td class="num ${
       totalJoins - totalLeaves >= 0 ? 'up' : 'down'
     }">${signed(totalJoins - totalLeaves)}</td></tr></tfoot>
-  </table>
+  </table>`;
+  return `
+  ${tableWrap('Joins and leaves by week', table)}
   <p class="note">"Set aside" is a known bot raid or mass prune. Those days are listed
   at the bottom of this page and are never averaged into the numbers above.</p>`;
 }
 
 function sourceChart(d: DashboardData): string {
   const all = d.sourcesAllTime;
-  if (all.length === 0) return `<p class="empty">No joins on record.</p>`;
+  if (all.length === 0) return `<p class="empty" role="status">No joins on record yet — the bot has not seen a join. Run the bot once (or <code>npm run backfill</code>), rebuild, and this section fills in.</p>`;
   const max = Math.max(1, ...all.map((s) => s.joins));
   const rows = all
     .slice(0, 12)
@@ -172,14 +176,16 @@ function sourceChart(d: DashboardData): string {
           .map((s) => `<li><strong>${s.joins}</strong> ${esc(s.label)}</li>`)
           .join('')}</ul>`;
 
+  const table = `
+  <table class="chart narrow">
+    <thead><tr><th scope="col">Source</th><th scope="col">Joins</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>`;
   return `
   <h3>This week</h3>
   ${thisWeekList}
   <h3>All time</h3>
-  <table class="chart">
-    <thead><tr><th scope="col">Source</th><th scope="col">Joins</th></tr></thead>
-    <tbody>${rows}</tbody>
-  </table>
+  ${tableWrap('Invite sources, all time', table)}
   <p class="note">A source only exists if the bot saw the join happen. Joins imported
   from the server's own log have no invite attached — Discord does not record which
   invite was used, so those are marked <em>not attributable</em> rather than guessed at.</p>`;
@@ -194,25 +200,28 @@ function retention(d: DashboardData): string {
   // months of intake converted at under 10% for a year unnoticed (TOG-76).
   const overall = `
   <h3>All time — every member who ever joined</h3>
-  <div class="tiles secondary">
+  <dl class="tiles secondary">
     ${gateTile(d.gateOverall)}
     ${retentionTile('D1', o.d1)}
     ${retentionTile('D7', o.d7)}
     ${retentionTile('D30', o.d30)}
-  </div>${gateNote(d.gateOverall)}`;
+  </dl>${gateNote(d.gateOverall)}`;
 
   const withPeople = d.cohorts.filter((c) => c.size > 0);
   const table =
     withPeople.length === 0
-      ? `<p class="empty">No cohort in the last ${d.cohorts.length} weeks has anyone in it — nobody joined.</p>`
-      : `<table class="chart">
+      ? `<p class="empty" role="status">No cohort in the last ${d.cohorts.length} weeks has anyone in it — nobody joined.</p>`
+      : tableWrap(
+          'Join cohorts',
+          `<table class="chart">
       <thead><tr>
         <th scope="col">Joined week of</th><th scope="col">People</th>
         <th scope="col">Got in</th>
         <th scope="col">D1</th><th scope="col">D7</th><th scope="col">D30</th>
       </tr></thead>
       <tbody>${withPeople.map(cohortRow).join('\n')}</tbody>
-    </table>`;
+    </table>`,
+        );
 
   return `${overall}
   <h3>By join cohort</h3>
@@ -319,7 +328,7 @@ function retentionTile(label: string, r: RetentionCell | null): string {
 
 function channels(d: DashboardData): string {
   if (d.channels.length === 0) {
-    return `<p class="empty">No channel activity data. Run <code>npm run audit:collect</code>.</p>`;
+    return `<p class="empty" role="status">No channel activity data yet — the bot has not collected a server snapshot. Run <code>npm run audit:collect</code>, rebuild, and this section fills in.</p>`;
   }
   const alive = d.channels.filter((c) => c.state === 'alive');
   const quiet = d.channels.filter((c) => c.state === 'quiet');
@@ -338,19 +347,21 @@ function channels(d: DashboardData): string {
   </tr>`;
 
   const shown = [...alive, ...quiet].slice(0, 25);
-  return `
-  <div class="tiles secondary">
-    ${tile('Alive', String(alive.length), 'a human posted in the last 30 days', alive.length > 0 ? 'good' : 'critical')}
-    ${tile('Quiet', String(quiet.length), 'last human post 30–90 days ago', 'warning')}
-    ${tile('Silent', String(silent.length), 'nothing in 90 days or more', silent.length > 0 ? 'warning' : 'plain')}
-  </div>
+  const table = `
   <table class="chart">
     <thead><tr>
       <th scope="col">Channel</th><th scope="col">Human messages, 90d</th>
       <th scope="col">30d</th><th scope="col">People, 30d</th><th scope="col">Silent for</th><th scope="col">State</th>
     </tr></thead>
     <tbody>${shown.map(row).join('\n')}</tbody>
-  </table>
+  </table>`;
+  return `
+  <dl class="tiles secondary">
+    ${tile('Alive', String(alive.length), 'a human posted in the last 30 days', alive.length > 0 ? 'good' : 'critical')}
+    ${tile('Quiet', String(quiet.length), 'last human post 30–90 days ago', 'warning')}
+    ${tile('Silent', String(silent.length), 'nothing in 90 days or more', silent.length > 0 ? 'warning' : 'plain')}
+  </dl>
+  ${tableWrap('Channel activity', table)}
   <p class="note">${
     d.channelSnapshotAt
       ? `Message counts from the server snapshot taken ${esc(d.channelSnapshotAt.slice(0, 10))}. `
@@ -382,16 +393,45 @@ function caveats(d: DashboardData): string {
 // Bits
 // ---------------------------------------------------------------------------
 
-function section(title: string, body: string): string {
-  return `<section class="card"><h2>${esc(title)}</h2>${body}</section>`;
+function section(id: string, title: string, body: string): string {
+  return `<section class="card" aria-labelledby="${id}-title"><h2 id="${id}-title">${esc(title)}</h2>${body}</section>`;
+}
+
+/**
+ * The fresh-database banner. A dashboard built from an empty database renders
+ * every section as zero, and without this banner those zeros read as "a dead
+ * server" instead of "nothing recorded yet". Shown only when neither the live
+ * funnel nor a snapshot census had anything to count.
+ */
+function freshNotice(d: DashboardData): string {
+  if (d.memberCountSource !== 'none') return '';
+  return `<div class="notice" role="status"><strong>Fresh database — nothing to show yet.</strong>
+  Every section below reads zero because nothing has been recorded, not because
+  nothing happened. Run the bot once (or <code>npm run backfill</code> and
+  <code>npm run audit:collect</code>), rebuild, and this page fills in.</div>`;
+}
+
+/**
+ * A scrollable region for wide tables. On a 360px phone the cohort and channel
+ * tables cannot fit all columns, so the table scrolls inside this region while
+ * the page itself never scrolls sideways. tabindex + role make the scrolled
+ * columns reachable by keyboard, in DOM order.
+ */
+function tableWrap(label: string, table: string): string {
+  return `<div class="tablewrap" tabindex="0" role="region" aria-label="${esc(
+    label,
+  )} — scroll horizontally to see all columns">${table}</div>`;
 }
 
 function tile(label: string, value: string, note: string, tone: 'good' | 'warning' | 'critical' | 'plain'): string {
   const badge = tone === 'plain' ? '' : `<span class="dot ${tone}" aria-hidden="true"></span>`;
+  // A description list, not three loose paragraphs: the label is a real term
+  // for the value, so a screen reader announces "Joined this week: 5" as one
+  // unit. The tone dot stays decorative (aria-hidden) — the words carry it.
   return `<div class="tile">
-    <p class="tlabel">${esc(label)}</p>
-    <p class="tvalue">${badge}${esc(value)}</p>
-    <p class="tnote">${esc(note)}</p>
+    <dt class="tlabel">${esc(label)}</dt>
+    <dd class="tvalue">${badge}${esc(value)}</dd>
+    <dd class="tnote">${esc(note)}</dd>
   </div>`;
 }
 
@@ -456,9 +496,9 @@ const CSS = `
   --line: #e3e2dd;
   --series: #2a78d6;
   --series-quiet: #cde2fb;
-  --good: #0ca30c;
-  --warning: #fab219;
-  --critical: #d03b3b;
+  --good: #0a7d0a;
+  --warning: #b45309;
+  --critical: #b3261e;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -470,6 +510,12 @@ const CSS = `
     --line: #2e2e2b;
     --series: #3987e5;
     --series-quiet: #184f95;
+    /* Light-mode --good (#0a7d0a) is 3.28:1 on --raised here; --critical
+       (#b3261e) is 4.39:1. Both are text colours (.num.up/.down), so dark
+       mode gets its own AA-passing steps. */
+    --good: #4ade80;
+    --warning: #fbbf24;
+    --critical: #f08080;
   }
 }
 * { box-sizing: border-box; }
@@ -480,6 +526,34 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 .page { max-width: 960px; margin: 0 auto; }
+/* Keyboard-first entry: hidden until focused, then a visible target. */
+.skip {
+  position: absolute; left: 12px; top: -48px; z-index: 10;
+  background: var(--raised); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px;
+  font-size: 14px; text-decoration: none; transition: top 0.15s ease;
+}
+.skip:focus-visible { top: 12px; outline: 2px solid var(--series); outline-offset: 2px; }
+/* Fresh-database banner: the one message that decides whether the zeros below
+   read as "dead server" or "nothing recorded yet". */
+.notice {
+  background: var(--raised); border: 1px solid var(--warning); border-radius: 8px;
+  padding: 12px 14px; margin: 0 0 20px; font-size: 14px;
+}
+.notice strong { display: block; margin-bottom: 4px; }
+.notice code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
+/* Wide tables scroll inside their region; the page itself never scrolls
+   sideways, even at 360px. The inner min-widths are what force the region —
+   not the page — to be the scroll container. */
+.tablewrap { overflow-x: auto; max-width: 100%; }
+.tablewrap:focus-visible { outline: 2px solid var(--series); outline-offset: 2px; }
+.tablewrap table.chart { min-width: 560px; }
+/* Two-column tables (invite sources) fit a phone as-is — no scroll region needed.
+   The row headers must be allowed to wrap: with nowrap, a long source name
+   ("Before tracking (imported history)") forces the table wider than 360px
+   and the region scrolls after all. */
+.tablewrap table.chart.narrow { min-width: 0; }
+.tablewrap table.chart.narrow tbody th { white-space: normal; }
 .head h1 { margin: 0 0 4px; font-size: 28px; letter-spacing: -0.02em; }
 .meta { margin: 0 0 24px; color: var(--ink-2); font-size: 13px; }
 .card {
@@ -490,13 +564,16 @@ body {
 .card h3 { margin: 24px 0 8px; font-size: 14px; color: var(--ink-2); font-weight: 600; }
 .card h3:first-of-type { margin-top: 4px; }
 
-.tiles { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+/* Tiles are a description list: reset the UA dl/dd margins so the grid, not
+   the browser stylesheet, decides spacing. The .tile div wrapping each
+   dt/dd group is the permitted dl-wrapper pattern. */
+.tiles { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); margin: 0; padding: 0; }
 .tiles.secondary { margin-top: 12px; }
 .tile { border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
 .tlabel { margin: 0; font-size: 12px; color: var(--ink-2); text-transform: uppercase; letter-spacing: 0.04em; }
-.tvalue { margin: 4px 0 2px; font-size: 34px; font-weight: 650; letter-spacing: -0.03em;
+.tvalue { margin: 4px 0 2px; margin-inline-start: 0; padding: 0; font-size: 34px; font-weight: 650; letter-spacing: -0.03em;
           font-variant-numeric: tabular-nums; display: flex; align-items: center; gap: 8px; }
-.tnote { margin: 0; font-size: 12px; color: var(--ink-3); }
+.tnote { margin: 0; margin-inline-start: 0; padding: 0; font-size: 12px; color: var(--ink-3); }
 
 .dot { width: 10px; height: 10px; border-radius: 999px; display: inline-block; flex: none; }
 .dot.good { background: var(--good); }
@@ -534,5 +611,20 @@ table.chart tfoot th, table.chart tfoot td { font-weight: 650; border-bottom: no
 .caveats li { margin-bottom: 8px; }
 .foot { color: var(--ink-3); font-size: 12px; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.92em; }
-@media (max-width: 640px) { .barcell { width: 34%; } body { padding: 16px 10px 48px; } }
+/* 360px phone: one tile per row, tighter cards, and bars yield to their
+   numbers so the weekly table's bar+value cells never force page scroll. */
+@media (max-width: 640px) {
+  body { padding: 16px 10px 48px; }
+  .card { padding: 14px; }
+  .head h1 { font-size: 23px; }
+  .tiles { grid-template-columns: 1fr; }
+  .tvalue { font-size: 28px; }
+  .barcell { width: 34%; }
+  table.chart th, table.chart td { padding: 6px 6px; }
+  .bar { max-width: 72px; }
+  /* The two-column sources table must fit 360px with no scroll region: its
+     value column is ~100px wide, and a 72px bar + 8px gap + a 4-5 digit
+     value overflows it by ~16px. 48px bars still read as magnitude. */
+  .tablewrap table.chart.narrow .bar { max-width: 48px; }
+}
 `;

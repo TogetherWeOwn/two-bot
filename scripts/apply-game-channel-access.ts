@@ -42,6 +42,14 @@
 import { GATED_CATEGORIES } from '../src/onboarding/catalog.ts';
 
 const API = 'https://discord.com/api/v10';
+// --help boots with no token, no guild, no network.
+if (process.argv.includes('--help')) {
+  console.log('usage: node scripts/apply-game-channel-access.ts [--apply | --revert]');
+  console.log('');
+  console.log('Grant the three game roles VIEW_CHANNEL on their categories and children (dry run by default).');
+  console.log('Needs CEO sign-off before --apply; --help contacts nothing and needs no token.');
+  process.exit(0);
+}
 const TOKEN = process.env.DISCORD_BOT_TOKEN ?? process.env.DISCORD_TOKEN;
 const GUILD = process.env.DISCORD_GUILD_ID;
 

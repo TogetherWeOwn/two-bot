@@ -1,0 +1,56 @@
+{
+  "_comment": "Golden output of `npm run review -- --force --json --weeks 8` on the scratch fixture in test/e2e.growthreview.test.ts, with Date.now fixed at 2026-10-26T00:00:00.000Z by a test-only preload. Nine matured joins, 8 producer hours and 4 non-activating-channel hours. Red-gate outputs are NOT A FINDING; no actual kill, scale or spend is authorized.",
+  "windowWeeks": 8,
+  "gate": "red",
+  "scoringLoopRuns": false,
+  "findingsAreValid": false,
+  "effortProblem": null,
+  "verdicts": {
+    "LIST-DISBOARD-A": "CONTINUE",
+    "LIST-DISBOARD-B": "HOLD",
+    "LIST-DISCADIA": "KILL-no-activation",
+    "LIST-DISCORDME": "HOLD",
+    "LIST-DISCORDHOME": "HOLD",
+    "LIST-DISFORGE": "HOLD",
+    "LIST-HIVEINDEX": "HOLD",
+    "REF": "HOLD",
+    "PART": "HOLD",
+    "CONT-YTSHORTS": "HOLD",
+    "CONT-TIKTOK": "HOLD",
+    "CONT-REDDIT": "HOLD",
+    "WEB-HOMEPAGE": "NOT-A-BET",
+    "PAID": "HOLD",
+    "ORGANIC-MEMBER": "NOT-A-BET",
+    "LEGACY-ORGANIC": "NOT-A-BET"
+  },
+  "reasons": {
+    "LIST-DISCADIA": "6 joins (>= 5) and 0 AM30, 6 of 6 joins matured past day 7, on 4.0 sustained agent-hours. An intent failure - it delivered people who never activated, which is the dangerous one, because the join count reads as success.",
+    "LIST-DISBOARD-A": "3 AM30 of 3 matured, on 8.0 agent-hours and £0.00. Producing; ranked against the portfolio for the scale decision.",
+    "REF": "the referral ask has not been made, so nobody has been asked to create a link. EXP-003 is killed on the ask, never on AM30 - with 5 members asked, 0 AM30 would mean 5 is too few to conclude anything.",
+    "PART": "no joint night has been run. EXP-004 is measured per night, and Stage-2 vetting is blocked on a human with a Discord account.",
+    "PAID": "EXP-008 is locked - no budget exists, £0 spent, no code created. Nothing is running to score."
+  },
+  "scores": {
+    "LIST-DISBOARD-A": {
+      "hoursPerAm30": 2.6666666666666665,
+      "cashPencePerAm30": 0,
+      "am30": 3,
+      "costIsHard": true
+    },
+    "LIST-DISCADIA": {
+      "hoursPerAm30": null,
+      "cashPencePerAm30": null,
+      "am30": 0,
+      "costIsHard": true
+    }
+  },
+  "scale": "LIST-DISBOARD-A",
+  "rankBlockers": [],
+  "allocationFindings": [
+    "Listings took 100% of 12.0 recorded agent-hours, above the 50% ceiling. They are ranked 5th of 6 on expected activation and 1st on convenience; this is the drift roadmap-30d §9 predicts.",
+    "Referral and partners took 0% of recorded agent-hours, below the 25% floor. They are the two highest-activation channels in the portfolio and they are being starved."
+  ],
+  "paidEarned": true,
+  "paidQualifying": ["LIST-DISBOARD-A"],
+  "paidDetail": "LIST-DISBOARD-A reached 3+ AM30. That earns the RIGHT TO ASK and nothing else - write the four-part proposal (every free channel's measured cost-per-AM30, the spend as amount and duration, what it should buy in AM30, and the result that would cut it) and put it to the CEO. No agent commits cash without approval of that specific proposal."
+}
