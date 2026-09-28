@@ -51,6 +51,16 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     why: 'growth-review CLI golden scores, kill/scale citations, red-gate refusal and sustained-effort guard',
   },
   {
+    // TOG-6489 slice. The campaigns operator CLI executed end to end through
+    // the real npm entry: --add creates the row, the bare list shows it, a
+    // duplicate --add fails naming "already exists", and the new slug 302s
+    // over loopback HTTP. Counted from the 4 top-level test() blocks; CI's
+    // postgres job confirms the count on the first run after this commit.
+    file: 'test/e2e.campaigns.test.ts',
+    minTests: 4,
+    why: 'the campaigns --add/--list operator path itself, not just the CampaignStore underneath it',
+  },
+  {
     // TOG-6491. The restore script that can wipe a database: three refusals
     // (no --force, no TWO_RESTORE_URL, no fallback to TWO_DATABASE_URL), a
     // dry run that writes nothing, and a target + --force restore of a canned
