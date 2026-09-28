@@ -27,6 +27,18 @@
  */
 import { randomBytes, createHash, createHmac } from 'node:crypto';
 
+// First statement of the body: the import above is side-effect-free, so this
+// runs before env() can exit(2) on missing TWO_ACCEPT_* vars. --help needs no
+// env, no running bot, no database, no network.
+if (process.argv.includes('--help')) {
+  console.log('usage: TWO_ACCEPT_URL=... TWO_ACCEPT_KEY_ID=... TWO_ACCEPT_SECRET=... TWO_ACCEPT_CHANNEL_KEY=... TWO_ACCEPT_ROLE_KEY=... TWO_ACCEPT_DISCORD_ID=... [TWO_ACCEPT_DB=...] [TWO_ACCEPT_SCHEMA=...] node scripts/internal-actions-acceptance.ts');
+  console.log('');
+  console.log('Acceptance run for POST /internal/actions against a running bot (TOG-463).');
+  console.log('Talks HTTP to a live endpoint and posts real announcements at a throwaway channel;');
+  console.log('--help contacts nothing and needs no env.');
+  process.exit(0);
+}
+
 const ACTIONS_PATH = '/internal/actions';
 
 function env(name: string, fallback?: string): string {
