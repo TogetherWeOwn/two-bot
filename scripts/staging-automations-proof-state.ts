@@ -3,6 +3,20 @@ import type {
   ScheduledMessageRow,
   StickyMessageRow,
 } from '../src/automations/store.ts';
+import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// Library: automations proof cleanup/restore helpers. Importing this file never
+// reads argv and never exits; the block below only runs on direct invocation.
+const isMain = process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+  console.log('usage: node scripts/staging-automations-proof-state.ts --help');
+  console.log('');
+  console.log('Automations proof cleanup/restore helpers (library, no direct invocation).');
+  console.log('Imported by scripts/staging-automations-proof.ts and test/unit.automations.test.ts.');
+  console.log('No token, no database, no side effects on --help.');
+  process.exit(process.argv.includes('--help') ? 0 : 2);
+}
 
 export interface ProofState<T> {
   before: T | null;

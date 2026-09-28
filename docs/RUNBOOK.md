@@ -1021,6 +1021,8 @@ with ids preserved and usernames/avatars removed.
 | `staging:announcements-proof` | TOG-3845 proof run: real REST + isolated staging Postgres (`--output=<report.json>`). | Report written, exit `0`. |
 | `staging:announcements-state` | Library: proof config/validators (`--help` only direct use). | `--help` exits `0`. |
 | `staging:announcements-verify` | Read-only readback of a proof report (`--proof=<report.json>`; never migrates/posts/repairs). | Proof verifies, exit `0`. |
+| `staging:automations-proof` | TOG-1648 proof run: custom commands, scheduled + sticky messages against TWO Staging (`--help` needs no token/DB). | Usage prints, exit `0` on `--help`. |
+| `staging:automations-state` | Library: proof cleanup/restore helpers (`--help` only direct use). | `--help` exits `0`. |
 | `automod:export` | Staging AutoMod rules export. | `wrote N ... rule(s)`, exit `0`. See above. |
 | `e2e:harness`, `e2e:selftest` | Drive end-to-end member flows against TWO Staging (`--dry-run` no credential; `--flow`, `--kill-switch`). | Flows pass; `--dry-run` exits `0` with no network. |
 | `onboarding:web:acceptance` | Offline acceptance for the next two-web onboarding slice (`--two-web <path>`). | Slice checks pass, exit `0` (`2` = usage/incomplete checkout). |
