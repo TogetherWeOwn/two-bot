@@ -86,6 +86,17 @@ function fakeDiscord(over: Partial<ActionDiscord> = {}): {
     async cancelEvent(_g, id) {
       calls.push(`cancelEvent:${id}`);
     },
+    async readEvent(_g, id) {
+      calls.push(`readEvent:${id}`);
+      return {
+        eventId: id,
+        name: 'Launch Night',
+        startsAt: '2026-09-01T19:00:00.000Z',
+        location: 'The Together We Own server',
+        status: 'SCHEDULED',
+        observedAt: new Date().toISOString(),
+      };
+    },
     ...over,
   };
   return { client, calls };

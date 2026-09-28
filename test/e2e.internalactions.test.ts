@@ -98,6 +98,17 @@ function recordingDiscord(over: Partial<ActionDiscord> = {}) {
     async cancelEvent(_g, id) {
       calls.push(`cancelEvent:${id}`);
     },
+    async readEvent(_g, id) {
+      calls.push(`readEvent:${id}`);
+      return {
+        eventId: id,
+        name: 'Launch Night',
+        startsAt: '2026-09-01T19:00:00.000Z',
+        location: 'The Together We Own server',
+        status: 'SCHEDULED',
+        observedAt: new Date().toISOString(),
+      };
+    },
     ...over,
   };
   return { client, calls };
@@ -191,7 +202,16 @@ interface CallResult {
   body: {
     ok: boolean;
     request_id: string;
-    result?: { outcome?: string; message_id?: string; event_id?: string };
+    result?: {
+      outcome?: string;
+      message_id?: string;
+      event_id?: string;
+      name?: string;
+      starts_at?: string;
+      location?: string | null;
+      status?: string;
+      observed_at?: string;
+    };
     error?: { code: string; message: string; retryable: boolean };
   };
 }
@@ -1291,6 +1311,108 @@ test('event.cancel permission denial keeps the mapping and records a typed rejec
     'SELECT action, outcome, code FROM internal_action_log WHERE request_id = ?',
   ).get(response.body.request_id);
   assert.deepEqual(row, { action: 'event.cancel', outcome: 'rejected', code: 'discord_rejected' });
+});
+
+// --- event.read --------------------------------------------------------------
+//
+// The narrow mapped-event verifier (TOG-5510, Gate 2 scope): the website's
+// event_key in, the Discord mirror's proof-owned fields out. No raw Discord
+// id, no listing, no attendees, no member data.
+
+test('event.read returns the mapped mirror without an idempotency key', async () => {
+  const store = freshStore();
+  const srv = await startAgainstMock({ store });
+  const eventKey = newKey();
+  const created = await call(srv, { body: eventUpsert({ event_key: eventKey }), idempotencyKey: newKey() });
+  assert.equal(created.status, 200);
+  const eventId = created.body.result?.event_id;
+  // No idempotencyKey: a read changes nothing, so the key rule from §3 does
+  // not apply - same posture as settings.get and automations.export.
+  const first = await call(srv, { body: { action: 'event.read', event_key: eventKey } });
+  assert.equal(first.status, 200);
+  assert.deepEqual(first.body.result, {
+    outcome: 'read',
+    event_id: eventId,
+    name: 'Launch Night',
+    starts_at: '2026-09-01T19:00:00.000Z',
+    location: 'The Together We Own server',
+    status: 'SCHEDULED',
+    observed_at: first.body.result?.observed_at,
+  });
+  assert.ok(!Number.isNaN(Date.parse(String(first.body.result?.observed_at))), 'observed_at is a parseable instant');
+  // Naturally idempotent: a second read is a second fresh observation, not a
+  // replay, and the mirror is unchanged in between.
+  const second = await call(srv, { body: { action: 'event.read', event_key: eventKey } });
+  assert.equal(second.status, 200);
+  assert.deepEqual({ ...second.body.result, observed_at: first.body.result?.observed_at }, first.body.result);
+  // The exact key set is the proof-owned boundary: id, name, start, place,
+  // lifecycle and observation time. Attendees, other guild events and member
+  // data cannot leak through a field that is never sent.
+  assert.deepEqual(Object.keys(first.body.result ?? {}).sort(), [
+    'event_id', 'location', 'name', 'observed_at', 'outcome', 'starts_at', 'status',
+  ]);
+  await awaitAuditRows([first.body.request_id, second.body.request_id]);
+});
+
+test('event.read answers a cancelled mirror with its terminal lifecycle', async () => {
+  const store = freshStore();
+  const srv = await startAgainstMock({ store });
+  const eventKey = newKey();
+  const created = await call(srv, { body: eventUpsert({ event_key: eventKey }), idempotencyKey: newKey() });
+  assert.equal(created.status, 200);
+  const cancelled = await call(srv, {
+    body: { action: 'event.cancel', event_key: eventKey }, idempotencyKey: newKey(),
+  });
+  assert.equal(cancelled.status, 200);
+  const read = await call(srv, { body: { action: 'event.read', event_key: eventKey } });
+  assert.equal(read.status, 200);
+  assert.equal(read.body.result?.event_id, created.body.result?.event_id);
+  assert.equal(read.body.result?.status, 'CANCELED');
+});
+
+test('event.read refuses missing, unknown and other-guild keys without reaching Discord', async () => {
+  const { client, calls } = recordingDiscord();
+  const store = freshStore();
+  const srv = await start({ discord: client, store });
+  const eventKey = newKey();
+  await store.rememberDiscordEvent('900000000000008888', eventKey, '900000000000007777');
+  for (const event_key of [undefined, '', newKey(), eventKey]) {
+    const response = await call(srv, {
+      body: { action: 'event.read', event_key, event_id: '900000000000007777' },
+    });
+    assert.equal(response.body.error?.code, !event_key ? 'malformed' : 'action_not_allowed');
+  }
+  assert.deepEqual(calls, [], 'a raw event_id cannot bypass the guild-scoped mapping');
+});
+
+test('event.read requires its capability and the durable store', async () => {
+  const { client, calls } = recordingDiscord();
+  const body = { action: 'event.read', event_key: newKey() };
+  const disabled = await start({ discord: client, enabled: new Set(['event.upsert']) });
+  const response = await call(disabled, { body });
+  assert.equal(response.body.error?.code, 'action_not_allowed');
+  const noStore = await start({ discord: client, store: null });
+  const missing = await call(noStore, { body });
+  assert.equal(missing.body.error?.code, 'internal');
+  assert.deepEqual(calls, []);
+});
+
+test('event.read surfaces a deleted mirror as discord_rejected and keeps the mapping', async () => {
+  const store = freshStore();
+  const srv = await startAgainstMock({ store });
+  const eventKey = newKey();
+  const eventId = '900000000000007777';
+  await store.rememberDiscordEvent(mock.guildId, eventKey, eventId);
+  const response = await call(srv, { body: { action: 'event.read', event_key: eventKey } });
+  assert.equal(response.status, 422);
+  assert.equal(response.body.error?.code, 'discord_rejected');
+  assert.equal(response.body.error?.retryable, false);
+  assert.equal(await store.discordEventId(mock.guildId, eventKey), eventId);
+  await awaitAuditRows([response.body.request_id]);
+  const row = await testDb.db.prepare(
+    'SELECT action, outcome, code FROM internal_action_log WHERE request_id = ?',
+  ).get(response.body.request_id);
+  assert.deepEqual(row, { action: 'event.read', outcome: 'rejected', code: 'discord_rejected' });
 });
 
 // --- the durable audit trail (§4) --------------------------------------------

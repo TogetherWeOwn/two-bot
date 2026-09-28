@@ -32,6 +32,7 @@ export const IMPLEMENTED_ACTIONS = [
   'announcement.post',
   'event.upsert',
   'event.cancel',
+  'event.read',
   'automations.import',
   'automations.export',
   'settings.get',
@@ -257,6 +258,8 @@ export async function runAction(
       return eventUpsert(body, ctx);
     case 'event.cancel':
       return eventCancel(body, ctx);
+    case 'event.read':
+      return eventRead(body, ctx);
     case 'automations.import':
       return automationsImport(body, ctx);
     case 'automations.export':
@@ -422,6 +425,51 @@ async function eventCancel(body: Record<string, unknown>, ctx: ActionContext): P
   // Retain the mapping: a late edit must not recreate a cancelled event. The
   // server's durable idempotency result handles retries of this cancellation.
   return { result: { outcome: 'cancelled', event_id: eventId }, outcome: 'cancelled' };
+}
+
+/**
+ * `event.read` - the narrow mapped-event verifier (TOG-5510, Gate 2 scope).
+ *
+ * Given the website's `event_key`, answer with the Discord mirror this
+ * endpoint mapped for it: id, name, start, location, lifecycle, and when we
+ * looked. Unknown keys refuse with `action_not_allowed` before any Discord
+ * call, so the key map is the whole address space - there is no field for a
+ * raw Discord id and no room for a predicate, listing, attendees or member
+ * data.
+ *
+ * Naturally read-only: a repeat changes nothing, so no `Idempotency-Key` is
+ * required (same posture as `settings.get` and `automations.export`). The
+ * mapping is deliberately NOT consulted beyond lookup - a 404 from Discord
+ * (mirror deleted out-of-band) surfaces as `discord_rejected` and keeps the
+ * mapping, because terminal state belongs to `event.cancel`, not to the read.
+ */
+async function eventRead(body: Record<string, unknown>, ctx: ActionContext): Promise<ActionOutcome> {
+  const store = ctx.store;
+  if (!store) {
+    throw new ActionError('internal', 'The durable store is not available', {
+      logReason: 'store_missing',
+    });
+  }
+  const eventKey = requireString(body, 'event_key');
+  const eventId = await store.discordEventId(ctx.guildId, eventKey);
+  if (!eventId) {
+    throw new ActionError('action_not_allowed', 'No event is mapped to this key in this guild', {
+      logReason: 'event_key_unknown',
+    });
+  }
+  const mirror = await ctx.discord.readEvent(ctx.guildId, eventId);
+  return {
+    result: {
+      outcome: 'read',
+      event_id: mirror.eventId,
+      name: mirror.name,
+      starts_at: mirror.startsAt,
+      location: mirror.location,
+      status: mirror.status,
+      observed_at: mirror.observedAt,
+    },
+    outcome: 'read',
+  };
 }
 
 function readEventInput(body: Record<string, unknown>, ctx: ActionContext): ScheduledEventInput {
