@@ -50,7 +50,7 @@ import {
   type JoinEventEvidence,
   type JoinRiskEvidence,
 } from '../src/staging/antiNukeAcceptance.ts';
-import { canonicalSnapshot, configHash, type GuildConfigSnapshot } from '../src/redesign/guildConfig.ts';
+import { canonicalSnapshot, configHash, verifySnapshotIntegrity, type GuildConfigSnapshot } from '../src/redesign/guildConfig.ts';
 import { planRestore } from '../src/redesign/guildConfigRestore.ts';
 import { openDb, type Db } from '../src/store/db.ts';
 import {
@@ -448,10 +448,16 @@ async function actorPreflight(context: CommonContext & { actorApplicationId: str
   return { actorApplicationId: context.actorApplicationId, owenRolePosition, actorDangerousRoleIds, recentActorRows, activeIncidents };
 }
 
-function acceptedSnapshot(path: string, current: GuildConfigSnapshot): { snapshot: GuildConfigSnapshot; hash: string } {
+export function acceptedSnapshot(path: string, current: GuildConfigSnapshot): { snapshot: GuildConfigSnapshot; hash: string } {
   const parsed = JSON.parse(readFileSync(resolve(path), 'utf8')) as GuildConfigSnapshot;
   if (parsed.version !== 1 || parsed.guildId !== TWO_STAGING_GUILD_ID || parsed.applicationId !== STAGING_BOT_APPLICATION_ID) {
     throw new Error('Accepted snapshot is not the Owen QA Test snapshot for TWO Staging.');
+  }
+  // TOG-7678: verify the tamper-evident seal before hash comparison (TOG-3513).
+  // A SnapshotIntegrityError propagates and refuses preflight/drive with zero
+  // writes; legacy pre-seal snapshots warn and proceed, matching restore.
+  if (verifySnapshotIntegrity(parsed) === 'legacy') {
+    console.error('staging-anti-nuke-acceptance: warning: accepted snapshot has no integrity seal (predates TOG-3513); skipping tamper check');
   }
   const hash = configHash(canonicalSnapshot(parsed));
   const currentHash = configHash(canonicalSnapshot(current));
