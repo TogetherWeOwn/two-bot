@@ -99,9 +99,13 @@ explicitly enabled, independently of the raw community-scorecard capture flag.
   webhooks are not qualifying sources in this slice.
 - `prompt_shown` uses the actual returned message ID/time. The message-first
   action destination is session's find-players option, anchor's posted room, or
-  legacy's explicitly linked intro channel (which must also be allowlisted).
-  The landing/send channel is not assumed to be the action destination. Picker
-  clicks, voice joins and RSVP are not counted as message-first prompt actions.
+  legacy's delivered landing channel (TOG-8774: the welcome copy merely links
+  the intro channel, and the `onboarding_prompt_acted` join compares
+  first-message channels, so the legacy seed must be the landing channel the
+  welcome was actually posted in — which must also be allowlisted).
+  The landing/send channel is not assumed to be the action destination for the
+  session variant. Picker clicks, voice joins and RSVP are not counted as
+  message-first prompt actions.
 - Staff exclusions reuse moderation's protected roles and protected actor, the
   ticket staff role, guild ownership and moderation/management permissions.
   Deployments must bind their staff roles correctly. Timed-out members and

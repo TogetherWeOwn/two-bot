@@ -16,7 +16,6 @@ import { Events } from 'discord.js';
 import { registerOnboarding } from '../src/discord/onboarding.ts';
 import { registerSessionWelcome } from '../src/discord/sessionWelcome.ts';
 import { sendAnchorWelcome } from '../src/discord/anchorWelcome.ts';
-import { INTRO_CHANNEL_ID } from '../src/onboarding/catalog.ts';
 import { SESSION_PICKS } from '../src/onboarding/session.ts';
 
 const GUILD = '326474832151838730';
@@ -140,7 +139,7 @@ function makeGateRecorder() {
 
 // --- legacy -------------------------------------------------------------------
 
-test('legacy success reports the returned message, legacy variant, intro action channel', async () => {
+test('legacy success reports the returned message, legacy variant, delivered landing action channel', async () => {
   const client = makeClient();
   const sends: { channelId: string; payload: any }[] = [];
   const channel = addPostableChannel(client, LANDING, { sends });
@@ -170,7 +169,7 @@ test('legacy success reports the returned message, legacy variant, intro action 
   assert.equal(call.message, channel.__returned[0], 'hook message is the returned Message object');
   assert.ok(call.message.id, 'hook message carries the delivered message id');
   assert.equal(call.variant, 'legacy');
-  assert.equal(call.actionChannelId, INTRO_CHANNEL_ID, 'legacy destination is the intro channel, not the send channel');
+  assert.equal(call.actionChannelId, LANDING, 'legacy destination is the delivered landing channel, not the linked intro channel');
   assert.equal(call.member, member, 'hook member is the welcomed member');
   assert.deepEqual(gate.prompted, [[GUILD, member.id, LANDING]], 'recorded only after the send');
   assert.deepEqual(member.__roleWrites, [], 'legacy prompt writes no roles');
