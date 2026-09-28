@@ -634,6 +634,14 @@ function roleDeltas(before: MemberRoles, after: MemberRoles): string[] {
 }
 
 async function main(): Promise<void> {
+  if (process.argv.includes('--help')) {
+    console.log('usage: node scripts/staging-session-demo.ts [--verify]');
+    console.log('');
+    console.log('TOG-1644 staging demo driver: post the welcome panel into #welcome, write the');
+    console.log('owner invite, then verify zero role writes. --verify re-checks the last walk.');
+    console.log('Staging only. Requires DISCORD_STAGING_BOT_TOKEN; --help needs no token.');
+    return;
+  }
   const verifyOnly = process.argv.includes('--verify');
   const token = process.env.DISCORD_STAGING_BOT_TOKEN;
   if (!token) throw new Error('Missing DISCORD_STAGING_BOT_TOKEN.');
