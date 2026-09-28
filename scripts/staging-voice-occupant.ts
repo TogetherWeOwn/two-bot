@@ -160,6 +160,15 @@ if (invokedDirectly) {
     console.log('usage: node scripts/staging-voice-occupant.ts <channelId>');
     console.log('');
     console.log('Hold a voice state open in TWO Staging until killed (TOG-3052 evidence).');
+    console.log('');
+    console.log('Flags:');
+    console.log('  <channelId>  Voice channel to hold open (required).');
+    console.log('  --help       Show this help and exit.');
+    console.log('');
+    console.log('Examples:');
+    console.log('  node scripts/staging-voice-occupant.ts --help');
+    console.log('  node scripts/staging-voice-occupant.ts <channelId>');
+    console.log('');
     console.log('Staging only. Requires DISCORD_STAGING_BOT_TOKEN; --help needs no token and opens no connection.');
     process.exit(0);
   }

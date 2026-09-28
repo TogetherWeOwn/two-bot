@@ -157,8 +157,23 @@ async function main(): Promise<number> {
     console.log('usage: node scripts/e2e-harness.ts [--dry-run] [--flow <key>] [--out <file>] [--timeout-ms <n>] [--no-pace] [--kill-switch --reason "<why>"] [--selftest]');
     console.log('');
     console.log('Drive the end-to-end member flows against TWO Staging (TOG-3978).');
-    console.log('  --dry-run   no credential, no session, no network; proves step sequence and pacing only');
-    console.log('  --selftest  boot tools/mock-discord, run one canned probe, report pass; no credential, no live Discord');
+    console.log('');
+    console.log('Flags:');
+    console.log('  --dry-run            No credential, no session, no network; proves step sequence and pacing only.');
+    console.log('  --flow <key>         Run only the named flow.');
+    console.log('  --out <file>         Write the run transcript to a file.');
+    console.log('  --timeout-ms <n>     Assertion timeout in ms (1-60000).');
+    console.log('  --no-pace            Skip pacing delays (only with --dry-run).');
+    console.log('  --kill-switch        Remove the throwaway account from the staging guild; needs --reason and TWO_E2E_ACCOUNT_ID.');
+    console.log('  --reason "<why>"     Reason recorded with the kill-switch removal.');
+    console.log('  --selftest           Boot tools/mock-discord, run one canned probe, report pass; no credential, no live Discord.');
+    console.log('  --help               Show this help and exit.');
+    console.log('');
+    console.log('Examples:');
+    console.log('  node scripts/e2e-harness.ts --help');
+    console.log('  node scripts/e2e-harness.ts --dry-run');
+    console.log('  node scripts/e2e-harness.ts --flow reaction --out t.json');
+    console.log('');
     console.log('Live flows need TWO_E2E_ACCOUNT_ID, TWO_E2E_STAFF_ROLE_ID and a user credential; --help needs none.');
     return 0;
   }

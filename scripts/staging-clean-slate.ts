@@ -17,6 +17,17 @@ if (process.argv.includes('--help')) {
   console.log('usage: node scripts/staging-clean-slate.ts [--apply] [--export] [--invite]');
   console.log('');
   console.log('Rebuild TWO Staging to the clean-slate channel/role layout. Read-only unless --apply.');
+  console.log('');
+  console.log('Flags:');
+  console.log('  --apply   Write the clean-slate layout to TWO Staging (default is read-only).');
+  console.log('  --export  Print the clean-slate export between BEGIN/END markers.');
+  console.log('  --invite  Create an owner review invite alongside --apply.');
+  console.log('  --help    Show this help and exit.');
+  console.log('');
+  console.log('Examples:');
+  console.log('  node scripts/staging-clean-slate.ts --help');
+  console.log('  node scripts/staging-clean-slate.ts --apply --invite');
+  console.log('');
   console.log('Staging only, never the live guild. Requires DISCORD_STAGING_BOT_TOKEN; --help needs no token.');
   process.exit(0);
 }

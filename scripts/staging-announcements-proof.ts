@@ -30,6 +30,15 @@ if (process.argv.includes('--help')) {
   console.log('usage: node scripts/staging-announcements-proof.ts --output=<new-report.json>');
   console.log('');
   console.log('TOG-3845: real REST + isolated staging Postgres, never the deployed bot DB schema.');
+  console.log('');
+  console.log('Flags:');
+  console.log('  --output=<new-report.json>  New report file to create; never overwrites an existing file (required).');
+  console.log('  --help                      Show this help and exit.');
+  console.log('');
+  console.log('Examples:');
+  console.log('  node scripts/staging-announcements-proof.ts --help');
+  console.log('  node scripts/staging-announcements-proof.ts --output=<new-report.json>');
+  console.log('');
   console.log('Requires DISCORD_STAGING_BOT_TOKEN and TWO_STAGING_DATABASE_URL; --help needs neither.');
   process.exit(0);
 }

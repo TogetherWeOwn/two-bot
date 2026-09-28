@@ -49,8 +49,16 @@ if (process.argv.includes('--help')) {
   console.log('');
   console.log('Standalone internal-actions host for TOG-463 acceptance (mock Discord, real Postgres).');
   console.log('Prints one JSON line `acceptance_host_ready`, then serves until SIGTERM.');
+  console.log('');
+  console.log('Flags:');
+  console.log('  --help  Show this help and exit.');
+  console.log('');
   console.log('Env: TWO_HOST_DB, TWO_HOST_SECRET, TWO_HOST_CHANNEL_KEY (default qa-throwaway),');
   console.log('TWO_HOST_KEY_ID (default web-staging), TWO_HOST_PORT (default 8787), TWO_HOST_SCHEMA (default qa_tog463).');
+  console.log('');
+  console.log('Examples:');
+  console.log('  node scripts/internal-actions-host.ts --help');
+  console.log('  TWO_HOST_DB=postgres://.../two_bot_staging TWO_HOST_SECRET=... node scripts/internal-actions-host.ts');
   process.exit(0);
 }
 

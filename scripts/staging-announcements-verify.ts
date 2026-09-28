@@ -16,8 +16,17 @@ if (isMain) {
   console.log('usage: node scripts/staging-announcements-verify.ts --proof=<report.json>');
   console.log('');
   console.log('Read-only acceptance readback for a staging-announcements proof report.');
-  console.log('Never migrates, posts or repairs anything. Requires DISCORD_STAGING_BOT_TOKEN');
-  console.log('and TWO_STAGING_DATABASE_URL for a real verify; --help needs neither.');
+  console.log('Never migrates, posts or repairs anything.');
+  console.log('');
+  console.log('Flags:');
+  console.log('  --proof=<report.json>  Proof report from staging-announcements-proof.ts (required for a real verify).');
+  console.log('  --help                 Show this help and exit.');
+  console.log('');
+  console.log('Examples:');
+  console.log('  node scripts/staging-announcements-verify.ts --help');
+  console.log('  node scripts/staging-verify.ts --case=announcements --proof=<report.json>');
+  console.log('');
+  console.log('Requires DISCORD_STAGING_BOT_TOKEN and TWO_STAGING_DATABASE_URL for a real verify; --help needs neither.');
   process.exit(process.argv.includes('--help') ? 0 : 2);
 }
 
