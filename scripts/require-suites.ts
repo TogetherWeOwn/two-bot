@@ -105,6 +105,28 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     minTests: 8,
     why: 'the settings-service startup injection and the signed settings round trip, or the TOG-4104 gap re-opens unnoticed',
   },
+  {
+    // TOG-5689. The RUNBOOK "Is it alive?" checks as an executable script: the
+    // ready-line shape, health-before-ready ordering and one-JSON-object-per-line
+    // logs against the mock harness, with host-only checks listed as skipped.
+    // Measured 2026-09-27 against Postgres 18.4 (embedded), at this commit.
+    file: 'test/e2e.runbook-health.test.ts',
+    minTests: 3,
+    why: 'the runbook liveness verdict going green against the mock harness, or its skips going unlisted',
+  },
+  {
+    // TOG-7198. The moderation kill-switch flip cycle: all nine verbs execute
+    // through the live signed endpoint, all nine refuse at the allowlist gate
+    // with zero Discord calls after a disable restart, and all nine recover
+    // on re-enable. Needs a real Postgres for the warn row and the durable
+    // idempotency claim. A run that quietly stopped including this file would
+    // leave the mid-flow disable unproved while the static gating in PR #216
+    // stays green.
+    // Measured 2026-09-27 against Postgres 17.11, at this commit.
+    file: 'test/e2e.moderation-killswitch-flip.test.ts',
+    minTests: 3,
+    why: 'the moderation kill-switch refuse/recover cycle through the live endpoint, or a half-disabled slice ships unnoticed',
+  },
 ];
 
 /**

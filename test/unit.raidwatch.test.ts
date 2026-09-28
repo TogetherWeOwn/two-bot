@@ -83,10 +83,10 @@ test('a long raid alerts on a cooldown, not once per account', () => {
 });
 
 test('both small raids are caught, and caught within seconds', () => {
-  // 2025-09-12: 15 accounts in 6 seconds. 2025-12-15: 15 in 11 seconds.
+  // 2025-09-12: 15 accounts in 6 seconds. 2025-12-15: 15 in 7 seconds.
   for (const [start, span] of [
     ['2025-09-12T17:42:59Z', 6],
-    ['2025-12-15T21:16:49Z', 11],
+    ['2025-12-15T21:16:49Z', 7],
   ] as const) {
     const alerts = scanJoinsForBursts(burst(start, 15, span / 15));
     assert.equal(alerts.length, 1);
