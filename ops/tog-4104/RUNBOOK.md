@@ -1,7 +1,8 @@
 # Staging signed settings proof — runnable packet (TOG-4705)
 
 This packet re-pins the TOG-4104 proof to the wired runtime
-`7995b3fb13feda26ae35356bc5227c67870370c9` and lifts the HOLD **only for that
+`5f57256d41130b056389f3098f3b0c84a9d9e261` (the commit staging runs,
+redeployed 2026-09-27) and lifts the HOLD **only for that
 pin**. At that commit startup passes the initialized settings store to
 `startInternalActions`, so both settings verbs are served with the existing
 flags enabled. See [SOURCE_IDENTITY.md](SOURCE_IDENTITY.md) for pin choice,
@@ -26,7 +27,7 @@ production, flags, credentials or the DB. The existing flags remain at 1.
 | App | `uy4d9ndeygjcem6lgayhxgub` |
 | Exact container | `bot-uy4d9ndeygjcem6lgayhxgub` |
 | Guild | `1545644954272137297` (TWO Staging) |
-| Pinned runtime | `7995b3fb13feda26ae35356bc5227c67870370c9` (PR #175 merge, contains `15b8f6c`) |
+| Pinned runtime | `5f57256d41130b056389f3098f3b0c84a9d9e261` (PR #176 merge, contains `15b8f6c`) |
 | Proof source | This packet's merged head, passed as `$2` and byte-checked against `ops/tog-4104` |
 | Candidate keys | `TWO_RAID_JOIN_THRESHOLD`, `TWO_RAID_WINDOW_SECONDS` |
 | Offline fixtures | Numeric strings `7`, `42`, respectively |
@@ -38,9 +39,11 @@ sibling.
 
 ## Operator steps (TOG-3706 only, after this packet merges)
 
-1. Deploy exactly `7995b3fb13feda26ae35356bc5227c67870370c9` to
-   `uy4d9ndeygjcem6lgayhxgub`. Record the Coolify deployment id and the
-   resulting immutable image ID (`sha256:…`).
+1. Confirm staging still runs `5f57256d41130b056389f3098f3b0c84a9d9e261`
+   on `uy4d9ndeygjcem6lgayhxgub` (redeployed 2026-09-27). Record the Coolify
+   deployment id and the resulting immutable image ID (`sha256:…`). If
+   staging has been redeployed since, stop: this packet pins only that
+   commit.
 2. Quiesce all writers: no dashboard saves, other clients, direct DB writers,
    second bot process, in-flight save, or joins. The API has no
    CAS/distributed lock. Wait at least 20 seconds after quiescence for the
@@ -48,15 +51,18 @@ sibling.
 3. Run the proof from a checkout at this packet's merged head (`$SOURCE`):
    ```bash
    PROOF_EXCLUSIVE_WINDOW=staging-writers-quiesced \
-   PROOF_RUNTIME_REVISION=7995b3fb13feda26ae35356bc5227c67870370c9 \
+   PROOF_RUNTIME_REVISION=5f57256d41130b056389f3098f3b0c84a9d9e261 \
    PROOF_IMAGE_ID='<sha256 from step 1>' \
    ops/tog-4104/run-proof.sh run "$SOURCE"
    ```
    The wrapper prints one `PROOF TARGET app=… container=<64-hex> image=…
-   ref=… runtime=… source=… mode=…` line recording the immutable container
-   and image IDs. Signing keys stay inside the container: the script never
-   reads or passes `TWO_INTERNAL_KEYS`. The only injected value is
-   `PROOF_SOURCE_SHA`, the validated packet commit, which is not a secret.
+   ref=… runtime=… source=… mode=… url=…` line recording the immutable
+   container and image IDs plus the measured listener URL. Forwarded into the
+   container are only values already validated against the packet pin: the app
+   UUID, the pinned runtime, the writer-exclusion declaration, the measured
+   listener URL and the validated packet source SHA. Signing keys stay inside
+   the container: the script never reads or passes `TWO_INTERNAL_KEYS`. None
+   of the forwarded values is a secret.
 4. Capture the deployment id from step 1, the wrapper's `PROOF TARGET` line,
    and the bot logs covering the run: `setting_changed`
    (`src/index.ts:233`, emitted per changed hot-wired key with `from`/`to`)
@@ -75,10 +81,13 @@ fixtures.
 
 ## Retained executable engine — safety contract
 
-`settings-signed-proof.mjs` refuses before mutation on: wrong/missing app,
-runtime, guild, proof source, keys, flags, writer assertion, malformed
-pre-state, URL credentials, redirects or a non-literal-loopback endpoint.
-Keys remain in the container environment.
+`settings-signed-proof.mjs` refuses before mutation on: wrong/missing app
+(either `STAGING_APP_UUID` or the container's own `COOLIFY_RESOURCE_UUID`
+must equal the pin), runtime, guild, proof source, keys, flags, writer
+assertion, malformed pre-state, URL credentials, redirects or an endpoint
+that is neither literal loopback nor one of the process's own private
+interface addresses. DNS names, public addresses and foreign private
+addresses still refuse. Keys remain in the container environment.
 
 - Capture both actual stored values and JSON types; get never reads
   environment fallback. Stored values must be digit strings or integers in

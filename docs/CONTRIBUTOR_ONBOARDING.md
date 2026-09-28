@@ -112,19 +112,22 @@ Pick **one** lane. All three count, all three get reviewed by a human.
 [CONTRIBUTING.md](../CONTRIBUTING.md)):
 
 ```bash
-git clone git@github.com:TogetherWeOwn/two-bot.git
+gh auth setup-git   # once per machine; the repos are private
+git clone https://github.com/TogetherWeOwn/two-bot.git
 cd two-bot
 npm ci --include=dev
 git checkout -b docs/short-description
-# edit, then:
-npm test   # must pass before you open the PR
+# edit, then (needs a running Postgres 17+ with a scratch database):
+TWO_TEST_DATABASE_URL=postgres://localhost:5432/two_bot_test npm test   # must pass before you open the PR
 ```
 
-Open the pull request against `main`. CI runs install, typecheck, tests and a
-secret scan — all four must be green. A code owner reviews it; you cannot
-approve your own PR. Name branches `type/short-description`
-(`docs/…`, `fix/…`, `feat/…`). Never put a token or private key in a commit —
-a pushed secret gets rotated, not just deleted.
+Open the pull request against `main`. CI runs the check job (typecheck,
+`test:postgres` wrapper, restart-storage provisioning, grant self-test) and the
+postgres job (migrate, web views, website-role checks), plus a secret scan —
+all must be green (full list: [CONTRIBUTING.md](../CONTRIBUTING.md)). A code
+owner reviews it; you cannot approve your own PR. Name branches
+`type/short-description` (`docs/…`, `fix/…`, `feat/…`). Never put a token or
+private key in a commit — a pushed secret gets rotated, not just deleted.
 
 **What happens after:** a reviewer reads it, you get comments or an approval,
 it merges, and your name is on the pilot's contributor list. Then pick the

@@ -55,6 +55,39 @@ logged. That is also why the floor is rescanned daily rather than hourly —
 re-paging 100+ member objects every hour to re-derive a number that moves a few
 times a year is a lot of data touched for nothing.
 
+## Query cost and ceilings (TOG-7206)
+
+Measured on seeded stub guilds in `test/unit.presenceprobecost.test.ts`:
+
+| Guild size | Discord requests | Member objects touched | Floor |
+|---|---|---|---|
+| 107 members (today) | 2 (1 presence + 1 page) | 107 | 22 |
+| 10,000 members | 12 (1 presence + 11 pages) | 10,000 | 2000 |
+| 25,000 members | 12, then stops | 11,000 scanned, none counted | NULL (presence kept) |
+
+Two ceilings bound the cost, and both refuse unbounded scans rather than
+degrading quietly:
+
+- **Bot-floor scan: `BOT_FLOOR_MAX_PAGES = 11`** (`src/jobs/presenceProbe.ts`).
+  Eleven member-list requests cover guilds up to 10,000 members — ten full
+  pages plus the short-or-empty page that proves the scan complete. Past that
+  the scan stops, logs `presence_probe_bot_floor_truncated`, and the cycle
+  records the presence reading with a NULL floor. A truncated roster is never
+  reduced to a count: a partial scan reported as a number would silently shrink
+  the floor as the guild grows. `countBotFloor()` takes the ceiling as a
+  REQUIRED argument and throws on a missing or non-positive value, so no
+  caller can page the roster by forgetting to bound it; `runProbeCycle()`
+  takes it required too, and only the `startPresenceProbe()` scheduler fills
+  in the module default.
+- **Trend read: 14-day query window** (`scripts/presence-trend.ts`). `--days`
+  used to pull the whole series and slice in memory; now the window goes into
+  the query (`readSeries(db, guildId, { since })`), bounded below by the
+  14-day trigger window so the verdict always sees what it needs. Against a
+  seeded two-year series (1460 rows) the windowed query reads 28 rows.
+
+Raise `BOT_FLOOR_MAX_PAGES` only after re-measuring: the cost test prints the
+current numbers, and the PR that changes the constant carries them.
+
 ## How containment is enforced
 
 Not by this document. By four things that fail loudly:

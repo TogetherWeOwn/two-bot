@@ -31,7 +31,10 @@ StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=two-bot-backup
 
-# Same posture as the bot: this writes to one directory and talks to Postgres.
+# Same posture as the bot: this writes to one directory and talks to Postgres
+# (plus HTTPS to R2 on upload). Nothing else. Timer-started oneshots carry no
+# Restart=: the timer refires nightly, and a failed run must stay failed so the
+# failure is visible instead of looping.
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
@@ -40,10 +43,26 @@ ProtectHome=true
 ReadWritePaths=/var/backups/two-bot
 ProtectKernelTunables=true
 ProtectKernelModules=true
+ProtectKernelLogs=true
 ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
 RestrictNamespaces=true
 RestrictSUIDSGID=true
+RestrictRealtime=true
 LockPersonality=true
 UMask=0077
 CapabilityBoundingSet=
 AmbientCapabilities=
+# Co-tenancy: hide other services' processes; a backup never inspects /proc.
+ProtectProc=invisible
+ProcSubset=pid
+# Postgres + HTTPS upload only. A compromised dependency cannot open a raw socket.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+SystemCallArchitectures=native
+# Nightly and low-priority: half a core, 512M (the dump streams via pipeline).
+MemoryMax=512M
+CPUQuota=50%
+TasksMax=32
