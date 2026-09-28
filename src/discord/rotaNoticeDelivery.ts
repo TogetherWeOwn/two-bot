@@ -18,7 +18,8 @@ export interface RotaNoticeDeliveryDeps {
   store: Pick<OperationalAuditStore,
     'record' | 'claim' | 'prepareDeliverySend' | 'extendDeliveryLease' |
     'markDelivered' | 'markAcknowledgementFailed' | 'markDeliveryFailed' |
-    'quarantineDelivery' | 'isDeliveryHalted' | 'holdDeliveryForHalt' | 'get'>;
+    'quarantineDelivery' | 'isDeliveryHalted' | 'holdDeliveryForHalt' |
+    'holdRecoveringDeliveryForHalt' | 'get'>;
   verifyAccess?: typeof verifyRotaNoticeAccess;
 }
 
@@ -223,13 +224,17 @@ export class RotaNoticeDelivery {
   }
 
   private async hold(entryId: string, claimToken: string, recovering: boolean): Promise<RotaNoticeOutcome> {
-    if (recovering) {
-      // holdDeliveryForHalt clears the boundary. That is safe only when this
-      // claim knows no POST began, never for an ambiguous previous attempt.
-      await this.fail(entryId, claimToken, 'audit_kill_switch_held', false);
-    } else {
-      try { await this.deps.store.holdDeliveryForHalt(entryId, claimToken); } catch { /* Lease expiry is the backstop. */ }
-    }
+    // Neither path is an attempt, so neither may move delivery_attempts.
+    // holdDeliveryForHalt clears the boundary: safe only when this claim
+    // knows no POST began. A recovering claim may follow an ambiguous
+    // previous POST, so its boundary must survive for the next pass.
+    try {
+      if (recovering) {
+        await this.deps.store.holdRecoveringDeliveryForHalt(entryId, claimToken);
+      } else {
+        await this.deps.store.holdDeliveryForHalt(entryId, claimToken);
+      }
+    } catch { /* Lease expiry is the backstop. */ }
     return { status: 'held', entryId };
   }
 

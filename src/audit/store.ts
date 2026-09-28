@@ -161,6 +161,32 @@ export class OperationalAuditStore {
     return result.changes === 1;
   }
 
+  /**
+   * Release a recovering claim back to `pending` because the kill switch
+   * stopped delivery before Discord was asked anything *in this pass*.
+   * Unlike `holdDeliveryForHalt`, the recovery boundary is preserved: it was
+   * written by an earlier, possibly ambiguous POST, so clearing it would fail
+   * the row closed as `discord_marker_missing` instead of resuming recovery
+   * on the next pass. Like `holdDeliveryForHalt` and unlike
+   * `markDeliveryFailed`, nothing was attempted in this pass, so the attempt
+   * count and `delivery_attempted_at` must not move (TOG-8773).
+   */
+  async holdRecoveringDeliveryForHalt(entryId: string, claimToken: string): Promise<boolean> {
+    const result = await this.db
+      .prepare(
+        `UPDATE operational_audit_log
+            SET delivery_state = 'pending',
+                delivery_lease_until = NULL,
+                delivery_claim_token = NULL,
+                delivery_last_error = 'audit_kill_switch_held'
+          WHERE entry_id = ?
+            AND delivery_state = 'delivering'
+            AND delivery_claim_token = ?`,
+      )
+      .run(entryId, claimToken);
+    return result.changes === 1;
+  }
+
   async claim(entryId: string, leaseMs = AUDIT_DELIVERY_LEASE_MS): Promise<StoredOperationalAudit | null> {
     const now = new Date();
     const leaseUntil = new Date(now.getTime() + leaseMs).toISOString();
