@@ -36,6 +36,21 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     why: 'the whole web_v1 contract the website reads, including the role grants',
   },
   {
+    // TOG-6492. The two website-role CLIs executed end to end through the
+    // real scripts: the provision grant list equals the contract, verify
+    // passes on its own exit code, and a real over-grant fails it. Counted
+    // from the 4 top-level test() blocks; CI's postgres job confirms the
+    // count on the first run after this commit.
+    file: 'test/e2e.webrole.test.ts',
+    minTests: 4,
+    why: 'the provision/verify website-role CLIs themselves, not just the library calls underneath them',
+  },
+  {
+    file: 'test/e2e.growthreview.test.ts',
+    minTests: 4,
+    why: 'growth-review CLI golden scores, kill/scale citations, red-gate refusal and sustained-effort guard',
+  },
+  {
     // TOG-6489 slice. The campaigns operator CLI executed end to end through
     // the real npm entry: --add creates the row, the bare list shows it, a
     // duplicate --add fails naming "already exists", and the new slug 302s
@@ -44,6 +59,27 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     file: 'test/e2e.campaigns.test.ts',
     minTests: 4,
     why: 'the campaigns --add/--list operator path itself, not just the CampaignStore underneath it',
+  },
+  {
+    // TOG-6491. The restore script that can wipe a database: three refusals
+    // (no --force, no TWO_RESTORE_URL, no fallback to TWO_DATABASE_URL), a
+    // dry run that writes nothing, and a target + --force restore of a canned
+    // dump with identical rows back. Counted from the 5 top-level test()
+    // blocks; 5/5 green in CI postgres runs 36344199113 and 36351823205.
+    file: 'test/e2e.pgrestore.test.ts',
+    minTests: 5,
+    why: 'the pg-restore safety refusals - without this floor a silent skip re-opens the wrong-database data-loss gap',
+  },
+  {
+    // TOG-7709. The web-views CLI executed end to end through the real npm
+    // entry: `npm run web:views` applies all 9 views, a hardcoded column
+    // fixture pins every view's exact shape (the code asserting against
+    // itself is the gap this closes), and --status changes nothing. Counted
+    // from the 3 top-level test() blocks; 3/3 green on first local run
+    // against Postgres 18.4, CI's postgres job confirms on merge.
+    file: 'test/e2e.webviews.test.ts',
+    minTests: 3,
+    why: 'the web-views contract CLI itself plus the exact web_v1 column fixture - without this floor a silent column drift breaks two-web',
   },
   {
     file: 'test/e2e.backup.test.ts',

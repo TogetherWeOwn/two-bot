@@ -41,6 +41,19 @@ function env(name: string, fallback?: string): string {
   return v;
 }
 
+// First statement of the body: imports above are side-effect-free, so this
+// runs before env() can exit(2) on missing TWO_HOST_DB. --help needs no env,
+// no database, no mock, no socket.
+if (process.argv.includes('--help')) {
+  console.log('usage: TWO_HOST_DB=postgres://.../two_bot_staging TWO_HOST_SECRET=... node scripts/internal-actions-host.ts');
+  console.log('');
+  console.log('Standalone internal-actions host for TOG-463 acceptance (mock Discord, real Postgres).');
+  console.log('Prints one JSON line `acceptance_host_ready`, then serves until SIGTERM.');
+  console.log('Env: TWO_HOST_DB, TWO_HOST_SECRET, TWO_HOST_CHANNEL_KEY (default qa-throwaway),');
+  console.log('TWO_HOST_KEY_ID (default web-staging), TWO_HOST_PORT (default 8787), TWO_HOST_SCHEMA (default qa_tog463).');
+  process.exit(0);
+}
+
 const DB_SPEC = env('TWO_HOST_DB');
 const KEY_ID = env('TWO_HOST_KEY_ID', 'web-staging');
 const SECRET = env('TWO_HOST_SECRET');

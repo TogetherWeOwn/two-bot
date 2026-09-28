@@ -70,13 +70,39 @@ function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** A port nobody is listening on, obtained by binding and immediately releasing. */
-async function freePort(): Promise<number> {
+/**
+ * A loopback port held bound until the child that will bind it has spawned.
+ *
+ * The old freePort() bound and released, and node --test runs files in
+ * parallel, so a sibling bot or mock could claim the port in the gap between
+ * our release and our child's bind (CI run 36369915601: every boot attempt
+ * died at the stays-up check in ~7.9s total). Holding the socket bound until
+ * after spawn() shrinks the race to the child's exec window - a sibling must
+ * now freePort() in exactly those microseconds AND bind before our child.
+ */
+interface HeldPort {
+  port: number;
+  release(): Promise<void>;
+}
+
+async function holdPort(): Promise<HeldPort> {
   const s = createServer();
   await new Promise<void>((r) => s.listen(0, '127.0.0.1', () => r()));
   const { port } = s.address() as AddressInfo;
-  await new Promise<void>((r) => s.close(() => r()));
-  return port;
+  return {
+    port,
+    release: () => new Promise<void>((r) => s.close(() => r())),
+  };
+}
+
+/**
+ * Release a held port, tolerating null. A free function (not `held?.release()`
+ * inline): `held` is `null` on every loop back edge, so TS narrows the local
+ * to `null` at the top of the loop and the inline optional chain looks up
+ * `release` on `never` (TS2339). The parameter keeps its declared union.
+ */
+async function releaseHeld(h: HeldPort | null): Promise<void> {
+  await h?.release().catch(() => {});
 }
 
 /**
@@ -176,20 +202,38 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
     return { checks, passed: false };
   };
 
-  // The health port is racy by construction: freePort() binds and releases,
-  // and node --test runs files in parallel, so a sibling bot or mock can
-  // claim the port before our child binds (CI signatures: EADDRINUSE crash,
-  // or a fetch landing on the wrong server and reading '{}'). Retry the boot
-  // phase only - once our health server answers, the port is ours. Five
-  // attempts: run 36314095503 exhausted three consecutive squats on the
-  // shared host, so the budget must survive sustained contention. Retries
-  // cost nothing on a green path (first attempt boots straight through).
-  const BOOT_ATTEMPTS = 5;
+  // The health port is racy by construction: node --test runs files in
+  // parallel, so a sibling bot or mock can claim our port before our child
+  // binds (CI signatures: EADDRINUSE crash, or a fetch landing on the wrong
+  // server and reading '{}'). Three layers of defense:
+  //
+  //   1. The port stays BOUND by this process until our child has spawned -
+  //      no bind-release gap for a sibling to slip into. A sibling can still
+  //      win the spawn-to-bind window (the child needs ~a second to boot),
+  //      so retries remain.
+  //   2. Retry the boot phase only - once our health server answers, the port
+  //      is ours. Eight attempts with jitter: run 36314095503 exhausted three
+  //      consecutive squats, and run 36369915601 exhausted five. Retries cost
+  //      nothing on a green path (first attempt boots straight through); the
+  //      jitter decorrelates two siblings colliding repeatedly.
+  //   3. Every attempt is recorded (port, outcome, exit tail) and the history
+  //      rides along on the failure detail, so the next red run says whether
+  //      it was EADDRINUSE every time or something else entirely.
+  const BOOT_ATTEMPTS = 8;
+  const attemptHistory: string[] = [];
+  const recordAttempt = (msg: string) => {
+    attemptHistory.push(msg);
+  };
+  const historyBlock = () => (attemptHistory.length ? `\nboot attempts:\n${attemptHistory.join('\n')}` : '');
+  // Decorrelate colliding siblings: without jitter two processes that lose
+  // the same race retry in lockstep and lose it together again.
+  const backoff = (attempt: number) => sleep(250 * attempt + Math.floor(Math.random() * 500));
   let port = 0;
   let url = (p: string) => `http://127.0.0.1:${port}${p}`;
   let logTail = () => '';
   let bootOk = false;
 
+  let held: HeldPort | null = null;
   try {
     for (let attempt = 1; attempt <= BOOT_ATTEMPTS && !bootOk; attempt++) {
       // Fresh state per attempt so a collided try leaves no checks behind.
@@ -198,13 +242,30 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
       pending = '';
       if (bot && bot.exitCode === null) bot.kill('SIGKILL');
       bot = null;
+      exited = null;
       await mock?.close().catch(() => {});
       mock = null;
+      // `releaseHeld` (not `held?.release()` inline): `held` is `null`
+      // on every loop back edge, so TS narrows it to `null` here and the
+      // inline optional chain looks up `release` on `never` (TS2339).
+      await releaseHeld(held);
+      held = null;
 
+      // Decorrelate from a sibling we just collided with: without this two
+      // processes that lose the same race retry in lockstep and lose together.
+      if (attempt > 1) await backoff(attempt);
       mock = await startMockDiscord();
-      port = await freePort();
+      // Bound by THIS process until our child exists: no bind-release gap for
+      // a sibling to slip into. Released right after spawn so the child can
+      // bind; the spawn-to-bind window (child boot, ~1s) stays racy, which is
+      // what the retry budget and the attempt history below are for.
+      held = await holdPort();
+      port = held.port;
       url = (p: string) => `http://127.0.0.1:${port}${p}`;
       logTail = () => lines.map((l) => l.raw).join('\n');
+      // The exit tail: EADDRINUSE (squatter) vs anything else decides whether
+      // a retry is correct, so it is logged per attempt, not just on failure.
+      const tailLines = (n = 8) => lines.map((l) => l.raw).slice(-n).join('\n');
 
       bot = spawn(process.execPath, ['src/index.ts'], {
         cwd: ROOT,
@@ -223,6 +284,8 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
           LOG_LEVEL: 'debug',
         },
       });
+      await held.release();
+      held = null;
       child = bot;
       exited = null;
       // Identity-guarded: a SIGKILLed previous attempt can still deliver
@@ -242,13 +305,21 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
 
       // 1. The process stays up through the whole check window. A boot crash is
       //    the thing `systemctl status` would have shown as anything but active.
-      //    An EADDRINUSE crash means a sibling claimed our released port first -
-      //    retry with a fresh one rather than failing the run.
+      //    An EADDRINUSE crash means a sibling bound our port in the
+      //    spawn-to-bind window - retry with a fresh held port, and record
+      //    the exit tail so the next red run says EADDRINUSE vs real crash.
       await sleep(1500);
       if (exited !== null) {
         const tail = logTail();
-        if (/EADDRINUSE/.test(tail) && attempt < BOOT_ATTEMPTS) continue;
-        fail('bot-process-stays-up', `bot exited with ${exited} seconds after start\n${tail}`);
+        const squat = /EADDRINUSE/.test(tail);
+        recordAttempt(
+          `attempt ${attempt}/${BOOT_ATTEMPTS} port ${port}: exited ${exited}${squat ? ' EADDRINUSE' : ' (non-port crash)'}\n${tailLines()}`,
+        );
+        if (squat && attempt < BOOT_ATTEMPTS) continue;
+        fail(
+          'bot-process-stays-up',
+          `bot exited with ${exited} after start (attempt ${attempt}/${BOOT_ATTEMPTS}, port ${port})\n${tail}${historyBlock()}`,
+        );
         return failReport();
       }
       pass('bot-process-stays-up', 'still running after boot');
@@ -261,25 +332,30 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
         return res.ok ? res : null;
       }, Math.min(timeoutMs, 30_000)).catch(() => null);
       if (!live) {
+        recordAttempt(`attempt ${attempt}/${BOOT_ATTEMPTS} port ${port}: /healthz never answered 200\n${tailLines()}`);
         if (attempt < BOOT_ATTEMPTS) continue;
-        fail('liveness-200-ok', `GET /healthz never answered 200 after ${BOOT_ATTEMPTS} boot attempts\n${logTail()}`);
+        fail(
+          'liveness-200-ok',
+          `GET /healthz never answered 200 after ${BOOT_ATTEMPTS} boot attempts\n${logTail()}${historyBlock()}`,
+        );
         return failReport();
       }
       {
         const body = (await live.text()).trim();
         if (live.status !== 200 || body !== 'ok') {
-          if (attempt < BOOT_ATTEMPTS) {
-            // Wrong server on our port (a sibling's mock answers '{}', a stale
-            // bot answers 503) - retry with a fresh port, don't fail the run.
-            continue;
-          }
-          fail('liveness-200-ok', `GET /healthz -> ${live.status} ${body}`);
+          // Wrong server on our port (a sibling's mock answers '{}', a stale
+          // bot answers 503) - retry with a fresh port, don't fail the run.
+          recordAttempt(
+            `attempt ${attempt}/${BOOT_ATTEMPTS} port ${port}: /healthz -> ${live.status} ${body.slice(0, 80)}\n${tailLines()}`,
+          );
+          if (attempt < BOOT_ATTEMPTS) continue;
+          fail('liveness-200-ok', `GET /healthz -> ${live.status} ${body}${historyBlock()}`);
           return failReport();
         }
         // Ownership: a 200 ok proves *a* server answers, not that it is ours.
         // Only our own child logging health_listening for this port proves the
-        // bind is ours - a sibling squatting on our released port makes our
-        // child crash with EADDRINUSE instead, which never logs that line.
+        // bind is ours - a sibling squatting on our port makes our child
+        // crash with EADDRINUSE instead, which never logs that line.
         const ours = await waitFor(async () => {
           const found = lines.find(
             (l) => l.json?.msg === 'health_listening' && l.json?.port === port,
@@ -287,16 +363,18 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
           return found ?? null;
         }, 15_000).catch(() => null);
         if (!ours) {
+          recordAttempt(`attempt ${attempt}/${BOOT_ATTEMPTS} port ${port}: 200 ok but no health_listening for our port\n${tailLines()}`);
           if (attempt < BOOT_ATTEMPTS) continue;
-          fail('liveness-200-ok', `our bot never logged health_listening for port ${port}\n${logTail()}`);
+          fail('liveness-200-ok', `our bot never logged health_listening for port ${port}\n${logTail()}${historyBlock()}`);
           return failReport();
         }
         pass('liveness-200-ok', 'GET /healthz -> 200 ok');
       }
+      recordAttempt(`attempt ${attempt}/${BOOT_ATTEMPTS} port ${port}: bound, ours`);
       bootOk = true;
     }
     if (!bootOk || !child) {
-      fail('liveness-200-ok', `no boot attempt bound the health port (${BOOT_ATTEMPTS} tries)`);
+      fail('liveness-200-ok', `no boot attempt bound the health port (${BOOT_ATTEMPTS} tries)${historyBlock()}`);
       return failReport();
     }
     const activeMock = mock;
@@ -422,6 +500,11 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
   } finally {
     if (bot && bot.exitCode === null) bot.kill('SIGKILL');
     await mock?.close().catch(() => {});
+    // A `continue` releases at the top of the next iteration, but an early
+    // return or throw would leak the bound holder and starve the host of one
+    // loopback port per red run. Via `releaseHeld` for the same narrowing
+    // reason as the loop-top call.
+    await releaseHeld(held);
   }
 }
 
