@@ -873,7 +873,7 @@ log. A concurrent admin edit made mid-run is left untouched (a
 The script takes exactly one flag:
 
 ```bash
-node scripts/staging-automations-proof.ts --help   # usage, exit 0, needs nothing
+node scripts/staging-automations-proof.ts --help   # usage, exit 0, needs no token or database
 ```
 
 A full run needs the staging token and the staging database, and nothing else:
@@ -901,10 +901,12 @@ nothing.
 
 ### Running the proof check offline (no token, no database, no Discord)
 
-The reviewer path. Everything below runs with no credentials set and makes no
-network calls:
+The reviewer path. Run `npm ci` first (the proof script imports `discord.js`,
+so `--help` needs installed dependencies — but nothing else). Everything below
+runs with no credentials set and makes no network calls:
 
 ```bash
+npm ci                                             # once per checkout
 npm run staging:automations-proof -- --help        # usage names the script, exit 0
 npm run staging:automations-state -- --help        # usage names the script, exit 0
 node --test test/unit.automationsproofhelp.test.ts # 4/4, exit 0
