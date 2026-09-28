@@ -99,12 +99,17 @@ the staging proof above does not directly exercise:
   other fetch failure, this is caught per-feed in `pollFeeds`
   (`src/announcements/service.ts`): no message is posted, remaining feeds
   still poll, and the failure is audited.
-- **Service-layer timeout.** `pollFeeds` sets no deadline of its own; each
-  feed read is bounded by a 15-second `AbortSignal.timeout` at the reader
-  layer (`REQUEST_TIMEOUT_MS` in `src/announcements/discord.ts`). A hung
-  feed aborts at 15 s, records a failed poll, and the loop moves on — worst
-  case roughly 15 s per feed, sequential. There is no fetch retry in the
-  service layer; the next scheduled poll tries again.
+- **Service-layer timeout.** `pollFeeds` bounds every feed read with
+  `FEED_READ_TIMEOUT_MS` (15 s, `src/announcements/service.ts`, overridable
+  via `AnnouncementsServiceOptions.feedReadTimeoutMs`, always ≤ 60 s): the
+  read races the reader against that deadline and receives an
+  `AbortSignal.timeout` of the same length. A hung feed — even one that
+  ignores the signal — rejects with `Feed read timed out after …ms`,
+  records a failed poll, and the loop moves on, so worst case is roughly
+  15 s per feed, sequential. `XmlFeedReader` honors a caller-provided
+  signal and falls back to its own 15-second `AbortSignal.timeout`
+  (`REQUEST_TIMEOUT_MS`) when none is passed. There is no fetch retry in
+  the service layer; the next scheduled poll tries again.
 
 **What the operator sees in audit.** Every poll writes one
 `announcements_audit_log` row per feed with `action = 'feed.poll'`,
