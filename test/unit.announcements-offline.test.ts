@@ -22,6 +22,7 @@ import {
   normalizeFeedSource,
   parseRoleSpec,
   type FeedItem,
+  type LfgRoleInput,
 } from '../src/announcements/service.ts';
 import { AnnouncementsStore, type FeedRelayRow } from '../src/announcements/store.ts';
 import type { Db, Statement } from '../src/store/db.ts';
@@ -222,7 +223,7 @@ test('createLfg refuses bad titles, times and role sets with zero posts', async 
   const discord = new FakeDiscord();
   const service = new AnnouncementsService(store, discord);
   const goodRoles = [{ key: 'any', label: 'Any', slots: 2 }];
-  const cases: Array<[string, Record<string, unknown>]> = [
+  const cases: Array<[string, { title?: string; startsAt?: string; roles?: LfgRoleInput[] }]> = [
     ['empty title', { title: '   ' }],
     ['overlong title', { title: 'x'.repeat(101) }],
     ['past starts-at', { startsAt: '2026-09-09T10:00:00.000Z' }],
@@ -238,11 +239,13 @@ test('createLfg refuses bad titles, times and role sets with zero posts', async 
   for (const [name, patch] of cases) {
     await assert.rejects(
       service.createLfg({
-        guildId: GUILD, channelId: CHANNEL, title: 'Offline raid',
+        guildId: GUILD, channelId: CHANNEL,
         startsAt: FUTURE, roles: goodRoles, actorId: USER, now: NOW,
-        ...(patch as { title: string }),
+        title: 'Offline raid',
+        ...patch,
       }),
-      undefined, name,
+      /.+/s,
+      name,
     );
   }
   assert.equal(discord.posts.length, 0, 'refused LFG must never reach the transport');
