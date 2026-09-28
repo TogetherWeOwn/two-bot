@@ -27,6 +27,10 @@ npm run check:credentials:selftest
 # token, no target — the interesting cases are the ones where none exists
 # (TOG-913). Runs before the slow suites so a broken guard fails in seconds.
 npm run deploy:selftest
+# Staging-broker server-side authority (TOG-6911 correction, 2026-09-28):
+# pinned staging app, authenticated triggering, redacted reads, rejection of
+# arbitrary UUIDs and production. Hermetic like the guard above.
+npm run broker:selftest
 npm run typecheck
 # Offline and instant: the golden ambiguous-vs-unknown eval (TOG-5849). It
 # scores the fixture split against the real attribution code, so a report or

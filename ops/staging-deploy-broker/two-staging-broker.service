@@ -1,0 +1,79 @@
+# systemd unit for the two-bot staging deploy broker (TOG-6911).
+#
+# WHAT THIS IS. A staging-only deploy authority on the Coolify host. It holds
+# the panel bearer (COOLIFY_TOKEN) and the scoped staging credential
+# (STAGING_BROKER_TOKEN) as systemd credentials — 0400 files exactly one Unix
+# user can open — and brokers Actions deploys of the pinned two-bot staging
+# app (uy4d9ndeygjcem6lgayhxgub) only. Actions never sees the panel bearer;
+# the broker never serves any other app or production.
+#
+# WHY NOT AN ACTIONS SECRET. The live panel token carries abilities
+# [read,deploy] and is NOT app-scoped: any job holding it can reach
+# production applications, and a GitHub environment label is not a resource
+# authorization boundary (operator hand-back on TOG-6911, 2026-09-28).
+#
+# INSTALL (operator, pinned to the reviewed commit — see install.sh):
+#   sudo bash ops/staging-deploy-broker/install.sh --commit <sha>
+#
+# ROLLBACK (operator):
+#   sudo systemctl stop two-staging-broker
+#   sudo systemctl disable two-staging-broker
+#   # staging deploys go red naming the missing broker (TOG-913); nothing
+#   # silently deploys, and production was never reachable through this unit.
+#   # To restore: sudo bash ops/staging-deploy-broker/install.sh --commit <prior-sha>
+#
+# PORT. 8091 loopback only. The two-selfhosted runners share the host's
+# network namespace, so a runner job reaches http://127.0.0.1:8091. The
+# broker refuses to start on any non-loopback bind (server.mjs parseConfig).
+
+[Unit]
+Description=TWO staging deploy broker (two-bot, staging app only)
+Documentation=https://github.com/TogetherWeOwn/two-bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=twobot
+Group=twobot
+WorkingDirectory=/opt/two-staging-broker
+ExecStart=/usr/bin/node server.mjs
+
+# --- Secrets ---------------------------------------------------------------
+# Both arrive as systemd credentials, NOT environment variables: readable only
+# by User= via $CREDENTIALS_DIRECTORY, never in /proc/<pid>/environ, never
+# inherited by children, never in a core dump. Same model as
+# deploy/two-bot.service. server.mjs reads STAGING_BROKER_TOKEN and
+# COOLIFY_TOKEN from the credential directory first, environment second (the
+# environment fallback is for local smoke only and is never used on the host,
+# where EnvironmentFile= carries non-secret configuration only).
+#
+# Source files must be root-owned and chmod 600. install.sh provisions each
+# empty and REFUSES to start the unit until the operator fills both — a
+# broker that starts with a placeholder credential is a broker that cannot
+# authenticate anyone, so install fails loudly instead (TOG-913).
+LoadCredential=staging_broker_token:/etc/two-staging-broker/credentials/staging_broker_token
+LoadCredential=coolify_token:/etc/two-staging-broker/credentials/coolify_token
+
+# --- Non-secret configuration ----------------------------------------------
+# COOLIFY_URL comes from /etc/two-staging-broker/broker.env (written by
+# install.sh from --panel-url; https:// required). It is deliberately NOT
+# preset here: an empty preset would satisfy "set" while pointing nowhere.
+Environment=STAGING_BROKER_PORT=8091
+Environment=STAGING_BROKER_BIND=127.0.0.1
+EnvironmentFile=/etc/two-staging-broker/broker.env
+
+# --- Containment (shared box: website, Postgres, staging live here) --------
+MemoryMax=256M
+CPUQuota=50%
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/two-staging-broker
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

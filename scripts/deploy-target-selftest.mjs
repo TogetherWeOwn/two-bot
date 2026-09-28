@@ -3,17 +3,26 @@
 // Self-test for the TOG-6911 deploy scripts.
 //
 // scripts/check-deploy-target.mjs, scripts/wait-for-host-mirror.mjs,
-// scripts/wait-for-coolify-deploy.mjs and scripts/smoke-staging-deploy.mjs
-// exist so that a deploy job FAILS when there is no target, no panel, or no
-// healthy release — never skip-and-passes (TOG-913). A guard that has never
-// been observed to fail is indistinguishable from one that cannot fail, so
-// this executes each script once per configuration and pins the exit code
-// and the reason (in-org precedent: two-web ci/deploy-target-selftest.sh).
+// scripts/broker-deploy.mjs and scripts/broker-smoke.mjs exist so that a
+// deploy job FAILS when there is no broker target, no broker, or no healthy
+// release — never skip-and-passes (TOG-913). A guard that has never been
+// observed to fail is indistinguishable from one that cannot fail, so this
+// executes each script once per configuration and pins the exit code and the
+// reason (in-org precedent: two-web ci/deploy-target-selftest.sh).
+//
+// TRANSPORT (2026-09-28 correction). Actions holds NO panel bearer: staging
+// goes through the staging-only broker (ops/staging-deploy-broker/server.mjs)
+// with the scoped STAGING_BROKER_TOKEN, and the broker's own hermetic suite
+// (ops/staging-deploy-broker/server.test.mjs) pins its server-side authority.
+// The retired panel-bearer clients (wait-for-coolify-deploy.mjs,
+// smoke-staging-deploy.mjs) remain in the tree for the post-TOG-6903
+// production broker path but are NOT wired into any job: deploy.yml must
+// reference no panel bearer and no caller-supplied app UUID in staging.
 //
 // Nothing here needs the network, a token, GitHub, or a deploy target. The
 // interesting cases are precisely the ones where no target exists. Pure
 // functions are imported and asserted in-process; CLI exit codes go through
-// spawned node with scrubbed env (every COOLIFY_* value is fake).
+// spawned node with scrubbed env (every STAGING_BROKER_* value is fake).
 //
 // What is pinned:
 //
@@ -24,9 +33,10 @@
 //   mirror-valid-zero    valid SHA, 0s delay             -> exit 0, fast
 //   mirror-bad-sha       non-hex MERGE_SHA               -> exit 2
 //   mirror-bad-delay     negative MIRROR_POLL_SECONDS    -> exit 2
-//   trigger-pure         URL building, status predicates, arg validation
-//   smoke-pure           log normalization, ready-line + freshness logic
-//   workflow-uses-guard  deploy.yml calls all four scripts
+//   broker-trigger-pure  staging-only refusal, status predicates, arg validation
+//   broker-smoke-pure    log normalization, ready-line + freshness logic
+//   workflow-uses-guard  deploy.yml calls the broker scripts, never the panel ones
+//   workflow-no-panel    staging carries no panel bearer / caller app UUID
 //   workflow-has-no-skip no step gated on secrets/target presence
 //
 // Usage: node scripts/deploy-target-selftest.mjs
@@ -50,33 +60,30 @@ import {
   sleep as mirrorSleep,
 } from "./wait-for-host-mirror.mjs";
 import {
-  apiGetJson,
-  appHealthy,
-  deployUrl,
-  deploymentTerminal,
-  parseArgs as triggerParseArgs,
-  summarizeDeployResponse,
-} from "./wait-for-coolify-deploy.mjs";
+  appHealthy as brokerAppHealthy,
+  brokerJson,
+  deploymentTerminal as brokerDeploymentTerminal,
+  parseArgs as brokerTriggerParseArgs,
+} from "./broker-deploy.mjs";
 import {
   findBotRecords,
   findReadyLines,
   jsonCandidates,
   maxTimestampMs,
   normalizeLogPayload,
-  parseArgs as smokeParseArgs,
-} from "./smoke-staging-deploy.mjs";
+  parseArgs as brokerSmokeParseArgs,
+} from "./broker-smoke.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const WORKFLOW = join(ROOT, ".github", "workflows", "deploy.yml");
 
-// Fake panel values. Never contacted: every case that would reach the
+// Fake broker values. Never contacted: every case that would reach the
 // network lives in deploy.yml, not here. The redaction case asserts the
 // credential value never appears in output.
 const FAKE = {
-  COOLIFY_URL: "https://panel.example.invalid",
-  COOLIFY_TOKEN: "NOT-A-REAL-TOKEN-Z9Q8",
-  TWO_BOT_STAGING_APP_UUID: "app-uuid-not-real-0001",
-  TWO_BOT_PRODUCTION_APP_UUID: "app-uuid-not-real-0002",
+  STAGING_BROKER_TOKEN: "NOT-A-REAL-TOKEN-Z9Q8",
+  STAGING_BROKER_URL: "http://127.0.0.1:8091",
+  MERGE_SHA: "a".repeat(40),
 };
 
 const GATE = join(ROOT, "scripts", "check-deploy-target.mjs");
@@ -84,13 +91,17 @@ const MIRROR = join(ROOT, "scripts", "wait-for-host-mirror.mjs");
 
 function scrubbedEnv(overrides = {}) {
   const env = { ...process.env };
-  for (const name of ["COOLIFY_URL", "COOLIFY_TOKEN", "COOLIFY_APP_UUID"]) delete env[name];
+  for (const name of [
+    "COOLIFY_URL", "COOLIFY_TOKEN", "COOLIFY_APP_UUID",
+    "TWO_BOT_STAGING_APP_UUID", "TWO_BOT_PRODUCTION_APP_UUID",
+    "STAGING_BROKER_TOKEN", "STAGING_BROKER_URL", "MERGE_SHA",
+  ]) delete env[name];
   return { ...env, ...overrides };
 }
 
 function runGate(args, extraEnv = {}) {
   return spawnSync(process.execPath, [GATE, ...args], {
-    env: scrubbedEnv({ ...FAKE, COOLIFY_APP_UUID: FAKE.TWO_BOT_STAGING_APP_UUID, ...extraEnv }),
+    env: scrubbedEnv({ ...FAKE, ...extraEnv }),
     encoding: "utf8",
   });
 }
@@ -99,11 +110,9 @@ const GATE_ARGS = [
   "--env-name",
   "staging",
   "--credential-env",
-  "COOLIFY_TOKEN",
+  "STAGING_BROKER_TOKEN",
   "--require-env",
-  "COOLIFY_URL",
-  "--require-env",
-  "TWO_BOT_STAGING_APP_UUID",
+  "MERGE_SHA",
 ];
 
 // --- check-deploy-target.mjs -------------------------------------------------
@@ -112,16 +121,14 @@ test("gate-ready: all vars set exits 0, prints names only", () => {
   const run = runGate(GATE_ARGS);
   assert.equal(run.status, 0, run.stderr);
   assert.match(run.stdout, /READY deploy-target \(staging\)/);
-  assert.match(run.stdout, /COOLIFY_TOKEN/);
+  assert.match(run.stdout, /STAGING_BROKER_TOKEN/);
   assert.doesNotMatch(run.stdout + run.stderr, /NOT-A-REAL-TOKEN-Z9Q8/);
 });
 
-for (const missing of ["COOLIFY_TOKEN", "COOLIFY_URL", "TWO_BOT_STAGING_APP_UUID"]) {
+for (const missing of ["STAGING_BROKER_TOKEN", "MERGE_SHA"]) {
   test(`gate-missing: unset ${missing} exits 1 and names it`, () => {
-    const env = { ...FAKE, COOLIFY_APP_UUID: FAKE.TWO_BOT_STAGING_APP_UUID };
-    delete env[missing === "COOLIFY_TOKEN" ? "COOLIFY_TOKEN" : missing];
-    // COOLIFY_APP_UUID is the script-facing alias; map the staging UUID case.
-    if (missing === "TWO_BOT_STAGING_APP_UUID") env.COOLIFY_APP_UUID = "";
+    const env = { ...FAKE };
+    delete env[missing];
     const run = spawnSync(process.execPath, [GATE, ...GATE_ARGS], {
       env: scrubbedEnv(env),
       encoding: "utf8",
@@ -134,7 +141,7 @@ for (const missing of ["COOLIFY_TOKEN", "COOLIFY_URL", "TWO_BOT_STAGING_APP_UUID
 }
 
 test("gate-blank: whitespace credential exits 1", () => {
-  const run = runGate(GATE_ARGS, { COOLIFY_TOKEN: "  \n " });
+  const run = runGate(GATE_ARGS, { STAGING_BROKER_TOKEN: "  \n " });
   assert.equal(run.status, 1, run.stdout);
   assert.match(run.stderr, /FAIL deploy-target/);
 });
@@ -209,59 +216,62 @@ test("mirror unit: sleep resolves", async () => {
   await mirrorSleep(1);
 });
 
-// --- wait-for-coolify-deploy.mjs (pure, no network) --------------------------
+// --- broker-deploy.mjs (pure, no network) ----------------------------------
 
-test("trigger unit: deployUrl is a bearer-header trigger, never token-in-URL", () => {
-  const url = deployUrl("https://panel.example.invalid", "uuid-1");
-  assert.equal(url, "https://panel.example.invalid/api/v1/deploy?uuid=uuid-1&force=true");
-  assert.doesNotMatch(url, /NOT-A-REAL-TOKEN/);
-});
-
-test("trigger unit: summarizeDeployResponse reads the first deployment", () => {
-  assert.equal(
-    summarizeDeployResponse({ deployments: [{ deployment_uuid: "dep-1" }, { deployment_uuid: "dep-2" }] }),
-    "dep-1",
-  );
-  assert.equal(summarizeDeployResponse({}), "");
-  assert.equal(summarizeDeployResponse(null), "");
-});
-
-test("trigger unit: deploymentTerminal only on finished/failed/cancelled", () => {
-  assert.equal(deploymentTerminal("finished"), true);
-  assert.equal(deploymentTerminal("failed"), true);
-  assert.equal(deploymentTerminal("cancelled"), true);
-  assert.equal(deploymentTerminal("queued"), false);
-  assert.equal(deploymentTerminal("running"), false);
-  assert.equal(deploymentTerminal(""), false);
-});
-
-test("trigger unit: appHealthy requires running:healthy, rejects bare running", () => {
-  assert.equal(appHealthy("running:healthy"), true);
-  assert.equal(appHealthy("running"), false);
-  assert.equal(appHealthy("running:unhealthy"), false);
-  assert.equal(appHealthy("exited:unhealthy"), false);
-  assert.equal(appHealthy(""), false);
-  assert.equal(appHealthy(null), false);
-});
-
-test("trigger unit: parseArgs fails closed on missing env", () => {
+test("broker unit: rejects non-staging env names", () => {
   const lookup = () => "";
-  assert.throws(() => triggerParseArgs(["--env-name", "staging"], lookup), /Missing COOLIFY_URL, COOLIFY_TOKEN, COOLIFY_APP_UUID/);
-  assert.throws(() => triggerParseArgs([], lookup), /Missing required --env-name/);
-  assert.throws(() => triggerParseArgs(["--env-name", "s", "--bogus", "x"], lookup), /Unknown argument/);
+  assert.throws(() => brokerTriggerParseArgs(["--env-name", "production"], lookup), /staging only/);
+  assert.throws(() => brokerTriggerParseArgs([], lookup), /Missing required --env-name/);
+  assert.throws(() => brokerTriggerParseArgs(["--env-name", "s", "--bogus", "x"], lookup), /Unknown argument/);
 });
 
-test("trigger unit: parseArgs strips a trailing panel slash", () => {
-  const lookup = (name) => ({ COOLIFY_URL: "https://panel.example.invalid/", COOLIFY_TOKEN: "t", COOLIFY_APP_UUID: "u" }[name]);
-  const parsed = triggerParseArgs(["--env-name", "staging"], lookup);
-  assert.equal(parsed.panelUrl, "https://panel.example.invalid");
+test("broker unit: parseArgs fails closed on missing token or SHA", () => {
+  const lookup = () => "";
+  assert.throws(
+    () => brokerTriggerParseArgs(["--env-name", "staging"], lookup),
+    /Missing STAGING_BROKER_TOKEN, MERGE_SHA/,
+  );
+  assert.throws(
+    () => brokerTriggerParseArgs(["--env-name", "staging"], (n) => ({ STAGING_BROKER_TOKEN: "t" })[n] ?? ""),
+    /MERGE_SHA/,
+  );
 });
 
-test("trigger unit: apiGetJson is exported for the panel reads", () => {
-  assert.equal(typeof apiGetJson, "function");
+test("broker unit: parseArgs accepts a valid SHA and pins repo staging-only", () => {
+  const sha = "b".repeat(40);
+  const lookup = (name) => ({ STAGING_BROKER_TOKEN: "t", MERGE_SHA: sha }[name] ?? "");
+  const parsed = brokerTriggerParseArgs(["--env-name", "staging"], lookup);
+  assert.equal(parsed.sha, sha);
+  assert.equal(parsed.brokerUrl, "http://127.0.0.1:8091");
+  const withUrl = brokerTriggerParseArgs(["--env-name", "staging"], (name) =>
+    name === "STAGING_BROKER_URL" ? "http://127.0.0.1:8091/" : lookup(name),
+  );
+  assert.equal(withUrl.brokerUrl, "http://127.0.0.1:8091");
 });
 
-// --- smoke-staging-deploy.mjs (pure, no network) -----------------------------
+test("broker unit: deploymentTerminal only on finished/failed/cancelled", () => {
+  assert.equal(brokerDeploymentTerminal("finished"), true);
+  assert.equal(brokerDeploymentTerminal("failed"), true);
+  assert.equal(brokerDeploymentTerminal("cancelled"), true);
+  assert.equal(brokerDeploymentTerminal("queued"), false);
+  assert.equal(brokerDeploymentTerminal("running"), false);
+  assert.equal(brokerDeploymentTerminal(""), false);
+});
+
+test("broker unit: appHealthy requires running:healthy, rejects bare running", () => {
+  assert.equal(brokerAppHealthy("running:healthy"), true);
+  assert.equal(brokerAppHealthy("running"), false);
+  assert.equal(brokerAppHealthy("running:unhealthy"), false);
+  assert.equal(brokerAppHealthy("exited:unhealthy"), false);
+  assert.equal(brokerAppHealthy(""), false);
+  assert.equal(brokerAppHealthy(null), false);
+});
+
+test("broker unit: brokerJson helper is exported for the broker reads", () => {
+  assert.equal(typeof brokerJson, "function");
+});
+
+// --- broker-smoke.mjs (pure, no network) -------------------------------------
 
 test("smoke unit: normalizeLogPayload handles string, array and object shapes", () => {
   assert.deepEqual(normalizeLogPayload('a\nb'), [
@@ -309,29 +319,47 @@ test("smoke unit: jsonCandidates finds nested objects", () => {
 });
 
 test("smoke unit: parseArgs requires --since and valid env", () => {
-  const lookup = (name) => ({ COOLIFY_URL: "https://p.invalid", COOLIFY_TOKEN: "t", COOLIFY_APP_UUID: "u" }[name]);
-  const parsed = smokeParseArgs(["--env-name", "staging", "--since", "2026-09-28T09:40:00.000Z"], lookup);
+  const lookup = (name) => ({ STAGING_BROKER_TOKEN: "t" }[name] ?? "");
+  const parsed = brokerSmokeParseArgs(["--env-name", "staging", "--since", "2026-09-28T09:40:00.000Z"], lookup);
   assert.equal(parsed.sinceMs, Date.parse("2026-09-28T09:40:00.000Z"));
-  assert.throws(() => smokeParseArgs(["--env-name", "s"], lookup), /Missing required --since/);
-  assert.throws(() => smokeParseArgs(["--env-name", "s", "--since", "yesterday"], lookup), /Invalid --since/);
+  assert.throws(() => brokerSmokeParseArgs(["--env-name", "staging"], lookup), /Missing required --since/);
+  assert.throws(() => brokerSmokeParseArgs(["--env-name", "staging", "--since", "yesterday"], lookup), /Invalid --since/);
   assert.throws(
-    () => smokeParseArgs(["--env-name", "s", "--since", "2026-09-28T09:40:00.000Z"], () => ""),
-    /Missing COOLIFY_URL, COOLIFY_TOKEN, COOLIFY_APP_UUID/,
+    () => brokerSmokeParseArgs(["--env-name", "staging", "--since", "2026-09-28T09:40:00.000Z"], () => ""),
+    /Missing STAGING_BROKER_TOKEN/,
   );
+  assert.throws(() => brokerSmokeParseArgs(["--env-name", "production", "--since", "2026-09-28T09:40:00.000Z"], lookup), /staging only/);
 });
 
 // --- deploy.yml wiring (the TOG-913 shape) -----------------------------------
 
-test("workflow-uses-guard: deploy.yml calls all four deploy scripts", () => {
+test("workflow-uses-guard: deploy.yml calls the broker deploy scripts", () => {
   const workflow = readFileSync(WORKFLOW, "utf8");
   for (const script of [
     "scripts/check-deploy-target.mjs",
     "scripts/wait-for-host-mirror.mjs",
-    "scripts/wait-for-coolify-deploy.mjs",
-    "scripts/smoke-staging-deploy.mjs",
+    "scripts/broker-deploy.mjs",
+    "scripts/broker-smoke.mjs",
   ]) {
     assert.match(workflow, new RegExp(script.replace(/\./g, "\\."), "m"), `${script} must be called from deploy.yml`);
   }
+});
+
+test("workflow-no-panel: staging carries no panel bearer or caller app UUID", () => {
+  // The 2026-09-28 correction: the live panel token is NOT app-scoped, so no
+  // staging step may read COOLIFY_TOKEN, COOLIFY_URL or a caller-supplied app
+  // UUID. Staging speaks to the broker with STAGING_BROKER_TOKEN only (the
+  // production HOLD job is allowed its own PRODUCTION_BROKER_TOKEN gate names).
+  const workflow = readFileSync(WORKFLOW, "utf8");
+  const staging = workflow.split("deploy-production:")[0];
+  assert.doesNotMatch(staging, /COOLIFY_TOKEN/, "staging must not reference the panel bearer");
+  assert.doesNotMatch(staging, /COOLIFY_APP_UUID/, "staging must not take a caller-supplied app UUID");
+  assert.doesNotMatch(staging, /TWO_BOT_STAGING_APP_UUID/, "staging must not take a caller-supplied app UUID");
+  assert.doesNotMatch(staging, /COOLIFY_URL/, "staging must not reference the panel URL");
+  assert.doesNotMatch(staging, /wait-for-coolify-deploy/, "staging must not call the retired panel client");
+  assert.doesNotMatch(staging, /smoke-staging-deploy/, "staging must not call the retired panel client");
+  assert.match(staging, /STAGING_BROKER_TOKEN/, "staging gates and triggers carry the scoped broker credential");
+  assert.match(staging, /MERGE_SHA/, "staging trigger pins the merge commit for broker validation");
 });
 
 test("workflow-has-no-skip: no step gated on secrets or target presence", () => {
