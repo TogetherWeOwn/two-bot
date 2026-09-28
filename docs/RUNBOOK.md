@@ -934,6 +934,66 @@ recorded in the operational audit log after both readbacks. The acceptance
 script writes an evidence bundle to `$OUT` and re-verifies absence through a
 separate API read, so the grant path never self-attests the cleanup.
 
+### Automations staging proof (TOG-1648)
+
+Exercises custom commands, scheduled messages and sticky messages through the
+real service + store against TWO Staging, in `#bot-log` — never
+member-facing. Every artefact the run creates it also removes: proof
+command/scheduled/sticky rows are deleted and any pre-proof definitions
+restored row-for-row, proof messages posted to `#bot-log` deleted, and the
+automation audit log is the only trace left — which is the point of the audit
+log. A concurrent admin edit made mid-run is left untouched (a
+`cleanup.*.concurrent` line) rather than overwritten.
+
+The script takes exactly one flag:
+
+```bash
+node scripts/staging-automations-proof.ts --help   # usage, exit 0, needs no token or database
+```
+
+A full run needs the staging token and the staging database, and nothing else:
+
+```bash
+DISCORD_STAGING_BOT_TOKEN=... TWO_DATABASE_URL=<staging> \
+  node scripts/staging-automations-proof.ts
+```
+
+Without both it refuses before touching anything (exit `2`, `need
+DISCORD_STAGING_BOT_TOKEN and TWO_DATABASE_URL`). Point `TWO_DATABASE_URL` at
+the staging database — the proof writes and deletes automation rows in
+whatever database it is given. Guild and channel are pinned in the script
+(`scripts/staging-automations-proof.ts:34-35`); there is no flag that
+retargets them, so a full run cannot be aimed at the live guild by typo.
+
+Green: `N/N pass, 0 fail`, exit `0`. Any `FAIL` line means not proven — do not
+relabel an interrupted run as a pass.
+
+`scripts/staging-automations-proof-state.ts` is the cleanup/restore library
+the proof imports (`cleanupDecision`, `restoredStickyRow` — also covered by
+`test/unit.automations.test.ts`). It is not run directly: invoked without
+`--help` it exits `2`; with `--help` it prints usage and exits `0`, touching
+nothing.
+
+### Running the proof check offline (no token, no database, no Discord)
+
+The reviewer path. Run `npm ci` first (the proof script imports `discord.js`,
+so `--help` needs installed dependencies — but nothing else). Everything below
+runs with no credentials set and makes no network calls:
+
+```bash
+npm ci                                             # once per checkout
+npm run staging:automations-proof -- --help        # usage names the script, exit 0
+npm run staging:automations-state -- --help        # usage names the script, exit 0
+node --test test/unit.automationsproofhelp.test.ts # 4/4, exit 0
+```
+
+Green: each `--help` prints a `usage:` line naming its script file and exits
+`0` even with every `DISCORD_*`/`TOKEN`/`DATABASE` variable unset; the test
+passes `4/4` (both registry entries exist and target real files; both boot on
+`--help` under a scrubbed environment). That proves both entries are wired
+and boot — not that staging is green. The full proof above still needs the
+staging token and staging database.
+
 ### AutoMod export (staging)
 
 Exports the staging guild's AutoMod rules to a JSON file (default
