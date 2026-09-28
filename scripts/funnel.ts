@@ -181,6 +181,12 @@ const downtimeUnknown = totalDowntimeUnknown(downtimeCounts);
 // Clicks per tracked link, next to the joins that link's invite code produced.
 // This is the per-place breakdown TOG-116 exists for: it is what separates "a
 // listing nobody reads" from "a listing plenty of people read and bounce off".
+// Both subqueries exclude the same anomaly windows as the headline counts
+// (TOG-8446): without this a raid-day join on a tracked code counted in the
+// campaign table while the headline set it aside, so campaign joins could
+// exceed headline joins in one report.
+const clickExcl = excludeClause('invite_click', ANOMALIES, 'e.occurred_at');
+const joinCampExcl = excludeClause('member_join', ANOMALIES, 'e.occurred_at');
 const perCampaign =
   trackedLinks > 0
     ? (
@@ -188,10 +194,10 @@ const perCampaign =
           .prepare(
             `SELECT c.slug, c.label, c.invite_code, c.disabled_at,
                     (SELECT COUNT(*) FROM events e
-                       WHERE e.event_type='invite_click' AND e.occurred_at >= ?
+                       WHERE e.event_type='invite_click' AND e.occurred_at >= ?${clickExcl.sql}
                          AND e.source = 'invite:' || c.invite_code) AS clicks,
                     (SELECT COUNT(*) FROM events e
-                       WHERE e.event_type='member_join' AND e.occurred_at >= ?
+                       WHERE e.event_type='member_join' AND e.occurred_at >= ?${joinCampExcl.sql}
                          AND e.source = 'invite:' || c.invite_code) AS joins
                FROM invite_campaigns c
               ORDER BY clicks DESC, c.slug`,
@@ -203,7 +209,7 @@ const perCampaign =
             disabled_at: string | null;
             clicks: number;
             joins: number;
-          }>(since, since)
+          }>(since, ...clickExcl.params, since, ...joinCampExcl.params)
       ).map((c) => ({
         slug: c.slug,
         label: c.label,
