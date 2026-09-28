@@ -28,10 +28,13 @@ Use only guild `1545644954272137297` with application `1469137636663758888` (`Ow
 ```dotenv
 DISCORD_GUILD_ID=1545644954272137297
 TWO_OWEN_USER_ID=1469137636663758888
+TWO_MODERATION=1
 TWO_ANTI_NUKE=1
 TWO_ANTI_NUKE_DRY_RUN=1
 TWO_ANTI_NUKE_SNAPSHOT_PATH=/var/backups/two-bot/guild-config/accepted.json
 ```
+
+Armed containment (`TWO_ANTI_NUKE_DRY_RUN=0`) requires `TWO_MODERATION=1`: quarantine DELETEs the executor's dangerous roles, which is a moderation-path member-role write, so the moderation killswitch covers it. Boot refuses `TWO_ANTI_NUKE=1` + dry-run off without `TWO_MODERATION=1`, mirroring the `TWO_AUTOMOD=1` gate. Dry-run containment never reaches `quarantine()` and stays bootable without moderation (alerts only); join-risk scoring is flag-only and likewise needs no moderation. Turning moderation off therefore also disarms the quarantine drill — see [MODERATION.md](MODERATION.md) "Turning moderation off".
 
 Start dry-run, prove audit delivery and the refusal paths, then switch dry-run off only for the staging quarantine drill. The application needs View Audit Log and Manage Roles; `npm run staging:verify` attempts the audit-log read directly.
 

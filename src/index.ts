@@ -419,6 +419,16 @@ const automodCfg = loadAutomodConfig();
 if (!stagingRestartArmed && automodCfg.enabled && !moderationService) {
   throw new Error('TWO_AUTOMOD=1 requires TWO_MODERATION=1 so sanctions use the reviewed moderation path.');
 }
+// TOG-8458. Anti-nuke quarantine DELETEs members' dangerous roles
+// (src/moderation/containmentDiscord.ts), a moderation-path member-role write
+// like any other: with TWO_MODERATION unset no armed quarantine may stay live.
+// Refuse at boot rather than at the first incident, mirroring the automod gate
+// above. Dry-run containment never reaches quarantine() so it stays bootable
+// without moderation (observability only); the JoinRiskScorer below is likewise
+// flag-only like the raid watch and needs no moderation service.
+if (!stagingRestartArmed && containmentCfg.enabled && !containmentCfg.dryRun && !moderationService) {
+  throw new Error('TWO_ANTI_NUKE=1 requires TWO_MODERATION=1 so quarantine uses the reviewed moderation path.');
+}
 const automodService = cfg.guildId && automodCfg.enabled && moderationResolver && moderationService
   ? new AutomodService(
       moderationDiscord,

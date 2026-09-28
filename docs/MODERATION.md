@@ -72,6 +72,8 @@ TWO_MODERATION_DISABLE_OVERRIDE_REASON=<why, one line - logged verbatim>
 
 The boot then proceeds and logs the complete stranded set at error level as `moderation_disable_stranded`, carrying `strandedUnbans` and `strandedLockdowns` with every id, so the release can be done by hand from the log alone. It is not a way to skip the check. It is a way to turn the check into a written record of what you are about to strand - unset it again as soon as the incident is over, or the next disable will be silent.
 
+**Disabling moderation also disarms anti-nuke quarantine (TOG-8458).** Quarantine DELETEs the executor's dangerous roles, a moderation-path member-role write, so armed containment (`TWO_ANTI_NUKE=1` + `TWO_ANTI_NUKE_DRY_RUN=0`) refuses to boot without `TWO_MODERATION=1` — mirroring the `TWO_AUTOMOD=1` gate. Dry-run containment (alerts only) and flag-only join-risk scoring keep running without the slice. See [ANTI-NUKE.md](ANTI-NUKE.md).
+
 ## Internal action bodies
 
 Target example:

@@ -513,7 +513,7 @@ async function runPreflight(flags: Map<string, string | true>): Promise<void> {
       rowCounts: await tableCounts(context.db, context.guildId, context.actorApplicationId),
       fullVerifierConfig: context.verifierConfig,
       prerequisites: {
-        antiNukeRuntimeExpected: 'TWO_ANTI_NUKE=1; TWO_ANTI_NUKE_DRY_RUN must match the drive expectation; accepted snapshot path configured',
+        antiNukeRuntimeExpected: 'TWO_ANTI_NUKE=1; TWO_ANTI_NUKE_DRY_RUN must match the drive expectation; accepted snapshot path configured; armed (DRY_RUN=0) runs additionally require TWO_MODERATION=1 (TOG-8458)',
         joinActor: 'one manually-operated human-owned disposable account; no token sharing or user-account automation',
         generalAuditEvidence: 'seven operational audit kinds, one sink-tamper row, one successful moderation mutation, and Discord marker reconciliation after TWO_AUDIT_ACCEPTANCE_SINCE',
       },
