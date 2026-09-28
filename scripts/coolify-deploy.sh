@@ -14,13 +14,25 @@
 # Exit codes are the contract - CI and the operator card both read them:
 #
 #   0  deployed, /readyz returned 200
-#   2  a precondition is not met (server not usable, no database, missing env)
+#   2  a precondition is not met (server not usable, no database, missing env,
+#      migration drift)
 #   3  the deploy was triggered but never went healthy
 #   1  an API call failed unexpectedly
 #
+# Before anything is created or queued, the preflight asks
+# scripts/migrate.ts --status (read-only) what the database looks like.
+# Pending migrations are reported and otherwise normal - the bot applies them
+# at startup under an advisory lock. Drift (a CHANGED or ORPHAN line: an
+# applied migration edited or deleted underneath the database) aborts the run
+# with exit 2, because rolling new code onto a drifted database is how two
+# environments quietly desynchronise. When the database is unreachable from
+# here the check says so and continues; boot-time migration stays the safety
+# net (docs/RUNBOOK.md).
+#
 # Usage:
-#   scripts/coolify-deploy.sh --check    # preconditions only, changes nothing
-#   scripts/coolify-deploy.sh            # check, then create/update and deploy
+#   scripts/coolify-deploy.sh --check     # preconditions only, changes nothing
+#   scripts/coolify-deploy.sh             # check, then create/update and deploy
+#   scripts/coolify-deploy.sh --selftest  # offline gate tests, changes nothing
 #
 # Required in the environment:
 #   COOLIFY_URL COOLIFY_TOKEN     the panel and a token with write+deploy
@@ -34,7 +46,84 @@
 set -euo pipefail
 
 CHECK_ONLY=0
-[[ "${1:-}" == "--check" ]] && CHECK_ONLY=1
+SELFTEST=0
+case "${1:-}" in
+  --check) CHECK_ONLY=1 ;;
+  --selftest) SELFTEST=1 ;;
+  "") ;;
+  *) echo "usage: scripts/coolify-deploy.sh [--check|--selftest]" >&2; exit 1 ;;
+esac
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# --- migration-gate helpers (testable without network) ---------------------
+# The preflight parses scripts/migrate.ts --status output through this
+# function so the selftest below can pin the decision table without a
+# database: 0 = clean-or-pending, 2 = drift (abort), anything else = output
+# the caller did not understand.
+#
+# Prints the human line for the preflight to report.
+migration_gate_decide() { # migration_gate_decide STATUS_OUTPUT MIGRATE_EXIT
+  local output="$1" rc="$2"
+  if [[ "$rc" -eq 0 ]]; then
+    local pending
+    pending="$(printf '%s\n' "$output" | grep -c '^pending' || true)"
+    if [[ "$pending" -gt 0 ]]; then
+      printf '%s pending migration(s) - the bot applies them at startup\n' "$pending"
+    else
+      printf 'database schema up to date\n'
+    fi
+    return 0
+  fi
+  if [[ "$rc" -eq 1 ]] && printf '%s\n' "$output" | grep -qE '^(CHANGED|ORPHAN)'; then
+    printf 'migration drift detected (a CHANGED or ORPHAN line above) - refusing to roll\n'
+    return 2
+  fi
+  printf 'could not read migration status (exit %s)\n' "$rc"
+  return 1
+}
+
+if [[ "$SELFTEST" -eq 1 ]]; then
+  selftest_fails=0
+  selftest_case() { # selftest_case NAME WANT_RC WANT_SUBSTR HAVE_RC HAVE_SUBSTR...
+    local name="$1" want_rc="$2" want_sub="$3"; shift 3
+    local have_rc="$1" have_sub="$2"
+    local out rc=0
+    out="$(migration_gate_decide "$have_sub" "$have_rc")" || rc=$?
+    if [[ "$rc" -ne "$want_rc" ]]; then
+      printf 'selftest FAIL %s: want rc %s, got %s (%s)\n' "$name" "$want_rc" "$rc" "$out" >&2
+      selftest_fails=$((selftest_fails + 1)); return
+    fi
+    if [[ "$out" != *"$want_sub"* ]]; then
+      printf 'selftest FAIL %s: want %q in %q\n' "$name" "$want_sub" "$out" >&2
+      selftest_fails=$((selftest_fails + 1)); return
+    fi
+    printf 'selftest ok %s\n' "$name"
+  }
+  selftest_case "clean reports up to date" 0 "up to date" 0 "applied  0001_init
+applied  0002_next
+
+2 on disk, 2 applied, 0 pending."
+  selftest_case "pending reports count, passes" 0 "2 pending" 0 "applied  0001_init
+pending  0037_temp_voice_owner_transition
+pending  0038_events_type_member
+
+3 on disk, 1 applied, 2 pending."
+  selftest_case "changed migration aborts" 2 "refusing to roll" 1 "CHANGED  0010_leveling  (recorded abc, file def)
+applied  0011_next
+
+2 on disk, 2 applied, 0 pending."
+  selftest_case "orphan migration aborts" 2 "refusing to roll" 1 "applied  0001_init
+ORPHAN   0009_deleted  (in schema_migrations, not in migrations/)
+
+1 on disk, 2 applied, 0 pending."
+  selftest_case "unreachable database is known-unknown" 1 "could not read" 2 "migrate: TWO_DATABASE_URL is not set."
+  if [[ "$selftest_fails" -ne 0 ]]; then
+    printf 'selftest: %s case(s) failed\n' "$selftest_fails" >&2; exit 1
+  fi
+  echo "selftest: all migration-gate cases hold, no network touched"
+  exit 0
+fi
 
 : "${COOLIFY_URL:?set COOLIFY_URL}"
 : "${COOLIFY_TOKEN:?set COOLIFY_TOKEN}"
@@ -118,6 +207,39 @@ if [[ -z "${DISCORD_BOT_TOKEN:-}" ]]; then
   fail=1
 else
   say PASS "DISCORD_BOT_TOKEN set"
+fi
+
+# --- 3b. Migration pre-roll status -------------------------------------------
+# Read-only: scripts/migrate.ts --status with skipMigrations, so reporting
+# never applies anything. Pending lines are informational - the bot migrates
+# at startup under an advisory lock. Drift (CHANGED/ORPHAN) aborts with
+# exit 2: rolling onto a drifted database desynchronises environments.
+# When the database is unreachable from here (CI runners, offline laptops),
+# the status command fails without a drift signature, and the gate says so
+# and passes - boot-time migration stays the safety net, and inventing a
+# refusal for "could not reach the database from this machine" would turn
+# every offline --check red for no additional safety.
+if command -v node >/dev/null 2>&1 && [[ -n "${TWO_DATABASE_URL:-}" ]]; then
+  migrate_out=""
+  migrate_rc=0
+  # Bounded: pg has no default connect timeout, so a blackholed database
+  # would otherwise hang the preflight. A timeout lands in the WARN branch
+  # below (exit 124, no drift signature), never in the abort branch.
+  migrate_out="$(timeout 120 node "$ROOT/scripts/migrate.ts" --status 2>&1)" || migrate_rc=$?
+  printf '%s\n' "$migrate_out" | sed 's/^/    migrate: /'
+  gate_out=""
+  gate_rc=0
+  gate_out="$(migration_gate_decide "$migrate_out" "$migrate_rc")" || gate_rc=$?
+  case "$gate_rc" in
+    0) say PASS "migrations: $gate_out" ;;
+    2) say FAIL "migrations: $gate_out"
+       echo "        Fix with: TWO_DATABASE_URL=... node scripts/migrate.ts --status (docs/RUNBOOK.md)."
+       echo "        Migrations are immutable - add a new one, never edit an applied file (migrations/README.md)."
+       fail=1 ;;
+    *) say "WARN" "migrations: $gate_out - continuing, boot-time migration is the safety net" ;;
+  esac
+else
+  say "SKIP" "migrations: no node or no TWO_DATABASE_URL here - boot-time migration is the safety net"
 fi
 
 echo
