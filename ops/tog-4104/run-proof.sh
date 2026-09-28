@@ -12,7 +12,7 @@
 # forwarded values is a secret.
 set -euo pipefail
 APP=uy4d9ndeygjcem6lgayhxgub
-RUNTIME=5f57256d41130b056389f3098f3b0c84a9d9e261
+RUNTIME=47c48197d46647e34132544523e863e3c92d82ff
 C="bot-$APP"
 MODE="${1:-}"
 SOURCE="${2:-}"
