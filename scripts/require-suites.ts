@@ -36,6 +36,52 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     why: 'the whole web_v1 contract the website reads, including the role grants',
   },
   {
+    // TOG-6492. The two website-role CLIs executed end to end through the
+    // real scripts: the provision grant list equals the contract, verify
+    // passes on its own exit code, and a real over-grant fails it. Counted
+    // from the 4 top-level test() blocks; CI's postgres job confirms the
+    // count on the first run after this commit.
+    file: 'test/e2e.webrole.test.ts',
+    minTests: 4,
+    why: 'the provision/verify website-role CLIs themselves, not just the library calls underneath them',
+  },
+  {
+    file: 'test/e2e.growthreview.test.ts',
+    minTests: 4,
+    why: 'growth-review CLI golden scores, kill/scale citations, red-gate refusal and sustained-effort guard',
+  },
+  {
+    // TOG-6489 slice. The campaigns operator CLI executed end to end through
+    // the real npm entry: --add creates the row, the bare list shows it, a
+    // duplicate --add fails naming "already exists", and the new slug 302s
+    // over loopback HTTP. Counted from the 4 top-level test() blocks; CI's
+    // postgres job confirms the count on the first run after this commit.
+    file: 'test/e2e.campaigns.test.ts',
+    minTests: 4,
+    why: 'the campaigns --add/--list operator path itself, not just the CampaignStore underneath it',
+  },
+  {
+    // TOG-6491. The restore script that can wipe a database: three refusals
+    // (no --force, no TWO_RESTORE_URL, no fallback to TWO_DATABASE_URL), a
+    // dry run that writes nothing, and a target + --force restore of a canned
+    // dump with identical rows back. Counted from the 5 top-level test()
+    // blocks; 5/5 green in CI postgres runs 36344199113 and 36351823205.
+    file: 'test/e2e.pgrestore.test.ts',
+    minTests: 5,
+    why: 'the pg-restore safety refusals - without this floor a silent skip re-opens the wrong-database data-loss gap',
+  },
+  {
+    // TOG-7709. The web-views CLI executed end to end through the real npm
+    // entry: `npm run web:views` applies all 9 views, a hardcoded column
+    // fixture pins every view's exact shape (the code asserting against
+    // itself is the gap this closes), and --status changes nothing. Counted
+    // from the 3 top-level test() blocks; 3/3 green on first local run
+    // against Postgres 18.4, CI's postgres job confirms on merge.
+    file: 'test/e2e.webviews.test.ts',
+    minTests: 3,
+    why: 'the web-views contract CLI itself plus the exact web_v1 column fixture - without this floor a silent column drift breaks two-web',
+  },
+  {
     file: 'test/e2e.backup.test.ts',
     minTests: 7,
     why: 'the dump/restore round trip - the only thing standing behind a restore',
@@ -61,6 +107,15 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     why: 'a HOT key reloading without a restart, and the schema-level refusal of every env-only key',
   },
   {
+    // TOG-3471. Provenance-guarded deletion and cleanup recovery, atomic caps,
+    // serialized durable ownership, and permission refusal all need a real
+    // Postgres to enforce. A run that quietly stopped including this file
+    // would leave those guarantees unverified and green.
+    file: 'test/unit.tempvoice.test.ts',
+    minTests: 86,
+    why: 'provenance-guarded deletion and cleanup recovery, atomic caps, serialized durable ownership, and permission refusal',
+  },
+  {
     // TOG-3481. Registered for the same reason as the suite above: this is the
     // only place the reward probe's "writes nothing" property is enforced
     // rather than asserted by reading the source, and it needs a real Postgres
@@ -70,6 +125,15 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     file: 'test/e2e.levelrewardprobe.test.ts',
     minTests: 8,
     why: 'the reward-role probe writing nothing, proved by a database that refuses the write',
+  },
+  {
+    // TOG-4444. The staging reward-role apply path: grant/readback/revoke
+    // through the CLI, its audit row, and the triggers that refuse a
+    // reward-config write or a live-guild audit row. Floor is the file's test
+    // count as written; not yet measured against a Postgres run.
+    file: 'test/e2e.levelrewardroleapply.test.ts',
+    minTests: 10,
+    why: 'the staging reward-role apply writing only the staging guild, proved by a database that refuses the rest',
   },
   {
     file: 'test/e2e.stagingrestart.test.ts',
@@ -86,6 +150,28 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     file: 'test/e2e.settingsstartup.test.ts',
     minTests: 8,
     why: 'the settings-service startup injection and the signed settings round trip, or the TOG-4104 gap re-opens unnoticed',
+  },
+  {
+    // TOG-5689. The RUNBOOK "Is it alive?" checks as an executable script: the
+    // ready-line shape, health-before-ready ordering and one-JSON-object-per-line
+    // logs against the mock harness, with host-only checks listed as skipped.
+    // Measured 2026-09-27 against Postgres 18.4 (embedded), at this commit.
+    file: 'test/e2e.runbook-health.test.ts',
+    minTests: 3,
+    why: 'the runbook liveness verdict going green against the mock harness, or its skips going unlisted',
+  },
+  {
+    // TOG-7198. The moderation kill-switch flip cycle: all nine verbs execute
+    // through the live signed endpoint, all nine refuse at the allowlist gate
+    // with zero Discord calls after a disable restart, and all nine recover
+    // on re-enable. Needs a real Postgres for the warn row and the durable
+    // idempotency claim. A run that quietly stopped including this file would
+    // leave the mid-flow disable unproved while the static gating in PR #216
+    // stays green.
+    // Measured 2026-09-27 against Postgres 17.11, at this commit.
+    file: 'test/e2e.moderation-killswitch-flip.test.ts',
+    minTests: 3,
+    why: 'the moderation kill-switch refuse/recover cycle through the live endpoint, or a half-disabled slice ships unnoticed',
   },
 ];
 

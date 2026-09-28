@@ -66,6 +66,8 @@ function die(code: number, msg: string): never {
 }
 
 if (flag('help') || argv.length === 0) {
+  console.log('usage: node scripts/raid-remove.ts --ids-from <file|-> [--execute --expect N]');
+  console.log('');
   console.log(readFileSync(new URL(import.meta.url), 'utf8').split('*/')[0]!.replace(/^\/\*\*| \* ?/gm, ''));
   process.exit(0);
 }

@@ -312,6 +312,65 @@ test('sealed snapshot verifies, tampered content throws SnapshotIntegrityError, 
   assert.throws(() => verifySnapshotIntegrity({ ...sealed, integrity: { algorithm: 'md5', snapshotHash: 'x' } as never }), SnapshotIntegrityError);
 });
 
+test('in-memory apply/restore round-trip: snapshot→mutate→restore→equal on seeded config', async () => {
+  const source = acceptedSnapshot();
+  const current = acceptedSnapshot();
+  // Mutate across every restore dimension (no deletes, so Discord ids stay stable).
+  current.guild.description = 'drifted';
+  const owner = current.roles.find((role) => role.name === 'Owner')!;
+  const moderator = current.roles.find((role) => role.name === 'Moderator')!;
+  owner.color = 0;
+  [owner.position, moderator.position] = [moderator.position, owner.position];
+  const general = current.channels.find((channel) => channel.name === 'general')!;
+  const lookingToPlay = current.channels.find((channel) => channel.name === 'looking-to-play')!;
+  general.topic = 'wrong';
+  general.permission_overwrites = [];
+  [general.position, lookingToPlay.position] = [lookingToPlay.position, general.position];
+  const categories = current.channels.filter((channel) => channel.type === 4).sort((a, b) => a.position - b.position);
+  [categories[0]!.position, categories[1]!.position] = [categories[1]!.position, categories[0]!.position];
+
+  assert.equal(snapshotsEqual(source, current), false);
+  const plan = planRestore(source, current);
+  assert.ok(plan.counts.operations > 0);
+
+  const api = {
+    async write(method: string, path: string, body: unknown) {
+      if (method === 'PATCH' && path === `/guilds/${GUILD}/roles` && Array.isArray(body)) {
+        for (const entry of body as Array<{ id: string; position: number }>) {
+          current.roles.find((role) => role.id === entry.id)!.position = entry.position;
+        }
+        return [];
+      }
+      const roleMatch = new RegExp(`/guilds/${GUILD}/roles/(\\d+)$`).exec(path);
+      if (method === 'PATCH' && roleMatch) {
+        Object.assign(current.roles.find((role) => role.id === roleMatch[1])!, body);
+        return {};
+      }
+      if (method === 'PATCH' && path === `/guilds/${GUILD}/channels` && Array.isArray(body)) {
+        for (const entry of body as Array<{ id: string; position: number }>) {
+          current.channels.find((channel) => channel.id === entry.id)!.position = entry.position;
+        }
+        return [];
+      }
+      const channelMatch = /\/channels\/(\d+)$/.exec(path);
+      if (method === 'PATCH' && channelMatch) {
+        Object.assign(current.channels.find((channel) => channel.id === channelMatch[1])!, body);
+        return {};
+      }
+      if (method === 'PATCH' && path === `/guilds/${GUILD}`) {
+        Object.assign(current.guild, body);
+        return {};
+      }
+      throw new Error(`unexpected write ${method} ${path}`);
+    },
+  } as GuildConfigDiscordApi;
+
+  await applyRestorePlan(api, plan);
+  assert.deepEqual(canonicalSnapshot(current), canonicalSnapshot(source));
+  assert.equal(snapshotsEqual(source, current), true);
+  assert.equal(planRestore(source, current).counts.operations, 0);
+});
+
 test('restore refuses a snapshot for another guild and ambiguous targets', () => {
   const source = acceptedSnapshot();
   const current = acceptedSnapshot();

@@ -331,6 +331,18 @@ journalctl -u two-bot -f          # follow
 A healthy start logs `{"msg":"ready","user":"...","guilds":1}` within a few
 seconds. If you see `ready` you are connected to Discord.
 
+The same checks run automated, against the mock-Discord harness rather than
+the host (TOG-5689):
+
+```bash
+TWO_DATABASE_URL=postgres://... node scripts/health-check.ts
+```
+
+It boots the real bot, asserts the `ready` line shape, the health-before-ready
+ordering and one-JSON-object-per-line logs, and reports pass/fail per check.
+`systemctl status` and `journalctl` are listed as skipped with their mock-side
+equivalents, because there is no systemd or journal under the mock.
+
 ## Stop the audit mirror right now (kill switch)
 
 When the audit mirror is misbehaving — posting to the wrong place, spamming,
@@ -407,6 +419,47 @@ minutes and do it when nobody is mid-event.
    `DISCORD_BOT_TOKEN`, and any shell you left `scripts/capture.ts` running in.
    Both pick the new value up on their next start; neither loses data, because
    `capture.ts` is idempotent and the bot re-reads the invite counters at boot.
+
+### Rotating everything else (all manual)
+
+The portal Reset above covers `discord_token` only. Every other credential is a
+**manual** rotation — there is no portal button, so each step below is done by
+hand on the box, and each ends with `sudo systemctl restart` of the unit that
+reads it. Nothing here is automatic; the check
+`scripts/ci/check-systemd-credentials.sh` only asserts these steps are written
+down, not that they ran.
+
+- `database_url` (`/etc/two-bot/credentials/database_url`, fallback
+  `TWO_DATABASE_URL`): manual. Change the Postgres password / role, write the
+  new URL into the credential file, restart `two-bot`. The backup and dashboard
+  units read `TWO_DATABASE_URL` from `backup.env` / `two-bot.env` — update those
+  copies in the same window or the nightly backup keeps the old password.
+- `internal_keys` (`/etc/two-bot/credentials/internal_keys`, fallback
+  `TWO_INTERNAL_KEYS`): manual. Mint the replacement key id, append it to the
+  credential file alongside the old key, roll the website to the new id, then
+  delete the old key and restart `two-bot`. Overlap-then-remove keeps
+  in-flight signed actions verifying throughout.
+- `discord_staging_token`
+  (`/etc/two-bot/credentials/discord_staging_token`, fallback
+  `DISCORD_STAGING_BOT_TOKEN`): manual. Reset in the **Owen QA Test**
+  application (never the live `Owen` one), write the new value into the
+  credential file, restart `two-bot-guild-config-backup`.
+- `moderation_audit_secret` (env-only, `TWO_MODERATION_AUDIT_SECRET`, no
+  credential file by design): manual. Set a fresh random value in
+  `/etc/two-bot/two-bot.env`, restart `two-bot`. Old MAC markers stop verifying
+  — that is expected; markers are convergence hints, not durable proof.
+- `two_e2e_user_token` (env-only, `TWO_E2E_USER_TOKEN`, never under systemd):
+  manual and human-only. Log in as the throwaway account, reset its token,
+  re-provision the secret store; nothing in this repository can rotate a Discord
+  user credential. See `docs/SECRETS.md` TOG-3978 section.
+- `TWO_BACKUP_S3_*` (`TWO_BACKUP_S3_ENDPOINT`, `TWO_BACKUP_S3_BUCKET`,
+  `TWO_BACKUP_S3_ACCESS_KEY_ID`, `TWO_BACKUP_S3_SECRET_ACCESS_KEY` in
+  `/etc/two-bot/backup.env`): manual. Rotate in the R2 dashboard, update
+  `backup.env`, run one `systemctl start two-bot-backup` and confirm the upload
+  succeeded before the next nightly run.
+- `TWO_RESTORE_URL` (in `/etc/two-bot/backup.env`, scratch database only):
+  manual. Rotate the scratch role's password, update `backup.env`, run one
+  `systemctl start two-bot-restore-drill` to prove the new value restores.
 
 **If the reset would add risk to a first production bring-up, bring it up first
 and rotate the same day.** A working deploy carrying a token that had a bad
@@ -596,6 +649,28 @@ deployment of this codebase and the scripts it describes were never committed
 to this repository, so the claim could not be reproduced here. It has been
 replaced rather than kept, because a runbook entry that cannot be re-run is
 worse than none.
+
+**Drilled 2026-09-27 (TOG-5711), backup→restore→verify unattended on a local
+database.** Against an ephemeral PostgreSQL 17.11 (user-space binaries, no
+system install): 180 events / 120 members / 1 invite snapshot plus moderation
+(5 warnings, 5 audit rows, 1 pending unban), 1 automation command and 1 ticket,
+all written through `EventStore` and the bot's own tables — then
+`scripts/pg-backup.ts` dumped `two-funnel-<stamp>.ndjson.gz`, `--dry-run`
+verified it both file-only (no URL) and against the scratch target, and the
+restore into an empty scratch database (migrations applied first, as the
+dry-run's "no such table" probe predicted) ended `RESTORE VERIFIED`. Checked:
+
+- all 22 tables row-count `ok` against the dump manifest
+- order-independent MD5 of the full row sets identical for `events` and
+  `members`; the `events.idempotency_key` set hashed identically
+- the `events` id sequence resumed at 181, and a replayed join still recorded
+  `inserted=false`
+- `scripts/funnel.ts 30` byte-identical on source vs restored
+- `test/e2e.backup.test.ts` 11/11 and `test/unit.dumpread.test.ts` 14/14 on the
+  same ephemeral Postgres
+
+No script fixes: the backup, restore and drill units needed no change, so none
+was made. Full log attached as the work product on TOG-5711.
 
 ### Off-box destination
 

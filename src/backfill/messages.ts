@@ -66,6 +66,13 @@ export interface MessageScanSummary {
   /** Authors we found a full ladder for - the ones AM7 can now judge exactly. */
   authorsWithFullLadder: number;
   firstMessagesWritten: number;
+  /**
+   * Messages read but refused a ladder slot: missing id, missing or
+   * unparseable timestamp, or no author id. Counted here so a corrupt page
+   * shows up as a number rather than vanishing into the totals. Bots are
+   * skipped, not malformed, and are not counted.
+   */
+  malformed: number;
   /** Channels that hit the page cap - their history is only partly read. */
   truncated: string[];
   /** Oldest message timestamp we actually reached. */
@@ -130,6 +137,7 @@ export async function findEarlyMessages(
     authorsSeen: 0,
     authorsWithFullLadder: 0,
     firstMessagesWritten: 0,
+    malformed: 0,
     truncated: [],
     scannedBackTo: null,
   };
@@ -181,10 +189,24 @@ export async function findEarlyMessages(
 
     for (const msg of r.messages) {
       const a = msg.author;
-      // Bots are not members of the funnel. Webhooks have no author.bot flag we
-      // can trust, but they also never carry a real member snowflake.
-      if (!a?.id || a.bot) continue;
-      const at = new Date(msg.timestamp).toISOString();
+      // Bots are not members of the funnel. Skipped, not malformed: every
+      // message in a log channel is authored by a bot and discarded on purpose.
+      if (a?.bot) continue;
+      // TOG-5700: a row without an author id, without a message id, or with
+      // an unparseable timestamp is refused a ladder slot and counted, not
+      // silently skipped. Before this, a bad timestamp threw RangeError and
+      // aborted the whole scan, and a missing id was admitted with `undefined`
+      // as its dedupe key.
+      if (!a?.id || typeof msg.id !== 'string' || !msg.id) {
+        s.malformed++;
+        continue;
+      }
+      const parsed = new Date(msg.timestamp);
+      if (Number.isNaN(parsed.getTime())) {
+        s.malformed++;
+        continue;
+      }
+      const at = parsed.toISOString();
       const prevActive = lastActive.get(a.id);
       if (!prevActive || at > prevActive) lastActive.set(a.id, at);
       let m = early.get(a.id);

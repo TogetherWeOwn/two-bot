@@ -132,6 +132,71 @@ export async function fetchAllMembers(rest: DiscordRest, guildId: string): Promi
 }
 
 /**
+ * The result of a page-capped member scan.
+ *
+ * `truncated` is true when the scan stopped at `maxPages` with more roster
+ * unread. A truncated scan is NOT a roster: callers must never reduce it to a
+ * count, or a large guild silently reports a small number.
+ */
+export interface MemberScan {
+  members: RawMember[];
+  truncated: boolean;
+}
+
+function validMaxPages(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1;
+}
+
+/** Shared pagination core. `limit` is a page count; Infinity means no ceiling. */
+async function pageMembers(
+  rest: DiscordRest,
+  guildId: string,
+  limit: number,
+): Promise<MemberScan | null> {
+  const out: RawMember[] = [];
+  let after = '0';
+  for (let pages = 0; ; pages++) {
+    // The ceiling is checked BEFORE the next request, so a capped scan makes
+    // at most `limit` member-list requests no matter how large the guild is.
+    if (pages >= limit) return { members: out, truncated: true };
+    const batch = await rest.get<RawMember[]>(
+      `/guilds/${guildId}/members?limit=1000&after=${after}`,
+    );
+    if (!batch) return null;
+    if (batch.length === 0) return { members: out, truncated: false };
+    out.push(...batch);
+    const last = batch[batch.length - 1]?.user?.id;
+    if (!last) return null;
+    if (batch.length < 1000) return { members: out, truncated: false };
+    after = last;
+  }
+}
+
+/**
+ * Page a guild's full member list with a hard page ceiling (TOG-7206).
+ *
+ * New callers that page members must use this, not the unbounded
+ * `fetchAllMembersStrict` default: an uncapped scan fetches the whole roster
+ * as full member JSON once per call, with no upper bound on requests or on
+ * per-member objects touched. Returns null on a failed page (strict: a partial
+ * roster is never presented as complete); `truncated: true` when the ceiling
+ * stopped the scan early, so the caller can refuse the partial result loudly
+ * instead of counting it.
+ */
+export async function fetchAllMembersCapped(
+  rest: DiscordRest,
+  guildId: string,
+  opts: { maxPages: number },
+): Promise<MemberScan | null> {
+  if (!validMaxPages(opts.maxPages)) {
+    throw new Error(
+      `fetchAllMembersCapped refuses an unbounded scan: maxPages must be a positive integer, got ${String(opts.maxPages)}.`,
+    );
+  }
+  return pageMembers(rest, guildId, opts.maxPages);
+}
+
+/**
  * Page a guild's full member list, preserving a failed page as `null`.
  *
  * Backfill historically treated an inaccessible page as the end of the list.
@@ -142,21 +207,10 @@ export async function fetchAllMembersStrict(
   rest: DiscordRest,
   guildId: string,
 ): Promise<RawMember[] | null> {
-  const out: RawMember[] = [];
-  let after = '0';
-  for (;;) {
-    const batch = await rest.get<RawMember[]>(
-      `/guilds/${guildId}/members?limit=1000&after=${after}`,
-    );
-    if (!batch) return null;
-    if (batch.length === 0) break;
-    out.push(...batch);
-    const last = batch[batch.length - 1]?.user?.id;
-    if (!last) return null;
-    if (batch.length < 1000) break;
-    after = last;
-  }
-  return out;
+  const scan = await pageMembers(rest, guildId, Number.POSITIVE_INFINITY);
+  // `pageMembers` never truncates with an infinite limit, so this is null on
+  // failure and the full roster otherwise - exactly the old contract.
+  return scan?.members ?? null;
 }
 
 export interface ScanResult {

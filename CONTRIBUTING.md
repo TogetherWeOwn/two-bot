@@ -2,23 +2,34 @@
 
 ## Local setup, start to finish
 
-Requires **Node 24 or newer** and nothing else. No database server, no Docker,
-no build step.
+Requires **Node 24 or newer** plus a running **Postgres 17+** with a scratch
+database for the suite (e.g. `createdb two_bot_test` — CI provides its own
+throwaway service). No Docker, no build step.
+
+All three repos are **private**, so authenticate git first (once per machine —
+`gh` reads `GH_TOKEN` from the environment, and this hands the same token to
+git), then:
 
 ```bash
-git clone git@github.com:TogetherWeOwn/two-bot.git
+gh auth setup-git
+git clone https://github.com/TogetherWeOwn/two-bot.git
 cd two-bot
 npm ci --include=dev
-npm test
+TWO_TEST_DATABASE_URL=postgres://localhost:5432/two_bot_test npm test
 ```
+
+Without `TWO_TEST_DATABASE_URL` the suite fails fast with
+`TWO_TEST_DATABASE_URL is required` — dozens of test files, including many
+`unit.*` ones, run against isolated Postgres schemas.
 
 `npm ci` also installs the repo's git hooks, which refuse a direct push to
 `main` and refuse to commit a `.env` or a private key. If you ever need to
 reinstate them: `npm run hooks:install`.
 
-If `npm test` passes you have a working environment. That is the whole setup —
-it needs no Discord token, because `tools/mock-discord/` stands in for Discord.
-On a clean machine the four commands above take well under a minute.
+If the suite passes you have a working environment. It needs no Discord token,
+because `tools/mock-discord/` stands in for Discord — but the bot itself still
+needs a database URL at runtime (see the mock-harness path in the
+[README](README.md): `TWO_DATABASE_URL=... DISCORD_TOKEN=mock ...`).
 
 `--include=dev` is not optional padding. Some environments set
 `NODE_ENV=production`, and npm then skips devDependencies without saying so.
@@ -34,7 +45,8 @@ environment file.
 
 | Command | What it does |
 |---|---|
-| `npm test` | Unit + end-to-end. Must pass before you open a PR. |
+| `npm test` | Unit + end-to-end. Needs `TWO_TEST_DATABASE_URL` (running Postgres 17+). Must pass before you open a PR. |
+| `npm run test:postgres` | Same suite through the CI wrapper: fails if any required Postgres-backed suite (`POSTGRES_SUITES` in `scripts/require-suites.ts`) skips or comes back short. Needs `TWO_TEST_DATABASE_URL`. |
 | `npm run typecheck` | Node strips types, it does not check them. CI runs this; run it too. |
 | `npm run dev` | Runs against real Discord using `.env`. |
 | `npm run funnel` | Prints the current funnel numbers. |
@@ -84,8 +96,12 @@ Reference the issue in the body when there is one (`TWO-9`).
 ## Pull requests
 
 1. Branch off `main`.
-2. Open the PR. CI runs `npm ci`, `npm run typecheck`, `npm test`, and a secret
-   scan. All four must be green.
+2. Open the PR. CI runs the check job (`npm run typecheck`, the
+   `npm run test:postgres` wrapper, restart-storage provisioning, grant
+   self-test) and the postgres job (`test:postgres` again, then `migrate`,
+   `web:views`, `web:role`, `verify:web-role`), plus a secret scan. All must
+   be green — the wrappers are checked-in scripts (`scripts/ci/run-check-job.sh`,
+   `scripts/ci/run-postgres-job.sh`), so reproduce a red run locally with those.
 3. A code owner reviews it — see [.github/CODEOWNERS](.github/CODEOWNERS).
    You cannot approve your own PR. That is deliberate and it applies to
    everyone.

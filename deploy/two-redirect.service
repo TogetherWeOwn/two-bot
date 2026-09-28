@@ -49,18 +49,42 @@ StandardError=journal
 SyslogIdentifier=two-redirect
 
 # Hardening. It listens, reads invite_campaigns, and appends to events. It has
-# no business anywhere else on the disk.
+# no business anywhere else on the disk - and note this is the PUBLIC unit:
+# unauthenticated strangers hit it, so it gets the full sandbox. The DB write
+# goes through the Postgres socket, not the filesystem, so ProtectSystem=strict
+# with no ReadWritePaths still lets it record clicks.
 NoNewPrivileges=true
 PrivateTmp=true
+PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
+ProtectKernelLogs=true
 ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
 RestrictNamespaces=true
 RestrictSUIDSGID=true
+RestrictRealtime=true
 LockPersonality=true
+UMask=0077
+# Empty set: serving redirects needs no capability.
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Co-tenancy: hide other services' processes; a redirect never inspects /proc.
+ProtectProc=invisible
+ProcSubset=pid
+# Listen socket + loopback Postgres. A compromised dependency cannot open a raw socket.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+SystemCallArchitectures=native
+# Public and crawler-exposed: cap it small so a traffic spike cannot starve the
+# bot - half a core, 192M, 32 tasks.
 MemoryMax=192M
+CPUQuota=50%
+TasksMax=32
 
 [Install]
 WantedBy=multi-user.target

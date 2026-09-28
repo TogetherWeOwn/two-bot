@@ -13,6 +13,13 @@ import {
 import { LIVE_GUILD_ID, STAGING_BOT_APPLICATION_ID, checkStagingToken, stagingGuildId } from '../src/staging/spec.ts';
 
 const API = 'https://discord.com/api/v10';
+if (process.argv.includes('--help')) {
+  console.log('usage: node scripts/staging-clean-slate.ts [--apply] [--export] [--invite]');
+  console.log('');
+  console.log('Rebuild TWO Staging to the clean-slate channel/role layout. Read-only unless --apply.');
+  console.log('Staging only, never the live guild. Requires DISCORD_STAGING_BOT_TOKEN; --help needs no token.');
+  process.exit(0);
+}
 const APPLY = process.argv.includes('--apply');
 const EXPORT = process.argv.includes('--export');
 const INVITE = process.argv.includes('--invite');
