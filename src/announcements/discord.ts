@@ -102,8 +102,8 @@ export class XmlFeedReader implements FeedReader {
     this.fetcher = fetcher;
   }
 
-  async read(feed: FeedRelayRow): Promise<FeedItem[]> {
-    const res = await this.fetcher.read(feed.source, AbortSignal.timeout(REQUEST_TIMEOUT_MS));
+  async read(feed: FeedRelayRow, signal?: AbortSignal): Promise<FeedItem[]> {
+    const res = await this.fetcher.read(feed.source, signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS));
     if (!res.ok) throw new Error(`Feed fetch failed: HTTP ${res.status}`);
     const type = res.headers.get('content-type')?.toLowerCase() ?? '';
     if (!type.includes('xml') && !type.includes('rss') && !type.includes('atom') && type !== '') {

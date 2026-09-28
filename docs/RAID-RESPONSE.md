@@ -111,11 +111,12 @@ Set `DISCORD_STAFF_ALERT_CHANNEL_ID` to a **staff-only** channel — the alert
 lists member IDs and must not be readable by members. The bot needs View Channel
 and Send Messages there, and nothing else.
 
-The chosen route is `🔧〢updates-and-changes`, channel
-`1138590808715571300`: it is staff-only and already Discord's
-`safety_alerts_channel_id`. `.env.example` carries that value for deploys to
-copy. Left empty, the detector still runs but the alert goes to the process log
-only, which nobody reads at 21:16 on a Monday.
+The chosen route is the staff-only channel already configured as Discord's
+`safety_alerts_channel_id` — ask the operator for the channel id and set
+`DISCORD_STAFF_ALERT_CHANNEL_ID` to it at deploy time (`.env.example` leaves it
+blank; never commit the live id here). Left empty, the detector still runs but
+the alert goes to the process log only, which nobody reads at 21:16 on a
+Monday.
 
 The detector goes live with the bot itself (TWO-11). Until the bot is deployed,
 nothing is watching in real time.

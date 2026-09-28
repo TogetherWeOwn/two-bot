@@ -37,6 +37,7 @@ describe('scheduled events mock lifecycle', () => {
       scheduled_start_time: new Date(Date.now() + 7 * 86_400_000).toISOString(),
       channel_id: mock.voiceChannelId,
       description: 'Weekly community games night.',
+      entity_metadata: null,
       status: 1,
     });
     await runScheduledEventsCycle({ db: fixture.db, rest, guildId: mock.guildId });

@@ -22,6 +22,11 @@ npm run check:script-targets
 # ratchet is only worth its line here if it still refuses things.
 npm run check:credentials
 npm run check:credentials:selftest
+# Deploy guard + mirror-settle + trigger/poll + smoke, each executed per
+# configuration with exit codes pinned (TOG-6911). Hermetic: no network, no
+# token, no target — the interesting cases are the ones where none exists
+# (TOG-913). Runs before the slow suites so a broken guard fails in seconds.
+npm run deploy:selftest
 npm run typecheck
 # Offline and instant: the golden ambiguous-vs-unknown eval (TOG-5849). It
 # scores the fixture split against the real attribution code, so a report or

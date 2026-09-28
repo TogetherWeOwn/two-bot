@@ -1,11 +1,11 @@
 {
-  "revision": "5f57256d41130b056389f3098f3b0c84a9d9e261",
+  "revision": "47c48197d46647e34132544523e863e3c92d82ff",
   "blocks": {
     "startup": {
       "path": "src/index.ts",
-      "blob": "9949f6993410e571109103d79311ed449adf99a2",
-      "startLine": 881,
-      "endLine": 910,
+      "blob": "f89e5100dffd12630eac24d9a18f3d3988dbad14",
+      "startLine": 946,
+      "endLine": 975,
       "sha256": "006bfbfdbd972e2ea9a44755082416f90c0178de406726477b28242e81da528d",
       "code": "  internal = await startInternalActions({\n    host: internalCfg.host,\n    port: internalCfg.port,\n    keys: new KeyRing(internalCfg.keys),\n    guildId: cfg.guildId,\n    discord: new DiscordActions({\n      token: cfg.discordToken,\n      base: cfg.apiBase ? `${cfg.apiBase}/v10` : undefined,\n      fetchImpl: stagingRestartFetch,\n    }),\n    roleKeys: internalCfg.roleKeys,\n    channelKeys: internalCfg.channelKeys,\n    enabled: internalCfg.enabled,\n    // The durable nonce, idempotency and audit tables (TOG-44). The same\n    // database as everything else, so it is covered by the same backups.\n    store: new InternalActionStore(db),\n    // The config store behind settings.get / settings.set (TOG-4230). The\n    // same instance the live config above reads through, so a signed write\n    // reaches the consumers on the next poll. Auth and the allowlist stay\n    // environment-only (src/internal/config.ts) - this only supplies the\n    // dependency server.ts null-defaults without.\n    settings,\n    expectedJoins,\n    automations: automationCfg.enabled ? automationService : null,\n    allowAutomationOverwrite: automationCfg.enabled && internalCfg.allowAutomationOverwrite,\n    syncCommands: automationCfg.enabled && commandRegistry ? () => commandRegistry!.sync() : null,\n    moderation: moderationResolver && moderationService\n      ? { resolver: moderationResolver, service: moderationService }\n      : null,\n  });\n"
     },

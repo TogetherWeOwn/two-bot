@@ -1,7 +1,8 @@
 # The internal actions endpoint
 
-**Status: `v0.6` — the endpoint is complete and tested (TOG-44), and join
-attribution for one-click joins is built (TOG-464). Nothing on this page is
+**Status: `v0.7` — the endpoint is complete and tested (TOG-44), join
+attribution for one-click joins is built (TOG-464), and the mapped-event
+read-back is built and gated (TOG-5510, §3). Nothing on this page is
 specification any more.**
 
 All four originally allowlisted actions are built. Three are live by default —
@@ -198,6 +199,7 @@ it is there for logging and for showing "already posted" rather than "posted".
 | `automations.export` | **built and tested, switched off — awaiting allowlist approval** | natural — read-only | None |
 | `settings.get` | **built and tested, switched off — awaiting CEO sign-off** (TOG-3101) | natural — read-only | None |
 | `settings.set` | **built and tested, switched off — awaiting CEO sign-off** (TOG-3101) | **needs key** — a repeat is a second audit row and a silent revert of anything saved in between | None directly; changes stored config only |
+| `event.read` | **built and tested, switched off — admitted scope** (TOG-5510, Gate 2) | natural — read-only | Read one guild scheduled event |
 
 `guild.add_member` only answers when `TWO_INTERNAL_ALLOW_ADD_MEMBER=1`, and
 that flag is the record of the CEO's decision rather than a convenience. With
@@ -323,6 +325,38 @@ operation, not a replay, and Discord may reject a second cancellation.
 
 `result: { "outcome": "cancelled", "event_id": "…" }`. Success, rejection and
 replay use the existing `internal_action_log` audit trail.
+
+### `event.read` — opt-in, default off
+
+```json
+{ "action": "event.read", "event_key": "…" }
+```
+
+Requires the environment-only `TWO_INTERNAL_ALLOW_EVENT_READ=1` capability.
+Shipping this action does not enable it on a running bot; staging authorization
+does not authorize live rollout. No `Idempotency-Key` is required: a repeat
+changes nothing, the same posture as `settings.get` and `automations.export`.
+
+The narrow mapped-event verifier for the agent slice (TOG-5510, Gate 2): the
+bot resolves the website's `event_key` through its own
+`event_key → discord_event_id` map and answers with the Discord mirror it
+mapped — id, name, start, location, lifecycle — plus when it looked. Unknown
+keys return `action_not_allowed` without a Discord request. There is no field
+for a raw Discord id and no room for a predicate, so a caller cannot address
+an arbitrary Discord event or ask an arbitrary question about the guild. No
+listing, no attendees, no member data, no DELETE.
+
+A mirror deleted out-of-band answers `discord_rejected` (Discord's 404) and
+keeps the mapping: terminal state belongs to `event.cancel`, not to the read.
+A cancelled mirror still reads back, with its `CANCELED` lifecycle — that is
+the terminal evidence the proof needs.
+
+`result: { "outcome": "read", "event_id": "…", "name": "…", "starts_at": "…",
+"location": "…|null", "status": "SCHEDULED|ACTIVE|COMPLETED|CANCELED",
+"observed_at": "…" }`. `location` is the external place text, or null for a
+voice-channel event (Discord names the channel by id, and resolving that id
+would spend a call on guild structure the verifier must not see). Success and
+rejection use the existing `internal_action_log` audit trail.
 
 ### `guild.add_member` — **proposed, not yet approved**
 
@@ -643,6 +677,10 @@ Named here so the list is agreed before there is anything to argue about.
 - `event.upsert` creates once, then updates the same Discord event.
 - `event.upsert` with both or neither of `channel_key`/`location`, or with
   `ends_at` before `starts_at` → `malformed`.
+- `event.read` returns the mapped mirror's proof-owned fields with no
+  idempotency key; unknown keys → `action_not_allowed` without a Discord call;
+  a deleted mirror → `discord_rejected` with the mapping kept; a cancelled
+  mirror reads back `CANCELED`.
 - Malformed JSON, missing field, wrong type → `malformed`.
 - Over the rate limit → `429` with `Retry-After`.
 - Discord 5xx / timeout / 429 → the right typed error, no retry storm.
@@ -673,6 +711,7 @@ and opens no port.
 | `TWO_INTERNAL_ROLE_KEYS` | Extra `role-key:<snowflake>` pairs beyond the self-assignable set. |
 | `TWO_INTERNAL_CHANNEL_KEYS` | `channel-key:<snowflake>` pairs for `announcement.post` and `event.upsert`. **Empty by default** — with none set, there is no channel the website may address. |
 | `TWO_INTERNAL_ALLOW_ADD_MEMBER` | `1` to enable `guild.add_member`. **Requires the CEO's sign-off.** |
+| `TWO_INTERNAL_ALLOW_EVENT_READ` | `1` to enable the mapped-event read-back. **Default off; staging proof does not authorize live enablement.** |
 | `TWO_INTERNAL_ALLOW_AUTOMATIONS` | `1` to enable non-destructive `automations.import` and `automations.export`. **Default off; set only after allowlist approval.** |
 | `TWO_INTERNAL_ALLOW_AUTOMATIONS_OVERWRITE` | `1` to permit `overwrite: true` imports. Has no effect unless the base automations flag is also on. |
 | `TWO_INTERNAL_ALLOW_SETTINGS` | `1` to enable `settings.get` and `settings.set`. **Requires the CEO's sign-off.** Neither verb can reach a `TWO_INTERNAL_*` key, including this one. |
@@ -705,6 +744,7 @@ CHECK constraint, against real Postgres), and
 
 | Version | Date | Change |
 |---|---|---|
+| `v0.7` | 2026-09-28 | TOG-5510: `event.read` implemented behind `TWO_INTERNAL_ALLOW_EVENT_READ`, default off. The narrow mapped-event verifier the Gate 2 scope asks for: the website's `event_key` in, the Discord mirror's id/name/start/location/lifecycle plus observation time out. No raw-ID path, no listing, no attendees, no member data, no key required (naturally read-only). Admitted scope (COO plan revision 5), matched exactly against two-web's merged `EventRead` contract (PR #375); the flag flips on staging first and live rollout needs its own authorization. |
 | `v0.6` | 2026-09-17 | TOG-3101: `settings.get` and `settings.set` implemented behind `TWO_INTERNAL_ALLOW_SETTINGS`, default off. **The CEO approved widening the allowlist with these two verbs on 2026-09-17** (TOG-3101, interaction `99e9e289`), on conditions: the three-layer `TWO_INTERNAL_*` refusal and its mutation-checked tests stay; capability gates and signing keys stay env-only; the flag flips on staging first, production only after a posted 15s-pickup proof. The request was raised on TOG-3101 rather than as a comment on TOG-44, because TOG-44 is closed and commenting on it would reopen a completed card — see the amendment to the sign-off paragraph above. Both verbs refuse `TWO_INTERNAL_*` keys in the handler, in the store and in the schema, and `settings.get` never reads through to `process.env`. New table `guild_settings` and its append-only `guild_settings_audit` (`migrations/0026_guild_settings.sql`). No wire-format change to any existing action. **The flag itself is still off in every environment as of this line** — approval is recorded, rollout is not done. |
 | `v0.5` | 2026-09-09 | TOG-1648: `automations.import` and `automations.export` implemented but default off behind `TWO_INTERNAL_ALLOW_AUTOMATIONS`; destructive overwrite has a second flag and imports are bounded by the remaining Discord guild-command budget. This does not widen the approved allowlist by default. |
 | `v0.1` | 2026-08-19 | First specification. Three approved actions from TWO-24, plus `guild.add_member` proposed on TWO-57 and awaiting CEO sign-off. |
