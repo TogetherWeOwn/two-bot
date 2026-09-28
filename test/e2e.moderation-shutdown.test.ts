@@ -303,6 +303,13 @@ function idleDiscord(): { client: ActionDiscord; calls: string[] } {
     async createEvent(_g, i) { calls.push(`createEvent:${i.name}`); return 'evt-1'; },
     async updateEvent(_g, id, i) { calls.push(`updateEvent:${id}:${i.name}`); },
     async cancelEvent(_g, id) { calls.push(`cancelEvent:${id}`); },
+    async readEvent(_g, id) {
+      calls.push(`readEvent:${id}`);
+      return {
+        eventId: id, name: '', startsAt: new Date(0).toISOString(), location: null,
+        status: 'SCHEDULED', observedAt: new Date().toISOString(),
+      };
+    },
   };
   return { client, calls };
 }

@@ -9,7 +9,7 @@ import { runInNewContext } from 'node:vm';
 // the moving working tree. verify-runtime-source.mjs checks them against Git
 // objects.
 const fixture = JSON.parse(readFileSync(new URL('./fixtures/tog4104-runtime-source.json', import.meta.url), 'utf8'));
-assert.equal(fixture.revision, '5f57256d41130b056389f3098f3b0c84a9d9e261');
+assert.equal(fixture.revision, '47c48197d46647e34132544523e863e3c92d82ff');
 const blocks = fixture.blocks;
 for (const block of Object.values(blocks) as Array<{ code: string; sha256: string }>) {
   assert.equal(createHash('sha256').update(block.code).digest('hex'), block.sha256);

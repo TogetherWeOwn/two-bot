@@ -67,9 +67,16 @@ function check(name: string, pass: boolean, detail: unknown): void {
   console.log(`${pass ? 'PASS' : 'FAIL'}  ${name}  ${JSON.stringify(detail)}`);
 }
 
+// Staging-only mock seam (TOG-6500), same shape as scripts/staging-session-demo.ts.
+// Default-off: unset means discord.com. Accepts the base with or without the
+// /v10 suffix; the discord.js REST override below needs it without.
+const RAW_API = (process.env.DISCORD_API_BASE ?? 'https://discord.com/api/v10').replace(/\/+$/, '');
+const API = RAW_API.endsWith('/v10') ? RAW_API : `${RAW_API}/v10`;
+const REST_API = API.replace(/\/v10$/, '');
+
 /** An independent read of Discord, deliberately not going through our gateway wrapper. */
 async function rest(path: string): Promise<{ status: number; body: any }> {
-  const r = await fetch(`https://discord.com/api/v10${path}`, { headers: { Authorization: `Bot ${token}` } });
+  const r = await fetch(`${API}${path}`, { headers: { Authorization: `Bot ${token}` } });
   return { status: r.status, body: r.status === 204 ? null : await r.json() };
 }
 
@@ -86,6 +93,12 @@ if (!config.enabled) throw new Error('TWO_TEMP_VOICE=1 is required for this demo
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.GuildMembers],
 });
+// Same override src/index.ts applies: point discord.js REST (and therefore the
+// gateway URL login fetches) at the mock. Staging-only, default-off: without
+// DISCORD_API_BASE this assignment never runs and the default path is untouched.
+if (process.env.DISCORD_API_BASE) {
+  client.rest.options.api = REST_API;
+}
 const store = new TempVoiceStore(db);
 const service = new TempVoiceService({
   store,

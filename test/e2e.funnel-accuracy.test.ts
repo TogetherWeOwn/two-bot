@@ -265,6 +265,40 @@ test('--json funnel counts equal the hand-computed expectations', async () => {
   assert.equal(r.totalEvents, 16, '3 clicks + 5 joins + 2 gate + 2 msg + 1 voice + 1 leave + 2 ends');
 });
 
+test('raid-day tracked-source join is set aside in headline and campaign counts', async () => {
+  await seedFixture();
+  // One raid-day join attributed to the tracked campaign. 2025-07-06 is a
+  // listed member_join anomaly window, so the headline counts set it aside;
+  // TOG-8446 pinned the per-campaign subquery counting it anyway, letting
+  // campaign joins exceed headline joins inside one report.
+  await harness.db
+    .prepare(
+      `INSERT INTO events (event_type, member_id, guild_id, occurred_at, source, metadata, idempotency_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run('member_join', '9001', GUILD, '2025-07-06T20:45:00.000Z', 'invite:abc123', null, 'funnel-accuracy-raid-day');
+
+  // Window wide enough to cover the raid day (default 7 days would not).
+  const machine = await cli(['3650', '--json']);
+  assert.equal(machine.code, 0, machine.stdout + machine.stderr);
+  const r = JSON.parse(machine.stdout) as FunnelReport;
+
+  assert.equal(r.windowDays, 3650);
+  // Headline: the 5 real joins counted, the raid-day row set aside.
+  assert.equal(r.funnel.joins, 5);
+  assert.equal(r.funnel.joinsSetAside, 1);
+  // Where-joins-came-from agrees with the headline.
+  const bySource = new Map(r.attribution.bySource.map((s) => [s.source, s.joins]));
+  assert.equal(bySource.get('invite:abc123'), 3);
+  // Campaign table must agree too - pre-fix it counted 4 here.
+  assert.equal(r.campaigns.length, 1);
+  assert.deepEqual(
+    { slug: r.campaigns[0].slug, clicks: r.campaigns[0].clicks, joins: r.campaigns[0].joins },
+    { slug: 'acc-link', clicks: 3, joins: 3 },
+  );
+  assert.equal(r.totalEvents, 17);
+});
+
 test('text report prints the same hand-computed numbers', async () => {
   await seedFixture();
   const text = await cli([]);

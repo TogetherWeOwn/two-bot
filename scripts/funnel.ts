@@ -26,6 +26,7 @@ import {
   totalDowntimeUnknown,
 } from '../src/core/inviteTracker.ts';
 import { formatFunnelText } from '../src/analytics/cliFormat.ts';
+import { buildFunnelReport } from '../src/analytics/funnelReport.ts';
 
 const rawArgs = process.argv.slice(2);
 const asJson = rawArgs.includes('--json');
@@ -180,6 +181,12 @@ const downtimeUnknown = totalDowntimeUnknown(downtimeCounts);
 // Clicks per tracked link, next to the joins that link's invite code produced.
 // This is the per-place breakdown TOG-116 exists for: it is what separates "a
 // listing nobody reads" from "a listing plenty of people read and bounce off".
+// Both subqueries exclude the same anomaly windows as the headline counts
+// (TOG-8446): without this a raid-day join on a tracked code counted in the
+// campaign table while the headline set it aside, so campaign joins could
+// exceed headline joins in one report.
+const clickExcl = excludeClause('invite_click', ANOMALIES, 'e.occurred_at');
+const joinCampExcl = excludeClause('member_join', ANOMALIES, 'e.occurred_at');
 const perCampaign =
   trackedLinks > 0
     ? (
@@ -187,10 +194,10 @@ const perCampaign =
           .prepare(
             `SELECT c.slug, c.label, c.invite_code, c.disabled_at,
                     (SELECT COUNT(*) FROM events e
-                       WHERE e.event_type='invite_click' AND e.occurred_at >= ?
+                       WHERE e.event_type='invite_click' AND e.occurred_at >= ?${clickExcl.sql}
                          AND e.source = 'invite:' || c.invite_code) AS clicks,
                     (SELECT COUNT(*) FROM events e
-                       WHERE e.event_type='member_join' AND e.occurred_at >= ?
+                       WHERE e.event_type='member_join' AND e.occurred_at >= ?${joinCampExcl.sql}
                          AND e.source = 'invite:' || c.invite_code) AS joins
                FROM invite_campaigns c
               ORDER BY clicks DESC, c.slug`,
@@ -202,7 +209,7 @@ const perCampaign =
             disabled_at: string | null;
             clicks: number;
             joins: number;
-          }>(since, since)
+          }>(since, ...clickExcl.params, since, ...joinCampExcl.params)
       ).map((c) => ({
         slug: c.slug,
         label: c.label,
@@ -316,52 +323,39 @@ const strandedRaid = await one(
 );
 const totalEvents = await one(`SELECT COUNT(*) AS n FROM events`);
 
-const report = {
-  schema: 1,
+// The --json shape lives in src/analytics/funnelReport.ts (TOG-8290) so the
+// offline schema test pins the exact keys the dashboard stopgap parses. This
+// file only collects rows; it never shapes the report.
+// Reporting flag only (TOG-6232): per-campaign per-day click spikes. Every
+// entry is unlabelled by construction (no click anomaly windows exist) and
+// stays counted above - this names the day, nothing more.
+const report = buildFunnelReport({
   windowDays: days,
   since,
-  funnel: {
-    clicks,
-    joins,
-    joinsSetAside,
-    gateCleared,
-    joiners,
-    stuckAtGate,
-    firstMessage: firstMsg,
-    firstVoice,
-    leaves,
-    leavesSetAside,
-  },
-  attribution: {
-    bySource,
-    ambiguous,
-    unknown,
-  },
-  downtime: {
-    windows: downtimeCounts.map((w) => ({
-      start: w.start,
-      end: w.end,
-      gapMs: w.gapMs,
-      downtimeUnknown: w.downtimeUnknown,
-    })),
-    unknownInWindow: downtimeUnknown,
-  },
+  clicks,
+  joins,
+  joinsSetAside,
+  gateCleared,
+  joiners,
+  stuckAtGate,
+  firstMessage: firstMsg,
+  firstVoice,
+  leaves,
+  leavesSetAside,
+  bySource,
+  ambiguous,
+  unknown,
+  downtime: downtimeCounts,
+  downtimeUnknown,
   campaigns: perCampaign,
-  // Reporting flag only (TOG-6232): per-campaign per-day click spikes. Every
-  // entry is unlabelled by construction (no click anomaly windows exist) and
-  // stays counted above - this names the day, nothing more.
   clickSpikes,
-  voice: {
-    firstVoiceSessions: firstVoice,
-    avgSessionSeconds: voiceDurationSummary.averageSeconds,
-    measuredSessions: voiceDurationSummary.measured,
-    excludedUnknownStarts: voiceDurationSummary.excludedUnknownStarts,
-  },
+  firstVoiceSessions: firstVoice,
+  voice: voiceDurationSummary,
   retention,
   neverPosted: never,
   strandedRaid,
   totalEvents,
-};
+});
 
 if (asJson) {
   // Exactly one JSON object on stdout - anything else (warnings, progress)

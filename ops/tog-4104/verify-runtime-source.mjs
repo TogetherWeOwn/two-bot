@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const fixture = JSON.parse(readFileSync(new URL('../../test/fixtures/tog4104-runtime-source.json', import.meta.url), 'utf8'));
-assert.equal(fixture.revision, '5f57256d41130b056389f3098f3b0c84a9d9e261');
+assert.equal(fixture.revision, '47c48197d46647e34132544523e863e3c92d82ff');
 for (const block of Object.values(fixture.blocks)) {
   const object = `${fixture.revision}:${block.path}`;
   const source = execFileSync('git', ['-C', root, 'show', object], { encoding: 'utf8' });

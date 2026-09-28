@@ -173,6 +173,17 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     minTests: 3,
     why: 'the moderation kill-switch refuse/recover cycle through the live endpoint, or a half-disabled slice ships unnoticed',
   },
+  {
+    // TOG-6481. The voice-sessions CLI executed end to end through the real
+    // npm entry: paired + orphan starts count as sessions, known-start ends
+    // average to 20m over 2 measured, and the two startKnown:false ends are
+    // excluded from the mean and attributed to the one blind window. Counted
+    // from the 2 top-level test() blocks; CI's postgres job confirms the
+    // count on the first run after this commit.
+    file: 'test/e2e.voicesessions-cli.test.ts',
+    minTests: 2,
+    why: 'the voice-sessions averages CLI itself, not just the helpers underneath it - without this floor a silent skip re-opens the startKnown averaging gap',
+  },
 ];
 
 /**

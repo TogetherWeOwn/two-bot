@@ -32,6 +32,12 @@ const noopDiscord: ActionDiscord = {
   async memberRoles() { return []; }, async addRole() {}, async addMember() { return 'added'; },
   async postMessage() { return 'message'; }, async createEvent() { return 'event'; }, async updateEvent() {},
   async cancelEvent() {},
+  async readEvent(_g, id) {
+    return {
+      eventId: id, name: '', startsAt: new Date(0).toISOString(), location: null,
+      status: 'SCHEDULED', observedAt: new Date().toISOString(),
+    };
+  },
 };
 
 function fixture(targetOver: Partial<Awaited<ReturnType<ModerationResolver['target']>>> = {}) {
