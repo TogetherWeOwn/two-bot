@@ -202,7 +202,16 @@ interface CallResult {
   body: {
     ok: boolean;
     request_id: string;
-    result?: { outcome?: string; message_id?: string; event_id?: string };
+    result?: {
+      outcome?: string;
+      message_id?: string;
+      event_id?: string;
+      name?: string;
+      starts_at?: string;
+      location?: string | null;
+      status?: string;
+      observed_at?: string;
+    };
     error?: { code: string; message: string; retryable: boolean };
   };
 }
