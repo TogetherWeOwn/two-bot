@@ -100,7 +100,7 @@ test('invite_link: variants match, non-invites do not', () => {
   for (const content of hits) {
     assert.equal(match({ content }), 'invite_link', content);
   }
-  const misses: Array<[string, string | null]> = [
+  const misses: Array<[string, string, string | null]> = [
     ['plain chat', 'ordinary message', null],
     ['non-invite discord path', 'see https://discord.com/channels/1/2', 'external_link'],
     ['word invite alone', 'you are invited', null],
