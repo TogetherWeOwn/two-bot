@@ -16,7 +16,10 @@
 # Node 24 runs TypeScript directly - no build step, no tsc, no dist/. That is
 # why there is no builder stage here: there is nothing to compile.
 
-FROM node:24-bookworm-slim
+# Pinned by digest (TOG-8680) so rebuilds do not drift when the rolling tag
+# moves. Refresh the digest with:
+#   crane digest node:24-bookworm-slim   (or Docker Hub API digest lookup)
+FROM node:24-bookworm-slim@sha256:0e0ff40c39bc087845bfb27465a0df4ea419520094bc35842ff83dd8cbe6f9b6
 
 # Unprivileged from the start. The base image ships uid/gid 1000 as `node`.
 # Nothing in this image needs root at runtime, and the internal actions endpoint
