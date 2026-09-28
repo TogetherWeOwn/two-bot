@@ -96,6 +96,16 @@ async function holdPort(): Promise<HeldPort> {
 }
 
 /**
+ * Release a held port, tolerating null. A free function (not `held?.release()`
+ * inline): `held` is `null` on every loop back edge, so TS narrows the local
+ * to `null` at the top of the loop and the inline optional chain looks up
+ * `release` on `never` (TS2339). The parameter keeps its declared union.
+ */
+async function releaseHeld(h: HeldPort | null): Promise<void> {
+  await h?.release().catch(() => {});
+}
+
+/**
  * Poll until `fn` resolves truthy. Callers signal "not yet" with null; the
  * only way out is a truthy value or the deadline.
  */
@@ -235,7 +245,10 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
       exited = null;
       await mock?.close().catch(() => {});
       mock = null;
-      await held?.release().catch(() => {});
+      // `releaseHeld` (not `held?.release()` inline): `held` is `null`
+      // on every loop back edge, so TS narrows it to `null` here and the
+      // inline optional chain looks up `release` on `never` (TS2339).
+      await releaseHeld(held);
       held = null;
 
       // Decorrelate from a sibling we just collided with: without this two
@@ -489,8 +502,9 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
     await mock?.close().catch(() => {});
     // A `continue` releases at the top of the next iteration, but an early
     // return or throw would leak the bound holder and starve the host of one
-    // loopback port per red run.
-    await held?.release().catch(() => {});
+    // loopback port per red run. Via `releaseHeld` for the same narrowing
+    // reason as the loop-top call.
+    await releaseHeld(held);
   }
 }
 
