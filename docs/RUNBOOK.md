@@ -936,8 +936,9 @@ pass the staging-token check (a live token is refused).
 
 ### Community scorecard
 
-Scores the previous closed community week as JSON (coverage, classifier
-version, recommendations unless `TWO_COMMUNITY_RECOMMENDATIONS=0`).
+Scores the previous closed community week: a one-screen human-readable
+summary, then the full JSON (coverage, classifier version, recommendations
+unless `TWO_COMMUNITY_RECOMMENDATIONS=0`).
 
 ```bash
 cd /opt/two-bot
@@ -968,7 +969,7 @@ back to them instead of repeating.
 | `internal-actions:host`, `internal-actions:host-real` | Standalone internal-actions host for the TOG-463 acceptance harness: mock-Discord variant, and real staging-token variant. | Serves `/internal/actions`; harness passes against it. |
 | `internal-actions:acceptance` | TOG-463 acceptance run against a live endpoint (`TWO_ACCEPT_*` env; `--help` needs no env/network). | Usage prints, exit `0` on `--help`. |
 | `redirect` | go.two.gg redirect service (separate process, no credential, default `127.0.0.1:8088`). | Binds and answers one public GET. |
-| `moderation:disable-preflight` | "Can I turn moderation off right now?" — same read the boot preflight performs, on demand (`--json` available). | Exit `0` (nothing blocking); `1` lists blockers; `2` usage. |
+| `moderation:disable-preflight` | "Can I turn moderation off right now?" — same read the boot preflight performs, on demand (`--json` available). | Exit `0` (nothing blocking); `1` lists blockers; `2` could not tell (missing/unreachable DB — never a clear). |
 
 ### Growth and funnel
 
