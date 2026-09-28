@@ -26,6 +26,7 @@ import {
   totalDowntimeUnknown,
 } from '../src/core/inviteTracker.ts';
 import { formatFunnelText } from '../src/analytics/cliFormat.ts';
+import { buildFunnelReport } from '../src/analytics/funnelReport.ts';
 
 const rawArgs = process.argv.slice(2);
 const asJson = rawArgs.includes('--json');
@@ -316,52 +317,39 @@ const strandedRaid = await one(
 );
 const totalEvents = await one(`SELECT COUNT(*) AS n FROM events`);
 
-const report = {
-  schema: 1,
+// The --json shape lives in src/analytics/funnelReport.ts (TOG-8290) so the
+// offline schema test pins the exact keys the dashboard stopgap parses. This
+// file only collects rows; it never shapes the report.
+// Reporting flag only (TOG-6232): per-campaign per-day click spikes. Every
+// entry is unlabelled by construction (no click anomaly windows exist) and
+// stays counted above - this names the day, nothing more.
+const report = buildFunnelReport({
   windowDays: days,
   since,
-  funnel: {
-    clicks,
-    joins,
-    joinsSetAside,
-    gateCleared,
-    joiners,
-    stuckAtGate,
-    firstMessage: firstMsg,
-    firstVoice,
-    leaves,
-    leavesSetAside,
-  },
-  attribution: {
-    bySource,
-    ambiguous,
-    unknown,
-  },
-  downtime: {
-    windows: downtimeCounts.map((w) => ({
-      start: w.start,
-      end: w.end,
-      gapMs: w.gapMs,
-      downtimeUnknown: w.downtimeUnknown,
-    })),
-    unknownInWindow: downtimeUnknown,
-  },
+  clicks,
+  joins,
+  joinsSetAside,
+  gateCleared,
+  joiners,
+  stuckAtGate,
+  firstMessage: firstMsg,
+  firstVoice,
+  leaves,
+  leavesSetAside,
+  bySource,
+  ambiguous,
+  unknown,
+  downtime: downtimeCounts,
+  downtimeUnknown,
   campaigns: perCampaign,
-  // Reporting flag only (TOG-6232): per-campaign per-day click spikes. Every
-  // entry is unlabelled by construction (no click anomaly windows exist) and
-  // stays counted above - this names the day, nothing more.
   clickSpikes,
-  voice: {
-    firstVoiceSessions: firstVoice,
-    avgSessionSeconds: voiceDurationSummary.averageSeconds,
-    measuredSessions: voiceDurationSummary.measured,
-    excludedUnknownStarts: voiceDurationSummary.excludedUnknownStarts,
-  },
+  firstVoiceSessions: firstVoice,
+  voice: voiceDurationSummary,
   retention,
   neverPosted: never,
   strandedRaid,
   totalEvents,
-};
+});
 
 if (asJson) {
   // Exactly one JSON object on stdout - anything else (warnings, progress)
