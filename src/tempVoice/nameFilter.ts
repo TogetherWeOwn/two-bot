@@ -33,11 +33,30 @@ export type NameRejection =
  * Control characters and Discord's markdown/mention sigils are stripped rather
  * than rejected: a user typing `@everyone` into a channel name wants a name,
  * not an error, and the name is never rendered as message content anyway.
+ *
+ * Bidirectional controls (U+061C, U+200E-U+200F, U+202A-U+202E, U+2066-U+2069)
+ * reorder displayed text and have no place in a channel name. Legitimate RTL
+ * scripts (Arabic, Hebrew) are laid out by the Unicode bidi algorithm without
+ * explicit controls, so stripping them cannot mangle a real name.
+ *
+ * Zalgo combining marks (Combining Diacritical Marks block plus the smaller
+ * combining ranges) are stripped too. Only the decorative combining blocks go:
+ * Arabic tashkeel, Hebrew niqqud and Indic matras live elsewhere and survive,
+ * and the NFKC fold above already recomposes single legitimate accents before
+ * the strip runs, so those are never touched. Stripping runs BEFORE the
+ * automod check, which also closes the bad-word evasion hole: a badword
+ * spelled with combining overlays folds to the plain word and is rejected by
+ * the matcher instead of slipping past.
  */
+const BIDI_CONTROLS = /[؜‎‏‪-‮⁦-⁩]/gu;
+const COMBINING_FLOOD = /[̀-ͯ҃-҉᪰-᫿᷀-᷿⃐-⃿︠-︯]/gu;
+
 function sanitize(raw: string): string {
   return raw
     .normalize('NFKC')
     .replace(/[\u0000-\u001F\u007F]/gu, ' ')
+    .replace(BIDI_CONTROLS, '')
+    .replace(COMBINING_FLOOD, '')
     .replace(/[@`]/gu, '')
     .replace(/\s+/gu, ' ')
     .trim();

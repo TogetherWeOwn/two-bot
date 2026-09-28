@@ -10,8 +10,9 @@
  * - mass-mention sigils are NEUTRALISED (stripped, accepted) rather than
  *   rejected — channel names never render as message content, so there is
  *   nobody to ping; the assertion is that no `@`/backtick survives;
- * - zalgo / RTL-spoof names currently PASS THROUGH the sanitizer (documented
- *   below, not rejected) — tightening that is follow-up work, not this card;
+ * - zalgo / RTL-spoof names are NEUTRALISED (combining-mark floods and bidi
+ *   overrides stripped, accepted as the cleaned name) — and a bad word hiding
+ *   behind combining marks folds to the plain word, so the matcher rejects it;
  * - over-long names are rejected at Discord's 100-char bound;
  * - normal game names pass (false-positive guard).
  *
@@ -76,20 +77,27 @@ describe('tempVoice nameFilter abuse corpus', () => {
     }
   });
 
-  test('documents zalgo/RTL pass-through (accepted, follow-up to tighten)', () => {
-    // The sanitizer NFKC-folds but keeps combining marks and bidi controls, so
-    // these are accepted today. Pinned so any future tightening/fallback shows
-    // up as a deliberate diff, not silent drift.
-    const passthrough = ['zalgo c̶o̶o̶l̶ room', 'room ‮ evil'];
-    for (const input of passthrough) {
-      assert.equal(filterChannelName(input, POLICY, where).ok, true, JSON.stringify(input));
+  test('neutralises zalgo/RTL spoofing instead of passing it through', () => {
+    // Combining-mark floods and bidi overrides are stripped in sanitize, so
+    // the displayed name is the cleaned one. A bad word hidden behind
+    // combining marks folds to the plain word and is rejected by the matcher.
+    const cases: Array<[string, string]> = [
+      ['zalgo c\u0336o\u0336o\u0336l\u0336 room', 'zalgo cool room'],
+      ['room \u202e evil', 'room evil'],
+    ];
+    for (const [input, name] of cases) {
+      assert.deepEqual(filterChannelName(input, POLICY, where), { ok: true, name });
     }
+    assert.equal(filterChannelName('b\u0336a\u0336d\u0336w\u0336o\u0336r\u0336d room', POLICY, where).ok, false);
   });
 
   test('rejects over-long names at the 100-char bound', () => {
     assert.equal(filterChannelName('x'.repeat(100), POLICY, where).ok, true);
     assert.equal(filterChannelName('x'.repeat(101), POLICY, where).ok, false);
-    assert.equal(filterChannelName(`${'x'.repeat(100)}‮`, POLICY, where).ok, false);
+    // A stripped bidi override does not inflate length: 100 visible chars +
+    // one override is exactly at the bound, so it is accepted as the 100 x's.
+    assert.deepEqual(filterChannelName(`${'x'.repeat(100)}‮`, POLICY, where), { ok: true, name: 'x'.repeat(100) });
+    assert.equal(filterChannelName(`${'x'.repeat(101)}‮`, POLICY, where).ok, false);
   });
 
   test('allows normal game names (false-positive guard)', () => {
@@ -99,6 +107,12 @@ describe('tempVoice nameFilter abuse corpus', () => {
       'Chill & grind 18+',
       "ava's lobby",
       'squad-4 | ranked',
+      'café night',
+      'naïve lobby',
+      '東京 ranked grind',
+      'القاهرة lobby',
+      '카페 방',
+      'Москва squad',
     ];
     for (const input of allowed) {
       const result = filterChannelName(input, POLICY, where);
