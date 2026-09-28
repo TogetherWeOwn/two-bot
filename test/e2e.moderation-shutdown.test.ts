@@ -22,6 +22,12 @@ import {
   enforceModerationShutdownPreflight,
   evaluateModerationShutdown,
 } from '../src/moderation/shutdownPreflight.ts';
+import { MODERATION_ACTIONS } from '../src/moderation/types.ts';
+import { loadModerationConfig } from '../src/moderation/config.ts';
+import { loadInternalActionsConfig } from '../src/internal/config.ts';
+import { assertAllowed, runAction, type ActionContext } from '../src/internal/actions.ts';
+import type { ActionDiscord } from '../src/internal/discordActions.ts';
+import { ActionError } from '../src/internal/errors.ts';
 import { ModerationStore } from '../src/moderation/store.ts';
 import { openTestDb, type TestDb } from './helpers/testDb.ts';
 
@@ -275,4 +281,120 @@ test('src/index.ts enforces the preflight against the real config', async () => 
   const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
   assert.match(source, /await enforceModerationShutdownPreflight\(\{/);
   assert.match(source, /enforceModerationShutdownPreflight\(\{\s*\n\s*enabled: moderationCfg\.enabled,/);
+});
+
+// --- the kill switch disables every moderation verb (TOG-5702) ----------------
+//
+// The preflight above answers "may I turn it off"; these cases answer "is it
+// off". `TWO_MODERATION` unset must leave no moderation path live: no slash
+// command, no internal verb, no automod sanction, no unban sweep. Each case
+// fails if any verb remains reachable under the kill-switch fixture.
+
+const INTERNAL_KEYS = 'web-test:0123456789abcdef0123456789abcdef';
+
+/** A Discord client that records every call, so "no verb ran" is provable. */
+function idleDiscord(): { client: ActionDiscord; calls: string[] } {
+  const calls: string[] = [];
+  const client: ActionDiscord = {
+    async memberRoles() { calls.push('memberRoles'); return []; },
+    async addRole(_g, _u, r) { calls.push(`addRole:${r}`); },
+    async addMember(_g, u, _t) { calls.push(`addMember:${u}`); return 'added'; },
+    async postMessage(c, _content) { calls.push(`postMessage:${c}`); return 'msg-1'; },
+    async createEvent(_g, i) { calls.push(`createEvent:${i.name}`); return 'evt-1'; },
+    async updateEvent(_g, id, i) { calls.push(`updateEvent:${id}:${i.name}`); },
+    async cancelEvent(_g, id) { calls.push(`cancelEvent:${id}`); },
+  };
+  return { client, calls };
+}
+
+/**
+ * The kill-switch fixture, built the way src/index.ts builds it: the website
+ * key may carry `TWO_INTERNAL_ALLOW_MODERATION=1`, but `TWO_MODERATION` is
+ * unset, so the co-gate keeps every verb out of the enabled set and the
+ * moderation dependency stays unwired (null).
+ */
+function disabledCtx(discord: ActionDiscord): ActionContext {
+  const cfg = loadInternalActionsConfig({
+    TWO_INTERNAL_ACTIONS: '1',
+    TWO_INTERNAL_KEYS: INTERNAL_KEYS,
+    TWO_INTERNAL_ALLOW_MODERATION: '1',
+  } as NodeJS.ProcessEnv)!;
+  return {
+    guildId: GUILD,
+    discord,
+    roleKeys: new Map(),
+    channelKeys: new Map(),
+    enabled: cfg.enabled,
+    store: null,
+    settings: null,
+    idempotencyKey: 'kill-switch-fixture',
+    moderation: null,
+  };
+}
+
+test('the kill switch starts at the config: no TWO_MODERATION means disabled', () => {
+  assert.equal(loadModerationConfig({} as NodeJS.ProcessEnv).enabled, false);
+});
+
+test('the kill switch keeps every moderation verb out of the internal allowlist', () => {
+  // Fails if either half of the co-gate is dropped: website allow-flag alone
+  // must not enable a single verb.
+  const cfg = loadInternalActionsConfig({
+    TWO_INTERNAL_ACTIONS: '1',
+    TWO_INTERNAL_KEYS: INTERNAL_KEYS,
+    TWO_INTERNAL_ALLOW_MODERATION: '1',
+  } as NodeJS.ProcessEnv)!;
+  for (const action of MODERATION_ACTIONS) {
+    assert.equal(cfg.enabled.has(action), false, `${action} must not be enabled without TWO_MODERATION=1`);
+  }
+});
+
+test('control: both flags on enables all nine verbs in the allowlist', () => {
+  // Without this, the refusal above could pass vacuously - a fixture that can
+  // never enable the verbs cannot prove the gate disabled them.
+  const cfg = loadInternalActionsConfig({
+    TWO_INTERNAL_ACTIONS: '1',
+    TWO_INTERNAL_KEYS: INTERNAL_KEYS,
+    TWO_INTERNAL_ALLOW_MODERATION: '1',
+    TWO_MODERATION: '1',
+  } as NodeJS.ProcessEnv)!;
+  for (const action of MODERATION_ACTIONS) {
+    assert.equal(cfg.enabled.has(action), true, `${action} must be enabled when both flags are set`);
+  }
+});
+
+test('every moderation verb is refused under the kill switch and Discord stays idle', async () => {
+  // Two layers, because each catches a different way to leave a verb live:
+  // the allowlist gate (what server.ts checks first) and the unwired-service
+  // refusal inside runAction (what holds if the gate is ever bypassed).
+  const { client, calls } = idleDiscord();
+  const ctx = disabledCtx(client);
+  for (const action of MODERATION_ACTIONS) {
+    assert.throws(
+      () => assertAllowed(action, ctx),
+      (e: unknown) => e instanceof ActionError && e.code === 'action_not_allowed' && e.logReason === 'action_disabled',
+      `${action} must be refused as disabled under the kill switch`,
+    );
+    const err = await runAction(action, {}, ctx).then(() => null, (e: unknown) => e);
+    assert.ok(err instanceof ActionError, `${action} must throw, got ${String(err)}`);
+    assert.equal(err.code, 'action_not_allowed');
+    assert.equal(err.logReason, 'moderation_not_configured');
+  }
+  assert.deepEqual(calls, [], 'a refused verb must not cause any Discord call');
+});
+
+test('src/index.ts leaves no moderation path live when the slice is off', async () => {
+  // Static, because booting index.ts needs a Discord token, a gateway and a
+  // guild. Seven predicates, one per wiring site: dropping any single gate
+  // leaves one verb family live while the other six stay off, which is exactly
+  // the partial disable this card exists to catch.
+  const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
+  assert.match(source, /const moderationResolver = !stagingRestartArmed && cfg\.guildId && moderationCfg\.enabled/);
+  assert.match(source, /const moderationService = moderationResolver/);
+  assert.match(source, /TWO_AUTOMOD=1 requires TWO_MODERATION=1/);
+  assert.match(source, /cfg\.guildId && moderationResolver && moderationService\) \{/);
+  assert.match(source, /registerModerationHandler\(client, \{/);
+  assert.match(source, /moderationResolver && moderationService \? MODERATION_COMMAND_DATA : \[\]/);
+  assert.match(source, /moderation: moderationResolver && moderationService/);
+  assert.match(source, /const moderationSweep = !stagingRestartArmed && moderationService/);
 });

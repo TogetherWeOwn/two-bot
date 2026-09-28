@@ -24,6 +24,7 @@
     "campaigns": "node scripts/campaigns.ts",
     "voice": "node scripts/voice-sessions.ts",
     "attribution": "node scripts/attribution.ts",
+    "unknown-attribution": "node scripts/unknown-attribution.ts",
     "eval:funnel-attribution": "node scripts/funnel-attribution-eval.ts",
     "gate:check": "node scripts/gate-check.ts",
     "review": "node scripts/growth-review.ts",
@@ -75,6 +76,7 @@
     "levels:inventory": "node scripts/levels-import-mee6.ts inventory",
     "levels:roles": "node scripts/levels-role-rewards.ts",
     "levels:roles:probe": "node scripts/levels-import-rewards-probe.ts",
+    "levels:roles:apply": "node scripts/levels-reward-role-apply.ts",
     "onboarding:web:acceptance": "node scripts/onboarding-web-slice-acceptance.ts",
     "automod:export": "node scripts/automod-export.ts",
     "community:scorecard": "node scripts/community-scorecard.ts"

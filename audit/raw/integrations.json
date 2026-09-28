@@ -21,22 +21,7 @@
       "is_verified": true,
       "is_discoverable": false,
       "bot": {
-        "id": "115385224119975941",
-        "username": "DiscordServers",
-        "avatar": "63194e8218b818bfca928a024563855a",
-        "discriminator": "2383",
-        "public_flags": 589824,
-        "flags": 589824,
-        "bot": true,
-        "banner": null,
-        "accent_color": null,
-        "global_name": null,
-        "avatar_decoration_data": null,
-        "collectibles": null,
-        "display_name_styles": null,
-        "banner_color": null,
-        "clan": null,
-        "primary_guild": null
+        "id": "115385224119975941"
       }
     },
     "scopes": [
@@ -68,22 +53,7 @@
       "is_verified": true,
       "is_discoverable": true,
       "bot": {
-        "id": "475744554910351370",
-        "username": "Apollo",
-        "avatar": "4a54729751b1dcb88c474cc49416d3eb",
-        "discriminator": "5552",
-        "public_flags": 65536,
-        "flags": 65536,
-        "bot": true,
-        "banner": null,
-        "accent_color": null,
-        "global_name": null,
-        "avatar_decoration_data": null,
-        "collectibles": null,
-        "display_name_styles": null,
-        "banner_color": null,
-        "clan": null,
-        "primary_guild": null
+        "id": "475744554910351370"
       }
     },
     "scopes": [
@@ -114,22 +84,7 @@
       "is_verified": true,
       "is_discoverable": true,
       "bot": {
-        "id": "491769129318088714",
-        "username": "Statbot",
-        "avatar": "f23fd300d377ab133db1d6ac7db5d10b",
-        "discriminator": "3472",
-        "public_flags": 589824,
-        "flags": 589824,
-        "bot": true,
-        "banner": null,
-        "accent_color": null,
-        "global_name": null,
-        "avatar_decoration_data": null,
-        "collectibles": null,
-        "display_name_styles": null,
-        "banner_color": null,
-        "clan": null,
-        "primary_guild": null
+        "id": "491769129318088714"
       }
     },
     "scopes": [
@@ -184,22 +139,7 @@
       "is_verified": false,
       "is_discoverable": false,
       "bot": {
-        "id": "456483983870394368",
-        "username": "TWO.gg",
-        "avatar": "8cde09a1aa7b86aefa790d430cf6af47",
-        "discriminator": "8158",
-        "public_flags": 0,
-        "flags": 0,
-        "bot": true,
-        "banner": null,
-        "accent_color": null,
-        "global_name": null,
-        "avatar_decoration_data": null,
-        "collectibles": null,
-        "display_name_styles": null,
-        "banner_color": null,
-        "clan": null,
-        "primary_guild": null
+        "id": "456483983870394368"
       }
     },
     "scopes": [
@@ -231,22 +171,7 @@
       "is_verified": false,
       "is_discoverable": false,
       "bot": {
-        "id": "1263049996916359258",
-        "username": "឵឵B឵឵ot",
-        "avatar": "c3293e717afd86c9b9e632ee671c4fce",
-        "discriminator": "6876",
-        "public_flags": 0,
-        "flags": 0,
-        "bot": true,
-        "banner": null,
-        "accent_color": null,
-        "global_name": null,
-        "avatar_decoration_data": null,
-        "collectibles": null,
-        "display_name_styles": null,
-        "banner_color": null,
-        "clan": null,
-        "primary_guild": null
+        "id": "1263049996916359258"
       }
     },
     "scopes": [
@@ -277,22 +202,7 @@
       "is_verified": true,
       "is_discoverable": true,
       "bot": {
-        "id": "474051954998509571",
-        "username": "Suggestions",
-        "avatar": "a_9284248445d77d12be8256ebcc88948e",
-        "discriminator": "2602",
-        "public_flags": 65536,
-        "flags": 65536,
-        "bot": true,
-        "banner": null,
-        "accent_color": null,
-        "global_name": null,
-        "avatar_decoration_data": null,
-        "collectibles": null,
-        "display_name_styles": null,
-        "banner_color": null,
-        "clan": null,
-        "primary_guild": null
+        "id": "474051954998509571"
       }
     },
     "scopes": [
@@ -324,22 +234,7 @@
       "is_verified": true,
       "is_discoverable": true,
       "bot": {
-        "id": "658698521570181140",
-        "username": "Raid Organizer",
-        "avatar": "6f0359e5b55b249b959cddbf2feb5d52",
-        "discriminator": "1884",
-        "public_flags": 65536,
-        "flags": 65536,
-        "bot": true,
-        "banner": null,
-        "accent_color": null,
-        "global_name": null,
-        "avatar_decoration_data": null,
-        "collectibles": null,
-        "display_name_styles": null,
-        "banner_color": null,
-        "clan": null,
-        "primary_guild": null
+        "id": "658698521570181140"
       }
     },
     "scopes": [
@@ -370,22 +265,7 @@
       "is_verified": true,
       "is_discoverable": true,
       "bot": {
-        "id": "235148962103951360",
-        "username": "Carl-bot",
-        "avatar": "ed3dac3b6e7a851df781632a4295fcb9",
-        "discriminator": "1536",
-        "public_flags": 65536,
-        "flags": 65536,
-        "bot": true,
-        "banner": null,
-        "accent_color": null,
-        "global_name": null,
-        "avatar_decoration_data": null,
-        "collectibles": null,
-        "display_name_styles": null,
-        "banner_color": null,
-        "clan": null,
-        "primary_guild": null
+        "id": "235148962103951360"
       }
     },
     "scopes": [
@@ -417,22 +297,7 @@
       "is_verified": true,
       "is_discoverable": false,
       "bot": {
-        "id": "491614535812120596",
-        "username": "Restream Bot",
-        "avatar": "4b9d523f9c9ff99639bc23c27c42fa58",
-        "discriminator": "0342",
-        "public_flags": 65536,
-        "flags": 65536,
-        "bot": true,
-        "banner": null,
-        "accent_color": null,
-        "global_name": null,
-        "avatar_decoration_data": null,
-        "collectibles": null,
-        "display_name_styles": null,
-        "banner_color": null,
-        "clan": null,
-        "primary_guild": null
+        "id": "491614535812120596"
       }
     },
     "scopes": [
@@ -463,22 +328,7 @@
       "is_verified": true,
       "is_discoverable": true,
       "bot": {
-        "id": "402528814548254720",
-        "username": "PatchBot",
-        "avatar": "f0d2e9f7fd8250932d2b7353e984f987",
-        "discriminator": "0303",
-        "public_flags": 589824,
-        "flags": 589824,
-        "bot": true,
-        "banner": null,
-        "accent_color": null,
-        "global_name": null,
-        "avatar_decoration_data": null,
-        "collectibles": null,
-        "display_name_styles": null,
-        "banner_color": null,
-        "clan": null,
-        "primary_guild": null
+        "id": "402528814548254720"
       }
     },
     "scopes": [
@@ -510,22 +360,7 @@
       "is_verified": true,
       "is_discoverable": true,
       "bot": {
-        "id": "302050872383242240",
-        "username": "DISBOARD",
-        "avatar": "67342a774a9f2d20d62bfc8553bb98e0",
-        "discriminator": "2760",
-        "public_flags": 589824,
-        "flags": 589824,
-        "bot": true,
-        "banner": null,
-        "accent_color": null,
-        "global_name": null,
-        "avatar_decoration_data": null,
-        "collectibles": null,
-        "display_name_styles": null,
-        "banner_color": null,
-        "clan": null,
-        "primary_guild": null
+        "id": "302050872383242240"
       }
     },
     "scopes": [
@@ -556,22 +391,7 @@
       "is_verified": true,
       "is_discoverable": true,
       "bot": {
-        "id": "495388016756523020",
-        "username": "GameServerApp.com",
-        "avatar": "0bef9a807c0d2258c4bbb1ac0b541297",
-        "discriminator": "1450",
-        "public_flags": 589824,
-        "flags": 589824,
-        "bot": true,
-        "banner": null,
-        "accent_color": null,
-        "global_name": null,
-        "avatar_decoration_data": null,
-        "collectibles": null,
-        "display_name_styles": null,
-        "banner_color": null,
-        "clan": null,
-        "primary_guild": null
+        "id": "495388016756523020"
       }
     },
     "scopes": [
@@ -603,22 +423,7 @@
       "is_verified": true,
       "is_discoverable": true,
       "bot": {
-        "id": "536991182035746816",
-        "username": "Wick",
-        "avatar": "c850c9bbeb25e119a4c85a9bfdb7871e",
-        "discriminator": "3938",
-        "public_flags": 65536,
-        "flags": 65536,
-        "bot": true,
-        "banner": null,
-        "accent_color": null,
-        "global_name": null,
-        "avatar_decoration_data": null,
-        "collectibles": null,
-        "display_name_styles": null,
-        "banner_color": null,
-        "clan": null,
-        "primary_guild": null
+        "id": "536991182035746816"
       }
     },
     "scopes": [
@@ -650,22 +455,7 @@
       "is_verified": true,
       "is_discoverable": false,
       "bot": {
-        "id": "476259371912003597",
-        "username": "Discord.Me",
-        "avatar": "dfecd897bfe9a05619470338ea3a3cd4",
-        "discriminator": "8575",
-        "public_flags": 65536,
-        "flags": 65536,
-        "bot": true,
-        "banner": null,
-        "accent_color": null,
-        "global_name": null,
-        "avatar_decoration_data": null,
-        "collectibles": null,
-        "display_name_styles": null,
-        "banner_color": null,
-        "clan": null,
-        "primary_guild": null
+        "id": "476259371912003597"
       }
     },
     "scopes": [
@@ -696,22 +486,7 @@
       "is_verified": true,
       "is_discoverable": true,
       "bot": {
-        "id": "628400349979344919",
-        "username": "StickyBot",
-        "avatar": "b2aed74a6631ee9755a8ae56d8e582a8",
-        "discriminator": "0392",
-        "public_flags": 65536,
-        "flags": 65536,
-        "bot": true,
-        "banner": null,
-        "accent_color": null,
-        "global_name": null,
-        "avatar_decoration_data": null,
-        "collectibles": null,
-        "display_name_styles": null,
-        "banner_color": null,
-        "clan": null,
-        "primary_guild": null
+        "id": "628400349979344919"
       }
     },
     "scopes": [
@@ -743,22 +518,7 @@
       "is_verified": true,
       "is_discoverable": false,
       "bot": {
-        "id": "307998818547531777",
-        "username": "Medal",
-        "avatar": "599ce1e7fb1152662b42404f3c323b71",
-        "discriminator": "1237",
-        "public_flags": 589824,
-        "flags": 589824,
-        "bot": true,
-        "banner": null,
-        "accent_color": null,
-        "global_name": null,
-        "avatar_decoration_data": null,
-        "collectibles": null,
-        "display_name_styles": null,
-        "banner_color": null,
-        "clan": null,
-        "primary_guild": null
+        "id": "307998818547531777"
       }
     },
     "scopes": [
@@ -790,22 +550,7 @@
       "is_verified": true,
       "is_discoverable": true,
       "bot": {
-        "id": "903380664336928798",
-        "username": "ChronicleBot",
-        "avatar": "c4f2acf2da4459bd93ac9787b3072d81",
-        "discriminator": "0372",
-        "public_flags": 589824,
-        "flags": 589824,
-        "bot": true,
-        "banner": null,
-        "accent_color": null,
-        "global_name": null,
-        "avatar_decoration_data": null,
-        "collectibles": null,
-        "display_name_styles": null,
-        "banner_color": null,
-        "clan": null,
-        "primary_guild": null
+        "id": "903380664336928798"
       }
     },
     "scopes": [
@@ -836,22 +581,7 @@
       "is_verified": false,
       "is_discoverable": false,
       "bot": {
-        "id": "1539711683898118154",
-        "username": "Owen",
-        "avatar": null,
-        "discriminator": "2309",
-        "public_flags": 0,
-        "flags": 0,
-        "bot": true,
-        "banner": null,
-        "accent_color": null,
-        "global_name": null,
-        "avatar_decoration_data": null,
-        "collectibles": null,
-        "display_name_styles": null,
-        "banner_color": null,
-        "clan": null,
-        "primary_guild": null
+        "id": "1539711683898118154"
       }
     },
     "scopes": [
@@ -882,22 +612,7 @@
       "is_verified": true,
       "is_discoverable": false,
       "bot": {
-        "id": "613156357239078913",
-        "username": "Poker Now Bot",
-        "avatar": "aeb31bd96e53cb5b91f0241a40d85efc",
-        "discriminator": "8842",
-        "public_flags": 65536,
-        "flags": 65536,
-        "bot": true,
-        "banner": null,
-        "accent_color": null,
-        "global_name": null,
-        "avatar_decoration_data": null,
-        "collectibles": null,
-        "display_name_styles": null,
-        "banner_color": null,
-        "clan": null,
-        "primary_guild": null
+        "id": "613156357239078913"
       }
     },
     "scopes": [
@@ -928,22 +643,7 @@
       "is_verified": true,
       "is_discoverable": true,
       "bot": {
-        "id": "953577640403550248",
-        "username": "LFG Tool",
-        "avatar": "74b686a2ed7f5446ae3fc8d2c1014c9f",
-        "discriminator": "4456",
-        "public_flags": 65536,
-        "flags": 65536,
-        "bot": true,
-        "banner": null,
-        "accent_color": null,
-        "global_name": null,
-        "avatar_decoration_data": null,
-        "collectibles": null,
-        "display_name_styles": null,
-        "banner_color": null,
-        "clan": null,
-        "primary_guild": null
+        "id": "953577640403550248"
       }
     },
     "scopes": [
@@ -974,22 +674,7 @@
       "is_verified": false,
       "is_discoverable": false,
       "bot": {
-        "id": "1469137636663758888",
-        "username": "Autoexec",
-        "avatar": null,
-        "discriminator": "9249",
-        "public_flags": 0,
-        "flags": 0,
-        "bot": true,
-        "banner": null,
-        "accent_color": null,
-        "global_name": null,
-        "avatar_decoration_data": null,
-        "collectibles": null,
-        "display_name_styles": null,
-        "banner_color": null,
-        "clan": null,
-        "primary_guild": null
+        "id": "1469137636663758888"
       }
     },
     "scopes": [
@@ -1021,22 +706,7 @@
       "is_verified": true,
       "is_discoverable": true,
       "bot": {
-        "id": "159985870458322944",
-        "username": "MEE6",
-        "avatar": "765030df32975c5b23f8dfe86d6ff520",
-        "discriminator": "4876",
-        "public_flags": 65536,
-        "flags": 65536,
-        "bot": true,
-        "banner": null,
-        "accent_color": null,
-        "global_name": null,
-        "avatar_decoration_data": null,
-        "collectibles": null,
-        "display_name_styles": null,
-        "banner_color": null,
-        "clan": null,
-        "primary_guild": null
+        "id": "159985870458322944"
       }
     },
     "scopes": [
@@ -1068,22 +738,7 @@
       "is_verified": true,
       "is_discoverable": true,
       "bot": {
-        "id": "436515089441488907",
-        "username": "Color-Chan",
-        "avatar": "c28c5c4d8238208798db728243772cc7",
-        "discriminator": "4928",
-        "public_flags": 589824,
-        "flags": 589824,
-        "bot": true,
-        "banner": null,
-        "accent_color": null,
-        "global_name": null,
-        "avatar_decoration_data": null,
-        "collectibles": null,
-        "display_name_styles": null,
-        "banner_color": null,
-        "clan": null,
-        "primary_guild": null
+        "id": "436515089441488907"
       }
     },
     "scopes": [

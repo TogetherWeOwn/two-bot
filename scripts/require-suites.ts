@@ -36,6 +36,16 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     why: 'the whole web_v1 contract the website reads, including the role grants',
   },
   {
+    // TOG-6489 slice. The campaigns operator CLI executed end to end through
+    // the real npm entry: --add creates the row, the bare list shows it, a
+    // duplicate --add fails naming "already exists", and the new slug 302s
+    // over loopback HTTP. Counted from the 4 top-level test() blocks; CI's
+    // postgres job confirms the count on the first run after this commit.
+    file: 'test/e2e.campaigns.test.ts',
+    minTests: 4,
+    why: 'the campaigns --add/--list operator path itself, not just the CampaignStore underneath it',
+  },
+  {
     file: 'test/e2e.backup.test.ts',
     minTests: 7,
     why: 'the dump/restore round trip - the only thing standing behind a restore',
@@ -81,6 +91,15 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     why: 'the reward-role probe writing nothing, proved by a database that refuses the write',
   },
   {
+    // TOG-4444. The staging reward-role apply path: grant/readback/revoke
+    // through the CLI, its audit row, and the triggers that refuse a
+    // reward-config write or a live-guild audit row. Floor is the file's test
+    // count as written; not yet measured against a Postgres run.
+    file: 'test/e2e.levelrewardroleapply.test.ts',
+    minTests: 10,
+    why: 'the staging reward-role apply writing only the staging guild, proved by a database that refuses the rest',
+  },
+  {
     file: 'test/e2e.stagingrestart.test.ts',
     minTests: 1,
     why: 'real entrypoint containment across three restarts, zero Discord mutations and pre-persistence actor filtering',
@@ -104,6 +123,19 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     file: 'test/e2e.runbook-health.test.ts',
     minTests: 3,
     why: 'the runbook liveness verdict going green against the mock harness, or its skips going unlisted',
+  },
+  {
+    // TOG-7198. The moderation kill-switch flip cycle: all nine verbs execute
+    // through the live signed endpoint, all nine refuse at the allowlist gate
+    // with zero Discord calls after a disable restart, and all nine recover
+    // on re-enable. Needs a real Postgres for the warn row and the durable
+    // idempotency claim. A run that quietly stopped including this file would
+    // leave the mid-flow disable unproved while the static gating in PR #216
+    // stays green.
+    // Measured 2026-09-27 against Postgres 17.11, at this commit.
+    file: 'test/e2e.moderation-killswitch-flip.test.ts',
+    minTests: 3,
+    why: 'the moderation kill-switch refuse/recover cycle through the live endpoint, or a half-disabled slice ships unnoticed',
   },
 ];
 
