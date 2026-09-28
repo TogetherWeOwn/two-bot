@@ -290,11 +290,52 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     });
   };
 
+  /**
+   * One chain per guild for invite snapshots, not one concurrent handler per
+   * join (TOG-8306). discord.js dispatches every gateway event to an async
+   * listener without awaiting the previous one, and `diffAndStore` is a
+   * read-modify-write across several statements with awaits between them. Two
+   * joins through different codes on the same tick interleaved like this:
+   *
+   *   join A fetches (A +1) -> join B fetches (A +1, B +1) ->
+   *   A reads the stored baseline -> B reads the SAME stored baseline ->
+   *   A stores its snapshot -> B diffs against the stale baseline and sees
+   *   both codes grow, attributing an exactly-attributable join
+   *   `ambiguous:A+B` (and A's stored write can clobber B's counter back
+   *   down, poisoning the next join too).
+   *
+   * Chaining the whole fetch-plus-diff per guild closes it: the second
+   * snapshot's baseline read cannot run until the first snapshot's write has
+   * committed, and invite counters only move up, so each join sees exactly
+   * its own delta. The InviteCreate refresh takes the same chain so a new
+   * code cannot shift the baseline mid-join either. Same per-subject
+   * precedent as the voice frames below (TOG-5981): a stuck fetch for guild
+   * A never stalls guild B. Scoped to this call so each test bus gets a
+   * fresh map; single-process scope is enough because one bot owns the
+   * gateway for a guild.
+   */
+  const inviteChains = new Map<string, Promise<unknown>>();
+  const chainedSnapshotInvites = (guild: Guild): Promise<string[]> => {
+    // Reserve synchronously at dispatch: both same-tick joins for one guild
+    // are ordered in the chain before either awaits anything.
+    const prev = inviteChains.get(guild.id) ?? Promise.resolve();
+    const next = prev.then(() => snapshotInvites(guild, invites));
+    // snapshotInvites never rejects (it catches into []), but the stored
+    // guard must never reject either or the chain breaks for every later
+    // join; the waiter still gets the real outcome via `next`.
+    const guard: Promise<unknown> = next.catch(() => {});
+    inviteChains.set(guild.id, guard);
+    void guard.finally(() => {
+      if (inviteChains.get(guild.id) === guard) inviteChains.delete(guild.id);
+    });
+    return next;
+  };
+
   client.once(Events.ClientReady, async (c) => {
     log.info('ready', { user: c.user.tag, guilds: c.guilds.cache.size });
     if (!contained) {
       for (const guild of c.guilds.cache.values()) {
-        await snapshotInvites(guild, invites);
+        await chainedSnapshotInvites(guild);
       }
     }
   });
@@ -306,7 +347,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
       // Snapshot regardless of how this member arrived, so the counters stay
       // current for the next organic join. A one-click join consumes no invite,
       // so for it the diff legitimately shows nothing grew.
-      const grew = contained ? [] : await snapshotInvites(member.guild, invites);
+      const grew = contained ? [] : await chainedSnapshotInvites(member.guild);
 
       // The web path's expected join beats the invite diff: a code that grew in
       // the same window belongs to some other join's event. Contained runs have
@@ -642,7 +683,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
   client.on(Events.ShardReady, () => dropSessionsOnReconnect('voice_sessions_dropped_on_fresh_session'));
 
   client.on(Events.InviteCreate, async (invite) => {
-    if (!contained && invite.guild) await snapshotInvites(invite.guild as Guild, invites);
+    if (!contained && invite.guild) await chainedSnapshotInvites(invite.guild as Guild);
   });
 
   client.on(Events.GuildAuditLogEntryCreate, (entry, guild) => {
