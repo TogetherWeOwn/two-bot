@@ -548,8 +548,12 @@ body {
 .tablewrap { overflow-x: auto; max-width: 100%; }
 .tablewrap:focus-visible { outline: 2px solid var(--series); outline-offset: 2px; }
 .tablewrap table.chart { min-width: 560px; }
-/* Two-column tables (invite sources) fit a phone as-is — no scroll region needed. */
+/* Two-column tables (invite sources) fit a phone as-is — no scroll region needed.
+   The row headers must be allowed to wrap: with nowrap, a long source name
+   ("Before tracking (imported history)") forces the table wider than 360px
+   and the region scrolls after all. */
 .tablewrap table.chart.narrow { min-width: 0; }
+.tablewrap table.chart.narrow tbody th { white-space: normal; }
 .head h1 { margin: 0 0 4px; font-size: 28px; letter-spacing: -0.02em; }
 .meta { margin: 0 0 24px; color: var(--ink-2); font-size: 13px; }
 .card {
@@ -618,5 +622,9 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0
   .barcell { width: 34%; }
   table.chart th, table.chart td { padding: 6px 6px; }
   .bar { max-width: 72px; }
+  /* The two-column sources table must fit 360px with no scroll region: its
+     value column is ~100px wide, and a 72px bar + 8px gap + a 4-5 digit
+     value overflows it by ~16px. 48px bars still read as magnitude. */
+  .tablewrap table.chart.narrow .bar { max-width: 48px; }
 }
 `;
