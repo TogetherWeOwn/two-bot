@@ -17,6 +17,14 @@ import type { AddressInfo } from 'node:net';
 import { randomUUID } from 'node:crypto';
 import { GAME_PICKS, GAME_HUB_CHANNEL_ID, GATED_CATEGORIES, GUILD_ID as TWO_GUILD_ID } from '../../src/onboarding/catalog.ts';
 import { LOOKING_TO_PLAY_CHANNEL_ID, LOBBY_VOICE_CHANNEL_ID } from '../../src/onboarding/session.ts';
+import {
+  STAGING_INVITE_PERMISSIONS,
+  STAGING_ROLES,
+  STAGING_SERVER_NAME,
+  STAGING_TEXT_CHANNELS,
+  STAGING_VOICE_CHANNELS,
+  TWO_STAGING_GUILD_ID,
+} from '../../src/staging/spec.ts';
 
 /**
  * Defaults use TWO's catalog ids so onboarding role/channel routing stays
@@ -104,6 +112,15 @@ export interface MockDiscord {
   /** Simulate the member leaving the guild (triggers goodbye, TOG-1644). */
   memberRemove(memberId: string, username: string, guildId?: string): void;
 
+  // --- staging-verify surface (TOG-8295) ------------------------------------
+  /**
+   * Channel history the audit-marker reconciliation reads, keyed by channel
+   * id. Only consulted when this mock was started with `stagingVerify: true`;
+   * anything unseeded reads back empty, so a missing marker is a FAIL in the
+   * script rather than a 500 here.
+   */
+  seedChannelHistory(channelId: string, messages: StagingVerifySeedMessage[]): void;
+
   // --- internal actions endpoint (TWO-59) -----------------------------------
   /** Seed the roles GET /guilds/x/members/y reports, so already_held is reachable. */
   setMemberRoles(memberId: string, roleIds: string[]): void;
@@ -115,7 +132,7 @@ export interface MockDiscord {
 
 const VIEW_CHANNEL = 1n << 10n;
 
-function rolePayload(id: string, name: string, position: number, permissions = '0') {
+function rolePayload(id: string, name: string, position: number, permissions = '0', tags?: { bot_id: string }) {
   return {
     id,
     name,
@@ -126,7 +143,134 @@ function rolePayload(id: string, name: string, position: number, permissions = '
     managed: false,
     mentionable: false,
     flags: 0,
+    ...(tags ? { tags } : {}),
   };
+}
+
+/**
+ * Fixture-block ids for the staging-verify surface (TOG-8295). The guild id
+ * itself must be the real TWO Staging guild - `stagingGuildId()` refuses
+ * anything else - but every channel and role id inside it is mock-local, so
+ * they come from the reserved fixture block and can never name a live object.
+ */
+export const STAGING_VERIFY_BOT_ROLE_ID = '900000000000000041';
+export const STAGING_VERIFY_CHANNELS = {
+  welcome: '900000000000000031',
+  /** Doubles as the goodbye channel: DISCORD_GOODBYE_CHANNEL_IDS points here. */
+  general: '900000000000000032',
+  events: '900000000000000033',
+  botLog: '900000000000000034',
+  auditLog: '900000000000000035',
+  voiceLog: '900000000000000036',
+  moderationLog: '900000000000000037',
+  voice1: '900000000000000038',
+  tempVoiceCategory: '900000000000000039',
+  tempVoiceGenerator: '900000000000000040',
+} as const;
+/** Not the bot: the verifier exercises the non-owner permission path. */
+const STAGING_VERIFY_OWNER_ID = '900000000000000099';
+
+/**
+ * Panel messages the full-sweep self-role slice reads (TOG-8295). The test
+ * owns the panel JSON and imports these ids so the catalogue and the mock
+ * cannot drift; any other single-message fetch 404s, keeping the slice
+ * falsifiable.
+ */
+export const STAGING_VERIFY_PANEL_MESSAGES = {
+  buttons: '900000000000000061',
+  select: '900000000000000062',
+  reactions: '900000000000000063',
+} as const;
+
+/** One seeded channel-history row the audit-marker reconciliation reads. */
+export interface StagingVerifySeedMessage {
+  id: string;
+  content: string;
+  timestamp: string;
+}
+
+/**
+ * Mock-local ids for the STAGING_ROLES entries, in spec order. Exported so
+ * the staging-verify test builds its panel catalogue from the same ids the
+ * mock serves, instead of repeating the template.
+ */
+export const STAGING_VERIFY_ROLE_IDS: Record<(typeof STAGING_ROLES)[number], string> = {
+  Moderator: '900000000000000050',
+  Member: '900000000000000051',
+  'Game: Test': '900000000000000052',
+  'Game: Test 2': '900000000000000053',
+  'Color: Red': '900000000000000054',
+  'Color: Blue': '900000000000000055',
+};
+
+/** The mock bot's own user id, served by GET /users/@me when stagingVerify is on. */
+export const MOCK_BOT_USER_ID = BOT_ID;
+
+/** Every STAGING_ROLES entry below the bot's managed role, so none is blocked. */
+function stagingVerifyRolesPayload(guildId: string) {
+  return [
+    rolePayload(guildId, '@everyone', 0, '0'),
+    ...STAGING_ROLES.map((name, i) => rolePayload(STAGING_VERIFY_ROLE_IDS[name], name, 10 + i, '0')),
+    {
+      ...rolePayload(
+        STAGING_VERIFY_BOT_ROLE_ID,
+        'Owen Staging',
+        100,
+        String(STAGING_INVITE_PERMISSIONS),
+        { bot_id: BOT_ID },
+      ),
+      managed: true,
+    },
+  ];
+}
+
+/**
+ * The spec channel set: every STAGING_TEXT_CHANNELS entry (the three staff
+ * logs private to @everyone), the STAGING_VOICE_CHANNELS entry, plus the
+ * temp-voice category and generator the --case=temp-voice slice resolves.
+ * Names come from the spec; only the ids are fixture-local.
+ */
+function stagingVerifyChannelsPayload(guildId: string) {
+  const text = (id: string, name: string) => ({
+    id, type: 0, guild_id: guildId, name, position: 0,
+    permission_overwrites: [], nsfw: false,
+  });
+  const staffLog = (id: string, name: string) => ({
+    id, type: 0, guild_id: guildId, name, position: 0,
+    permission_overwrites: [{ id: guildId, type: 0, allow: '0', deny: String(VIEW_CHANNEL) }],
+    nsfw: false,
+  });
+  const textId: Record<string, string> = {
+    welcome: STAGING_VERIFY_CHANNELS.welcome,
+    general: STAGING_VERIFY_CHANNELS.general,
+    events: STAGING_VERIFY_CHANNELS.events,
+    'bot-log': STAGING_VERIFY_CHANNELS.botLog,
+    'audit-log': STAGING_VERIFY_CHANNELS.auditLog,
+    'voice-log': STAGING_VERIFY_CHANNELS.voiceLog,
+    'moderation-log': STAGING_VERIFY_CHANNELS.moderationLog,
+  };
+  const staffLogs = new Set(['audit-log', 'voice-log', 'moderation-log']);
+  const channels = STAGING_TEXT_CHANNELS.map((name) => {
+    const id = textId[name] ?? `90000000000000007${STAGING_TEXT_CHANNELS.indexOf(name)}`;
+    return staffLogs.has(name) ? staffLog(id, name) : text(id, name);
+  });
+  return [
+    ...channels,
+    {
+      id: STAGING_VERIFY_CHANNELS.voice1, type: 2, guild_id: guildId,
+      name: STAGING_VOICE_CHANNELS[0] ?? 'Voice 1', position: 1, permission_overwrites: [],
+      bitrate: 64000, user_limit: 0,
+    },
+    {
+      id: STAGING_VERIFY_CHANNELS.tempVoiceCategory, type: 4, guild_id: guildId,
+      name: 'Voice Rooms', position: 5, permission_overwrites: [],
+    },
+    {
+      id: STAGING_VERIFY_CHANNELS.tempVoiceGenerator, type: 2, guild_id: guildId,
+      name: 'Join to Create', position: 6, parent_id: STAGING_VERIFY_CHANNELS.tempVoiceCategory,
+      permission_overwrites: [], bitrate: 64000, user_limit: 0,
+    },
+  ];
 }
 
 /**
@@ -331,11 +475,19 @@ function userPayload(id: string, username: string, bot = false) {
 }
 
 export async function startMockDiscord(
-  opts: { lighting?: Lighting; guildId?: string } = {},
+  opts: { lighting?: Lighting; guildId?: string; stagingVerify?: boolean } = {},
 ): Promise<MockDiscord> {
   // Instance-local: fixtures can exercise staging exclusions without changing
   // the production catalog, or another concurrently running mock's identity.
   const GUILD_ID = opts.guildId ?? TWO_GUILD_ID;
+  /**
+   * The staging-verify REST surface (TOG-8295). Opt-in so the onboarding
+   * fixtures keep their exact current answers: every route below is keyed to
+   * this mock's own guild id and only fires when the flag is on.
+   */
+  const stagingVerify = opts.stagingVerify === true && GUILD_ID === TWO_STAGING_GUILD_ID;
+  /** Seeded channel history for the audit-marker reconciliation. */
+  const channelHistory = new Map<string, StagingVerifySeedMessage[]>();
   const invites: MockInvite[] = [{ code: 'twodev01', uses: 5, inviterId: '900000000000000099' }];
   const scheduledEvents: MockScheduledEvent[] = [];
   const captured: CapturedRequest[] = [];
@@ -589,6 +741,67 @@ export async function startMockDiscord(
       return json({ ...existing, guild_id: GUILD_ID });
     }
 
+    // --- staging-verify surface (TOG-8295) ---------------------------------
+    // Flag-gated: with the flag off every one of these falls through to the
+    // empty answer below, exactly as before. The verifier is pure REST, so
+    // the gateway side of this mock is untouched.
+    if (stagingVerify) {
+      const path = url.split('?')[0] ?? url;
+
+      if (path === '/api/v10/users/@me') {
+        return json({ id: BOT_ID, username: 'two-dev-bot' });
+      }
+
+      if (path === '/api/v10/applications/@me') {
+        // Both privileged intents the verifier checks: Server Members and
+        // Message Content, limited and full bits.
+        return json({ id: BOT_ID, flags: (1 << 14) | (1 << 15) | (1 << 18) | (1 << 19) });
+      }
+
+      let g = /\/api\/v10\/guilds\/(\d+)$/.exec(path);
+      if (g && g[1] === GUILD_ID) {
+        return json({ id: GUILD_ID, name: STAGING_SERVER_NAME, owner_id: STAGING_VERIFY_OWNER_ID });
+      }
+
+      g = /\/api\/v10\/guilds\/(\d+)\/roles$/.exec(path);
+      if (g && g[1] === GUILD_ID) {
+        return json(stagingVerifyRolesPayload(GUILD_ID));
+      }
+
+      g = /\/api\/v10\/guilds\/(\d+)\/channels$/.exec(path);
+      if (g && g[1] === GUILD_ID) {
+        return json(stagingVerifyChannelsPayload(GUILD_ID));
+      }
+
+      g = /\/api\/v10\/guilds\/(\d+)\/audit-logs$/.exec(path);
+      if (g && g[1] === GUILD_ID) {
+        return json({ audit_log_entries: [] });
+      }
+
+      const single = /\/api\/v10\/channels\/(\d+)\/messages\/(\d+)$/.exec(path);
+      if (single) {
+        const [, channelId, messageId] = single;
+        const knownPanel = (Object.values(STAGING_VERIFY_PANEL_MESSAGES) as string[]).includes(messageId ?? '');
+        if (knownPanel) return json({ id: messageId, channel_id: channelId });
+        const seeded = (channelHistory.get(channelId ?? '') ?? []).some((m) => m.id === messageId);
+        if (seeded) return json({ id: messageId, channel_id: channelId });
+        return json({ message: 'Unknown Message', code: 50035 }, 404);
+      }
+
+      const history = /\/api\/v10\/channels\/(\d+)\/messages$/.exec(path);
+      if (history) {
+        const rows = channelHistory.get(history[1] ?? '') ?? [];
+        return json(
+          rows.map((m) => ({
+            id: m.id,
+            content: m.content,
+            timestamp: m.timestamp,
+            author: userPayload(BOT_ID, 'two-dev-bot', true),
+          })),
+        );
+      }
+    }
+
     // Anything else the client happens to ask for: an empty, valid-looking answer.
     return json({});
   });
@@ -821,6 +1034,10 @@ export async function startMockDiscord(
 
     setMemberRoles(memberId: string, roleIds: string[]) {
       memberRoles.set(memberId, roleIds);
+    },
+
+    seedChannelHistory(channelId: string, messages: StagingVerifySeedMessage[]) {
+      channelHistory.set(channelId, messages);
     },
 
     selectSession(memberId, username, keys, guildId = GUILD_ID) {
