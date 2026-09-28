@@ -32,17 +32,39 @@ import type { DiscordOnboardingRota } from './onboardingRota.ts';
  *   Guilds              - required for any guild event at all
  *   GuildMembers        - member_join / member_leave        (PRIVILEGED)
  *   GuildMessages       - first_message + tickets + automod events
- *   MessageContent      - ticket transcripts and enabled automod (PRIVILEGED)
+ *   MessageContent      - ticket transcripts and enabled automod (PRIVILEGED,
+ *                         requested only when it can be used - see below)
  *   GuildMessageReactions - reaction-role add/remove        (metadata only)
  *   GuildVoiceStates    - first_voice_session + voice_session_start/end
  *   GuildInvites        - invite create/delete for attribution
  *   GuildModeration     - authoritative destructive-action audit entries
  *
- * MessageContent is required for MEE6-equivalent ticket export. Enabled automod
- * also inspects public messages in memory but never stores or logs their content.
- * Ticket retention and both erasure boundaries are documented in docs/PRIVACY.md.
+ * MessageContent is requested ONLY when enabled automod inspects public
+ * messages in memory (TWO_AUTOMOD === '1', exact match) or tickets are
+ * configured (all three of DISCORD_TICKET_CATEGORY_ID,
+ * DISCORD_TICKET_STAFF_ROLE_ID and DISCORD_TICKET_PANEL_CHANNEL_ID set,
+ * non-empty - the same all-three-present check as the registration guard in
+ * src/index.ts). Otherwise the gateway never receives privileged message
+ * content, matching docs/SECRETS.md ("leave OFF - we count that a message
+ * happened; we never read it") and docs/PRIVACY.md. Ticket retention and both
+ * erasure boundaries are documented in docs/PRIVACY.md.
+ *
+ * Bitfields: full set 34503 (7-intent gated set 1735 + MessageContent 32768);
+ * gated set 1735 = Guilds 1 + GuildMembers 2 + GuildModeration 4 +
+ * GuildInvites 64 + GuildVoiceStates 128 + GuildMessages 512 +
+ * GuildMessageReactions 1024. Reduced/contained set (TOG-4011) stays 643.
  */
-const BASE_INTENTS = [
+const GATED_INTENTS = [
+  GatewayIntentBits.Guilds,
+  GatewayIntentBits.GuildModeration,
+  GatewayIntentBits.GuildMembers,
+  GatewayIntentBits.GuildMessages,
+  GatewayIntentBits.GuildMessageReactions,
+  GatewayIntentBits.GuildVoiceStates,
+  GatewayIntentBits.GuildInvites,
+];
+
+const FULL_INTENTS = [
   GatewayIntentBits.Guilds,
   GatewayIntentBits.GuildModeration,
   GatewayIntentBits.GuildMembers,
@@ -53,8 +75,31 @@ const BASE_INTENTS = [
   GatewayIntentBits.GuildInvites,
 ];
 
-export function intents(_automodEnabled = process.env.TWO_AUTOMOD === '1'): GatewayIntentBits[] {
-  return [...BASE_INTENTS];
+/**
+ * Registration guards are the source of truth for "tickets configured": the
+ * same all-three-present check as src/index.ts (`cfg.ticketCategoryId &&
+ * cfg.ticketStaffRoleId && cfg.ticketPanelChannelId`). Empty string counts as
+ * absent, matching `str()` in src/core/config.ts (`src.get(name) || null`).
+ */
+export function ticketsConfigured(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(
+    env.DISCORD_TICKET_CATEGORY_ID &&
+      env.DISCORD_TICKET_STAFF_ROLE_ID &&
+      env.DISCORD_TICKET_PANEL_CHANNEL_ID,
+  );
+}
+
+/** MessageContent is justified only by enabled automod or configured tickets. */
+export function needsMessageContent(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env.TWO_AUTOMOD === '1' || ticketsConfigured(env);
+}
+
+export function intents(
+  automodEnabled = process.env.TWO_AUTOMOD === '1',
+  env: NodeJS.ProcessEnv = process.env,
+): GatewayIntentBits[] {
+  const need = automodEnabled || ticketsConfigured(env);
+  return need ? [...FULL_INTENTS] : [...GATED_INTENTS];
 }
 
 export const INTENTS = intents();
@@ -97,9 +142,15 @@ export function capabilityScoped(env: NodeJS.ProcessEnv = process.env): boolean 
   return env[STAGING_RESTART_CONTAINMENT_FLAG] === '1';
 }
 
-/** Message content is already required by tickets/automod on current main. */
+/**
+ * The Identify-frame capability for this run. Containment wins first; otherwise
+ * the passed `env` threads through the MessageContent gating decision, so a
+ * caller-supplied env never reads a stale module-load cache. `INTENTS` above
+ * remains the process-env evaluation at import for production.
+ */
 export function intentsFor(env: NodeJS.ProcessEnv = process.env): GatewayIntentBits[] {
-  return capabilityScoped(env) ? [...REDUCED_INTENTS] : [...INTENTS];
+  if (capabilityScoped(env)) return [...REDUCED_INTENTS];
+  return intents(env.TWO_AUTOMOD === '1', env);
 }
 
 export interface BotDeps {
@@ -151,8 +202,15 @@ export function createClient(
   automodEnabled = process.env.TWO_AUTOMOD === '1',
   env: NodeJS.ProcessEnv = process.env,
 ): Client {
+  // Containment wins first (see intentsFor). Otherwise the explicit automod
+  // flag and the passed env both thread through gating: an explicit `true`
+  // (tests, callers) justifies MessageContent even when `env` is an empty
+  // object, and ticket vars in `env` justify it even when the flag is false.
+  const mainIntents = capabilityScoped(env)
+    ? intentsFor(env)
+    : intents(automodEnabled || env.TWO_AUTOMOD === '1', env);
   return new Client({
-    intents: intentsFor(env),
+    intents: mainIntents,
     partials: automodEnabled
       ? [...new Set([...PARTIALS, Partials.Channel])]
       : PARTIALS,
@@ -360,7 +418,9 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
 
   client.on(Events.GuildMemberRemove, async (member) => {
     if (!accepts(member.guild.id, member.id)) return;
-    await handlers.onLeave(member.guild.id, member.id);
+    // A server-leave is also a voice-leave: Discord drops them from voice with
+    // no VoiceStateUpdate, so onLeave closes any open session (TOG-6122).
+    await handlers.onLeave(member.guild.id, member.id, undefined, { isBot: !!member.user?.bot });
   });
 
   const inspectAutomod = async (msg: {
@@ -476,7 +536,33 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     }
   });
 
-  client.on(Events.VoiceStateUpdate, async (oldState, newState) => {
+  /**
+   * One chain per member for voice frames, not one concurrent handler per
+   * frame (TOG-5981). discord.js dispatches every gateway event to an async
+   * listener without awaiting the previous one, so two frames for one member
+   * on the same tick interleaved: the move's `onVoiceLeave` chain-read the
+   * tracker BEFORE the join's `onVoiceJoin` chain-wrote it, and the end
+   * landed startKnown:false with a null duration even though the bot saw the
+   * start. Same per-subject chaining precedent as TOG-3695: a stuck write for
+   * member A never stalls member B, and unrelated members stay concurrent.
+   * Scoped to this registerHandlers call so tests get a fresh map per bus.
+   */
+  const voiceChains = new Map<string, Promise<void>>();
+  const chainVoice = (guildId: string, memberId: string, work: () => Promise<void>): void => {
+    // Reserve synchronously at dispatch: both same-tick frames for one member
+    // are ordered in the chain before either awaits anything.
+    const subject = `${guildId}:${memberId}`;
+    const tail = (voiceChains.get(subject) ?? Promise.resolve()).then(work).catch(() => {
+      // Error strings can contain SQL binds or Discord payloads. Never log them.
+      log.error('voice_state_update_failed', { guildId, memberId, classification: 'measurement_gap' });
+    });
+    voiceChains.set(subject, tail);
+    void tail.finally(() => {
+      if (voiceChains.get(subject) === tail) voiceChains.delete(subject);
+    });
+  };
+
+  client.on(Events.VoiceStateUpdate, (oldState, newState) => {
     // Discord fires this for mute, deafen, camera and go-live too. Only a
     // change of channel is a session boundary.
     if (oldState.channelId === newState.channelId) return;
@@ -485,60 +571,75 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     const memberId = newState.id ?? oldState.id;
     if (!accepts(guild.id, memberId)) return;
     const isBot = !!(newState.member ?? oldState.member)?.user?.bot;
+    const oldChannelId = oldState.channelId;
+    const newChannelId = newState.channelId;
+    const member = oldState.member ?? newState.member;
+    const guildId = guild.id;
 
-    // One timestamp for both halves. On a move from A to B the end and the
-    // start are the same instant, and taking nowIso() twice would make the
-    // pair look like a gap.
-    const at = nowIso();
-    const voiceKind = oldState.channelId
-      ? newState.channelId
-        ? 'voice_move'
-        : 'voice_leave'
-      : 'voice_join';
-    auditSafely({
-      entryId: `${voiceKind}:${guild.id}:${memberId}:${oldState.channelId ?? 'none'}:${newState.channelId ?? 'none'}:${at}`,
-      kind: voiceKind,
-      channel: 'voice',
-      guildId: guild.id,
-      occurredAt: at,
-      targetId: memberId,
-      sourceChannelId: oldState.channelId,
-      destinationChannelId: newState.channelId,
-      metadata: { isBot },
+    chainVoice(guildId, memberId, async () => {
+      // One timestamp for both halves. On a move from A to B the end and the
+      // start are the same instant, and taking nowIso() twice would make the
+      // pair look like a gap. Taken inside the chain so a queued frame stamps
+      // after the frame ahead of it finished, never before its start.
+      const at = nowIso();
+      const voiceKind = oldChannelId
+        ? newChannelId
+          ? 'voice_move'
+          : 'voice_leave'
+        : 'voice_join';
+      auditSafely({
+        entryId: `${voiceKind}:${guildId}:${memberId}:${oldChannelId ?? 'none'}:${newChannelId ?? 'none'}:${at}`,
+        kind: voiceKind,
+        channel: 'voice',
+        guildId,
+        occurredAt: at,
+        targetId: memberId,
+        sourceChannelId: oldChannelId,
+        destinationChannelId: newChannelId,
+        metadata: { isBot },
+      });
+
+      // End first, so a move reads as end(A) then start(B) in occurred order.
+      if (oldChannelId) {
+        await handlers.onVoiceLeave({
+          guildId,
+          memberId,
+          isBot,
+          channelId: oldChannelId,
+          occurredAt: at,
+          onLevelUp: levelUpRoleHook(member),
+        });
+      }
+      if (newChannelId) {
+        await handlers.onVoiceJoin({
+          guildId,
+          memberId,
+          isBot,
+          channelId: newChannelId,
+          occurredAt: at,
+        });
+      }
     });
-
-    // End first, so a move reads as end(A) then start(B) in occurred order.
-    if (oldState.channelId) {
-      const member = oldState.member ?? newState.member;
-      await handlers.onVoiceLeave({
-        guildId: guild.id,
-        memberId,
-        isBot,
-        channelId: oldState.channelId,
-        occurredAt: at,
-        onLevelUp: levelUpRoleHook(member),
-      });
-    }
-    if (newState.channelId) {
-      await handlers.onVoiceJoin({
-        guildId: guild.id,
-        memberId,
-        isBot,
-        channelId: newState.channelId,
-        occurredAt: at,
-      });
-    }
   });
 
   // A reconnect means we may have missed leaves while we were away, so every
   // session we think is open is now unproven. Dropping them costs the duration
   // on those sessions (they end with startKnown: false) and is the only
   // alternative to reporting a duration that silently includes the outage.
-  client.on(Events.ShardResume, () => {
+  // This covers BOTH gateway recovery paths (TOG-6123): ShardResume after a
+  // successful resume, and ShardReady after a fresh session - a full
+  // re-identify following an unresumable disconnect (InvalidSession with no
+  // stored session, Reconnect opcode, unrecoverable close). ShardReady only
+  // follows a READY dispatch, never a RESUMED one, so the two handlers never
+  // double-drop; on first-ever connect the tracker is empty and this is a
+  // no-op.
+  const dropSessionsOnReconnect = (event: string) => {
     const dropped = handlers.voiceSessions.openCount;
     handlers.voiceSessions.clear();
-    if (dropped) log.info('voice_sessions_dropped_on_resume', { dropped });
-  });
+    if (dropped) log.info(event, { dropped });
+  };
+  client.on(Events.ShardResume, () => dropSessionsOnReconnect('voice_sessions_dropped_on_resume'));
+  client.on(Events.ShardReady, () => dropSessionsOnReconnect('voice_sessions_dropped_on_fresh_session'));
 
   client.on(Events.InviteCreate, async (invite) => {
     if (!contained && invite.guild) await snapshotInvites(invite.guild as Guild, invites);

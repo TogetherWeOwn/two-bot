@@ -11,6 +11,15 @@
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 
+// --help prints usage without touching audit/raw (the reads below run at import time).
+if (process.argv.includes('--help')) {
+  console.log('usage: node scripts/audit-report.ts');
+  console.log('');
+  console.log('Turn audit/raw/*.json into the human-readable tables (channels/roles/invites CSVs, summary).');
+  console.log('Pure function of the raw dump: no network, no Discord; --help reads nothing.');
+  process.exit(0);
+}
+
 const RAW = 'audit/raw';
 const OUT = 'audit';
 const read = <T>(n: string): T => JSON.parse(readFileSync(`${RAW}/${n}.json`, 'utf8')) as T;

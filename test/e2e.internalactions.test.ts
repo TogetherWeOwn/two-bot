@@ -858,12 +858,20 @@ test('access_token appears in no log line: success, rejection, or thrown excepti
 test('the structured log line names the caller, the action and the outcome', async () => {
   const srv = await start();
   let line: Record<string, unknown> | undefined;
+  let requestId: string | undefined;
 
   const logs = await captureLogs(async () => {
-    await call(srv, { body: roleAssign });
+    const res = await call(srv, { body: roleAssign });
+    requestId = res.body.request_id;
   });
+  // Match on the request_id join key, not last-match-wins: the unknown_route
+  // 404 probe (keyId null) shares this stream whenever the runner overlaps
+  // tests, and last-match-wins picked it up (run 36344199113:
+  // null !== 'web-prod'). request_id is unique per request, so this selects
+  // exactly our line.
+  assert.ok(requestId, 'no request_id in response');
   for (const parsed of jsonLines(logs)) {
-    if (parsed.msg === 'internal_action') line = parsed;
+    if (parsed.msg === 'internal_action' && parsed.requestId === requestId) line = parsed;
   }
 
   assert.ok(line, 'no internal_action log line');
@@ -877,10 +885,15 @@ test('the structured log line names the caller, the action and the outcome', asy
 
 test('a rejection logs its reason code, so a run of them is diagnosable', async () => {
   const srv = await start();
+  let requestId: string | undefined;
   const logs = await captureLogs(async () => {
-    await call(srv, { body: roleAssign, timestamp: String(Math.floor(Date.now() / 1000) - 300) });
+    const res = await call(srv, { body: roleAssign, timestamp: String(Math.floor(Date.now() / 1000) - 300) });
+    requestId = res.body.request_id;
   });
-  const line = jsonLines(logs).find((l) => l.msg === 'internal_action');
+  // Same join-key selection as above: without it a concurrent test's
+  // internal_action line can satisfy `.find()` first.
+  assert.ok(requestId, 'no request_id in response');
+  const line = jsonLines(logs).find((l) => l.msg === 'internal_action' && l.requestId === requestId);
 
   assert.equal(line?.code, 'stale_request');
   assert.equal(line?.reason, 'stale_timestamp', 'a pile of these is a clock problem, and should read like one');
@@ -970,11 +983,19 @@ test('automations.import requires a key and sequential retries replay once', asy
 test('concurrent automations.import retries run the importer once', async () => {
   let release: (() => void) | null = null;
   const held = new Promise<void>((resolve) => { release = resolve; });
+  // Deterministic gate: the overlap must arrive while the first request holds
+  // the idempotency claim. A fixed sleep bets the first request finished auth +
+  // DB claim in N ms; on a busy runner it loses and the overlap becomes the
+  // claim holder (run 36349151484). The claim is taken before runAction, so
+  // the importer's entry proves the claim is held.
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
   let imports = 0;
   const srv = await start({
     automations: {
       async importMee6() {
         imports++;
+        markStarted();
         await held;
         return { imported: 1, skipped: 0 };
       },
@@ -986,7 +1007,7 @@ test('concurrent automations.import retries run the importer once', async () => 
   const body = { action: 'automations.import', commands: [{ command: 'faq', response: 'A' }] };
   const key = newKey();
   const first = call(srv, { body, idempotencyKey: key });
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await started;
   const overlap = await call(srv, { body, idempotencyKey: key });
   assert.equal(overlap.status, 409);
   assert.equal(overlap.body.error?.code, 'in_progress');
@@ -1076,9 +1097,15 @@ test('a concurrent retry gets in_progress, which is the one retryable 409', asyn
   const held = new Promise<void>((r) => {
     release = r;
   });
+  // Same deterministic gate as the concurrent-import test above: the claim is
+  // taken before runAction, so the action's entry proves the claim is held and
+  // the overlap deterministically sees in_flight instead of racing a sleep.
+  let markStarted!: () => void;
+  const started = new Promise<void>((r) => { markStarted = r; });
   const { client, calls } = recordingDiscord({
     async postMessage(c, _content) {
       calls.push(`postMessage:${c}`);
+      markStarted();
       await held;
       return 'msg-slow';
     },
@@ -1087,8 +1114,7 @@ test('a concurrent retry gets in_progress, which is the one retryable 409', asyn
   const key = newKey();
 
   const slow = call(srv, { body: announcement(), idempotencyKey: key });
-  // Let the first request claim the key before the second one arrives.
-  await new Promise((r) => setTimeout(r, 30));
+  await started;
   const overlapping = await call(srv, { body: announcement(), idempotencyKey: key });
 
   assert.equal(overlapping.status, 409);

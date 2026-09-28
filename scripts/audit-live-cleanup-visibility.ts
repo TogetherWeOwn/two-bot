@@ -39,6 +39,15 @@ import { LIVE_BOT_APPLICATION_ID } from '../src/staging/spec.ts';
 type FixtureMember = { user: { id: string; username: string; bot: boolean }; roles: string[]; premium_since: string | null; pending: boolean };
 type FixtureState = { guild: JsonObject; roles: Role[]; channels: Channel[]; members: FixtureMember[] };
 
+// --help boots with no snapshot read, no token, no network.
+if (process.argv.includes('--help')) {
+  console.log('usage: node scripts/audit-live-cleanup-visibility.ts [--snapshot <run-dir/snapshot/pre.json>]');
+  console.log('');
+  console.log('Independent post-plan visibility audit for the archive-legacy phase (fixture by default).');
+  console.log('Reports principals that can still see reviewed legacy channels; --help reads nothing.');
+  process.exit(0);
+}
+
 const snapshotArgument = process.argv.indexOf('--snapshot');
 if (snapshotArgument !== -1 && !process.argv[snapshotArgument + 1]) {
   console.error('--snapshot needs a path.');

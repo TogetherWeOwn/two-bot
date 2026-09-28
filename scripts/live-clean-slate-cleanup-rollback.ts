@@ -44,6 +44,14 @@ import {
 } from '../src/redesign/live-cleanup.ts';
 
 const argv = process.argv.slice(2);
+// --help boots with no token, no manifest read, no network.
+if (argv.includes('--help')) {
+  console.log('usage: node scripts/live-clean-slate-cleanup-rollback.ts --manifest <rollback.json> --confirm-main-guild --apply');
+  console.log('');
+  console.log('Undo an applied live-clean-slate phase from its journal-signed manifest, in reverse.');
+  console.log('Requires both --confirm-main-guild and --apply; --help contacts nothing and needs no token.');
+  process.exit(0);
+}
 const APPLY = argv.includes('--apply');
 const CONFIRMED = argv.includes('--confirm-main-guild');
 const token = process.env.DISCORD_BOT_TOKEN;
