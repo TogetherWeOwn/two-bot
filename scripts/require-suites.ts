@@ -184,6 +184,17 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     minTests: 2,
     why: 'the voice-sessions averages CLI itself, not just the helpers underneath it - without this floor a silent skip re-opens the startKnown averaging gap',
   },
+  {
+    // TOG-6493. The audit kill switch operated end to end through the real
+    // CLI: disengaged status on a fresh schema, halt engages and a second
+    // halt changes nothing, seeded pending rows are reported honestly, and
+    // resume disengages without dropping evidence. Counted from the 3
+    // top-level test() blocks; CI's postgres job confirms the count on the
+    // first run after this commit.
+    file: 'test/e2e.auditswitch.test.ts',
+    minTests: 3,
+    why: 'the audit halt/resume/status CLI path itself, not just the helpers underneath it - without this floor a silent skip re-opens the audit-script gap',
+  },
 ];
 
 /**
