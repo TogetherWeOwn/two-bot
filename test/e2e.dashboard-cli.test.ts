@@ -305,7 +305,7 @@ test('--json reports every documented panel with the fixture numbers', async () 
 
   // Where they came from: two attributed to the invite, one imported-history
   // bucket, one unknown - biggest first.
-  assert.deepEqual(d.sourcesAllTime, [
+  assert.deepStrictEqual(d.sourcesAllTime, [
     { label: 'Invite promo1', unattributed: false, joins: 2, source: 'invite:promo1' },
     {
       label: 'Before tracking (imported history)',
@@ -329,20 +329,20 @@ test('--json reports every documented panel with the fixture numbers', async () 
 
   // Retention: m1 is too new for any column; m2/m3/m4 form the old cohort.
   // m4 left 5 days after joining, so it stayed and was active at D1 only.
-  assert.deepEqual(d.retentionOverall.d1, { eligible: 3, stayed: 3, active: 3 });
-  assert.deepEqual(d.retentionOverall.d7, { eligible: 3, stayed: 3, active: 2 });
-  assert.deepEqual(d.retentionOverall.d30, { eligible: 3, stayed: 3, active: 2 });
+  assert.deepStrictEqual(d.retentionOverall.d1, { eligible: 3, stayed: 3, active: 3 });
+  assert.deepStrictEqual(d.retentionOverall.d7, { eligible: 3, stayed: 3, active: 2 });
+  assert.deepStrictEqual(d.retentionOverall.d30, { eligible: 3, stayed: 3, active: 2 });
   const oldCohort = d.cohorts.find((c) => c.weekStart === weekStart(d40))!;
   assert.equal(oldCohort.size, 3);
-  assert.deepEqual(oldCohort.d1, { eligible: 3, stayed: 3, active: 3 });
-  assert.deepEqual(oldCohort.gate, { observed: 2, cleared: 1, stuck: 1, leftAtTheGate: 0, unknowable: 1 });
+  assert.deepStrictEqual(oldCohort.d1, { eligible: 3, stayed: 3, active: 3 });
+  assert.deepStrictEqual(oldCohort.gate, { observed: 2, cleared: 1, stuck: 1, leftAtTheGate: 0, unknowable: 1 });
   const newCohort = d.cohorts.find((c) => c.weekStart === weekStart(joinAt))!;
   assert.equal(newCohort.size, 1);
   assert.equal(newCohort.d1, null, 'a days-old cohort has no D1 yet, not 0%');
-  assert.deepEqual(newCohort.gate, { observed: 1, cleared: 1, stuck: 0, leftAtTheGate: 0, unknowable: 0 });
+  assert.deepStrictEqual(newCohort.gate, { observed: 1, cleared: 1, stuck: 0, leftAtTheGate: 0, unknowable: 0 });
 
   // The gate: two cleared, m3 stuck at the door, m4 unknowable.
-  assert.deepEqual(d.gateOverall, {
+  assert.deepStrictEqual(d.gateOverall, {
     observed: 3,
     cleared: 2,
     stuck: 1,
@@ -353,7 +353,7 @@ test('--json reports every documented panel with the fixture numbers', async () 
   // Channels: alive / quiet / silent in snapshot order, with the funnel event
   // m1's first message landed on general.
   assert.equal(d.channelSnapshotAt, collectedAt);
-  assert.deepEqual(
+  assert.deepStrictEqual(
     d.channels.map((c) => [c.name, c.state]),
     [
       ['general', 'alive'],
@@ -442,7 +442,7 @@ test('an empty database renders honest zero-states, not zeros', async () => {
   assert.equal(d.retentionOverall.d7, null);
   assert.equal(d.retentionOverall.d30, null);
   assert.equal(d.gateOverall, null);
-  assert.deepEqual(d.channels, []);
+  assert.deepStrictEqual(d.channels, []);
   assert.equal(d.channelSnapshotAt, null);
 
   const outPath = join(dir, 'dashboard.html');
