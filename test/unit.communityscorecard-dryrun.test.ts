@@ -30,7 +30,11 @@ import { readFileSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { CommunityClassifier, loadCommunityClassifierConfig } from '../src/analytics/communityClassifier.ts';
 import { CommunityFactStore, COMMUNITY_FACT_TYPES } from '../src/analytics/communityFacts.ts';
-import { runPreviousClosedCommunityWeek } from '../src/analytics/communityScorecard.ts';
+import {
+  COMMUNITY_INTERVENTION_CODES,
+  normalizeCommunityInterventionCode,
+  runPreviousClosedCommunityWeek,
+} from '../src/analytics/communityScorecard.ts';
 import { ANOMALIES, windowBounds } from '../src/analytics/anomalies.ts';
 import { RANKS, buildCommunitySnapshot, runRankSnapshotCycle } from '../src/jobs/communitySnapshots.ts';
 import type { RawMember } from '../src/discord/rest.ts';
@@ -213,6 +217,20 @@ test('snapshot jobs and scorecard script expose no send surface', () => {
       assert.ok(!pat.test(src), `${name} reaches a send-shaped API: ${pat}`);
     }
   }
+});
+
+test('intervention codes are SCREAMING_SNAKE and legacy rows normalize', () => {
+  assert.deepEqual(
+    [...COMMUNITY_INTERVENTION_CODES].sort(),
+    [...COMMUNITY_INTERVENTION_CODES].filter((code) => /^[A-Z0-9_]+$/.test(code)).sort(),
+    'TOG-8985: every intervention code must be SCREAMING_SNAKE',
+  );
+  assert.equal(
+    normalizeCommunityInterventionCode('none_insufficient_evidence'),
+    'NO_INTERVENTION_INSUFFICIENT_EVIDENCE',
+    'stored rows keep reading back after the rename',
+  );
+  assert.equal(normalizeCommunityInterventionCode('HOLD'), 'HOLD');
 });
 
 // --- the dry-run ------------------------------------------------------------------

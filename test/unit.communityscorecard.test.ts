@@ -312,6 +312,29 @@ test('incomplete ingestion fails closed, and kill switch disables recommendation
   assert.equal(scorecard.recommendationsEnabled, false);
 });
 
+test('insufficient evidence selects the SCREAMING_SNAKE code and legacy rows normalize', async () => {
+  await cover();
+  await message('thin-0', 'thin-0', '2026-09-01T10:00:00.000Z');
+  await message('thin-1', 'thin-1', '2026-09-01T10:01:00.000Z');
+  const { scorecard } = await score();
+  assert.equal(scorecard.evidenceState, 'insufficient');
+  assert.equal(scorecard.intervention.code, 'NO_INTERVENTION_INSUFFICIENT_EVIDENCE');
+
+  // A stored pre-rename row reads back to the canonical code on rerun reuse.
+  const stored = JSON.parse(
+    (await t.db
+      .prepare(`SELECT scorecard_json FROM community_scorecard_runs WHERE idempotency_key = ?`)
+      .get<{ scorecard_json: string }>(scorecard.idempotencyKey))!.scorecard_json,
+  );
+  stored.intervention.code = 'none_insufficient_evidence';
+  await t.db
+    .prepare(`UPDATE community_scorecard_runs SET scorecard_json = ? WHERE idempotency_key = ?`)
+    .run(JSON.stringify(stored), scorecard.idempotencyKey);
+  const reused = await score();
+  assert.equal(reused.reused, true);
+  assert.equal(reused.scorecard.intervention.code, 'NO_INTERVENTION_INSUFFICIENT_EVIDENCE');
+});
+
 test('scorecard is guild isolated', async () => {
   await cover();
   await cover(OTHER_GUILD);

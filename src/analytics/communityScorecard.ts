@@ -19,10 +19,24 @@ export const COMMUNITY_INTERVENTION_CODES = [
   'EVENT_AT_RISK',
   'CORE_DECLINE',
   'HOLD',
-  'none_insufficient_evidence',
+  'NO_INTERVENTION_INSUFFICIENT_EVIDENCE',
 ] as const;
 
 export type CommunityInterventionCode = (typeof COMMUNITY_INTERVENTION_CODES)[number];
+
+/**
+ * Pre-rename spelling of `NO_INTERVENTION_INSUFFICIENT_EVIDENCE`, retained so
+ * stored `community_scorecard_runs` rows (both the `intervention_code` column
+ * and the embedded `scorecard_json`) still read back. Writes always use the
+ * SCREAMING_SNAKE code; see `normalizeCommunityInterventionCode`.
+ */
+export const LEGACY_INSUFFICIENT_EVIDENCE_CODE = 'none_insufficient_evidence' as const;
+
+/** Map a stored intervention code to its canonical spelling (legacy compat). */
+export function normalizeCommunityInterventionCode(code: string): CommunityInterventionCode {
+  if (code === LEGACY_INSUFFICIENT_EVIDENCE_CODE) return 'NO_INTERVENTION_INSUFFICIENT_EVIDENCE';
+  return code as CommunityInterventionCode;
+}
 
 interface CommunityFactRow {
   id: number;
@@ -331,7 +345,7 @@ function selectIntervention(
     return { code: 'BOT_NOISE_HIGH', reason: 'pause or reduce one discretionary automated post source in human spaces' };
   }
   if (evidenceState === 'insufficient') {
-    return { code: 'none_insufficient_evidence', reason: 'fewer than five eligible humans; no growth intervention' };
+    return { code: 'NO_INTERVENTION_INSUFFICIENT_EVIDENCE', reason: 'fewer than five eligible humans; no growth intervention' };
   }
   if (reply.noReplyWithin24hCount > 0) {
     return { code: 'FIRST_REPLY_BREACH', reason: 'tighten the human welcome rota for the next week' };
@@ -416,7 +430,11 @@ export async function buildCommunityScorecard(
   const existing = await db
     .prepare(`SELECT scorecard_json FROM community_scorecard_runs WHERE idempotency_key = ?`)
     .get<{ scorecard_json: string }>(idempotencyKey);
-  if (existing) return { scorecard: JSON.parse(existing.scorecard_json), reused: true, alertEmitted: false };
+  if (existing) {
+    const scorecard = JSON.parse(existing.scorecard_json) as CommunityScorecard;
+    const code = normalizeCommunityInterventionCode(String(scorecard.intervention?.code ?? ''));
+    return { scorecard: { ...scorecard, intervention: { ...scorecard.intervention, code } }, reused: true, alertEmitted: false };
+  }
 
   const reconciliation = reconcile(facts);
   const ingestionErrors = await validateCoverage(db, config, facts, reconciliation);
@@ -450,7 +468,7 @@ export async function buildCommunityScorecard(
   const selected = selectIntervention(coverageState, evidenceState, botAlert, reply);
   const invalidRecommendation =
     selected.code !== 'INGESTION_INCOMPLETE' &&
-    selected.code !== 'none_insufficient_evidence' &&
+    selected.code !== 'NO_INTERVENTION_INSUFFICIENT_EVIDENCE' &&
     (coverageState === 'incomplete' || evidenceState === 'insufficient');
   const killSwitchActive = config.correctionCycles >= 2 &&
     (coverageState === 'incomplete' || Object.values(reconciliation).some((row) => !row.reconciles) || invalidRecommendation);
@@ -460,7 +478,7 @@ export async function buildCommunityScorecard(
     : coverageState === 'incomplete'
       ? { code: 'INGESTION_INCOMPLETE' as const, reason: 'recommendations and threshold notifications disabled; repair ingestion/reconciliation' }
       : evidenceState === 'insufficient'
-        ? { code: 'none_insufficient_evidence' as const, reason: 'recommendations and threshold notifications disabled; fewer than five eligible humans' }
+        ? { code: 'NO_INTERVENTION_INSUFFICIENT_EVIDENCE' as const, reason: 'recommendations and threshold notifications disabled; fewer than five eligible humans' }
         : { code: 'HOLD' as const, reason: 'recommendations and threshold notifications disabled by kill switch' };
 
   const previous = await db
@@ -530,7 +548,7 @@ export async function buildCommunityScorecard(
         scorecard.intervention.code,
         config.generatedAt,
       );
-    if (recommendationsEnabled && selected.code !== 'HOLD' && selected.code !== 'none_insufficient_evidence') {
+    if (recommendationsEnabled && selected.code !== 'HOLD' && selected.code !== 'NO_INTERVENTION_INSUFFICIENT_EVIDENCE') {
       const threshold = selected.code === 'BOT_NOISE_HIGH' ? '0.20' : 'contract';
       const alertKey = `${selected.code}:${config.weekStart.slice(0, 10)}:${threshold}`;
       const inserted = await tx
