@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   ANTI_NUKE_ACCEPTANCE_TARGET_SHA,
@@ -10,7 +13,12 @@ import {
   selectFixtureAuditEntries,
 } from '../src/staging/antiNukeAcceptance.ts';
 import { STAGING_BOT_APPLICATION_ID, TWO_STAGING_GUILD_ID } from '../src/staging/spec.ts';
-import { validateStagingDatabaseIdentity } from '../scripts/staging-anti-nuke-acceptance.ts';
+import {
+  SnapshotIntegrityError,
+  sealSnapshot,
+  type GuildConfigSnapshot,
+} from '../src/redesign/guildConfig.ts';
+import { acceptedSnapshot, validateStagingDatabaseIdentity } from '../scripts/staging-anti-nuke-acceptance.ts';
 
 const ACTOR = '111111111111111111';
 const CAPABILITY = '222222222222222222';
@@ -211,4 +219,51 @@ test('bot joins cannot be mislabeled as real join-risk gateway evidence', () => 
   });
   assert.equal(verdict.ok, false);
   assert.match(verdict.errors.join('\n'), /intentionally ignores bot joins/);
+});
+
+function stagingSnapshotFixture(): GuildConfigSnapshot {
+  return {
+    version: 1,
+    generatedAt: '2026-09-27T00:00:00.000Z',
+    applicationId: STAGING_BOT_APPLICATION_ID,
+    guildId: TWO_STAGING_GUILD_ID,
+    guild: { description: 'TWO Staging' },
+    roles: [],
+    channels: [],
+    emojis: [],
+  };
+}
+
+test('accepted snapshot verifies the tamper seal: tampered sealed refuses, legacy warns', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'tog-7678-'));
+  try {
+    // Sealed snapshot matching guild state passes.
+    const sealed = sealSnapshot(stagingSnapshotFixture());
+    const sealedPath = join(dir, 'sealed.json');
+    writeFileSync(sealedPath, JSON.stringify(sealed));
+    assert.equal(acceptedSnapshot(sealedPath, structuredClone(sealed)).hash.length, 64);
+
+    // Tampered sealed snapshot whose content matches guild state still refuses.
+    const tampered = structuredClone(sealed);
+    tampered.guild = { ...tampered.guild, description: 'evil' };
+    const tamperedPath = join(dir, 'tampered.json');
+    writeFileSync(tamperedPath, JSON.stringify(tampered));
+    assert.throws(() => acceptedSnapshot(tamperedPath, structuredClone(tampered)), SnapshotIntegrityError);
+
+    // Legacy pre-seal snapshot warns and proceeds, matching restore semantics.
+    const legacy = stagingSnapshotFixture();
+    const legacyPath = join(dir, 'legacy.json');
+    writeFileSync(legacyPath, JSON.stringify(legacy));
+    const warnings: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')); };
+    try {
+      assert.equal(acceptedSnapshot(legacyPath, structuredClone(legacy)).hash.length, 64);
+    } finally {
+      console.error = originalError;
+    }
+    assert.match(warnings.join('\n'), /no integrity seal/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
