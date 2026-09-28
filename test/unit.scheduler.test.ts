@@ -28,27 +28,6 @@ const NOW = '2026-09-08T10:00:00.000Z';
 const DUE = '2026-09-08T09:59:00.000Z';
 const LATER = '2026-09-08T12:00:00.000Z';
 
-function row(partial: Partial<ScheduledMessageRow> & { id: string }): ScheduledMessageRow {
-  return {
-    guildId: GUILD,
-    channelId: CHANNEL,
-    body: 'hello',
-    nextRunAt: DUE,
-    intervalSeconds: null,
-    enabled: true,
-    lastRunAt: null,
-    lastMessageId: null,
-    createdBy: ACTOR,
-    createdAt: NOW,
-    updatedBy: ACTOR,
-    updatedAt: NOW,
-    claimToken: null,
-    claimedAt: null,
-    occurrenceNonce: null,
-    ...partial,
-  };
-}
-
 /**
  * Minimal in-memory scheduled-message store. Only the scheduled/audit
  * surface the service touches; it mirrors the real driver's claim semantics
@@ -232,7 +211,7 @@ test('tick passes the injected clock through to runDueScheduled', async () => {
   // Observe via the store fake's claim args through a wrapper.
   const origClaim = store.claimDueScheduled.bind(store);
   let claimedAt = '';
-  store.claimDueScheduled = async (guildId, nowIso, claimToken, leaseUntilIso, limit, nonce) => {
+  store.claimDueScheduled = async (guildId, nowIso, claimToken, leaseUntilIso, limit = 10, nonce = claimToken) => {
     claimedAt = nowIso;
     return origClaim(guildId, nowIso, claimToken, leaseUntilIso, limit, nonce);
   };
