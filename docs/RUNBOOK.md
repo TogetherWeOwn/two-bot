@@ -672,6 +672,27 @@ dry-run's "no such table" probe predicted) ended `RESTORE VERIFIED`. Checked:
 No script fixes: the backup, restore and drill units needed no change, so none
 was made. Full log attached as the work product on TOG-5711.
 
+**Drilled 2026-09-28 (TOG-8296), evidence refresh on current scripts.** Against
+an ephemeral PostgreSQL 18.4 (embedded user-space binaries, scratch DBs only,
+no production data): 90 events / 60 members / 1 invite snapshot for a synthetic
+guild, all written through `EventStore` — then `scripts/pg-backup.ts` dumped
+`two-funnel-20260928T110722Z.ndjson.gz` at 2026-09-28T11:07:22Z,
+`pg-restore.ts --dry-run` reported `DRY RUN VERIFIED` (151 rows, all 22 tables
+`ok` file-only), and the restore into the empty `two_scratch` database at
+2026-09-28T11:07:28Z ended `RESTORE VERIFIED` with all 22 tables row-count
+`ok` against the dump manifest. Checked:
+
+- full ordered row sets MD5-identical source vs restored for `events` and
+  `members`; the `events.idempotency_key` set hashed identically
+- the `events` id sequence resumes at 91, so the first write after the
+  restore does not collide
+- `scripts/funnel.ts 30` byte-identical on source vs restored
+- `test/e2e.backup.test.ts` 11/11 on the same ephemeral Postgres
+
+No script fixes: the backup, restore and drill units needed no change, so none
+was made. Timers unchanged: nightly `two-bot-backup.timer` at 04:17 UTC,
+monthly `two-bot-restore-drill.timer` on the 1st at 05:30 UTC.
+
 ### Off-box destination
 
 > **Production path:** the Coolify VPS runs scheduled database backups through
