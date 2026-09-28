@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { Db, RunResult, Statement } from '../src/store/driver.ts';
-import { loadMigrations, migrate } from '../src/store/migrate.ts';
+import { MIGRATIONS_DIR, loadMigrations, migrate } from '../src/store/migrate.ts';
 
 test('the applied leveling migration stays immutable and the XP ceiling is additive', () => {
   const migrations = loadMigrations();
@@ -113,6 +115,34 @@ test('automation lease columns are repaired by an immutable migration after 0015
   assert.match(claims.sql, /ALTER TABLE scheduled_messages ADD COLUMN IF NOT EXISTS claimed_at TEXT/);
   assert.match(claims.sql, /ALTER TABLE sticky_messages ADD COLUMN IF NOT EXISTS claim_token TEXT/);
   assert.match(claims.sql, /ALTER TABLE sticky_messages ADD COLUMN IF NOT EXISTS claimed_at TEXT/);
+});
+
+test('migration apply order matches the explicit ordering manifest', () => {
+  // Numeric prefixes are reused (0010x2, 0011x3, 0012-0018 dupes) and the
+  // loader applies files in filename sort order, so a new 0011_fourth.sql
+  // would interleave silently. migrations/manifest.txt pins the exact order;
+  // adding, removing, or reordering a file without updating it fails here.
+  const manifest = readFileSync(join(MIGRATIONS_DIR, 'manifest.txt'), 'utf8')
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'));
+  const migrations = loadMigrations();
+
+  assert.deepEqual(
+    migrations.map((migration) => migration.id),
+    manifest,
+    'loader order drifted from migrations/manifest.txt - update the manifest when adding a migration',
+  );
+  assert.equal(
+    new Set(manifest).size,
+    manifest.length,
+    'manifest lists a migration id twice - each file must appear exactly once',
+  );
+  assert.equal(
+    new Set(migrations.map((migration) => migration.id)).size,
+    migrations.length,
+    'two migration files share an id - filenames must stay unique',
+  );
 });
 
 test('distinct-members index arrives as a new additive migration after 0037', () => {

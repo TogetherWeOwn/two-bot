@@ -18,6 +18,9 @@ to update that wording.
 2. **Additive by default.** A migration has to be safe to run while the old
    code is still up, because during a deploy it is.
 3. One logical change per file.
+4. Append the new id to `manifest.txt` (numeric prefixes are reused, so the
+   manifest pins the exact apply order; the order-manifest test fails without
+   it).
 
 ## Number ranges — two teams share this directory
 

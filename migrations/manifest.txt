@@ -1,0 +1,63 @@
+# Migration ordering manifest.
+#
+# Numeric prefixes in this directory are intentionally reused (0010x2, 0011x3,
+# 0012-0018 dupes): migrations are immutable once applied, so renumbering is
+# not an option. This file pins the exact apply order instead. The loader
+# applies files in filename (byte) sort order, so this manifest MUST match
+# `ls migrations/*.sql` sorted.
+#
+# When adding a migration, append its id (filename without .sql) to the END of
+# this list. The order-manifest test fails if a file is added, removed, or
+# reordered without updating this file, so a new 0011_fourth.sql cannot
+# interleave silently.
+0001_initial
+0002_internal_actions
+0003_web_contract_tables
+0004_presence_probe
+0005_counter_snapshots
+0006_invite_campaigns
+0007_gate_cleared
+0008_members_third_message_at
+0009_timestamptz_and_boolean
+0010_leveling
+0010_moderation
+0011_leveling_xp_ceiling
+0011_moderation_durability
+0011_operational_audit
+0012_moderation_recovery
+0012_operational_audit_delivery
+0013_automod
+0013_operational_audit_delivery_message
+0013_tickets
+0014_automod_idempotency
+0014_operational_audit_delivery_search
+0014_ticket_safety
+0015_anti_nuke_containment
+0015_automations
+0015_operational_audit_delivery_claim
+0016_automation_claims
+0016_operational_audit_mirror_checked
+0017_operational_audit_mirror_check_index
+0017_scheduled_occurrence_nonce
+0018_community_scorecard
+0018_self_role_audit
+0019_self_role_recovery
+0020_self_role_ordering
+0021_self_role_event_order
+0022_self_role_committed_target
+0023_self_role_committed_target_repair
+0024_announcements_feeds
+0025_feed_delivery_claims
+0026_guild_settings
+0027_audit_kill_switch
+0027_guild_settings_env_only
+0028_onboarding_rota
+0029_onboarding_rota_env_only
+0030_rota_acknowledgement
+0031_rota_primary_env_only
+0032_rota_readers_env_only
+0033_rota_replied
+0034_staging_restart_env_only
+0036_temp_voice
+0037_temp_voice_owner_transition
+0038_events_type_member
