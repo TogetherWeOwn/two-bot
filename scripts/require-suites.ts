@@ -61,6 +61,17 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     why: 'the pg-restore safety refusals - without this floor a silent skip re-opens the wrong-database data-loss gap',
   },
   {
+    // TOG-7709. The web-views CLI executed end to end through the real npm
+    // entry: `npm run web:views` applies all 9 views, a hardcoded column
+    // fixture pins every view's exact shape (the code asserting against
+    // itself is the gap this closes), and --status changes nothing. Counted
+    // from the 3 top-level test() blocks; 3/3 green on first local run
+    // against Postgres 18.4, CI's postgres job confirms on merge.
+    file: 'test/e2e.webviews.test.ts',
+    minTests: 3,
+    why: 'the web-views contract CLI itself plus the exact web_v1 column fixture - without this floor a silent column drift breaks two-web',
+  },
+  {
     file: 'test/e2e.backup.test.ts',
     minTests: 7,
     why: 'the dump/restore round trip - the only thing standing behind a restore',
