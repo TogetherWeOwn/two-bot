@@ -423,6 +423,28 @@ test('pollFeeds audits a failed read without throwing and sends nothing', async 
   assert.equal(await auditCount('feed.poll', 'failed'), 1);
 });
 
+test('pollFeeds records a redirect refusal distinctly from a fetch failure', async () => {
+  await reset();
+  const discord = new FakeDiscord();
+  const redirectRefusal = {
+    read: async (_feed: FeedRelayRow): Promise<FeedItem[]> => {
+      throw new Error('Feed redirect refused: cross-host redirect to https://www.example.com (HTTP 301).');
+    },
+  };
+  const service = new AnnouncementsService(store, discord, redirectRefusal);
+  await service.addFeed({
+    id: 'feed-moved', guildId: GUILD, channelId: CHANNEL, kind: 'rss',
+    source: 'https://example.com/moved.xml', actorId: USER, now: NOW,
+  });
+  assert.equal(await service.pollFeeds(GUILD, NOW), 0);
+  assert.equal(discord.posts.length, 0);
+  const row = await db.prepare(
+    `SELECT outcome, reason FROM announcements_audit_log WHERE action = ? AND target_key = ?`,
+  ).get<{ outcome: string; reason: string | null }>('feed.poll', 'feed-moved');
+  assert.equal(row?.outcome, 'failed');
+  assert.match(row?.reason ?? '', /^Feed redirect refused: cross-host redirect/);
+});
+
 // --- pure validators ---------------------------------------------------------------
 
 test('normalizeFeedSource refuses credentials, plain HTTP and loopback', () => {

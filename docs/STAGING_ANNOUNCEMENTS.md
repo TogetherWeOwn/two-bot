@@ -93,12 +93,20 @@ the staging proof above does not directly exercise:
   Rejection errors: `Feed source must resolve only to public IP addresses.`
   (pre-flight) or `Feed source resolved to a non-public IP address.`
   (connect-time).
-- **Redirects refused.** The fetcher passes `redirect: 'error'`, so any 3xx
-  response rejects the fetch instead of following it — including redirects
-  that would land on an internal address past the SSRF check. Like every
-  other fetch failure, this is caught per-feed in `pollFeeds`
+- **Redirect policy.** The fetcher passes `redirect: 'manual'` to undici
+  and follows same-host redirects itself (same host, scheme kept or
+  upgraded http→https, at most 3 hops), so moved feeds keep polling
+  instead of hard-failing every tick. Cross-host targets (including www
+  additions), scheme downgrades, non-HTTP(S) schemes, embedded
+  credentials, missing/invalid `Location`, and hop overflow are refused
+  with a stable `Feed redirect refused:` prefix. Every hop — initial URL
+  and redirect targets alike — is gated by `assertPublicHostname`, and
+  the custom undici connector re-checks at connect time, so a redirect
+  can never land on an internal address. Like every other fetch failure,
+  a refusal is caught per-feed in `pollFeeds`
   (`src/announcements/service.ts`): no message is posted, remaining feeds
-  still poll, and the failure is audited.
+  still poll, and the failure is audited with the refusal prefix in
+  `reason`, distinct from fetch failures.
 - **Service-layer timeout.** `pollFeeds` bounds every feed read with
   `FEED_READ_TIMEOUT_MS` (15 s, `src/announcements/service.ts`, overridable
   via `AnnouncementsServiceOptions.feedReadTimeoutMs`, always ≤ 60 s): the
