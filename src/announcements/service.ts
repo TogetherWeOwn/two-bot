@@ -158,7 +158,7 @@ export class AnnouncementsService {
       input.guildId, input.id, input.roleKey, input.userId, now,
     );
     const post = await this.store.getLfg(input.guildId, input.id);
-    if (post?.messageId && (outcome === 'joined' || outcome === 'moved')) await this.refreshLfg(post);
+    if (post?.messageId && (outcome === 'joined' || outcome === 'moved')) await this.refreshBestEffort(post);
     await this.store.audit({
       guildId: input.guildId,
       actorId: input.userId,
@@ -173,7 +173,7 @@ export class AnnouncementsService {
   async leaveLfg(guildId: string, id: string, userId: string, now = new Date()): Promise<boolean> {
     const removed = await this.store.leaveLfg(id, userId);
     const post = await this.store.getLfg(guildId, id);
-    if (removed && post?.messageId) await this.refreshLfg(post);
+    if (removed && post?.messageId) await this.refreshBestEffort(post);
     await this.store.audit({
       guildId, actorId: userId, action: 'lfg.leave', targetKey: id,
       outcome: removed ? 'left' : 'not_joined',
@@ -184,7 +184,7 @@ export class AnnouncementsService {
   async closeLfg(guildId: string, id: string, actorId: string, now = new Date()): Promise<boolean> {
     const closed = await this.store.closeLfg(guildId, id, now.toISOString());
     const post = await this.store.getLfg(guildId, id);
-    if (closed && post?.messageId) await this.refreshLfg(post);
+    if (closed && post?.messageId) await this.refreshBestEffort(post);
     await this.store.audit({
       guildId, actorId, action: 'lfg.close', targetKey: id,
       outcome: closed ? 'closed' : 'already_closed_or_missing',
@@ -282,6 +282,17 @@ export class AnnouncementsService {
     if (!post.messageId) return;
     const rendered = await this.renderLfg(post);
     await this.discord.editMessage(post.channelId, post.messageId, rendered.content, rendered.components);
+  }
+
+  // Discord refresh is cosmetic: the store mutation above is already durable and
+  // the audit row below must land, so a failed edit must not fail the call.
+  // The stale message is repaired by the refresh on the next mutation.
+  private async refreshBestEffort(post: LfgPostRow): Promise<void> {
+    try {
+      await this.refreshLfg(post);
+    } catch {
+      // Swallowed: outcome and audit still land below.
+    }
   }
 
   private async renderLfg(post: LfgPostRow): Promise<{ content: string; components: unknown[] }> {

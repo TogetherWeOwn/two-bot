@@ -157,6 +157,29 @@ test('closing an LFG disables future signups and clears components', async () =>
   assert.deepEqual(discord.edits.at(-1)?.components, []);
 });
 
+test('LFG signup/leave/close keep outcome and audit when the Discord edit fails', async () => {
+  const discord = new FakeDiscord();
+  discord.editMessage = async () => { throw new Error('discord edit 500'); };
+  const service = new AnnouncementsService(store, discord);
+  const post = await service.createLfg({
+    id: 'lfg-edit-fail-proof', guildId: GUILD, channelId: CHANNEL, title: 'Flaky raid',
+    startsAt: '2026-09-11T20:00:00Z', roles: [{ key: 'any', label: 'Any', slots: 2 }],
+    actorId: USER, now: new Date('2026-09-10T10:00:00Z'),
+  });
+  assert.equal(await service.signupLfg({ guildId: GUILD, id: post.id, roleKey: 'any', userId: USER }), 'joined');
+  assert.equal(await service.leaveLfg(GUILD, post.id, USER), true);
+  assert.equal(await service.closeLfg(GUILD, post.id, USER), true);
+  const audits = await dbFixture.db.prepare(
+    `SELECT action, outcome FROM announcements_audit_log WHERE target_key = ? ORDER BY rowid`,
+  ).all<{ action: string; outcome: string }>(post.id);
+  assert.deepEqual(audits.map((row) => [row.action, row.outcome]), [
+    ['lfg.create', 'created'],
+    ['lfg.signup', 'joined'],
+    ['lfg.leave', 'left'],
+    ['lfg.close', 'closed'],
+  ]);
+});
+
 test('ambiguous LFG post recovers the accepted message by stable nonce', async () => {
   const discord = new FakeDiscord();
   const original = discord.postMessage.bind(discord);
