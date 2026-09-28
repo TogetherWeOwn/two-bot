@@ -65,7 +65,11 @@ test('every documented runnable check ran and passed', { timeout: 180_000 }, asy
   ];
   const byId = new Map(report.checks.map((c) => [c.id, c]));
   for (const id of runnable) {
-    assert.equal(byId.get(id)?.status, 'pass', `check ${id} did not pass`);
+    // Include the check's detail (the boot-attempt history + exit tail on a
+    // stays-up/liveness failure): run 36369915601's `check ... did not pass`
+    // with no detail cost a whole CI round trip to interpret.
+    const got = byId.get(id);
+    assert.equal(got?.status, 'pass', `check ${id} did not pass: ${got?.detail ?? '(no such check)'}`);
   }
 });
 
