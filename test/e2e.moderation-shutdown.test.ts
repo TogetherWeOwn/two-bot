@@ -287,8 +287,10 @@ test('src/index.ts enforces the preflight against the real config', async () => 
 //
 // The preflight above answers "may I turn it off"; these cases answer "is it
 // off". `TWO_MODERATION` unset must leave no moderation path live: no slash
-// command, no internal verb, no automod sanction, no unban sweep. Each case
-// fails if any verb remains reachable under the kill-switch fixture.
+// command, no internal verb, no automod sanction, no unban sweep, no armed
+// anti-nuke quarantine (TOG-8458: quarantine DELETEs dangerous roles, a
+// moderation-path member-role write). Each case fails if any verb remains
+// reachable under the kill-switch fixture.
 
 const INTERNAL_KEYS = 'web-test:0123456789abcdef0123456789abcdef';
 
@@ -385,8 +387,8 @@ test('every moderation verb is refused under the kill switch and Discord stays i
 
 test('src/index.ts leaves no moderation path live when the slice is off', async () => {
   // Static, because booting index.ts needs a Discord token, a gateway and a
-  // guild. Seven predicates, one per wiring site: dropping any single gate
-  // leaves one verb family live while the other six stay off, which is exactly
+  // guild. Nine predicates, one per wiring site: dropping any single gate
+  // leaves one verb family live while the others stay off, which is exactly
   // the partial disable this card exists to catch.
   const source = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8');
   assert.match(source, /const moderationResolver = !stagingRestartArmed && cfg\.guildId && moderationCfg\.enabled/);
@@ -397,4 +399,8 @@ test('src/index.ts leaves no moderation path live when the slice is off', async 
   assert.match(source, /moderationResolver && moderationService \? MODERATION_COMMAND_DATA : \[\]/);
   assert.match(source, /moderation: moderationResolver && moderationService/);
   assert.match(source, /const moderationSweep = !stagingRestartArmed && moderationService/);
+  // TOG-8458: armed anti-nuke containment refuses to boot without moderation,
+  // because quarantine() DELETEs members' dangerous roles. Dry-run containment
+  // never reaches quarantine() so it stays bootable without the slice.
+  assert.match(source, /TWO_ANTI_NUKE=1 requires TWO_MODERATION=1/);
 });

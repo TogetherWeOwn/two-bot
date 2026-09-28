@@ -152,9 +152,12 @@ The bounded scenario is exactly two actor-executed fixture role deletions, each 
 Run this only under the existing, explicit authorization for the staging live-fire drill. Use a new run ID and wait for the disposable actor's prior five-minute cleanliness window. The accepted runtime must use:
 
 ```dotenv
+TWO_MODERATION=1
 TWO_ANTI_NUKE=1
 TWO_ANTI_NUKE_DRY_RUN=0
 ```
+
+`TWO_MODERATION=1` is required because quarantine is a moderation-path member-role write: boot refuses the armed combination without it (TOG-8458).
 
 `TWO_ONBOARDING_MODE=session` must not be active because that mode forbids role writes. No production activation is authorized.
 
