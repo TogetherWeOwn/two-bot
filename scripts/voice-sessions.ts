@@ -26,6 +26,14 @@ import {
   MIN_OBSERVED_DAYS_FOR_DOW,
   type SessionRow,
 } from '../src/analytics/voiceSessions.ts';
+import {
+  countUnknownStartsPerWindow,
+  findBlindWindows,
+  formatVoiceDurationSeconds,
+  parseVoiceEndMetadata,
+  renderReconcileReport,
+  summarizeVoiceDurations,
+} from '../src/core/voiceSessions.ts';
 
 const args = process.argv.slice(2);
 const days = Number(args.find((a) => /^\d+$/.test(a)) ?? 90);
@@ -132,6 +140,81 @@ for (let d = 0; d < 7; d++) {
     return (n ? String(n) : '.').padStart(3);
   }).join('');
   console.log(`    ${DAY_NAMES[d]}${cells}`);
+}
+console.log('');
+
+// --- blind-window reconcile (TOG-5683) --------------------------------------
+//
+// A voice gap while the bot is down can never be recovered (docs/EVENTS.md
+// limit 5): Discord serves no voice history over REST. This section does not
+// try. It names each blind window - a gap in the bot's own append-only write
+// series (`events.recorded_at`: every row is proof the bot was alive to write
+// it, cf. src/analytics/dashboard.ts) - and counts the `voice_session_end`
+// rows with `startKnown: false` attributed to each window. A count, never an
+// average: the rows carry no duration precisely because we never saw the
+// start.
+//
+// NOTE (TOG-469 containment): the hourly instrument table is deliberately NOT
+// a source here. Gaps in the write series are coarser - a quiet stretch with
+// no writes reads as a gap - and the report says so.
+
+// Every write is proof the bot was alive. Gaps in this series are the blind
+// windows. `recorded_at` (when WE wrote the row), not `occurred_at` (when
+// Discord says it happened): a backfilled row has a fresh recorded_at, so the
+// series measures bot liveness, not event time.
+const heartbeats = await db
+  .prepare(
+    `SELECT recorded_at AS at FROM events
+      WHERE guild_id = ? AND recorded_at >= ?
+      ORDER BY recorded_at`,
+  )
+  .all<{ at: string }>(process.env.DISCORD_GUILD_ID?.trim() ?? '', since)
+  .catch(() => [] as Array<{ at: string }>);
+
+// No write history for this guild yet (a fresh database): the voice-session
+// starts are the only proof the listener was alive, so gaps in them are the
+// windows. Coarser still - a quiet night reads as a gap - and the report
+// says so.
+const heartbeatAt =
+  heartbeats.length > 0
+    ? heartbeats.map((r) => r.at)
+    : starts.map((r) => r.occurred_at);
+
+const ends = await db
+  .prepare(
+    `SELECT occurred_at, metadata FROM events
+      WHERE event_type = 'voice_session_end' AND occurred_at >= ?`,
+  )
+  .all<{ occurred_at: string; metadata: string | null }>(since);
+// One parse for both jobs below: the reconcile counts the unknown starts,
+// the average excludes them. Both go through the shared helper (TOG-5684).
+const durationRows = ends.map((r) => parseVoiceEndMetadata(r.metadata));
+const unknownEnds = ends.map((r, i) => ({ occurredAt: r.occurred_at, startKnown: durationRows[i]!.startKnown }));
+
+// --- average session length (TOG-5684) --------------------------------------
+//
+// Mean over known-start sessions only. `startKnown: false` ends are counted
+// in the reconcile below, never averaged here: we never saw the start, so any
+// number on those rows is unproven.
+const durationSummary = summarizeVoiceDurations(durationRows);
+console.log('  Average session length (known-start sessions only):');
+if (durationSummary.averageSeconds === null) {
+  console.log('    —  (no measured session in this window)');
+} else {
+  console.log(
+    `    ${formatVoiceDurationSeconds(durationSummary.averageSeconds)} ` +
+      `over ${durationSummary.measured} measured session(s); ` +
+      `${durationSummary.excludedUnknownStarts} unknown-start session(s) excluded, counted below.`,
+  );
+}
+console.log('');
+
+const reconcileCounts = countUnknownStartsPerWindow(findBlindWindows(heartbeatAt), unknownEnds);
+console.log('  Blind-window reconcile (bot-down gaps the log cannot recover):');
+for (const line of renderReconcileReport(reconcileCounts)) console.log(line);
+if (heartbeats.length === 0 && starts.length > 0) {
+  console.log('    (windows derived from session starts - the probe has no history for this guild,');
+  console.log('     so a quiet night reads as a gap. Enable the presence probe for sharper windows.)');
 }
 console.log('');
 

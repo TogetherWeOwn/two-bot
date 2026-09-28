@@ -15,6 +15,13 @@ trap report_failure ERR
 # exist on disk (TOG-6810 - the `reconcile` entry pointed at a file that never
 # existed). Runs first so a dangling entry fails before the slow suites start.
 npm run check:script-targets
+# systemd credential wiring must match the code, the bootstrap and the docs
+# (TOG-5706). Needs neither node nor the database, so it runs alongside the
+# target guard and a PR that drifts a LoadCredential fails in seconds. The
+# selftest runs alongside for the same reason as the snowflake selftest: a
+# ratchet is only worth its line here if it still refuses things.
+npm run check:credentials
+npm run check:credentials:selftest
 npm run typecheck
 # Offline and instant: the golden ambiguous-vs-unknown eval (TOG-5849). It
 # scores the fixture split against the real attribution code, so a report or

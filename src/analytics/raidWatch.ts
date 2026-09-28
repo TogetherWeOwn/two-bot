@@ -59,7 +59,7 @@ const DEFAULTS = {
    *
    * TWO retained roughly five real joins in the measured year, and the biggest
    * genuine day in nine years of history is well under this. Both small raids
-   * put 15 accounts in under 11 seconds and the big one ran at ~18 a minute for
+   * put 15 accounts in 7 seconds or less and the big one ran at ~18 a minute for
    * an hour, so
    * every raid on record trips this several times over while an ordinary week
    * never comes close. Verified against the recorded history by
