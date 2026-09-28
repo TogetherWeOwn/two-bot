@@ -19,6 +19,8 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import {
   AnnouncementsService,
+  FEED_READ_TIMEOUT_MS,
+  MAX_FEED_READ_TIMEOUT_MS,
   normalizeFeedSource,
   parseRoleSpec,
   type FeedItem,
@@ -366,6 +368,45 @@ test('pollFeeds caps at 20 items, delivers oldest first, then dedupes', async ()
   assert.equal(await service.pollFeeds(GUILD, NOW), 0, 'second poll delivers nothing new');
   assert.equal(discord.posts.length, 20);
   assert.equal(await auditCount('feed.poll'), 2);
+});
+
+test('pollFeeds bounds every read with an AbortSignal.timeout at or below 60s', async () => {
+  assert.ok(FEED_READ_TIMEOUT_MS <= MAX_FEED_READ_TIMEOUT_MS, `FEED_READ_TIMEOUT_MS=${FEED_READ_TIMEOUT_MS} must stay <= 60s`);
+  assert.equal(MAX_FEED_READ_TIMEOUT_MS, 60_000);
+  // Oversized and non-positive overrides never widen the deadline.
+  const discord = new FakeDiscord();
+  assert.throws(() => new AnnouncementsService(store, discord, readerFor([]), { feedReadTimeoutMs: 0 }), /positive/);
+  assert.throws(() => new AnnouncementsService(store, discord, readerFor([]), { feedReadTimeoutMs: NaN }), /positive/);
+  const over = new AnnouncementsService(store, discord, readerFor([]), { feedReadTimeoutMs: 600_000 });
+  assert.equal((over as unknown as { feedReadTimeoutMs: number }).feedReadTimeoutMs, 60_000);
+});
+
+test('pollFeeds times out a hung feed, audits failed, and still delivers the next feed', async () => {
+  await reset();
+  const discord = new FakeDiscord();
+  const seenSignals: Array<AbortSignal | undefined> = [];
+  const reader = {
+    read: async (feed: FeedRelayRow, signal?: AbortSignal): Promise<FeedItem[]> => {
+      seenSignals.push(signal);
+      if (feed.id === 'feed-aaa-hung') return new Promise<FeedItem[]>(() => {});
+      return [{ key: 'ok-1', title: 'Ok item', url: 'https://example.com/ok' }];
+    },
+  };
+  const service = new AnnouncementsService(store, discord, reader, { feedReadTimeoutMs: 50 });
+  await service.addFeed({
+    id: 'feed-aaa-hung', guildId: GUILD, channelId: CHANNEL, kind: 'rss',
+    source: 'https://example.com/hung.xml', actorId: USER, now: NOW,
+  });
+  await service.addFeed({
+    id: 'feed-zzz-ok', guildId: GUILD, channelId: CHANNEL, kind: 'rss',
+    source: 'https://example.com/ok.xml', actorId: USER, now: NOW,
+  });
+  assert.equal(await service.pollFeeds(GUILD, NOW), 1);
+  assert.equal(discord.posts.length, 1);
+  assert.ok(discord.posts[0]?.content.includes('Ok item'));
+  assert.equal(await auditCount('feed.poll', 'failed'), 1);
+  assert.equal(seenSignals.length, 2);
+  for (const signal of seenSignals) assert.ok(signal instanceof AbortSignal, 'each read receives an AbortSignal');
 });
 
 test('pollFeeds audits a failed read without throwing and sends nothing', async () => {

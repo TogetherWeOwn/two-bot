@@ -27,7 +27,7 @@ export interface FeedItem {
 }
 
 export interface FeedReader {
-  read(feed: FeedRelayRow): Promise<FeedItem[]>;
+  read(feed: FeedRelayRow, signal?: AbortSignal): Promise<FeedItem[]>;
 }
 
 export interface LfgRoleInput {
@@ -36,15 +36,47 @@ export interface LfgRoleInput {
   slots: number;
 }
 
+/**
+ * Per-feed read deadline for `pollFeeds`, in milliseconds.
+ *
+ * Each feed read races the reader against this timeout, so one hung feed
+ * records a `failed` feed.poll audit and the loop moves on instead of
+ * stalling every feed behind it. Must stay at or below 60_000: the feed
+ * poller runs on a fixed interval and a longer per-feed deadline would let
+ * a slow feed list overrun the next tick.
+ */
+export const FEED_READ_TIMEOUT_MS = 15_000;
+/** Upper bound for any per-feed read deadline. Polls run on a fixed interval. */
+export const MAX_FEED_READ_TIMEOUT_MS = 60_000;
+
+export interface AnnouncementsServiceOptions {
+  /**
+   * Override for {@link FEED_READ_TIMEOUT_MS}. Defaults to 15 s.
+   * Values are clamped to (0, {@link MAX_FEED_READ_TIMEOUT_MS}].
+   */
+  feedReadTimeoutMs?: number;
+}
+
 export class AnnouncementsService {
   private store: AnnouncementsStore;
   private discord: AnnouncementDiscord;
   private feedReader?: FeedReader;
+  private feedReadTimeoutMs: number;
 
-  constructor(store: AnnouncementsStore, discord: AnnouncementDiscord, feedReader?: FeedReader) {
+  constructor(
+    store: AnnouncementsStore,
+    discord: AnnouncementDiscord,
+    feedReader?: FeedReader,
+    options: AnnouncementsServiceOptions = {},
+  ) {
     this.store = store;
     this.discord = discord;
     this.feedReader = feedReader;
+    const configured = options.feedReadTimeoutMs ?? FEED_READ_TIMEOUT_MS;
+    if (!Number.isFinite(configured) || configured <= 0) {
+      throw new Error('feedReadTimeoutMs must be a positive number of milliseconds.');
+    }
+    this.feedReadTimeoutMs = Math.min(configured, MAX_FEED_READ_TIMEOUT_MS);
   }
 
   async rsvp(input: {
@@ -237,7 +269,7 @@ export class AnnouncementsService {
     let delivered = 0;
     for (const feed of await this.store.listEnabledFeeds(guildId)) {
       try {
-        const items = await this.feedReader.read(feed);
+        const items = await this.readFeedWithTimeout(feed);
         for (const item of items.slice(0, 20).reverse()) {
           const itemKey = normalizeItemKey(item);
           const nonce = deliveryNonce(feed.id, itemKey);
@@ -276,6 +308,25 @@ export class AnnouncementsService {
       }
     }
     return delivered;
+  }
+
+  private async readFeedWithTimeout(feed: FeedRelayRow): Promise<FeedItem[]> {
+    const reader = this.feedReader;
+    if (!reader) throw new Error('Feed reader is not configured.');
+    const timeoutMs = this.feedReadTimeoutMs;
+    const signal = AbortSignal.timeout(timeoutMs);
+    const pending = reader.read(feed, signal);
+    // Suppress a late rejection after the timeout wins the race below.
+    pending.catch(() => {});
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Feed read timed out after ${timeoutMs}ms.`)), timeoutMs);
+    });
+    try {
+      return await Promise.race([pending, timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private async refreshLfg(post: LfgPostRow): Promise<void> {
