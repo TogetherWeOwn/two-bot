@@ -32,10 +32,19 @@
  * reproducible proof. The script exits nonzero if any timed read breaches
  * the 1s budget, so the acceptance criterion is runnable, not just
  * documented.
+ *
+ * TOG-7870 parity: exclusion-windowed join/leave reads carry the same
+ * `excludeClause` predicates funnel.ts issues (joiners, leaves, by-source,
+ * retention cohort/retained and stranded-raid re-keyed onto joined_at,
+ * never-posted likewise), the voice-ends and join/leave spike-bucketing
+ * reads are windowed like funnel.ts, retention mirrors the d=1/7/30 iterations,
+ * and the dashboard's member_leave scan has a timed counterpart - so no
+ * production read shape escapes the budget.
  */
 import { openDb } from '../src/store/db.ts';
 import { EventStore } from '../src/store/eventStore.ts';
 import { buildDashboard } from '../src/analytics/dashboard.ts';
+import { excludeClause } from '../src/analytics/anomalies.ts';
 import { MESSAGE_RUNGS, type EventType } from '../src/core/events.ts';
 
 const spec = process.env.TWO_DATABASE_URL?.trim();
@@ -165,6 +174,17 @@ try {
   // --- read path: the queries the funnel and dashboard actually issue -------
   const since = iso(base + (N - 168) * 3600_000); // last 7 days of seeded joins
   const since30 = iso(Date.now() - 30 * 86_400_000);
+  // TOG-7870 CHANGES: hold the bench to the exact production predicates -
+  // funnel.ts wraps join/leave counts in anomaly excludeClause windows, the
+  // retention section re-keys them onto joined_at (cohort, retained d=1/7/30,
+  // never-posted, stranded-raid), and the spike-bucketing / downtime /
+  // gate-observed / campaign-count reads are windowed like production.
+  // Mirroring the clauses keeps the acceptance bar honest for the reads
+  // that carry NOT (...) predicates.
+  const joinExcl = excludeClause('member_join');
+  const leaveExcl = excludeClause('member_leave');
+  const cohortExcl = joinExcl.sql.replaceAll('occurred_at', 'joined_at');
+  const cohortParams = joinExcl.params;
   const timed = async (label: string, sql: string, ...params: unknown[]) => {
     const a = Date.now();
     const rows = await db.prepare(sql).all(...params);
@@ -172,23 +192,45 @@ try {
   };
   const reads = [
     await timed('funnel count (type+time)', `SELECT COUNT(*) AS n FROM events WHERE event_type = ? AND occurred_at >= ?`, 'member_join' as EventType, since),
+    await timed('joins COUNT (excluded)', `SELECT COUNT(*) AS n FROM events WHERE event_type='member_join' AND occurred_at >= ?${joinExcl.sql}`, since, ...joinExcl.params),
     await timed('joiners DISTINCT (windowed)', `SELECT COUNT(DISTINCT member_id) AS n FROM events WHERE event_type = ? AND occurred_at >= ?`, 'member_join' as EventType, since),
+    await timed('joiners DISTINCT (excluded)', `SELECT COUNT(DISTINCT member_id) AS n FROM events WHERE event_type='member_join' AND occurred_at >= ?${joinExcl.sql}`, since, ...joinExcl.params),
+    await timed('leaves COUNT (windowed)', `SELECT COUNT(*) AS n FROM events WHERE event_type='member_leave' AND occurred_at >= ?`, since),
+    await timed('leaves count (excluded)', `SELECT COUNT(*) AS n FROM events WHERE event_type='member_leave' AND occurred_at >= ?${leaveExcl.sql}`, since, ...leaveExcl.params),
+    await timed('gate-cleared DISTINCT (windowed)', `SELECT COUNT(DISTINCT member_id) AS n FROM events WHERE event_type='gate_cleared' AND occurred_at >= ?`, since),
+    await timed('gate-cleared COUNT (unwindowed)', `SELECT COUNT(*) AS n FROM events WHERE event_type='gate_cleared'`),
+    await timed('first-message count (windowed)', `SELECT COUNT(*) AS n FROM events WHERE event_type='first_message' AND occurred_at >= ?`, since),
+    await timed('first-voice count (windowed)', `SELECT COUNT(*) AS n FROM events WHERE event_type='first_voice_session' AND occurred_at >= ?`, since),
+    await timed('clicks COUNT (windowed)', `SELECT COUNT(*) AS n FROM events WHERE event_type='invite_click' AND occurred_at >= ?`, since),
+    await timed('spike buckets (joins)', `SELECT occurred_at FROM events WHERE event_type=? AND occurred_at >= ?`, 'member_join' as EventType, since),
+    await timed('spike buckets (leaves)', `SELECT occurred_at FROM events WHERE event_type=? AND occurred_at >= ?`, 'member_leave' as EventType, since),
+    await timed('downtime unknown joins (excluded)', `SELECT occurred_at, source FROM events WHERE event_type='member_join' AND occurred_at >= ?${joinExcl.sql} AND source = 'unknown'`, since, ...joinExcl.params),
     await timed('stage DISTINCT (unwindowed)', `SELECT COUNT(DISTINCT member_id) AS n FROM events WHERE event_type = ? AND member_id IS NOT NULL`, 'first_message' as EventType),
     await timed('member rung lookup', `SELECT event_type, occurred_at FROM events WHERE guild_id = ? AND member_id = ? AND event_type IN (?, ?, ?)`, GUILD, 'm1', ...MESSAGE_RUNGS),
     await timed('hasEvent probe', `SELECT 1 AS x FROM events WHERE guild_id = ? AND member_id = ? AND event_type = ? LIMIT 1`, GUILD, 'm1', 'first_voice_session' as EventType),
     await timed('write series (recorded_at scan)', `SELECT recorded_at AS at FROM events WHERE occurred_at >= ? ORDER BY recorded_at`, since),
     // TOG-7207: funnel.ts shapes beyond the store reads above.
     await timed('funnel stuck-at-gate', `SELECT COUNT(*) AS n FROM members WHERE NOT is_bot AND left_at IS NULL AND joined_at IS NOT NULL AND gate_cleared_at IS NULL`),
-    await timed('funnel never-posted', `SELECT COUNT(*) AS n FROM members WHERE joined_at IS NOT NULL AND first_message_at IS NULL AND first_voice_at IS NULL AND left_at IS NULL AND NOT is_bot`),
-    await timed('funnel by-source GROUP BY', `SELECT source, COUNT(*) AS n FROM events WHERE event_type='member_join' AND occurred_at >= ? GROUP BY source ORDER BY n DESC LIMIT 15`, since),
+    await timed('funnel never-posted', `SELECT COUNT(*) AS n FROM members WHERE joined_at IS NOT NULL AND first_message_at IS NULL AND first_voice_at IS NULL AND left_at IS NULL AND NOT is_bot${cohortExcl}`, ...cohortParams),
+    await timed('funnel by-source GROUP BY', `SELECT source, COUNT(*) AS n FROM events WHERE event_type='member_join' AND occurred_at >= ?${joinExcl.sql} GROUP BY source ORDER BY n DESC LIMIT 15`, since, ...joinExcl.params),
+    await timed('invite_campaigns COUNT', `SELECT COUNT(*) AS n FROM invite_campaigns`),
     await timed('funnel per-campaign correlated', `SELECT c.slug, (SELECT COUNT(*) FROM events e WHERE e.event_type='invite_click' AND e.occurred_at >= ? AND e.source = 'invite:' || c.invite_code) AS clicks, (SELECT COUNT(*) FROM events e WHERE e.event_type='member_join' AND e.occurred_at >= ? AND e.source = 'invite:' || c.invite_code) AS joins FROM invite_campaigns c ORDER BY clicks DESC, c.slug`, since, since),
-    await timed('funnel retention cohort', `SELECT COUNT(*) AS n FROM members WHERE joined_at >= ? AND joined_at <= ? AND NOT is_bot`, since, iso(Date.now() - 1 * 86_400_000)),
+    await timed('funnel retention cohort d1', `SELECT COUNT(*) AS n FROM members WHERE joined_at >= ? AND joined_at <= ? AND NOT is_bot${cohortExcl}`, since, iso(Date.now() - 1 * 86_400_000), ...cohortParams),
+    await timed('funnel retention retained d1', `SELECT COUNT(*) AS n FROM members WHERE joined_at >= ? AND joined_at <= ? AND NOT is_bot${cohortExcl} AND last_active_at IS NOT NULL AND EXTRACT(EPOCH FROM (last_active_at - joined_at)) / 86400 >= ?`, since, iso(Date.now() - 1 * 86_400_000), ...cohortParams, 1),
+    await timed('funnel retention cohort d7', `SELECT COUNT(*) AS n FROM members WHERE joined_at >= ? AND joined_at <= ? AND NOT is_bot${cohortExcl}`, since, iso(Date.now() - 7 * 86_400_000), ...cohortParams),
+    await timed('funnel retention retained d7', `SELECT COUNT(*) AS n FROM members WHERE joined_at >= ? AND joined_at <= ? AND NOT is_bot${cohortExcl} AND last_active_at IS NOT NULL AND EXTRACT(EPOCH FROM (last_active_at - joined_at)) / 86400 >= ?`, since, iso(Date.now() - 7 * 86_400_000), ...cohortParams, 7),
+    await timed('funnel retention cohort d30', `SELECT COUNT(*) AS n FROM members WHERE joined_at >= ? AND joined_at <= ? AND NOT is_bot${cohortExcl}`, since, iso(Date.now() - 30 * 86_400_000), ...cohortParams),
+    await timed('funnel retention retained d30', `SELECT COUNT(*) AS n FROM members WHERE joined_at >= ? AND joined_at <= ? AND NOT is_bot${cohortExcl} AND last_active_at IS NOT NULL AND EXTRACT(EPOCH FROM (last_active_at - joined_at)) / 86400 >= ?`, since, iso(Date.now() - 30 * 86_400_000), ...cohortParams, 30),
+    await timed('funnel stranded-raid', `SELECT COUNT(*) AS n FROM members WHERE NOT is_bot AND left_at IS NULL AND first_message_at IS NULL AND first_voice_at IS NULL AND NOT (1=1${cohortExcl})`, ...cohortParams),
+    await timed('total events COUNT', `SELECT COUNT(*) AS n FROM events`),
     await timed('funnel click rows', `SELECT occurred_at, source, metadata FROM events WHERE event_type='invite_click' AND occurred_at >= ?`, since),
+    await timed('funnel voice ends (windowed)', `SELECT metadata FROM events WHERE event_type = 'voice_session_end' AND occurred_at >= ?`, since),
     // TOG-7207: dashboard.ts (buildDashboard) full-scan shapes. Rule 1 in
     // src/analytics/dashboard.ts: the DB is asked for rows, arithmetic stays
     // in JS - so these scans ARE the dashboard's read path.
     await timed('dashboard members scan', `SELECT member_id, joined_at, join_source, gate_cleared_at, first_message_at, first_voice_at, last_active_at, left_at FROM members WHERE NOT is_bot`),
     await timed('dashboard join events scan', `SELECT member_id, occurred_at, source FROM events WHERE event_type = 'member_join'`),
+    await timed('dashboard leave events scan', `SELECT occurred_at FROM events WHERE event_type = 'member_leave'`),
     await timed('dashboard voice ends scan', `SELECT metadata FROM events WHERE event_type = 'voice_session_end'`),
     await timed('dashboard gate events scan', `SELECT source, occurred_at, recorded_at FROM events WHERE event_type = 'gate_cleared'`),
     await timed('dashboard channel events', `SELECT source, occurred_at FROM events WHERE source LIKE 'channel:%' AND occurred_at >= ?`, since30),
@@ -206,6 +248,13 @@ try {
       .filter((l) => /Scan|Sort|Aggregate/.test(l))
       .slice(0, 3)
       .join(' > ');
+  // Fold bound params into literals for EXPLAIN text: each `?` in order
+  // takes the next param, single-quoted. Keeps the planned predicate -
+  // including exclusion window bounds - identical to the timed read.
+  const lit = (sql: string, params: unknown[]) => {
+    let i = 0;
+    return sql.replaceAll('?', () => `'${String(params[i++]).replaceAll("'", "''")}'`);
+  };
   const plans: Record<string, string> = {
     'stage DISTINCT (unwindowed)': await explain(`SELECT COUNT(DISTINCT member_id) FROM events WHERE event_type = 'first_message' AND member_id IS NOT NULL`),
     'member rung lookup': await explain(`SELECT event_type, occurred_at FROM events WHERE guild_id = '${GUILD}' AND member_id = 'm1' AND event_type IN ('first_message','second_message','third_message')`),
@@ -213,6 +262,9 @@ try {
     'dashboard channel events': await explain(`SELECT source, occurred_at FROM events WHERE source LIKE 'channel:%' AND occurred_at >= '${since30}'`),
     'funnel stuck-at-gate': await explain(`SELECT COUNT(*) FROM members WHERE NOT is_bot AND left_at IS NULL AND joined_at IS NOT NULL AND gate_cleared_at IS NULL`),
     'funnel per-campaign subq': await explain(`SELECT COUNT(*) FROM events e WHERE e.event_type='member_join' AND e.occurred_at >= '${since}' AND e.source = 'invite:CODE1'`),
+    'joiners DISTINCT (excluded)': await explain(lit(`SELECT COUNT(DISTINCT member_id) FROM events WHERE event_type='member_join' AND occurred_at >= ?${joinExcl.sql}`, [since, ...joinExcl.params])),
+    'dashboard leave events scan': await explain(`SELECT occurred_at FROM events WHERE event_type = 'member_leave'`),
+    'funnel voice ends (windowed)': await explain(`SELECT metadata FROM events WHERE event_type = 'voice_session_end' AND occurred_at >= '${since}'`),
   };
 
   const indexSizes = await db
