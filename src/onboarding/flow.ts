@@ -86,9 +86,15 @@ export function planSelection(
   keys: string[],
   visible: (channelId: string) => boolean,
 ): SelectionResult {
+  // Discord redelivery, double-clicks and stale panel resubmissions can hand
+  // us the same key twice. Dedupe up front (first occurrence wins, order
+  // preserved) so roleIds, degradedCount and unknownKeys each count a repeated
+  // key once. Mirrors planSession()'s `seen` set, extended to unknown keys so
+  // the unknown report does not repeat either.
+  const dedupedKeys = [...new Set(keys)];
   const picks: GamePick[] = [];
   const unknownKeys: string[] = [];
-  for (const k of keys) {
+  for (const k of dedupedKeys) {
     const p = pickByKey(k);
     if (p) picks.push(p);
     else unknownKeys.push(k);

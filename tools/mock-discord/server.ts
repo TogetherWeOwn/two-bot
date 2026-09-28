@@ -49,6 +49,8 @@ export interface MockScheduledEvent {
   scheduled_start_time: string;
   channel_id: string | null;
   description: string | null;
+  /** Discord's real shape for an external event; null for a voice event. */
+  entity_metadata: { location: string } | null;
   status: number;
 }
 
@@ -387,6 +389,7 @@ export async function startMockDiscord(
     m = /\/api\/v10\/guilds\/\d+\/scheduled-events$/.exec(url);
     if (m && method === 'POST') {
       const b = (body ?? {}) as Record<string, unknown>;
+      const metadata = b.entity_metadata as { location?: unknown } | undefined;
       const event: MockScheduledEvent = {
         id: snowflake(),
         name: typeof b.name === 'string' ? b.name : '',
@@ -394,6 +397,8 @@ export async function startMockDiscord(
           typeof b.scheduled_start_time === 'string' ? b.scheduled_start_time : new Date().toISOString(),
         channel_id: typeof b.channel_id === 'string' ? b.channel_id : null,
         description: typeof b.description === 'string' ? b.description : null,
+        entity_metadata:
+          typeof metadata?.location === 'string' ? { location: metadata.location } : null,
         status: 1,
       };
       scheduledEvents.push(event);
@@ -572,6 +577,16 @@ export async function startMockDiscord(
 
     if (/\/api\/v10\/guilds\/\d+\/scheduled-events$/.test(url)) {
       return json(scheduledEvents);
+    }
+
+    // Read one scheduled event, for event.read (TOG-5510). A deleted mirror
+    // answers 404, which the bot surfaces as discord_rejected without
+    // dropping the key mapping - terminal state belongs to event.cancel.
+    const scheduledEvent = /\/api\/v10\/guilds\/\d+\/scheduled-events\/(\d+)$/.exec(url);
+    if (scheduledEvent) {
+      const existing = scheduledEvents.find((event) => event.id === scheduledEvent[1]);
+      if (!existing) return json({ message: 'Unknown Scheduled Event', code: 10070 }, 404);
+      return json({ ...existing, guild_id: GUILD_ID });
     }
 
     // Anything else the client happens to ask for: an empty, valid-looking answer.

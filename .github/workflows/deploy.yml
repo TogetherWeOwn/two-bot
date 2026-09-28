@@ -1,0 +1,213 @@
+# Deploys staging on every green main, and production on operator dispatch.
+#
+# THIS FILE MUST NEVER PASS WHEN IT DEPLOYED NOTHING. Do not put a skip branch back.
+#
+# two-web's deploy.yml used to guard on a missing hook by setting ready=false,
+# skipping every later step and exiting success — green while deploying nothing.
+# On TOG-48 an agent read that green as "it shipped" and told the owner the
+# landing page was live. Nothing had shipped (TOG-913). So every step here is
+# unconditional and the gate (scripts/check-deploy-target.mjs) FAILS the job
+# when a target is missing. A missing deploy target is red, on purpose, naming
+# the secrets that clear it. scripts/deploy-target-selftest.mjs executes each
+# script per configuration and pins the exit codes; it also pins that this
+# file calls all four scripts and carries no secret-gated `if:`.
+#
+# WHY A SEPARATE FILE. scripts/ci/check-fork-gate-coverage.mjs rejects any
+# job-level `if:` beyond bare success(), so a push-gated deploy job cannot
+# live in ci.yml — and a push-to-main deploy needs no fork gate anyway (push
+# events only ever run our own ref, per scripts/ci/refuse-fork-pr.sh). This
+# file has no pull_request trigger and is exempt, like main-guard.yml. "Only
+# after blocking checks pass" comes from keying staging off `workflow_run`
+# on CI success (the two-web shape), not off push.
+#
+# TRANSPORT. The panel token is an Authorization Bearer HEADER from a
+# self-hosted runner, never a token-in-URL hook (docs/DEPLOY.md §6.1; the
+# wayselect TOG-7131 recipe). The bot publishes no ports, so there is no URL
+# to curl — the staging app's sslip.io address answers proxy 404 BY DESIGN
+# (docs/DEPLOY.md §6.1). Liveness is proved through the panel: the deployment
+# reaches `finished`, the app reports `running:healthy` (the compose
+# healthcheck is /readyz: gateway connected AND Postgres answering), the logs
+# carry a fresh {"msg":"ready","guilds":N>=1} line, and log timestamps advance
+# between two reads a minute apart.
+#
+# NO MIGRATE STEP. The bot migrates at startup under an advisory lock
+# (scripts/migrate.ts header), so a normal deploy applies pending migrations
+# before serving. A separate migrate step would need the staging database URL
+# as a fourth secret for no additional safety.
+#
+# PRODUCTION IS GATED AND STAYS GATED. deploy-production runs on
+# workflow_dispatch ONLY — never automatically — behind `environment:
+# production`, which records the Deployment the Shipping KPI reads. It stays
+# gated until TOG-6903 says the Community Platform may go live; the first
+# production launch needs owner approval. Plan caveat: on GitHub Free with a
+# private repo, environment protection rules are IGNORED (two-web TWO-91,
+# TOG-118), so the real gate today is that dispatch is a human click plus the
+# required reviewer the Operator sets on the production environment. If the
+# plan cannot enforce the reviewer, do NOT "fix" this file — keep production
+# manual from the Coolify dashboard (docs/DEPLOY.md §6.1) and say so here.
+#
+# Rollback for either env: `git revert` on main, wait for the host mirror
+# (~2 min), re-run the deploy (docs/DEPLOY.md §7). Migrations do not roll
+# back; every migration here is additive.
+name: Deploy
+
+on:
+  # Staging follows `main` automatically, and only after CI has actually gone
+  # green. Keying off `workflow_run` rather than `push` is the difference
+  # between "main moved" and "main passed".
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+    branches: [main]
+
+  # Manual re-deploy of staging, and the ONLY path to production. There is no
+  # environment input: a choice list with `production` on it is how the
+  # ignored gate gets rebuilt by accident (two-web deploy.yml).
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-staging:
+    name: deploy-staging
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
+    runs-on: [self-hosted, two-selfhosted]
+    timeout-minutes: 30
+    # Creates the GitHub Deployment record (with status updates) that the
+    # Shipping KPI reads. Decorative as protection on some plans; the record
+    # is real on all of them.
+    environment: staging
+    # Least privilege for this job's Deployment-status writes.
+    permissions:
+      contents: read
+      deployments: write
+    # Serialize staging deploys so overlapping merges can't race; never
+    # cancel an in-flight deploy.
+    concurrency:
+      group: deploy-staging
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # workflow_run checks out the default branch by default, which can
+          # lag the commit CI just proved. Pin the proved head SHA instead.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      # Coolify clones the HOST mirror, not github.com, and the mirror
+      # re-syncs every ~2 minutes. Deploying sooner rebuilds the previous
+      # commit and looks like the merge did nothing (docs/DEPLOY.md §6.1).
+      - name: Wait for the host mirror
+        env:
+          MERGE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: node scripts/wait-for-host-mirror.mjs
+
+      # Fails the job when there is no target. Prints secret NAMES only,
+      # never values. This step is the entire subject of TOG-913: it must
+      # never gain a "skip and pass" branch.
+      - name: Deploy-target gate
+        env:
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+          COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
+          TWO_BOT_STAGING_APP_UUID: ${{ secrets.TWO_BOT_STAGING_APP_UUID }}
+        run: >-
+          node scripts/check-deploy-target.mjs --env-name staging
+          --credential-env COOLIFY_TOKEN
+          --require-env COOLIFY_URL
+          --require-env TWO_BOT_STAGING_APP_UUID
+
+      # Freshness anchor for the smoke step: the ready line must prove THIS
+      # deploy, not the previous release's surviving log tail.
+      - name: Record deploy start time
+        id: start
+        run: echo "since=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      # No `if:` on this step or the next. A gate-gated trigger is what let a
+      # missing target sail through as a pass; the step above fails the job
+      # outright and these simply never start.
+      - name: Trigger Coolify deploy and wait for healthy
+        env:
+          COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+          COOLIFY_APP_UUID: ${{ secrets.TWO_BOT_STAGING_APP_UUID }}
+        run: node scripts/wait-for-coolify-deploy.mjs --env-name staging
+
+      - name: Post-deploy smoke against staging
+        env:
+          COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+          COOLIFY_APP_UUID: ${{ secrets.TWO_BOT_STAGING_APP_UUID }}
+        run: node scripts/smoke-staging-deploy.mjs --env-name staging --since "${{ steps.start.outputs.since }}"
+
+  deploy-production:
+    name: deploy-production
+    # Operator-initiated only, after deploy-staging ran on this dispatch. The
+    # result check matters: on a dispatch event deploy-staging runs first, and
+    # production must not proceed past a failed staging deploy. (On a
+    # workflow_run event deploy-staging succeeds and this job is skipped: the
+    # `github.event_name` arm below is false.)
+    needs: [deploy-staging]
+    if: github.event_name == 'workflow_dispatch' && (needs.deploy-staging.result == 'success' || needs.deploy-staging.result == 'skipped')
+    runs-on: [self-hosted, two-selfhosted]
+    timeout-minutes: 30
+    # The required reviewer lives here. Stays gated until TOG-6903 says the
+    # Community Platform may go live — the first production launch needs owner
+    # approval. See the plan caveat in the file header before relying on this
+    # as the only gate.
+    environment: production
+    permissions:
+      contents: read
+      deployments: write
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Wait for the host mirror
+        env:
+          MERGE_SHA: ${{ github.sha }}
+        run: node scripts/wait-for-host-mirror.mjs
+
+      - name: Deploy-target gate
+        env:
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+          COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
+          TWO_BOT_PRODUCTION_APP_UUID: ${{ secrets.TWO_BOT_PRODUCTION_APP_UUID }}
+        run: >-
+          node scripts/check-deploy-target.mjs --env-name production
+          --credential-env COOLIFY_TOKEN
+          --require-env COOLIFY_URL
+          --require-env TWO_BOT_PRODUCTION_APP_UUID
+
+      - name: Record deploy start time
+        id: start
+        run: echo "since=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger Coolify deploy and wait for healthy
+        env:
+          COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+          COOLIFY_APP_UUID: ${{ secrets.TWO_BOT_PRODUCTION_APP_UUID }}
+        run: node scripts/wait-for-coolify-deploy.mjs --env-name production
+
+      - name: Post-deploy smoke against production
+        env:
+          COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
+          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
+          COOLIFY_APP_UUID: ${{ secrets.TWO_BOT_PRODUCTION_APP_UUID }}
+        run: node scripts/smoke-staging-deploy.mjs --env-name production --since "${{ steps.start.outputs.since }}"
