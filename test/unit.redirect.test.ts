@@ -149,6 +149,62 @@ test('two campaigns on one invite code are told apart by campaign', async () => 
   assert.ok(rows.every((r) => r.source === `invite:${CODE}`));
 });
 
+// --- campaign tracking accuracy (TOG-7199) -----------------------------------
+//
+// The number this whole feature exists to produce: N campaign clicks through
+// the live redirect become exactly N attributed invite_click events that the
+// funnel/attribution reports read. Ten is the acceptance count - large enough
+// that a dedupe collapse, a dropped write, or an off-by-one cannot hide, small
+// enough to stay sequential and deterministic (burst behaviour is pinned by
+// the abuse-burst test below, not here).
+
+test('ten seeded campaign clicks produce exactly ten attributed events', async () => {
+  await addCampaign('acc-link', CODE, 'Accuracy listing');
+
+  for (let i = 0; i < 10; i++) {
+    const res = await get('/acc-link');
+    assert.equal(res.status, 302, `click ${i} must redirect`);
+    assert.equal(res.headers.get('location'), `https://discord.gg/${CODE}`);
+  }
+
+  const rows = await clicks();
+  assert.equal(rows.length, 10, 'every seeded click must leave exactly one attributed event');
+  assert.ok(rows.every((r) => r.source === `invite:${CODE}`), 'every click credits the invite code');
+  assert.ok(
+    rows.every((r) => JSON.parse(r.metadata ?? '{}').campaign === 'acc-link'),
+    'every click carries the campaign it was posted as',
+  );
+
+  // Nothing else was written: the click is the whole footprint of a visit.
+  const total = await t.db.prepare(`SELECT COUNT(*) AS n FROM events`).get<{ n: string }>();
+  assert.equal(Number(total?.n), 10);
+
+  // The read path the reports use, in the same shape scripts/funnel.ts runs
+  // it: per-campaign clicks/joins off the invite code, plus clicks by source.
+  const since = '1970-01-01T00:00:00.000Z';
+  const campaign = await t.db
+    .prepare(
+      `SELECT
+         (SELECT COUNT(*) FROM events e
+            WHERE e.event_type='invite_click' AND e.occurred_at >= ?
+              AND e.source = 'invite:' || c.invite_code) AS clicks,
+         (SELECT COUNT(*) FROM events e
+            WHERE e.event_type='member_join' AND e.occurred_at >= ?
+              AND e.source = 'invite:' || c.invite_code) AS joins
+         FROM invite_campaigns c WHERE c.slug = ?`,
+    )
+    .get<{ clicks: string; joins: string }>(since, since, 'acc-link');
+  assert.equal(Number(campaign?.clicks), 10, 'the funnel per-campaign count must see all ten clicks');
+  assert.equal(Number(campaign?.joins), 0, 'clicks with no joins are reach without conversion, not missing rows');
+  const bySource = await t.db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM events
+        WHERE event_type='invite_click' AND occurred_at >= ? AND source = ?`,
+    )
+    .get<{ n: string }>(since, `invite:${CODE}`);
+  assert.equal(Number(bySource?.n), 10, 'clicks grouped by source must match the seeded ten');
+});
+
 // --- what must NOT be recorded ----------------------------------------------
 
 test('nothing about the visitor is stored', async () => {
