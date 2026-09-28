@@ -96,6 +96,7 @@
     "staging:automations-proof": "node scripts/staging-automations-proof.ts",
     "staging:automations-state": "node scripts/staging-automations-proof-state.ts --help",
     "mutate:tempvoice": "node scripts/mutate-tempvoice.ts --staging",
+    "bench:temp-voice": "node scripts/temp-voice-index-bench.ts",
     "e2e:harness": "node scripts/e2e-harness.ts",
     "test:report": "node scripts/test-report.ts --help",
     "backup:upload-s3": "node scripts/backup-upload-s3.ts",
