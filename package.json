@@ -59,6 +59,7 @@
     "staging:reset": "node scripts/staging-reset.ts",
     "staging:check": "node scripts/staging-reset.ts --check",
     "staging:verify": "node scripts/staging-verify.ts",
+    "staging:smoke": "node scripts/staging-smoke.ts",
     "staging:goodbye-live-verify": "node scripts/staging-goodbye-live-verify.ts",
     "staging:anti-nuke": "node scripts/staging-anti-nuke-acceptance.ts",
     "staging:provision": "node scripts/staging-provision.ts",
