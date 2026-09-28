@@ -471,6 +471,10 @@ rotation quietly never happening.
 ```bash
 cd /opt/two-bot
 sudo -u twobot --preserve-env=TWO_DATABASE_URL node scripts/funnel.ts 7
+# Is the attribution behind those numbers good enough to quote? FAIL (exit 1)
+# means the unknown share breached TWO_UNKNOWN_THRESHOLD (default 50%) - fix
+# attribution before quoting per-code winners. See docs/EVENTS.md.
+sudo -u twobot --preserve-env=TWO_DATABASE_URL,TWO_UNKNOWN_THRESHOLD node scripts/unknown-attribution.ts 8
 ```
 
 ## When should we run the community event?

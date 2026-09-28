@@ -142,6 +142,22 @@ themselves and never guessed into a real invite code. If half our joins say
 `unknown`, that is important information about our attribution, and rounding it
 away would hide it.
 
+## The unknown-share threshold: when attribution is quotable
+
+`npm run unknown-attribution` prints one line per Monday-start week with the
+unknown rate and the pattern split (pre-tracking / downtime / unexplained),
+then judges the window against a tripwire: the TOTAL unknown share must stay
+at or under `TWO_UNKNOWN_THRESHOLD` (default 50%). Above half unknown, most
+joins carry no code and any per-code winner is noise, so the script prints
+FAIL and exits 1 rather than leaving the judgement to whoever reads the table.
+One bad week in an otherwise attributed window is named on its own
+weeks-over line, never a failed window; a window with no joins is n/a, never
+a pass or a fail. The 50% was set before live capture accumulates - lower it
+as it does. Flip it per run with `--max-unknown=25` (the flag beats the env),
+and rehearse the whole thing with no database via
+`node scripts/unknown-attribution.ts --seed` (10 joins, 40% unknown: PASS at
+the default, FAIL once flipped to 25).
+
 ## Known limits, stated up front
 
 1. **`invite_click` only covers invites posted as a tracked link.** Discord
