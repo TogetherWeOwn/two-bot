@@ -77,6 +77,45 @@ These are proof-only transport settings, not changes to production retry policy.
   that followers get an additional notification, or that LFG closure is wired
   automatically to scheduled-event cancellation.
 
+## Feed failure modes (SSRF guard, redirects, timeouts)
+
+Production feed fetching (`src/announcements/feedHttp.ts`, read through
+`XmlFeedReader` in `src/announcements/discord.ts`) fails closed in three ways
+the staging proof above does not directly exercise:
+
+- **SSRF guard.** Before connecting, the fetcher resolves the feed hostname
+  and requires *every* resolved address to be a public IP
+  (`assertPublicHostname`, `createPublicLookup`). Private, loopback,
+  link-local, carrier-grade NAT, documentation, and multicast ranges (IPv4
+  and IPv6) are rejected, including IP literals. Enforcement happens twice:
+  a pre-flight check plus a custom undici connector, so a DNS change between
+  check and connect (rebinding) still cannot reach an internal address.
+  Rejection errors: `Feed source must resolve only to public IP addresses.`
+  (pre-flight) or `Feed source resolved to a non-public IP address.`
+  (connect-time).
+- **Redirects refused.** The fetcher passes `redirect: 'error'`, so any 3xx
+  response rejects the fetch instead of following it — including redirects
+  that would land on an internal address past the SSRF check. Like every
+  other fetch failure, this is caught per-feed in `pollFeeds`
+  (`src/announcements/service.ts`): no message is posted, remaining feeds
+  still poll, and the failure is audited.
+- **Service-layer timeout.** `pollFeeds` sets no deadline of its own; each
+  feed read is bounded by a 15-second `AbortSignal.timeout` at the reader
+  layer (`REQUEST_TIMEOUT_MS` in `src/announcements/discord.ts`). A hung
+  feed aborts at 15 s, records a failed poll, and the loop moves on — worst
+  case roughly 15 s per feed, sequential. There is no fetch retry in the
+  service layer; the next scheduled poll tries again.
+
+**What the operator sees in audit.** Every poll writes one
+`announcement_audit` row per feed with `action = 'feed.poll'`,
+`actor_id = NULL` (system poll), and the feed id as target. Success rows
+carry `outcome = 'read N'`; failure rows carry `outcome = 'failed'` with
+`reason` set to the first 500 characters of the error (SSRF rejection,
+redirect error, timeout abort, HTTP status, oversize feed, or unsupported
+content type). A feed that never shows a `read N` row but accumulates
+`failed` rows is misconfigured or unreachable — check `reason` before
+touching delivery state; undelivered items stay claimable for the next poll.
+
 ## Ownership and cleanup
 
 A random run marker tags every created Discord artifact. Cleanup inspects
