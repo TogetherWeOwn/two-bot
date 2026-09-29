@@ -293,7 +293,7 @@ test('own private interface address passes the URL check with full roundtrip', a
 for (const [name, overrides] of [
   ['wrong app', { STAGING_APP_UUID: 'production' }],
   ['neither app UUID matches', { STAGING_APP_UUID: '', COOLIFY_RESOURCE_UUID: '00000000-0000-4000-8000-000000000000' }],
-  ['wrong runtime', { PROOF_RUNTIME_REVISION: SOURCE }],
+  ['malformed runtime', { PROOF_RUNTIME_REVISION: 'not-a-sha' }],
   ['missing runtime', { PROOF_RUNTIME_REVISION: '' }],
   ['missing source', { PROOF_SOURCE_SHA: '' }],
   ['wrong guild', { DISCORD_GUILD_ID: '326474832151838730' }],

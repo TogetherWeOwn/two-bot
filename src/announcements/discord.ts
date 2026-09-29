@@ -133,8 +133,7 @@ export function parseXmlFeed(xml: string): FeedItem[] {
   const entries = [...asArray(rss?.item), ...asArray(atom?.entry)].slice(0, 200);
   return entries.map((entry) => {
     const row = asRecord(entry);
-    const linkValue = row?.link;
-    const link = typeof linkValue === 'string' ? linkValue : textValue(asRecord(linkValue)?.href);
+    const link = resolveLink(row?.link);
     const key = textValue(row?.guid) || textValue(row?.id) || link;
     const title = decodeXml(textValue(row?.title) || 'Untitled');
     const publishedAt = decodeXml(textValue(row?.pubDate) || textValue(row?.published) || textValue(row?.updated));
@@ -144,6 +143,27 @@ export function parseXmlFeed(xml: string): FeedItem[] {
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function resolveLink(value: unknown): string {
+  if (typeof value === 'string' || typeof value === 'number') return String(value).trim();
+  const record = asRecord(value);
+  if (record) return textValue(record.href);
+  if (Array.isArray(value)) {
+    const hrefs = value
+      .map((item) => ({
+        rel: typeof item === 'string' ? '' : textValue(asRecord(item)?.rel),
+        href: typeof item === 'string' ? item.trim() : textValue(asRecord(item)?.href),
+      }))
+      .filter((entry) => entry.href);
+    if (hrefs.length === 0) return '';
+    const alternate = hrefs.find(
+      (entry) => (entry.rel || 'alternate').toLowerCase() === 'alternate' && /^https?:\/\//i.test(entry.href),
+    );
+    if (alternate) return alternate.href;
+    return (hrefs.find((entry) => /^https?:\/\//i.test(entry.href)) ?? hrefs[0]).href;
+  }
+  return '';
 }
 
 function asArray(value: unknown): unknown[] {

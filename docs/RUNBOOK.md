@@ -185,8 +185,9 @@ The other three are always present on any exit except `2` and `3`.
 
 **These name individual members, and they must never reach GitHub.** `data/*`
 is gitignored precisely so they cannot be committed by accident — verified: all
-four paths are ignored, while `data/server-audit-*.json` is explicitly
-un-ignored because the drift check needs it as its base. Do not paste holder
+four paths are ignored. The old drift-check base (`data/server-audit-*.json`,
+retired from HEAD by TOG-8963) is gone too; the drift check now takes an
+explicit snapshot path or skips. Do not paste holder
 rows into an issue, a PR or a chat channel either. `docs/PRIVACY.md` permits
 storing member ids; it does not permit publishing them.
 
@@ -1041,6 +1042,7 @@ back to them instead of repeating.
 | `migrate` | Apply pending migrations (`--status` to preview). Bot also migrates at boot; this is belt-and-braces. | Nothing pending; see "The database". |
 | `web:views` | Apply `sql/web_v1.sql` contract views (`--status` lists, changes nothing). | All views present, exit `0`. |
 | `internal-actions:host`, `internal-actions:host-real` | Standalone internal-actions host for the TOG-463 acceptance harness: mock-Discord variant, and real staging-token variant. | Serves `/internal/actions`; harness passes against it. |
+| `internal-actions:acceptance` | TOG-463 acceptance run against a live endpoint (`TWO_ACCEPT_*` env; `--help` needs no env/network). | Usage prints, exit `0` on `--help`. |
 | `redirect` | go.two.gg redirect service (separate process, no credential, default `127.0.0.1:8088`). | Binds and answers one public GET. |
 | `moderation:disable-preflight` | "Can I turn moderation off right now?" — same read the boot preflight performs, on demand (`--json` available). | Exit `0` (nothing blocking); `1` lists blockers; `2` usage. |
 
@@ -1102,13 +1104,11 @@ back to them instead of repeating.
 
 | script | purpose | green signal |
 |---|---|---|
-| `audit:collect` | Read-only inventory of the live server → `audit/raw/*.json` (GET-only by construction). | Raw files written, exit `0`. |
+| `audit:collect` | Read-only inventory of the live server → local `audit/raw/*.json` (GET-only by construction; gitignored since TOG-8963, never committed). | Raw files written, exit `0`. |
 | `audit:report` | Raw dump → `audit/channels.csv`, `roles.csv`, `invites.csv`, `summary.json` + walkthrough (never calls Discord). | Tables written, exit `0`. |
 | `audit:halt`, `audit:resume`, `audit:switch` | Kill switch: stop all mirror sends / resume / show state. DB row, survives restart, idempotent. | `audit:switch` shows expected state, held rows deliver after resume. |
 
-Note: `scripts/audit-scrub.ts` (PII scrubber for the collector) has no npm
-entry point; run it as `node scripts/audit-scrub.ts`. Green is a scrubbed dump
-with ids preserved and usernames/avatars removed.
+| `audit:scrub` | Usage for the PII scrubber behind the collector (a library: `stripUsers` imported by `audit-collect.ts`). | Usage prints, exit `0`. |
 
 ### Redesign waves and guild config
 
@@ -1162,6 +1162,7 @@ with ids preserved and usernames/avatars removed.
 | `e2e:harness`, `e2e:selftest` | Drive end-to-end member flows against TWO Staging (`--dry-run` no credential; `--flow`, `--kill-switch`). | Flows pass; `--dry-run` exits `0` with no network. |
 | `onboarding:web:acceptance` | Offline acceptance for the next two-web onboarding slice (`--two-web <path>`). | Slice checks pass, exit `0` (`2` = usage/incomplete checkout). |
 | `mutate:tempvoice` | Mutation harness for the temp-voice delete path (`--staging`, needs `TWO_TEST_DATABASE_URL`). Rewrites a file per mutation and runs the unit suite. | Surviving mutants listed; exit `0` when all killed. |
+| `bench:temp-voice` | Temp-voice index audit + EXPLAIN harness: seeds 100 guilds × 40 rows through the store in an isolated schema (dropped on exit), prints read timings + plan shapes. Needs `TWO_DATABASE_URL` at a scratch DB, never production. | `VERDICT: INDEXED`, exit `0`. |
 | `test:report` | `node:test` reporter writing one JSON object per test point (`--test-reporter` + `--test-reporter-destination`). | Results ndjson written; skips explicit, never silent. |
 
 ### Tests, typecheck, repo checks

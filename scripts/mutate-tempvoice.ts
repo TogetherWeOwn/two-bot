@@ -150,6 +150,12 @@ const MUTATIONS: ReadonlyArray<Mutation> = [
     to: `      if (true) {
         // Boot-time empties are deleted immediately`,
   },
+  {
+    name: 'M7 create path confers ManageRoles the bot cannot grant',
+    guard: 'no create-time overwrite confers ManageRoles (TOG-9541: live 403/50013)',
+    from: `    { id: botId, type: 'member', allow: ['ViewChannel', 'Connect', 'ManageChannels', 'MoveMembers'] },`,
+    to: `    { id: botId, type: 'member', allow: ['ViewChannel', 'Connect', 'ManageChannels', 'MoveMembers', 'ManageRoles'] },`,
+  },
 ];
 
 const selected = onlyFilter ? MUTATIONS.filter((m) => m.name.includes(onlyFilter)) : MUTATIONS;

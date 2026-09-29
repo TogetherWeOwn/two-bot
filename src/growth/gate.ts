@@ -97,17 +97,25 @@ export interface Observations {
   /** The landing page rendered and the tracked join button resolved end to end. */
   joinButtonWorks?: boolean;
   joinButtonDetail?: string;
-  /** `WEB-HOMEPAGE` appeared in the funnel report as its own row. */
+  /** The resolved `invite:<code>` source matched in the funnel for the web-code row. */
+  webCodeRowSource?: string;
+  /** The WEB-HOMEPAGE slot appeared in the funnel report as its own row. */
   webCodeRowPresent?: boolean;
   webCodeRowDetail?: string;
 }
 
 /**
- * The website join button's invite code. Ledger §1a consequence 2: this is both
- * EXP-006's code and website criterion 3, which is why the lowest-stakes entry
- * in the ledger sits on the critical path for every other experiment.
+ * The growth-registry SLOT for the website join button (EXP-006), not a Discord
+ * code. Ledger §1a consequence 2: this slot is both EXP-006's instrumentation
+ * and website criterion 3, which is why the lowest-stakes entry in the ledger
+ * sits on the critical path for every other experiment.
+ *
+ * The funnel stores raw Discord codes (`invite:<code>`), so this label must be
+ * resolved to its bound code - via `webCodeRowSource()` in joinPath.ts, from
+ * the same destination the join-path observation checks - before matching. A
+ * funnel lookup on this string itself can never hit a row.
  */
-export const WEB_HOMEPAGE_CODE = 'WEB-HOMEPAGE';
+export const WEB_HOMEPAGE_SLOT = 'WEB-HOMEPAGE';
 
 // TOG-13 (live token + host + deploy) closed 2026-09-06: `two-bot-dk` runs on
 // the Coolify VPS as `Owen#2309`. The bot side is no longer blocked on a deploy
@@ -252,14 +260,21 @@ export function websiteChecks(o: Observations): Criterion[] {
     },
   );
 
+  /**
+   * Which funnel row to look for: the resolved `invite:<code>` source, never
+   * the slot label. The funnel stores raw Discord codes and the label is not
+   * one, so matching on `WEB-HOMEPAGE` itself could never hit a row (TOG-5037).
+   */
+  const webSource = o.webCodeRowSource ?? WEB_HOMEPAGE_SLOT;
+
   const row = observed(
     o.webCodeRowPresent,
     { id: 'web-code-row', side: 'website', title: `the join button's invite code appears in the funnel as its own row` },
-    `${WEB_HOMEPAGE_CODE} appears in the funnel report as its own row.`,
+    `${webSource} appears in the funnel report as its own row.`,
     {
-      detail: o.webCodeRowDetail ?? `${WEB_HOMEPAGE_CODE} is bound but has produced no row in the funnel report.`,
+      detail: o.webCodeRowDetail ?? `${webSource} is bound but has produced no row in the funnel report.`,
       owner: WEB_OWNER,
-      action: 'verify /join reaches the WEB-HOMEPAGE invite with npm run gate:check, then: npm run attribution -- all',
+      action: 'verify /discord reaches the bound WEB-HOMEPAGE invite with npm run gate:check, then: npm run attribution -- all',
     },
     {
       detail: o.webCodeRowDetail ?? 'the funnel could not be read - TWO_DATABASE_URL is not bound in this environment.',

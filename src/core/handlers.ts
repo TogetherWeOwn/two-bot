@@ -266,23 +266,43 @@ export class FunnelHandlers {
     const at = i.occurredAt ?? nowIso();
     const open = this.voiceSessions.end(i.guildId, i.memberId);
 
+    // TOG-7512: validate the leave timestamp up front. Date.parse of garbage
+    // is NaN, and NaN survives Math.max/Math.round (still !== null, so the
+    // leveling branch fired) while JSON.stringify(NaN) stores null - a row
+    // claiming a KNOWN start with NO measured duration. An unparseable leave
+    // is an unmeasurable session: the bot-down unknown-start row, not a
+    // measured-but-empty one. The tracker entry is still closed above - the
+    // member left, we just cannot say when.
+    const leaveMs = Date.parse(at);
+    const startMs = open ? Date.parse(open.startedAt) : NaN;
+    // Both endpoints must parse: a garbage leave timestamp is the TOG-7512
+    // case, and a garbage start (from a malformed join) is equally
+    // unmeasurable - either way the honest row is the bot-down unknown-start
+    // one, never startKnown:true with a null duration.
+    const startKnown = open !== null && Number.isFinite(leaveMs) && Number.isFinite(startMs);
+    const startedAt = startKnown && open ? open.startedAt : null;
+    // An unparseable leave has no time to stamp: file it at processing time.
+    // Storing the raw garbage in occurred_at would throw on Postgres
+    // (timestamptz), so "no throw" has to hold on both backends.
+    const endAt = Number.isFinite(leaveMs) ? at : nowIso();
+
     // Clamp at zero. The start timestamp and this one can come from different
     // clocks, and a negative duration in a column people will average is worse
     // than a zero.
-    const durationSeconds = open
-      ? Math.max(0, Math.round((Date.parse(at) - Date.parse(open.startedAt)) / 1000))
+    const durationSeconds = startKnown
+      ? Math.max(0, Math.round((leaveMs - startMs) / 1000))
       : null;
 
     if (this.communityFacts) {
-      const sessionKey = open?.sessionKey ?? `${i.guildId}:${i.memberId}:unknown-start:${at}:${i.channelId}`;
+      const sessionKey = open?.sessionKey ?? `${i.guildId}:${i.memberId}:unknown-start:${endAt}:${i.channelId}`;
       await this.communityFacts.recordVoiceEnded({
         guildId: i.guildId,
         actorId: i.memberId,
         isBot: i.isBot,
         sessionKey,
         channelId: open?.channelId ?? i.channelId,
-        occurredAt: at,
-        startedAt: open?.startedAt ?? null,
+        occurredAt: endAt,
+        startedAt,
         durationSeconds,
       });
     }
@@ -292,13 +312,14 @@ export class FunnelHandlers {
       guildId: i.guildId,
       memberId: i.memberId,
       eventType: 'voice_session_end',
-      occurredAt: at,
+      occurredAt: endAt,
       source: `channel:${open?.channelId ?? i.channelId}`,
       metadata: {
-        // False means the bot came up mid-session. Filter on it before
-        // averaging durations - see src/core/voiceSessions.ts.
-        startKnown: open !== null,
-        startedAt: open?.startedAt ?? null,
+        // False means the bot came up mid-session - or the leave timestamp was
+        // unparseable (TOG-7512), which is equally unmeasurable. Filter on it
+        // before averaging durations - see src/core/voiceSessions.ts.
+        startKnown,
+        startedAt,
         durationSeconds,
       },
     };
@@ -308,18 +329,21 @@ export class FunnelHandlers {
         i.guildId,
         i.memberId,
         durationSeconds,
-        at,
+        endAt,
         open?.channelId ?? i.channelId,
       );
       if (award.leveledUp) await i.onLevelUp?.(award.level);
     }
     // Leaving at T proves they were still there at T, so recency moves too.
-    await this.store.touchActivity(i.guildId, i.memberId, at);
+    // A malformed T has no time to prove: recency moves to the processing
+    // time we stamped the row with, never the raw garbage (which would throw
+    // on Postgres timestamptz and corrupt the projection on sqlite).
+    await this.store.touchActivity(i.guildId, i.memberId, endAt);
     log.info('voice_session_end', {
       memberId: i.memberId,
       channelId: e.source,
       durationSeconds,
-      startKnown: open !== null,
+      startKnown,
     });
     return e;
   }

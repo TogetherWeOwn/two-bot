@@ -12,9 +12,11 @@
  * what is already stored, and it opens the connection with migrations off so
  * it cannot write schema either. Pass --no-db to skip even that.
  *
- * Roles come from a snapshot file rather than the network - the same shape
- * `audit/raw/roles.json` already has - so the probe is deterministic, runs
- * offline, and cannot contact the guild it is reporting on.
+ * Roles come from a snapshot file rather than the network - a Discord roles
+ * array (`audit-collect.ts` used to write one to the now-untracked
+ * `audit/raw/roles.json`; any fresh snapshot has the same shape) - so the
+ * probe is deterministic, runs offline, and cannot contact the guild it is
+ * reporting on.
  *
  * Exit codes: 0 fine, 1 the export is not importable or the report does not
  * balance, 2 usage or a refused guild.
@@ -98,7 +100,7 @@ function readRoles(path: string): PartialRole[] {
     console.error(`--roles ${path} is not valid JSON: ${(error as Error).message}`);
     process.exit(1);
   }
-  // Accept the bare array that `audit/raw/roles.json` is, and the {roles:[...]}
+  // Accept the bare array a roles snapshot is, and the {roles:[...]}
   // envelope a guild fetch tends to be wrapped in.
   const roles = Array.isArray(parsed)
     ? parsed

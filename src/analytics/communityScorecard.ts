@@ -394,6 +394,7 @@ async function validateCoverage(
 export async function buildCommunityScorecard(
   db: Db,
   config: CommunityScorecardConfig,
+  opts: { dryRun?: boolean } = {},
 ): Promise<CommunityScorecardResult> {
   const raw = await db
     .prepare(
@@ -503,6 +504,11 @@ export async function buildCommunityScorecard(
     killSwitchActive,
   };
 
+  // TOG-8294 dry-run preview: score and return without persisting. No run
+  // row, no alert row, no heartbeat touch. The caller pins generatedAt to the
+  // closed-week end so two previews of the same week are byte-identical.
+  if (opts.dryRun) return { scorecard, reused: false, alertEmitted: false };
+
   let alertEmitted = false;
   await db.transaction(async (tx) => {
     await tx
@@ -552,7 +558,7 @@ export async function runPreviousClosedCommunityWeek(
   db: Db,
   guildId: string,
   classifierVersion: string,
-  opts: { now?: Date; recommendationsEnabled?: boolean; correctionCycles?: number } = {},
+  opts: { now?: Date; recommendationsEnabled?: boolean; correctionCycles?: number; dryRun?: boolean } = {},
 ): Promise<CommunityScorecardResult> {
   const now = opts.now ?? new Date();
   const { start, end } = previousClosedCommunityWeek(now);
@@ -565,8 +571,10 @@ export async function runPreviousClosedCommunityWeek(
     weekStart: start,
     weekEnd: end,
     watermark: Number(watermarkRow?.watermark ?? 0),
-    generatedAt: now.toISOString(),
+    // TOG-8294: a dry-run preview pins generatedAt to the closed-week end so
+    // two previews of the same week are byte-identical.
+    generatedAt: opts.dryRun ? end : now.toISOString(),
     recommendationsEnabled: opts.recommendationsEnabled ?? true,
     correctionCycles: opts.correctionCycles ?? 0,
-  });
+  }, { dryRun: opts.dryRun });
 }

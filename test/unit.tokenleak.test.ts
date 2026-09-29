@@ -165,3 +165,151 @@ test(
     assert.deepEqual(hits, [], `token-shaped literals in test fixtures: ${hits.join(', ')}`);
   },
 );
+
+// ---------------------------------------------------------------------------
+// TOG-7217: explicit script-dir coverage. The sweep above walks every tracked
+// file, so a new script file is covered from the day it lands — but nothing
+// proved it, and nothing stopped a fixture under scripts/ or tools/ from
+// carrying a live guild id. The three tests below close both gaps: an explicit
+// inventory of every script-bearing dir, token shapes over those dirs with no
+// allowlist applied, and a live-id guard over their fixture files.
+// ---------------------------------------------------------------------------
+
+/** Every directory that holds operator scripts, their harnesses, or the
+ * deployment definitions around them. `.github/` rides on the repo-wide sweep
+ * (workflows, not scripts) and needs no per-dir pin.
+ *
+ * This list is a ratchet, not documentation: the coverage test derives the
+ * real closure from `git ls-files` and fails on any difference, so a new
+ * script dir without a line here is a red test, not a silent gap. */
+const SCRIPT_DIRS: ReadonlyArray<string> = [
+  'ci',
+  'ops',
+  'ops/auto-voice',
+  'ops/tog-4104',
+  'ops/tog-4230',
+  'ops/two-web-bootstrap',
+  'ops/two-web-bootstrap/githooks',
+  'scripts',
+  'scripts/ci',
+  'scripts/ci/fixtures',
+  'scripts/ci/fixtures/fork-policy',
+  'scripts/ci/fixtures/fork-policy/.github',
+  'scripts/ci/fixtures/fork-policy/.github/workflows',
+  'scripts/ci/postgres-bin',
+  'tools',
+  'tools/mock-discord',
+  'tools/onboarding-picker-preview',
+  'tools/reward-role-readback-panel',
+  'tools/reward-role-readback-preview',
+];
+
+const SCRIPT_ROOTS: ReadonlyArray<string> = ['ci', 'ops', 'scripts', 'tools'];
+
+/** Tracked files under the script roots, plus their ancestor-dir closure. */
+function scriptInventory(): { files: string[]; dirs: string[] } {
+  const raw = execFileSync('git', ['-C', REPO, 'ls-files', '--', ...SCRIPT_ROOTS], { encoding: 'utf8' });
+  const files = raw
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const dirs = new Set<string>();
+  for (const file of files) {
+    const parts = file.split('/');
+    for (let i = 1; i < parts.length; i++) dirs.add(parts.slice(0, i).join('/'));
+  }
+  return { files, dirs: [...dirs].sort() };
+}
+
+test(
+  'every current script dir is inside the sweep (else a new dir is a silent gap)',
+  { skip: !isGitWorkTree() },
+  () => {
+    const { files, dirs } = scriptInventory();
+    assert.deepEqual(dirs, SCRIPT_DIRS, `script-dir inventory changed: got [${dirs.join(', ')}]`);
+    // No dir may be swallowed whole by the skip allowlist: each one must
+    // contribute at least one file the repo-wide sweep actually reads.
+    const swept = (path: string): boolean => !SWEEP_SKIP.some((re) => re.test(path));
+    const fullySkipped = dirs.filter(
+      (dir) => !files.some((file) => file.startsWith(`${dir}/`) && swept(file)),
+    );
+    // The single documented exception: the local Discord stand-in is skipped
+    // repo-wide (its tokens are literally "mock") and gets its own sweep below.
+    assert.deepEqual(
+      fullySkipped,
+      ['tools/mock-discord'],
+      `fully-skipped script dirs: [${fullySkipped.join(', ')}]`,
+    );
+  },
+);
+
+test(
+  'no token-shaped literal in any script-dir file, skipped or not',
+  { skip: !isGitWorkTree() },
+  () => {
+    const token = sentinelToken();
+    assert.match(token, PATTERNS[0]!.re, 'synthetic sentinel no longer matches discord-bot-token shape');
+    const { files } = scriptInventory();
+    const hits: string[] = [];
+    for (const path of files) {
+      let body: string;
+      try {
+        body = readFileSync(join(REPO, path), 'utf8');
+      } catch {
+        continue;
+      }
+      if (body.includes('\0')) continue;
+      const rule = leakIn(body);
+      if (rule) hits.push(`${path} (${rule})`);
+    }
+    assert.deepEqual(hits, [], `token-shaped literals in script dirs: ${hits.join(', ')}`);
+  },
+);
+
+test(
+  'no script-dir fixture carries a live or staging environment id',
+  { skip: !isGitWorkTree() },
+  async () => {
+    // Source of truth, not a copy: if staging gains a new environment id, the
+    // guard picks it up. spec.ts is side-effect-free consts (no imports).
+    const spec = await import('../src/staging/spec.ts');
+    const ENV_IDS: ReadonlyArray<{ name: string; id: string }> = [
+      { name: 'LIVE_GUILD_ID', id: spec.LIVE_GUILD_ID },
+      { name: 'LIVE_BOT_APPLICATION_ID', id: spec.LIVE_BOT_APPLICATION_ID },
+      { name: 'STAGING_BOT_APPLICATION_ID', id: spec.STAGING_BOT_APPLICATION_ID },
+      { name: 'TWO_STAGING_GUILD_ID', id: spec.TWO_STAGING_GUILD_ID },
+      { name: 'FORMER_STAGING_BOT_APPLICATION_ID', id: spec.FORMER_STAGING_BOT_APPLICATION_ID },
+    ];
+    // Calibration, same discipline as the sentinel above: a non-snowflake id
+    // would make every absence assertion below vacuous.
+    for (const { name, id } of ENV_IDS) {
+      assert.match(id, /^[0-9]{17,20}$/, `${name} is no longer a snowflake; the fixture guard below proves nothing`);
+    }
+    // Data files a script can be pointed at. Scripts (.ts/.sh) and docs (.md)
+    // may legitimately name the ids they target or guard against — fixtures may
+    // not, because a fixture is what turns "points at live" from a code-review
+    // finding into a runtime fact.
+    const isFixtureLike = (path: string): boolean =>
+      path.includes('/fixtures/') || /\.(json|csv|ya?ml)$/.test(path);
+    // The one intentional exception: the operator-owned AVC deployment
+    // definition names the live guild it deploys into (see ops/auto-voice
+    // README §6). Everything else under the script roots must be synthetic.
+    const FIXTURE_LIVE_SKIP: ReadonlyArray<RegExp> = [/^ops\/auto-voice\/avc-config-.*\.json$/];
+    const { files } = scriptInventory();
+    const hits: string[] = [];
+    for (const path of files) {
+      if (!isFixtureLike(path)) continue;
+      if (FIXTURE_LIVE_SKIP.some((re) => re.test(path))) continue;
+      let body: string;
+      try {
+        body = readFileSync(join(REPO, path), 'utf8');
+      } catch {
+        continue;
+      }
+      if (body.includes('\0')) continue;
+      const hit = ENV_IDS.find(({ id }) => body.includes(id));
+      if (hit) hits.push(`${path} (${hit.name})`);
+    }
+    assert.deepEqual(hits, [], `live/staging ids in script-dir fixtures: ${hits.join(', ')}`);
+  },
+);

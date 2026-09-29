@@ -236,6 +236,101 @@ after(async () => dbFixture.cleanup());
 
 // ---------------------------------------------------------------------------
 
+describe('rolling create burst limits', () => {
+  const burstConfig = () => config({ maxPerUser: 10, maxPerGuild: 40, createCooldownSeconds: 0 });
+
+  test('allows three user creates, refuses the fourth without mutation, and recovers one slot at the window boundary', async () => {
+    const svc = service(burstConfig());
+    const start = clock;
+    for (let i = 0; i < 3; i++) {
+      clock = start + i * 10_000;
+      assert.equal((await join(svc, OWNER)).status, 'created');
+    }
+    clock = start + 59_999;
+    const refused = await join(svc, OWNER);
+    assert.equal(refused.status, 'refused');
+    if (refused.status === 'refused') assert.match(refused.reason, /rate limit.*3.*60/i);
+    assert.equal(gateway.createCalls, 3);
+    assert.equal(gateway.moves.length, 3);
+    assert.equal(await store.countForGuild(GUILD), 3);
+    clock = start + 60_000;
+    assert.equal((await join(svc, OWNER)).status, 'created');
+    assert.equal((await join(svc, OWNER)).status, 'refused', 'a rolling window does not reset every slot');
+    assert.equal(gateway.createCalls, 4);
+  });
+
+  test('allows ten guild creates across users, refuses the eleventh and recovers after 60 seconds', async () => {
+    const svc = service(burstConfig());
+    for (let i = 0; i < 10; i++) {
+      assert.equal((await join(svc, String(BigInt(OWNER) + BigInt(i)))).status, 'created');
+    }
+    const refused = await join(svc, ROLE);
+    assert.equal(refused.status, 'refused');
+    if (refused.status === 'refused') assert.match(refused.reason, /server.*rate limit.*10.*60/i);
+    assert.equal(gateway.createCalls, 10);
+    assert.equal(gateway.moves.length, 10);
+    clock += 60_000;
+    assert.equal((await join(svc, ROLE)).status, 'created');
+  });
+
+  test('rapid leave/rejoin after deletion and service restart cannot reset the user budget', async () => {
+    for (let i = 0; i < 3; i++) {
+      const svc = service();
+      const made = await join(svc, OWNER);
+      assert.equal(made.status, 'created');
+      if (made.status !== 'created') return;
+      await gateway.moveMember(GUILD, OWNER, null);
+      assert.equal(await svc.deleteGeneratedChannel(GUILD, made.channelId, 'empty test channel'), 'deleted');
+    }
+    assert.equal(await store.countForOwner(GUILD, OWNER), 0);
+    const restarted = new TempVoiceService({ store: new TempVoiceStore(dbFixture.db), gateway, config: config(), policy: POLICY, now });
+    assert.equal((await join(restarted, OWNER)).status, 'refused');
+    assert.equal(gateway.createCalls, 3);
+    clock += 60_000;
+    assert.equal((await join(restarted, OWNER)).status, 'created');
+  });
+
+  test('failed Discord creates release channel slots but not the burst budget', async () => {
+    const svc = service(burstConfig());
+    gateway.failCreate = new TempVoiceGatewayError('full', CATEGORY_FULL_CODE);
+    for (let i = 0; i < 3; i++) await join(svc, OWNER);
+    assert.equal(await store.countForGuild(GUILD), 0);
+    gateway.failCreate = null;
+    assert.equal((await join(svc, OWNER)).status, 'refused');
+    assert.equal(gateway.createCalls, 3);
+  });
+
+  for (const dimension of ['user', 'guild'] as const) {
+    test(`parallel joins through independent stores cannot overspend the ${dimension} budget`, async () => {
+      const peerDb = await openPostgres({ connectionString: process.env.TWO_TEST_DATABASE_URL!, schema: dbFixture.schema });
+      try {
+        const peer = new TempVoiceService({ store: new TempVoiceStore(peerDb), gateway, config: burstConfig(), policy: POLICY, now });
+        const svc = service(burstConfig());
+        const outcomes = await Promise.all(Array.from({ length: 12 }, (_, i) =>
+          join(i % 2 ? peer : svc, dimension === 'user' ? OWNER : String(BigInt(OWNER) + BigInt(i)))));
+        const limit = dimension === 'user' ? 3 : 10;
+        assert.equal(outcomes.filter((result) => result.status === 'created').length, limit);
+        assert.equal(outcomes.filter((result) => result.status === 'refused').length, 12 - limit);
+        assert.equal(gateway.createCalls, limit);
+        assert.equal(gateway.moves.length, limit);
+      } finally {
+        await peerDb.close();
+      }
+    });
+  }
+
+  test('guild budgets are isolated even for the same user', async () => {
+    const reserve = (guildId: string) => store.reserveIfUnderCaps({
+      guildId, generatorId: GENERATOR, categoryId: CATEGORY, ownerId: OWNER,
+      name: 'test', createdAt: new Date(clock).toISOString(),
+      maxPerUser: 10, maxPerGuild: 40, cooldownSeconds: 0,
+    });
+    for (let i = 0; i < 3; i++) assert.equal((await reserve(GUILD)).ok, true);
+    assert.equal((await reserve(GUILD)).ok, false);
+    assert.equal((await reserve('1545644954272137298')).ok, true);
+  });
+});
+
 describe('config', () => {
   test('canonical flag enables staging, refuses live, and overrides the legacy flag', () => {
     const env = {
@@ -574,15 +669,19 @@ describe('creating a channel', () => {
 });
 
 describe('permission preflight', () => {
-  test('the required set is exactly what the overwrites grant', () => {
+  test('the create path confers only what the bot can grant; the rest stays a category-level requirement', () => {
     const granted = new Set<OverwriteFlag>();
     for (const spec of tempVoiceOverwrites(GUILD, '1469137636663758888', OWNER)) {
       for (const flag of spec.allow ?? []) granted.add(flag);
     }
-    // Drift here is the 50013 above, deferred until a member hits the
-    // generator in production. Any flag added to the overwrites is a flag the
-    // bot must hold, and therefore a flag the preflight must check.
-    assert.deepEqual([...granted].sort(), [...TEMP_VOICE_REQUIRED_PERMISSIONS].sort());
+    // TOG-9541: live staging proved the bot holds ManageRoles on the category
+    // yet Discord 403/50013s any create (or PATCH) whose overwrites confer it.
+    // So the create path must confer exactly the required set MINUS
+    // ManageRoles, while the preflight still requires all six (the owner
+    // controls edit overwrites under the bot's category-level ManageRoles).
+    const conferrable = [...TEMP_VOICE_REQUIRED_PERMISSIONS].filter((flag) => flag !== 'ManageRoles');
+    assert.deepEqual([...granted].sort(), [...conferrable].sort());
+    assert.ok(TEMP_VOICE_REQUIRED_PERMISSIONS.includes('ManageRoles'), 'controls still need the category-level grant');
   });
 
   for (const permission of TEMP_VOICE_REQUIRED_PERMISSIONS) {
@@ -598,10 +697,14 @@ describe('permission preflight', () => {
     });
   }
 
-  test('ManageRoles belongs only to the bot channel overwrite, not the owner', () => {
+  test('no create-time overwrite confers ManageRoles — the bot cannot grant it (TOG-9541)', () => {
     const botId = gateway.botUserId();
     const overwrites = tempVoiceOverwrites(GUILD, botId, OWNER);
-    assert.deepEqual(overwrites.filter((spec) => spec.allow?.includes('ManageRoles')).map((spec) => spec.id), [botId]);
+    assert.deepEqual(
+      overwrites.filter((spec) => spec.allow?.includes('ManageRoles')),
+      [],
+      'conferring ManageRoles in a create fails live with 403/50013 even though preflight passes',
+    );
   });
 
   test('names the missing permission rather than failing opaquely', async () => {

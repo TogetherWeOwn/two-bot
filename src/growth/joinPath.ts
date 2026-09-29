@@ -24,6 +24,48 @@ const JOIN_INTERSTITIAL = /\bdata-testid\s*=\s*(["'])one-click-join\1/i;
 
 const APPROVED_SITE = new URL('https://togetherweown.com/');
 
+/**
+ * The Discord invite code behind a join destination URL.
+ *
+ * The funnel stores raw Discord codes (`inviteTracker.ts` writes
+ * `invite:<code>`), while the growth registry names the SLOT (`WEB-HOMEPAGE`).
+ * Matching the funnel on the slot label can never hit a row, so callers that
+ * need the funnel row resolve the slot to its bound code through this - from
+ * the same `TWO_GATE_JOIN_DESTINATION` value the join-path observation checks
+ * against, never from a second hardcoded copy of the code.
+ *
+ * Returns `undefined` when the destination is not a Discord invite URL, so the
+ * caller reports "could not resolve" instead of matching on a guess.
+ */
+export function inviteCodeFromDestination(destination: string): string | undefined {
+  let url: URL;
+  try {
+    url = new URL(destination);
+  } catch {
+    return undefined;
+  }
+  const host = url.hostname.toLowerCase();
+  if (host === 'discord.gg') {
+    const code = url.pathname.replace(/^\/+|\/+$/g, '');
+    return code && !code.includes('/') ? code : undefined;
+  }
+  const invitePath = url.pathname.match(/^\/invite\/([^/]+)\/?$/);
+  if ((host === 'discord.com' || host === 'www.discord.com') && invitePath) {
+    return invitePath[1];
+  }
+  return undefined;
+}
+
+/**
+ * The funnel `source` value a join through this destination is stored under:
+ * `invite:<code>`, exactly as the tracker writes it. `undefined` when the
+ * destination does not resolve to a Discord invite code.
+ */
+export function webCodeRowSource(destination: string): string | undefined {
+  const code = inviteCodeFromDestination(destination);
+  return code === undefined ? undefined : `invite:${code}`;
+}
+
 function sameDestination(actual: URL, expected: URL): boolean {
   return (
     actual.protocol === expected.protocol &&

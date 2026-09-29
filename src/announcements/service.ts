@@ -11,6 +11,10 @@ import type {
 const MAX_TITLE_CHARS = 100;
 const MAX_LFG_ROLES = 20;
 const MAX_FEED_BODY_CHARS = 2000;
+// A worker that crashes between the claim insert and markDelivered/release
+// must not wedge the item forever: a later poll reclaims `pending` claims
+// older than this lease. Mirrors the automations sticky-post 60s lease.
+export const DELIVERY_CLAIM_LEASE_MS = 60_000;
 
 export interface AnnouncementDiscord {
   postMessage(channelId: string, content: string, options?: { nonce?: string; components?: unknown[] }): Promise<string>;
@@ -270,29 +274,53 @@ export class AnnouncementsService {
     for (const feed of await this.store.listEnabledFeeds(guildId)) {
       try {
         const items = await this.readFeedWithTimeout(feed);
+        // Per-item isolation (TOG-9346): one bad item must not abort the
+        // batch. Each item is attempted inside its own try/catch — a keyless
+        // item audits `feed.item/skipped`, a post failure releases the claim
+        // and audits `feed.item/failed` — and the loop continues with the
+        // rest, so `markFeedChecked` below still runs.
         for (const item of items.slice(0, 20).reverse()) {
-          const itemKey = normalizeItemKey(item);
-          const nonce = deliveryNonce(feed.id, itemKey);
-          const claimToken = randomUUID();
-          const claim = await this.store.claimDelivery({
-            feedId: feed.id,
-            itemKey,
-            nonce,
-            state: 'pending',
-            messageId: null,
-            firstSeenAt: now.toISOString(),
-            deliveredAt: null,
-            claimToken,
-            claimedAt: now.toISOString(),
-          });
-          if (!claim) continue;
-          const content = formatFeedMessage(feed.kind, item);
+          let itemKey: string;
           try {
-            const messageId = await this.discord.postMessage(feed.channelId, content, { nonce });
-            if (await this.store.markDelivered(feed.id, itemKey, claimToken, messageId, now.toISOString())) delivered++;
+            itemKey = normalizeItemKey(item);
           } catch (error) {
-            await this.store.releaseDelivery(feed.id, itemKey, claimToken);
-            throw error;
+            await this.store.audit({
+              guildId, actorId: null, action: 'feed.item', targetKey: feed.id,
+              outcome: 'skipped',
+              reason: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
+            }, now.toISOString());
+            continue;
+          }
+          try {
+            const nonce = deliveryNonce(feed.id, itemKey);
+            const claimToken = randomUUID();
+            const expiredClaimCutoff = new Date(now.getTime() - DELIVERY_CLAIM_LEASE_MS).toISOString();
+            const claim = await this.store.claimDelivery({
+              feedId: feed.id,
+              itemKey,
+              nonce,
+              state: 'pending',
+              messageId: null,
+              firstSeenAt: now.toISOString(),
+              deliveredAt: null,
+              claimToken,
+              claimedAt: now.toISOString(),
+            }, expiredClaimCutoff);
+            if (!claim) continue;
+            const content = formatFeedMessage(feed.kind, item);
+            try {
+              const messageId = await this.discord.postMessage(feed.channelId, content, { nonce });
+              if (await this.store.markDelivered(feed.id, itemKey, claimToken, messageId, now.toISOString())) delivered++;
+            } catch (error) {
+              await this.store.releaseDelivery(feed.id, itemKey, claimToken);
+              throw error;
+            }
+          } catch (error) {
+            await this.store.audit({
+              guildId, actorId: null, action: 'feed.item', targetKey: feed.id,
+              outcome: 'failed',
+              reason: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
+            }, now.toISOString());
           }
         }
         await this.store.markFeedChecked(feed.id, now.toISOString());

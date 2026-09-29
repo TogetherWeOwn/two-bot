@@ -244,6 +244,56 @@ test('lifecycle: a leave with no seen start ends unknown-start with no duration'
   }
 });
 
+// --- F2. malformed leave timestamp (TOG-7512) -----------------------------------------
+//
+// A garbage occurredAt on the leave must not write the lying row:
+// startKnown:true with a null duration. Date.parse garbage is NaN, NaN
+// survived Math.max/Math.round (still !== null, so the leveling branch fired
+// with amount NaN), and JSON.stringify(NaN) stored null. The honest row is
+// the bot-down unknown-start one: startKnown:false, nulls, tracker closed,
+// and a parseable occurred_at (raw garbage would throw on Postgres
+// timestamptz, so "no throw" must hold on both backends).
+
+test('lifecycle: a malformed leave timestamp ends unknown-start, never the lying row', async () => {
+  const { db, handlers } = await fixture();
+  try {
+    await handlers.onVoiceJoin({ guildId: G, memberId: 'garbage-leave', isBot: false, channelId: CH_A, occurredAt: '2026-08-02T19:00:00.000Z' });
+    const end = await handlers.onVoiceLeave({ guildId: G, memberId: 'garbage-leave', isBot: false, channelId: CH_A, occurredAt: 'not-a-date' });
+    const [meta] = await endMetas(db, 'garbage-leave');
+    assert.equal(meta.startKnown, false, 'unmeasurable, not a KNOWN start with no duration');
+    assert.equal(meta.durationSeconds, null);
+    assert.equal(meta.startedAt, null);
+    assert.equal(handlers.voiceSessions.isOpen(G, 'garbage-leave'), false, 'tracker entry closed, not leaked');
+    const row = await db
+      .prepare(`SELECT occurred_at, source FROM events WHERE event_type='voice_session_end' AND member_id=?`)
+      .get<{ occurred_at: string; source: string }>('garbage-leave');
+    assert.ok(Number.isFinite(Date.parse(row?.occurred_at ?? '')), 'occurred_at is a real timestamp, not the raw garbage');
+    assert.deepEqual(
+      (end?.metadata ?? {}) as object,
+      { startKnown: false, startedAt: null, durationSeconds: null },
+      'returned metadata matches the stored row',
+    );
+    assert.equal(row?.source, 'channel:chan-a', 'credited to the open channel');
+  } finally {
+    await db.close();
+  }
+});
+
+test('lifecycle: a malformed join start is equally unmeasurable on the way out', async () => {
+  const { db, handlers } = await fixture();
+  try {
+    await handlers.onVoiceJoin({ guildId: G, memberId: 'garbage-start', isBot: false, channelId: CH_A, occurredAt: 'also-not-a-date' });
+    await handlers.onVoiceLeave({ guildId: G, memberId: 'garbage-start', isBot: false, channelId: CH_A, occurredAt: '2026-08-02T20:30:00.000Z' });
+    const [meta] = await endMetas(db, 'garbage-start');
+    assert.equal(meta.startKnown, false, 'a start we could never read is not a KNOWN start');
+    assert.equal(meta.durationSeconds, null);
+    assert.equal(meta.startedAt, null);
+    assert.equal(handlers.voiceSessions.isOpen(G, 'garbage-start'), false);
+  } finally {
+    await db.close();
+  }
+});
+
 // --- G. dangling-open scan ----------------------------------------------------------
 
 test('lifecycle: dangling-open scan is empty across the matrix and bites on a synthetic orphan', async () => {
