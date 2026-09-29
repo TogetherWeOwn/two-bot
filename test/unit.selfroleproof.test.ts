@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { after, before, test } from 'node:test';
@@ -54,14 +55,19 @@ test('proveGrantRevoke fails closed on an empty panel', () => {
 let server: Server;
 let baseUrl = '';
 let hits = 0;
+// Same nonce-prefix scoping as unit.selfrolepanel-acceptance.test.ts (TOG-7982):
+// only traffic aimed at our own base URL counts; stray loopback scans from
+// sibling suites on the shared CI host are ignored.
+const nonce = randomBytes(16).toString('hex');
+const prefix = `/${nonce}`;
 
 before(async () => {
-  server = createServer((_req, res) => {
-    hits++;
+  server = createServer((req, res) => {
+    if ((req.url ?? '/').startsWith(`${prefix}/`) || req.url === prefix) hits++;
     res.writeHead(500).end();
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}${prefix}`;
 });
 
 after(async () => {
