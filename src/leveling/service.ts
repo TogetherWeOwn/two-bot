@@ -59,6 +59,19 @@ export interface ImportSummary {
   totalImportedXp: number;
 }
 
+/**
+ * File-level counts for the `level_import_runs` audit row, for callers that
+ * filtered rows out before handing them to the importer (e.g. declined stale
+ * rows in `planMee6Import`).
+ *
+ * When omitted the audit describes exactly what was handed to `importMee6`.
+ */
+export interface Mee6ImportSourceCounts {
+  sourceRows: number;
+  uniqueMembers: number;
+  duplicateRows: number;
+}
+
 export function totalXpForLevel(level: number): number {
   if (!Number.isInteger(level) || level < 0) throw new Error('level must be a non-negative integer');
   return Math.floor((5 / 6) * level * (2 * level * level + 27 * level + 91));
@@ -329,6 +342,7 @@ export class LevelingService {
     guildId: string,
     rows: readonly Mee6ImportRow[],
     importedAt = new Date().toISOString(),
+    sourceCounts?: Mee6ImportSourceCounts,
   ): Promise<ImportSummary> {
     const at = isoOrThrow(importedAt);
     const byMember = new Map<string, number>();
@@ -407,6 +421,25 @@ export class LevelingService {
         throw new Error(`imported XP plus organic XP exceeds ${MAX_STORED_XP} for member ${memberId}`);
       }
 
+      // The audit row describes the source file, not just the rows that
+      // survived filtering. Callers that declined rows before calling (e.g.
+      // runMee6Import via planMee6Import) pass the file-level counts through;
+      // direct callers omit them and the audit describes what was handed in.
+      // Declined members reconcile as unique_members - (inserted + updated +
+      // unchanged); there is no declined column on level_import_runs.
+      const auditSourceRows = sourceCounts?.sourceRows ?? rows.length;
+      const auditUniqueMembers = sourceCounts?.uniqueMembers ?? byMember.size;
+      const auditDuplicateRows = sourceCounts?.duplicateRows ?? duplicateRows;
+      for (const [name, value, floor] of [
+        ['sourceRows', auditSourceRows, rows.length],
+        ['uniqueMembers', auditUniqueMembers, byMember.size],
+        ['duplicateRows', auditDuplicateRows, duplicateRows],
+      ] as const) {
+        if (!Number.isSafeInteger(value) || value < floor) {
+          throw new Error(`invalid file-level ${name} for the import audit: ${value}`);
+        }
+      }
+
       await tx
         .prepare(
           `INSERT INTO level_import_runs
@@ -416,23 +449,23 @@ export class LevelingService {
         )
         .run(
           guildId,
-          rows.length,
-          byMember.size,
+          auditSourceRows,
+          auditUniqueMembers,
           inserted,
           updated,
           unchanged,
-          duplicateRows,
+          auditDuplicateRows,
           totalImportedXp,
           at,
         );
 
       return {
-        sourceRows: rows.length,
-        uniqueMembers: byMember.size,
+        sourceRows: auditSourceRows,
+        uniqueMembers: auditUniqueMembers,
         inserted,
         updated,
         unchanged,
-        duplicateRows,
+        duplicateRows: auditDuplicateRows,
         totalImportedXp,
       };
     });

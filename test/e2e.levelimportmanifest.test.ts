@@ -175,6 +175,25 @@ test('a row that would lower an existing member is skipped with its reason, and 
   assert.equal(alice.xp, 915);
   assert.equal(alice.importedXp, 900);
   assert.equal(alice.messageXp, 15);
+
+  // TOG-9915: the audit row describes the source file, not the post-decline
+  // rows. The second run saw 2 file rows / 2 file members even though Alice
+  // was declined and only Bob was written.
+  const runs = await harness.db
+    .prepare(
+      `SELECT source_rows, unique_members, inserted, updated, unchanged, duplicate_rows
+         FROM level_import_runs WHERE guild_id = ? ORDER BY id`,
+    )
+    .all<Record<string, number>>(GUILD);
+  assert.equal(runs.length, 2);
+  assert.deepEqual({ ...runs[1] }, {
+    source_rows: 2,
+    unique_members: 2,
+    inserted: 1,
+    updated: 0,
+    unchanged: 0,
+    duplicate_rows: 0,
+  });
 });
 
 test('--allow-lower applies the same row, and says so in the totals', async () => {

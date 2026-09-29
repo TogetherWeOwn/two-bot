@@ -453,10 +453,17 @@ export async function runMee6Import(
   let totalXpAfterMeasured: number | null = null;
 
   if (options.apply) {
+    // plan.apply excludes declined rows, so the audit row would understate
+    // the file without the file-level counts (TOG-9915).
     importSummary = await new LevelingService(db).importMee6(
       guildId,
       plan.apply,
       options.importedAt,
+      {
+        sourceRows: plan.accounting.rowsIn,
+        uniqueMembers: plan.accounting.uniqueMembersIn,
+        duplicateRows: plan.accounting.duplicateRows,
+      },
     );
     inventoryAfter = await inventory(db, guildId);
     totalXpAfterMeasured = inventoryAfter.totalXp;
