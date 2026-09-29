@@ -103,6 +103,7 @@
     "raid:remove": "node scripts/raid-remove.ts",
     "roles:consolidation": "node scripts/role-consolidation.ts",
     "events:dedupe": "node scripts/dedupe-events.ts",
+    "events:drift": "node scripts/scheduled-events-drift.ts",
     "audit:report": "node scripts/audit-report.ts",
     "cleanup:audit-visibility": "node scripts/audit-live-cleanup-visibility.ts",
     "cleanup:derive-pins": "node scripts/derive-live-cleanup-pins.ts",
