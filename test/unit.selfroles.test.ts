@@ -124,6 +124,33 @@ test('configuration rejects button labels over Discord\'s 80-char limit', () => 
   assert.equal(loadSelfRolePanels(selectPanel).length, 1);
 });
 
+test('configuration rejects button panels whose custom ids exceed Discord\'s 100-char limit', () => {
+  const buttonPanel = (panelId: string, optionKey: string) => JSON.stringify([{
+    ...panel,
+    id: panelId,
+    mode: 'button',
+    exclusive: false,
+    color: false,
+    options: [{ ...panel.options[0], key: optionKey }],
+  }]);
+  // 14-char prefix + 60-char panel id + colon + 25-char option key = exactly 100.
+  assert.equal(loadSelfRolePanels(buttonPanel('p'.repeat(60), 'k'.repeat(25))).length, 1);
+  assert.throws(
+    () => loadSelfRolePanels(buttonPanel('p'.repeat(60), 'k'.repeat(26))),
+    /over Discord's 100-char custom_id limit/,
+  );
+  // Select and reaction panels render no button custom ids, so long keys still load there.
+  const selectPanel = JSON.stringify([{
+    ...panel,
+    id: 'p'.repeat(60),
+    mode: 'select',
+    exclusive: false,
+    color: false,
+    options: [{ ...panel.options[0], key: 'k'.repeat(26) }],
+  }]);
+  assert.equal(loadSelfRolePanels(selectPanel).length, 1);
+});
+
 test('configuration rejects role ids reused across panels', () => {
   assert.throws(
     () => loadSelfRolePanels(JSON.stringify([
