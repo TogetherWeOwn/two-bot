@@ -17,6 +17,8 @@
  * | `TWO_DATABASE_URL` | The funnel database, as everywhere else. |
  */
 
+import { isValidInviteCode } from './campaigns.ts';
+
 export interface RedirectConfig {
   host: string;
   port: number;
@@ -31,10 +33,23 @@ export function loadRedirectConfig(env: NodeJS.ProcessEnv = process.env): Redire
       'The invite redirect needs DISCORD_GUILD_ID - a click has to be recorded against a guild.',
     );
   }
+  const rawPort = env.TWO_REDIRECT_PORT ?? '8088';
+  const port = Number(rawPort);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(
+      `TWO_REDIRECT_PORT="${rawPort}" is invalid - expected an integer port 1-65535.`,
+    );
+  }
+  const fallbackInviteCode = env.TWO_REDIRECT_FALLBACK_CODE || null;
+  if (fallbackInviteCode !== null && !isValidInviteCode(fallbackInviteCode)) {
+    throw new Error(
+      `TWO_REDIRECT_FALLBACK_CODE="${fallbackInviteCode}" is invalid - pass the invite code only, not a discord.gg/ URL.`,
+    );
+  }
   return {
     host: env.TWO_REDIRECT_BIND_HOST || '127.0.0.1',
-    port: Number(env.TWO_REDIRECT_PORT ?? 8088),
+    port,
     guildId,
-    fallbackInviteCode: env.TWO_REDIRECT_FALLBACK_CODE || null,
+    fallbackInviteCode,
   };
 }

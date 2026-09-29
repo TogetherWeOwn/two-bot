@@ -88,6 +88,32 @@ test('redirect config defaults to loopback and reads its overrides', () => {
   assert.deepEqual(over, { host: '10.0.0.5', port: 8090, guildId: 'g1', fallbackInviteCode: 'fallback' });
 });
 
+test('the redirect refuses to start with an invalid TWO_REDIRECT_PORT', () => {
+  for (const port of ['abc', '', '99999', '8088.5', '0', '-1']) {
+    assert.throws(
+      () => loadRedirectConfig({ DISCORD_GUILD_ID: 'g1', TWO_REDIRECT_PORT: port } as NodeJS.ProcessEnv),
+      /TWO_REDIRECT_PORT/,
+      `port "${port}" must throw`,
+    );
+  }
+});
+
+test('the redirect refuses to start with an invalid TWO_REDIRECT_FALLBACK_CODE', () => {
+  for (const code of ['has space', 'https://discord.gg/aB3xY9', 'a/b', '']) {
+    // '' is falsy and behaves as no fallback, so only non-empty values throw.
+    if (code === '') continue;
+    assert.throws(
+      () =>
+        loadRedirectConfig({
+          DISCORD_GUILD_ID: 'g1',
+          TWO_REDIRECT_FALLBACK_CODE: code,
+        } as NodeJS.ProcessEnv),
+      /TWO_REDIRECT_FALLBACK_CODE/,
+      `fallback "${code}" must throw`,
+    );
+  }
+});
+
 // --- store ---------------------------------------------------------------------
 
 test('list() returns every campaign in slug order', async () => {
