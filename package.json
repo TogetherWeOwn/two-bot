@@ -32,6 +32,7 @@
     "review": "node scripts/growth-review.ts",
     "dashboard": "node scripts/dashboard.ts",
     "roster": "node scripts/roster.ts",
+    "leave:gap": "node scripts/leave-gap.ts",
     "audit:collect": "node scripts/audit-collect.ts",
     "audit:scrub": "node scripts/audit-scrub.ts --help",
     "audit:halt": "node scripts/audit-switch.ts --halt",
