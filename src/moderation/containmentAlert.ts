@@ -173,9 +173,12 @@ function outcomeSeverity(outcome: string): number {
 }
 
 function cappedList(names: string[], total: number, label: string): string {
-  const shown = names.slice(0, DIGEST_LIST_CAP).join(', ');
-  const hidden = total - Math.min(total, names.length);
-  return hidden > 0 ? `${shown} (…and ${hidden} more ${label})` : shown;
+  // NB: callers pass one name per distinct item, so names.length usually
+  // equals total — hidden must count against the display cap, not the input
+  // length, or the suffix never renders (TOG-9988 review).
+  const shown = names.slice(0, DIGEST_LIST_CAP);
+  const hidden = total - shown.length;
+  return hidden > 0 ? `${shown.join(', ')} (…and ${hidden} more ${label})` : shown.join(', ');
 }
 
 /**

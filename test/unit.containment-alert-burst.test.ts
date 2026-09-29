@@ -162,6 +162,15 @@ test('join-risk digest names distinct reasons and member count', () => {
   assert.match(digest.reasons.join(' '), /3 flag\(s\)/);
 });
 
+test('containment digest names executor overflow instead of truncating silently', () => {
+  const sample = Array.from({ length: 12 }, (_, index) =>
+    containmentAlert(`9000000000000000${String(index).padStart(2, '0')}`),
+  );
+  const digest = summarizeContainmentBurst(GUILD, sample, 12);
+  assert.match(digest.note ?? '', /…and 2 more executors/, 'overflow suffix renders past the 10-name cap');
+  assert.match(digest.note ?? '', /900000000000000000×1/);
+});
+
 test('containment digest with one executor stays readable', () => {
   const digest = summarizeContainmentBurst(
     GUILD,
