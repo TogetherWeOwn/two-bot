@@ -88,3 +88,45 @@ export class RenameThrottle {
     this.state.delete(channelId);
   }
 }
+
+/**
+ * Rename-collision check (TOG-9992).
+ *
+ * Discord permits duplicate voice-channel names, so nothing below us refuses a
+ * rename that clones a sibling's name. The service therefore checks the
+ * persisted live rows first and refuses with a named error instead of minting
+ * a duplicate.
+ */
+export interface SiblingName {
+  channelId: string;
+  name: string;
+}
+
+/**
+ * Fold a channel name for collision comparison: NFKC (so fullwidth and
+ * compatibility variants match their plain forms, and NFC/NFD canonically
+ * equivalent strings match each other) plus case-insensitive (`Squad` and
+ * `squad` collide - users cannot reliably tell them apart in the voice UI).
+ * The filter already NFKC-sanitizes the candidate; siblings are folded here
+ * because stored rows predate any single normalization.
+ */
+export function foldChannelNameForCollision(name: string): string {
+  return name.normalize('NFKC').toLowerCase();
+}
+
+/**
+ * The sibling already holding `candidate`, or null. The channel being renamed
+ * never collides with itself.
+ */
+export function findRenameCollision(
+  candidate: string,
+  channelId: string,
+  siblings: readonly SiblingName[],
+): SiblingName | null {
+  const folded = foldChannelNameForCollision(candidate);
+  for (const sibling of siblings) {
+    if (sibling.channelId === channelId) continue;
+    if (foldChannelNameForCollision(sibling.name) === folded) return sibling;
+  }
+  return null;
+}

@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import test, { after, beforeEach, describe } from 'node:test';
 import { loadTempVoiceConfig, TEMP_VOICE_CONTROLS, type TempVoiceConfig, type TempVoiceControl } from '../src/tempVoice/config.ts';
 import { filterChannelName, renderNameTemplate } from '../src/tempVoice/nameFilter.ts';
-import { RenameThrottle, RENAME_MIN_INTERVAL_MS } from '../src/tempVoice/rename.ts';
+import { RenameThrottle, RENAME_MIN_INTERVAL_MS, findRenameCollision, foldChannelNameForCollision } from '../src/tempVoice/rename.ts';
 import { TempVoiceStore } from '../src/tempVoice/store.ts';
 import { openPostgres } from '../src/store/postgresDriver.ts';
 import {
@@ -988,6 +988,105 @@ describe('owner controls', () => {
     const outcome = await svc.rename(ctx(OWNER, channelId), 'badword lounge');
     assert.equal(outcome.status, 'refused');
     assert.notEqual(gateway.channels.get(channelId)!.name, 'badword lounge');
+  });
+
+  test('renaming onto a sibling channel name is refused with a named error, never a duplicate', async () => {
+    // One service, like production: a single shared throttle sees every queue.
+    await setup(config({ maxPerUser: 5 }));
+    const second = await join(svc, OTHER, 'other-champion');
+    assert.equal(second.status, 'created');
+    const otherId = second.status === 'created' ? second.channelId : '';
+    const before = gateway.channels.get(channelId)!.name;
+
+    // The generator template renders "{username}'s channel", so the sibling
+    // holds "other-champion's channel", not the bare username.
+    const outcome = await svc.rename(ctx(OWNER, channelId), "other-champion's channel");
+    assert.equal(outcome.status, 'refused');
+    assert.match(outcome.message, /already named/, 'the refusal must name the collision');
+    assert.match(outcome.message, /other-champion/);
+    assert.equal(gateway.channels.get(channelId)!.name, before, 'a colliding rename must not reach Discord');
+    assert.equal(gateway.channels.get(otherId)!.name, "other-champion's channel", 'the sibling keeps its name');
+  });
+
+  test('a collision check is case-insensitive and fullwidth-folded', async () => {
+    await setup(config({ maxPerUser: 5 }));
+    const second = await join(svc, OTHER, 'Squad Alpha');
+    assert.equal(second.status, 'created');
+
+    // Sibling holds "Squad Alpha's channel" (template-rendered); case,
+    // fullwidth, and the fullwidth apostrophe (NFKC-folds to ') all collide.
+    assert.equal((await svc.rename(ctx(OWNER, channelId), "SQUAD ALPHA'S CHANNEL")).status, 'refused');
+    assert.equal((await svc.rename(ctx(OWNER, channelId), 'Ｓｑｕａｄ Ａｌｐｈａ＇ｓ ｃｈａｎｎｅｌ')).status, 'refused');
+    assert.equal(gateway.channels.get(channelId)!.name, "owen's channel");
+  });
+
+  test('renaming to the channel’s own current name is not a collision', async () => {
+    await setup();
+    assert.equal((await svc.rename(ctx(OWNER, channelId), 'first')).status, 'ok');
+    clock += RENAME_MIN_INTERVAL_MS;
+    assert.equal((await svc.rename(ctx(OWNER, channelId), 'first')).status, 'ok');
+    assert.equal(gateway.channels.get(channelId)!.name, 'first');
+  });
+
+  test('a refused collision spends no throttle budget', async () => {
+    await setup(config({ maxPerUser: 5 }));
+    assert.equal((await join(svc, OTHER, 'room two')).status, 'created');
+
+    assert.equal((await svc.rename(ctx(OWNER, channelId), "room two's channel")).status, 'refused');
+    const outcome = await svc.rename(ctx(OWNER, channelId), 'fresh start');
+    assert.equal(outcome.status, 'ok');
+    assert.equal(gateway.channels.get(channelId)!.name, 'fresh start');
+  });
+
+  test('unicode names survive the rename round trip', async () => {
+    await setup();
+    const names = ['日本語ラウンジ', 'squad Café ☕', 'комната отдыха'];
+    for (const [index, name] of names.entries()) {
+      if (index > 0) clock += RENAME_MIN_INTERVAL_MS;
+      const outcome = await svc.rename(ctx(OWNER, channelId), name);
+      assert.equal(outcome.status, 'ok', JSON.stringify(name));
+      assert.equal(gateway.channels.get(channelId)!.name, name);
+      assert.equal((await store.getByChannel(GUILD, channelId))?.name, name, 'the persisted row must store the exact name');
+    }
+  });
+
+  test('a name another channel queued but has not landed yet still collides', async () => {
+    await setup(config({ maxPerUser: 5 }));
+    const second = await join(svc, OTHER, 'starter name');
+    assert.equal(second.status, 'created');
+    const otherId = second.status === 'created' ? second.channelId : '';
+    // Queue "claimed" on the other channel: throttled, so Discord still holds
+    // the old name while the shared throttle holds the new one.
+    assert.equal((await svc.rename(ctx(OTHER, otherId), 'first pick')).status, 'ok');
+    clock += 60_000;
+    const queued = await svc.rename(ctx(OTHER, otherId), 'claimed');
+    assert.equal(queued.status, 'ok');
+    assert.match(queued.message, /queued/);
+
+    assert.equal((await svc.rename(ctx(OWNER, channelId), 'claimed')).status, 'refused');
+  });
+
+  test('a queued rename a new channel takes in the meantime is dropped, never landed as a duplicate', async () => {
+    await setup(config({ maxPerUser: 5 }));
+    assert.equal((await svc.rename(ctx(OWNER, channelId), 'first pick')).status, 'ok');
+    clock += 60_000;
+    const queued = await svc.rename(ctx(OWNER, channelId), "ava's channel");
+    assert.equal(queued.status, 'ok');
+    assert.match(queued.message, /queued/);
+    // A new member joins; the create template renders the same name the owner
+    // queued. The create path does not collision-check, so the queued flush
+    // must yield rather than land a duplicate.
+    assert.equal((await join(svc, OTHER, 'ava')).status, 'created');
+
+    clock += RENAME_MIN_INTERVAL_MS;
+    await svc.sweep(GUILD);
+    const live = [...gateway.channels.values()].filter((channel) => ![LOBBY, GENERATOR].includes(channel.id));
+    assert.equal(
+      live.filter((channel) => channel.name === "ava's channel").length,
+      1,
+      'exactly one channel may hold the name',
+    );
+    assert.equal(gateway.channels.get(channelId)!.name, 'first pick', 'the queued rename is dropped, not landed');
   });
 
   test('reject removes a member who is already inside', async () => {
