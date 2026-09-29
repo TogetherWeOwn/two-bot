@@ -19,8 +19,10 @@ import {
   MODERATION_DISABLE_OVERRIDE_ENV,
   MODERATION_DISABLE_OVERRIDE_REASON_ENV,
   ModerationShutdownRefusal,
+  OUTSTANDING_ID_LIMIT,
   enforceModerationShutdownPreflight,
   evaluateModerationShutdown,
+  readOutstandingModerationState,
 } from '../src/moderation/shutdownPreflight.ts';
 import { MODERATION_ACTIONS } from '../src/moderation/types.ts';
 import { loadModerationConfig } from '../src/moderation/config.ts';
@@ -252,6 +254,48 @@ test('staged and running unban jobs do block a disable', async () => {
     assert.equal(verdict.decision, 'refused', `state ${state} must block the disable`);
     assert.equal(verdict.outstanding?.pendingUnbanCount, 1);
   }
+});
+
+// --- truncated means rows were actually cut, not merely full ------------------
+//
+// TOG-8459: length >= LIMIT misreported a complete 500-row list as truncated.
+// The counts are exact (COUNT(*)); only count > list means a cut.
+
+function fakeStore(unbans: number, locks: number) {
+  const makeUnbans = (n: number) =>
+    Array.from({ length: Math.min(n, OUTSTANDING_ID_LIMIT) }, (_, i) => ({
+      requestId: `req-${i}`,
+      guildId: GUILD,
+      userId: USER,
+      state: 'pending',
+      executeAt: inFuture(60),
+      reason: 'r',
+    }));
+  const makeLocks = (n: number) =>
+    Array.from({ length: Math.min(n, OUTSTANDING_ID_LIMIT) }, (_, i) => ({
+      channelId: `${CHANNEL}-${i}`,
+      guildId: GUILD,
+      reason: 'r',
+      lockedAt: inFuture(60),
+    }));
+  return {
+    countOutstandingUnbans: async () => unbans,
+    listOutstandingUnbans: async () => makeUnbans(unbans),
+    countActiveLockdowns: async () => locks,
+    listActiveLockdowns: async () => makeLocks(locks),
+  };
+}
+
+test('exactly OUTSTANDING_ID_LIMIT rows with a complete list is not truncated', async () => {
+  const state = await readOutstandingModerationState(fakeStore(OUTSTANDING_ID_LIMIT, 0));
+  assert.equal(state.pendingUnbans.length, OUTSTANDING_ID_LIMIT);
+  assert.equal(state.truncated, false);
+});
+
+test('one row over the cap is truncated', async () => {
+  const state = await readOutstandingModerationState(fakeStore(OUTSTANDING_ID_LIMIT + 1, 0));
+  assert.equal(state.pendingUnbans.length, OUTSTANDING_ID_LIMIT);
+  assert.equal(state.truncated, true);
 });
 
 // --- moderation staying on is not a shutdown --------------------------------
