@@ -50,7 +50,7 @@ jobs:
   # and the gate checks out the base commit rather than the pull request so the
   # fork is not the one supplying the guard (TOG-3103).
   fork-gate:
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
@@ -80,7 +80,7 @@ jobs:
 
   owners-resolve:
     needs: fork-gate
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
