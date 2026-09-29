@@ -52,6 +52,8 @@ export interface ContainmentAlert {
   outcome: string;
   removedRoleIds?: string[];
   restore?: Record<string, unknown>;
+  /** Extra line for digests/throttle notes. Rendered verbatim by the formatter. */
+  note?: string;
 }
 
 export type ContainmentAnnouncer = (alert: ContainmentAlert) => Promise<void>;
@@ -206,6 +208,8 @@ export interface JoinRiskAlert {
   score: number;
   reasons: string[];
   bulkJoinWindow: boolean;
+  /** Extra line for digests/throttle notes. Rendered verbatim by the formatter. */
+  note?: string;
 }
 
 export class JoinRiskScorer {

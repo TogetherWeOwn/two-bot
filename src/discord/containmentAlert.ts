@@ -21,24 +21,30 @@ function restoreText(restore: Record<string, unknown> | undefined): string {
 }
 
 export function formatContainmentAlert(alert: ContainmentAlert): string {
-  return [
+  const lines = [
     `**Anti-nuke ${alert.outcome}** — destructive heat ${alert.heat}/${alert.threshold}.`,
     `Executor: \`${alert.executorId ?? 'unknown'}\` · action: \`${alert.action}\` · target: \`${alert.targetId ?? 'unknown'}\`.`,
     alert.removedRoleIds?.length
       ? `Removed dangerous roles (${alert.removedRoleIds.length}): ${alert.removedRoleIds.slice(0, 20).map((id) => `\`${id}\``).join(' ')}${alert.removedRoleIds.length > 20 ? ` …and ${alert.removedRoleIds.length - 20} more` : ''}.`
       : 'No role removal was confirmed.',
     restoreText(alert.restore),
+  ];
+  if (alert.note) lines.push('', alert.note);
+  lines.push(
     '',
     'No member join was kicked or banned by this feature. Verify the executor and run the guarded staging restore procedure if drift is reported.',
-  ].join('\n');
+  );
+  return lines.join('\n');
 }
 
 export function formatJoinRiskAlert(alert: JoinRiskAlert): string {
-  return [
+  const lines = [
     `**Join risk flag** — score ${alert.score}.`,
     `Member: \`${alert.memberId}\` · reasons: ${alert.reasons.join('; ') || 'none'}.`,
     'Flag only: Owen did not kick, ban, timeout, or message this member.',
-  ].join('\n');
+  ];
+  if (alert.note) lines.push('', alert.note);
+  return lines.join('\n');
 }
 
 async function post(client: Client, channelId: string | null, content: string): Promise<void> {
