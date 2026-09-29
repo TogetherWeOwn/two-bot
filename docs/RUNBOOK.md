@@ -669,8 +669,9 @@ journalctl -u two-bot-restore-drill -n 40
 
 **Last drill: 2026-08-24 (TOG-37), against a synthetic database, not
 production.** 4,009 events / 1,874 members / 5 invite snapshots were loaded
-into SQLite through the bot's own write path, migrated with
-`scripts/migrate-sqlite-to-postgres.ts`, dumped with `scripts/pg-backup.ts`,
+into SQLite through the bot's own write path, migrated with the SQLite-to-Postgres
+script `migrate-sqlite-to-postgres.ts` (removed since by TOG-450 — the SQLite
+datastore path is gone, so this step no longer exists to re-run), dumped with `scripts/pg-backup.ts`,
 copied off-box by `TWO_BACKUP_UPLOAD_CMD`, and restored from *that off-box
 copy* into a scratch database. What was checked:
 
@@ -1175,7 +1176,7 @@ back to them instead of repeating.
 | `test:postgres` | Postgres-backed suite gate: fails unless critical suites report expected floors with no skips (needs `TWO_TEST_DATABASE_URL`; `--results FILE` checks a run without re-running). | Floors met, no skips, exit `0`. |
 | `test:restart-storage` | Owned-cluster restart-storage profile (`--provision`, `--results`). | Report passes, exit `0`. |
 | `typecheck` | `tsc --noEmit`. | No output, exit `0`. |
-| `check:script-targets` | Every `node scripts/<file>` target in package.json exists on disk (TOG-6810). | All targets resolve, exit `0`. |
+| `check:script-targets` | Every `node scripts/<file>` target in package.json exists on disk (TOG-6810), and every `scripts/<path>` / `npm run <name>` in RUNBOOK.md/DEPLOY.md resolves (TOG-10007). | All references resolve, exit `0`. |
 | `check:snowflakes`, `check:snowflakes:selftest` | No hardcoded Discord snowflakes in `src/` (selftest proves the check). | No hits, exit `0`. |
 | `check:credentials`, `check:credentials:selftest` | Systemd credential wiring documented (selftest proves the check). | Checks pass, exit `0`. |
 | `hooks:install`, `prepare` | Install git hooks (prepare runs on `npm install`, failures swallowed). | Hooks present, exit `0`. |

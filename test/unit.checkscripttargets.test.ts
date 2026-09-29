@@ -13,9 +13,16 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { extractTargets, findMissing } from '../scripts/check-script-targets.ts';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import {
+  extractDocNpmRuns,
+  extractDocTargets,
+  extractTargets,
+  findMissing,
+  findMissingDocRefs,
+} from '../scripts/check-script-targets.ts';
 
 const ROOT = resolve(import.meta.dirname, '..');
 
@@ -60,4 +67,59 @@ test('the live package.json has no dangling node scripts/<x> target', () => {
   };
   assert.deepEqual(findMissing(ROOT, pkg.scripts), []);
   assert.ok(!('reconcile' in pkg.scripts), 'the dangling reconcile entry is gone');
+});
+
+test('extractDocTargets finds scripts/<path> in prose and trims file:line + punctuation', () => {
+  assert.deepEqual(extractDocTargets('run `node scripts/staging-doctor.ts` first'), [
+    'scripts/staging-doctor.ts',
+  ]);
+  // Pinned references (scripts/x.ts:34-35) yield the path; sentence-final
+  // periods are punctuation, not path.
+  assert.deepEqual(extractDocTargets('pinned in the script (`scripts/staging-automations-proof.ts:34-35`);'), [
+    'scripts/staging-automations-proof.ts',
+  ]);
+  assert.deepEqual(extractDocTargets('Re-run with scripts/backfill.ts. Then stop.'), [
+    'scripts/backfill.ts',
+  ]);
+  // Dupes collapse; a bare historical filename never mentions scripts/.
+  assert.deepEqual(extractDocTargets('`scripts/a.ts` and scripts/a.ts'), ['scripts/a.ts']);
+  assert.deepEqual(extractDocTargets('the old `migrate-sqlite-to-postgres.ts` is gone'), []);
+});
+
+test('extractDocNpmRuns finds npm run <name> in prose', () => {
+  assert.deepEqual(extractDocNpmRuns('run `npm run staging:doctor` then `npm run wave0`.'), [
+    'staging:doctor',
+    'wave0',
+  ]);
+  assert.deepEqual(extractDocNpmRuns('npm run levels:roles -- --guild <id>'), ['levels:roles']);
+});
+
+test('findMissingDocRefs names the doc for a missing file and a missing npm entry', () => {
+  const root = mkdtempSync(join(tmpdir(), 'docdrift-'));
+  mkdirSync(join(root, 'scripts'), { recursive: true });
+  writeFileSync(join(root, 'scripts', 'kept.ts'), '// fixture');
+  const scripts = { kept: 'node scripts/kept.ts' };
+  const docs = {
+    'docs/RUNBOOK.md':
+      'run `node scripts/kept.ts`, then `node scripts/never-existed.ts`, then `npm run kept` and `npm run typo:name`.',
+  };
+  assert.deepEqual(findMissingDocRefs(root, docs, scripts), [
+    { doc: 'docs/RUNBOOK.md', ref: 'scripts/never-existed.ts', kind: 'file' },
+    { doc: 'docs/RUNBOOK.md', ref: 'typo:name', kind: 'npm-script' },
+  ]);
+  assert.deepEqual(findMissingDocRefs(root, { 'docs/RUNBOOK.md': 'nothing referenced here' }, scripts), []);
+});
+
+test('the live docs reference no missing script file or npm entry', () => {
+  // Failed while docs/RUNBOOK.md still pointed at the TOG-450-removed
+  // scripts/migrate-sqlite-to-postgres.ts (TOG-10007); passes after the
+  // reference was rewritten as history rather than a runnable path.
+  const pkg = JSON.parse(readFileSync(`${ROOT}/package.json`, 'utf8')) as {
+    scripts: Record<string, string>;
+  };
+  const docs: Record<string, string> = {};
+  for (const doc of ['docs/RUNBOOK.md', 'docs/DEPLOY.md']) {
+    docs[doc] = readFileSync(`${ROOT}/${doc}`, 'utf8');
+  }
+  assert.deepEqual(findMissingDocRefs(ROOT, docs, pkg.scripts), []);
 });
