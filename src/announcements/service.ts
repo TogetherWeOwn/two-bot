@@ -11,6 +11,10 @@ import type {
 const MAX_TITLE_CHARS = 100;
 const MAX_LFG_ROLES = 20;
 const MAX_FEED_BODY_CHARS = 2000;
+// A worker that crashes between the claim insert and markDelivered/release
+// must not wedge the item forever: a later poll reclaims `pending` claims
+// older than this lease. Mirrors the automations sticky-post 60s lease.
+export const DELIVERY_CLAIM_LEASE_MS = 60_000;
 
 export interface AnnouncementDiscord {
   postMessage(channelId: string, content: string, options?: { nonce?: string; components?: unknown[] }): Promise<string>;
@@ -290,6 +294,7 @@ export class AnnouncementsService {
           try {
             const nonce = deliveryNonce(feed.id, itemKey);
             const claimToken = randomUUID();
+            const expiredClaimCutoff = new Date(now.getTime() - DELIVERY_CLAIM_LEASE_MS).toISOString();
             const claim = await this.store.claimDelivery({
               feedId: feed.id,
               itemKey,
@@ -300,7 +305,7 @@ export class AnnouncementsService {
               deliveredAt: null,
               claimToken,
               claimedAt: now.toISOString(),
-            });
+            }, expiredClaimCutoff);
             if (!claim) continue;
             const content = formatFeedMessage(feed.kind, item);
             try {
