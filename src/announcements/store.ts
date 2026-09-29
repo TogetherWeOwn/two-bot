@@ -244,8 +244,11 @@ export class AnnouncementsStore {
     });
   }
 
-  async leaveLfg(id: string, userId: string): Promise<boolean> {
-    const result = await this.db.prepare(`DELETE FROM lfg_signups WHERE lfg_id = ? AND user_id = ?`).run(id, userId);
+  async leaveLfg(guildId: string, id: string, userId: string): Promise<boolean> {
+    const result = await this.db.prepare(
+      `DELETE FROM lfg_signups WHERE lfg_id = ? AND user_id = ?
+       AND EXISTS (SELECT 1 FROM lfg_posts WHERE lfg_posts.id = lfg_signups.lfg_id AND lfg_posts.guild_id = ?)`,
+    ).run(id, userId, guildId);
     return result.changes > 0;
   }
 

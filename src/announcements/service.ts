@@ -175,7 +175,7 @@ export class AnnouncementsService {
   }
 
   async leaveLfg(guildId: string, id: string, userId: string, now = new Date()): Promise<boolean> {
-    const removed = await this.store.leaveLfg(id, userId);
+    const removed = await this.store.leaveLfg(guildId, id, userId);
     const post = await this.store.getLfg(guildId, id);
     if (removed && post?.messageId) await this.refreshBestEffort(post);
     await this.store.audit({
