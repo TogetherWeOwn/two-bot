@@ -1162,6 +1162,7 @@ with ids preserved and usernames/avatars removed.
 | `e2e:harness`, `e2e:selftest` | Drive end-to-end member flows against TWO Staging (`--dry-run` no credential; `--flow`, `--kill-switch`). | Flows pass; `--dry-run` exits `0` with no network. |
 | `onboarding:web:acceptance` | Offline acceptance for the next two-web onboarding slice (`--two-web <path>`). | Slice checks pass, exit `0` (`2` = usage/incomplete checkout). |
 | `mutate:tempvoice` | Mutation harness for the temp-voice delete path (`--staging`, needs `TWO_TEST_DATABASE_URL`). Rewrites a file per mutation and runs the unit suite. | Surviving mutants listed; exit `0` when all killed. |
+| `bench:temp-voice` | Temp-voice index audit + EXPLAIN harness: seeds 100 guilds × 40 rows through the store in an isolated schema (dropped on exit), prints read timings + plan shapes. Needs `TWO_DATABASE_URL` at a scratch DB, never production. | `VERDICT: INDEXED`, exit `0`. |
 | `test:report` | `node:test` reporter writing one JSON object per test point (`--test-reporter` + `--test-reporter-destination`). | Results ndjson written; skips explicit, never silent. |
 
 ### Tests, typecheck, repo checks
