@@ -210,12 +210,20 @@ test('funnel joins and review slots match on invite_code, never the label', () =
   // the label groups two campaigns with the same display name into one row,
   // and the dashboard silently merges their joins.
   const funnel = read(join('scripts', 'funnel.ts'));
-  assert.match(funnel, /e\.source = 'invite:' \|\| c\.invite_code/, 'funnel counts rows keyed by code');
+  // Count, not just match: funnel.ts keys TWO rows on the code (clicks and
+  // joins). A drift that re-keys either one to c.label keeps one match and
+  // stays green under assert.match - so the code-keyed pattern must appear
+  // exactly twice, and a label-keyed concatenation must appear nowhere.
+  const codeKeys = funnel.match(/e\.source = 'invite:' \|\| c\.invite_code/g) ?? [];
+  assert.equal(
+    codeKeys.length,
+    2,
+    'funnel must key BOTH clicks and joins on the code; re-keying either to the label must red here',
+  );
+  assert.doesNotMatch(funnel, /\|\| c\.label/, 'funnel must never concatenate a row key from the label');
   const review = read(join('scripts', 'growth-review.ts'));
   assert.match(review, /c\.invite_code === code/, 'review maps a source to its slot by code');
-  for (const [rel, text] of [['scripts/funnel.ts', funnel], ['scripts/growth-review.ts', review]] as const) {
-    assert.doesNotMatch(text, /c\.label ===|=== c\.label|label === code/, `${rel} must never key on the label`);
-  }
+  assert.doesNotMatch(review, /c\.label ===|=== c\.label|label === code/, 'review must never key on the label');
 });
 
 test('gate-check.ts carries no second copy of the bound code', () => {
