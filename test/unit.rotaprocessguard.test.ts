@@ -122,3 +122,25 @@ test('TOG-9656: the preload refuses a production database host', () => {
   assert.notEqual(run.status, 0, `preload exited 0: ${output.slice(0, 1000)}`);
   assert.match(output, /isolated test host/);
 });
+
+test('TOG-9740: the preload refuses a query-param host override on an allowlisted host', () => {
+  // node-postgres promotes ?host= over the hostname, so the hostname check
+  // alone would admit this URL. Only the query-string refusal can catch it.
+  const run = spawnSync(
+    process.execPath,
+    ['-e', 'require("./test/helpers/rotaProcessGuard.cjs")'],
+    {
+      cwd: ROOT,
+      env: {
+        PATH: process.env.PATH,
+        DISCORD_API_BASE: 'http://127.0.0.1:32101/api',
+        TWO_DATABASE_URL: 'postgres://synthetic@127.0.0.1:32102/fixture?host=db.internal',
+      },
+      encoding: 'utf8',
+      timeout: 10_000,
+    },
+  );
+  const output = `${run.stdout ?? ''}${run.stderr ?? ''}`;
+  assert.notEqual(run.status, 0, `preload exited 0: ${output.slice(0, 1000)}`);
+  assert.match(output, /query string/);
+});

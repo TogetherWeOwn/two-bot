@@ -58,6 +58,23 @@ for (const [name, url] of [
   });
 }
 
+// TOG-9740: node-postgres (pg-connection-string) promotes ?host=/?port= over
+// the hostname — proven live: the URL below parses as host=db.internal — so a
+// hostname-only allowlist is bypassable. Any query string is refused instead.
+// No legitimate query-param use exists (CI sets bare URLs; schema selection
+// uses driver options, e.g. PGOPTIONS in e2e.rotaprocess.test.ts).
+for (const [name, url] of [
+  ['query-param host override on allowlisted hostname', 'postgres://agent_test@127.0.0.1:5432/two_bot_test_tog9656?host=db.internal'],
+  ['query-param host override on sandbox hostname', 'postgres://agent_test@agent-testdb:5432/two_bot_test_tog9656?host=db.internal'],
+  ['query-param port override', 'postgres://agent_test@127.0.0.1:5432/two_bot_test?port=5433'],
+  ['benign-looking option', 'postgres://agent_test@127.0.0.1:5432/two_bot_test?sslmode=require'],
+] as Array<[string, string]>) {
+  test(`refuses ${name} before any connection`, () => {
+    assert.equal(isAllowedTestDatabaseUrl(url), false);
+    assert.throws(() => assertTestDatabaseHost(url), /query string/);
+  });
+}
+
 test('helper import against a non-allowlisted host throws before connecting', () => {
   // Unroutable host: if the helper tried to connect instead of refusing, this
   // would hang or fail with a connection error, not the guard message.
@@ -92,6 +109,24 @@ test('require-suites against a non-allowlisted host refuses before spawning suit
   const output = `${run.stdout ?? ''}${run.stderr ?? ''}`;
   assert.notEqual(run.status, 0, `wrapper exited 0: ${output.slice(0, 1000)}`);
   assert.match(output, /not an isolated test database/, 'refusal must name the guard');
+  assert.doesNotMatch(output, /passing, .* skipped/, 'no suite may have run');
+});
+
+test('require-suites against a query-param host override refuses before spawning suites', () => {
+  // TOG-9740: the hostname looks allowlisted, so only the query-string check
+  // can refuse this URL — it proves the wrapper mirrors the shared guard.
+  const run = spawnSync(process.execPath, ['scripts/require-suites.ts'], {
+    cwd: ROOT,
+    env: {
+      PATH: process.env.PATH,
+      TWO_TEST_DATABASE_URL: 'postgres://agent_test@127.0.0.1:5432/two_bot_test?host=db.invalid',
+    },
+    encoding: 'utf8',
+    timeout: 60_000,
+  });
+  const output = `${run.stdout ?? ''}${run.stderr ?? ''}`;
+  assert.notEqual(run.status, 0, `wrapper exited 0: ${output.slice(0, 1000)}`);
+  assert.match(output, /query string/, 'refusal must name the query-string bypass');
   assert.doesNotMatch(output, /passing, .* skipped/, 'no suite may have run');
 });
 

@@ -120,15 +120,18 @@ export function checkStagingRestartPreflight(
   } catch {
     return refuse('Staging restart containment could not parse TWO_DATABASE_URL. Refusing to continue.');
   }
+  // Query string first: node-postgres promotes ?host=/?port= over the
+  // hostname, so a query string bypasses the hostname allowlist below
+  // (TOG-9740). This keeps the injection-specific refusal for query URLs.
+  if (parsed.search) {
+    return refuse('Staging restart containment refuses connection-option injection. Refusing to continue.');
+  }
   if (!isAllowedTestDatabaseUrl(url) || !parsed.port) {
     return refuse(
       'Staging restart containment requires a disposable isolated test database ' +
         '(agent-testdb, 127.0.0.1/localhost, or the CI "postgres" service, with an explicit port). ' +
         'Production and staging hosts are never valid. Refusing to continue.',
     );
-  }
-  if (parsed.search) {
-    return refuse('Staging restart containment refuses connection-option injection. Refusing to continue.');
   }
   if (!/staging|test/i.test(dbName(url))) {
     return refuse(

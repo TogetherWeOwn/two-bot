@@ -17,8 +17,14 @@ const ALLOWED_TEST_DB_HOSTS = new Set(['agent-testdb', '127.0.0.1', 'localhost',
 const api = new URL(process.env.DISCORD_API_BASE);
 if (api.hostname !== '127.0.0.1' || !api.port) throw new Error('fixture endpoint must be explicit IPv4 loopback');
 const endpoints = [{ host: api.hostname.toLowerCase(), port: Number(api.port) }];
+// Mirrors scripts/test-db-guard.ts, including the query-string refusal:
+// node-postgres promotes ?host=/?port= over the hostname, so a query string
+// bypasses any hostname allowlist. There is no legitimate query-param use.
 const db = new URL(process.env.TWO_DATABASE_URL);
 const dbHost = db.hostname.toLowerCase().replace(/\.$/, '');
+if (db.search) {
+  throw new Error('fixture database URL must not carry a query string (?host=/?port= retarget the connection)');
+}
 if (!ALLOWED_TEST_DB_HOSTS.has(dbHost) || !db.port) {
   throw new Error('fixture database endpoint must be an isolated test host with an explicit port');
 }

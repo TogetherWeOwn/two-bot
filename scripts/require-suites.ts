@@ -380,17 +380,30 @@ if (invokedDirectly) {
     // and refuse a non-test host before any migration runs (TOG-9656). The
     // allowlist is inline here, not imported, because
     // test/unit.restartstorageci.test.ts executes this file from a bare
-    // fixture tree containing only this file plus test-report.ts.
+    // fixture tree containing only this file plus test-report.ts. Mirrors
+    // scripts/test-db-guard.ts, including the query-string refusal:
+    // node-postgres promotes ?host=/?port= over the hostname, so a query
+    // string bypasses any hostname allowlist.
     const testDbUrl = process.env.TWO_TEST_DATABASE_URL?.trim() ?? '';
     const allowedTestDbHosts = new Set(['agent-testdb', '127.0.0.1', 'localhost', '::1', '[::1]', 'postgres']);
     let testDbHost = '';
+    let testDbHasQuery = false;
     try {
-      testDbHost = new URL(testDbUrl).hostname.toLowerCase().replace(/\.$/, '');
+      const parsedTestDbUrl = new URL(testDbUrl);
+      testDbHost = parsedTestDbUrl.hostname.toLowerCase().replace(/\.$/, '');
+      testDbHasQuery = parsedTestDbUrl.search !== '';
     } catch {
       testDbHost = '';
     }
     if (!testDbUrl) {
       console.error('require-suites: TWO_TEST_DATABASE_URL is not set. This suite requires Postgres.');
+      process.exit(1);
+    }
+    if (testDbHasQuery) {
+      console.error(
+        'require-suites: TWO_TEST_DATABASE_URL carries a query string, which node-postgres promotes over ' +
+          'the hostname (?host=/?port= retarget the connection), refusing to run. Pass a bare database URL.',
+      );
       process.exit(1);
     }
     if (!allowedTestDbHosts.has(testDbHost)) {
