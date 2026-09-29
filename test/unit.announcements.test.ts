@@ -181,6 +181,19 @@ test('LFG signup/leave/close keep outcome and audit when the Discord edit fails'
   ]);
 });
 
+test('LFG leave from another guild keeps the signup', async () => {
+  const service = new AnnouncementsService(store, new FakeDiscord());
+  const post = await service.createLfg({
+    id: 'lfg-guild-fence-proof', guildId: GUILD, channelId: CHANNEL, title: 'Fenced raid',
+    startsAt: '2026-09-11T20:00:00Z', roles: [{ key: 'any', label: 'Any', slots: 2 }],
+    actorId: USER, now: new Date('2026-09-10T10:00:00Z'),
+  });
+  assert.equal(await service.signupLfg({ guildId: GUILD, id: post.id, roleKey: 'any', userId: USER }), 'joined');
+  assert.equal(await service.leaveLfg('1546451670500642997', post.id, USER), false);
+  assert.deepEqual((await store.listLfgSignups(post.id)).map((row) => row.userId), [USER]);
+  assert.equal(await service.leaveLfg(GUILD, post.id, USER), true);
+});
+
 test('ambiguous LFG post recovers the accepted message by stable nonce', async () => {
   const discord = new FakeDiscord();
   const original = discord.postMessage.bind(discord);
