@@ -1,5 +1,5 @@
 {
-  "revision": "47c48197d46647e34132544523e863e3c92d82ff",
+  "baseline": "c2a00876d9772c0e341e7aed643518cf02d100a3",
   "blocks": {
     "startup": {
       "path": "src/index.ts",
@@ -19,33 +19,33 @@
     },
     "implemented": {
       "path": "src/internal/actions.ts",
-      "blob": "3421bcb86d670dcd32a916653cea92f9e9a6aa3c",
+      "blob": "5e98ab1e92aff4f14cd7c5dfa8e74886a351bb93",
       "startLine": 29,
-      "endLine": 40,
-      "sha256": "ff16d75b9f8a981fa31ba5c9bf5922986b83f2cf7f4ff674671336d35069275c",
-      "code": "export const IMPLEMENTED_ACTIONS = [\n  'role.assign',\n  'guild.add_member',\n  'announcement.post',\n  'event.upsert',\n  'event.cancel',\n  'automations.import',\n  'automations.export',\n  'settings.get',\n  'settings.set',\n  ...MODERATION_ACTIONS,\n] as const;\n"
+      "endLine": 41,
+      "sha256": "6e8cfeca63da9b3a7b7d11d2ad825f6fb95f2494b27a8d6b5abe132adf0d68d6",
+      "code": "export const IMPLEMENTED_ACTIONS = [\n  'role.assign',\n  'guild.add_member',\n  'announcement.post',\n  'event.upsert',\n  'event.cancel',\n  'event.read',\n  'automations.import',\n  'automations.export',\n  'settings.get',\n  'settings.set',\n  ...MODERATION_ACTIONS,\n] as const;\n"
     },
     "needsStores": {
       "path": "src/internal/actions.ts",
-      "blob": "3421bcb86d670dcd32a916653cea92f9e9a6aa3c",
-      "startLine": 50,
-      "endLine": 68,
+      "blob": "5e98ab1e92aff4f14cd7c5dfa8e74886a351bb93",
+      "startLine": 51,
+      "endLine": 69,
       "sha256": "b0bf6b58819f87a05efd3e3049f7dba998c6888dcd9e1afa20f4585dbc71cfc5",
       "code": "export const NEEDS_IDEMPOTENCY_KEY: ReadonlySet<string> = new Set([\n  'announcement.post',\n  'event.upsert',\n  'event.cancel',\n  'automations.import',\n  // A settings write is not naturally idempotent the way role.assign is: two\n  // deliveries of the same save are two audit rows and two version bumps, and\n  // if a concurrent save landed in between, the second delivery silently\n  // reverts it. The key makes the retry replay one stored result instead.\n  'settings.set',\n  ...MODERATION_ACTIONS,\n]);\n\n/**\n * Actions that cannot run without the config store wired in. Same shape as the\n * NEEDS_IDEMPOTENCY_KEY/store check: configured-on with nothing behind it is a\n * typed refusal, never a 500.\n */\nexport const NEEDS_SETTINGS_STORE: ReadonlySet<string> = new Set(['settings.get', 'settings.set']);\n"
     },
     "isImplemented": {
       "path": "src/internal/actions.ts",
-      "blob": "3421bcb86d670dcd32a916653cea92f9e9a6aa3c",
-      "startLine": 207,
-      "endLine": 209,
+      "blob": "5e98ab1e92aff4f14cd7c5dfa8e74886a351bb93",
+      "startLine": 208,
+      "endLine": 210,
       "sha256": "808bc293bc8144a50325400c4bd13bd595fc14d474dce59447cb532cacdd6fb0",
       "code": "export function isImplemented(action: string): action is ActionName {\n  return (IMPLEMENTED_ACTIONS as readonly string[]).includes(action);\n}\n"
     },
     "assertAllowed": {
       "path": "src/internal/actions.ts",
-      "blob": "3421bcb86d670dcd32a916653cea92f9e9a6aa3c",
-      "startLine": 215,
-      "endLine": 242,
+      "blob": "5e98ab1e92aff4f14cd7c5dfa8e74886a351bb93",
+      "startLine": 216,
+      "endLine": 243,
       "sha256": "38cf7aeb1748aae71aef7a868fa77c175cf4d2957a9775a3be2ea9fb2b61ddd0",
       "code": "export function assertAllowed(\n  action: string,\n  ctx: Pick<ActionContext, 'enabled' | 'store'> & Partial<Pick<ActionContext, 'settings'>>,\n): asserts action is ActionName {\n  if (!isImplemented(action)) {\n    throw new ActionError('action_not_allowed', `\"${action}\" is not an allowlisted action`, {\n      logReason: 'action_unknown',\n    });\n  }\n  if (!ctx.enabled.has(action)) {\n    throw new ActionError('action_not_allowed', `\"${action}\" is not enabled on this bot`, {\n      logReason: 'action_disabled',\n    });\n  }\n  // Configured on but with no database behind it. Only reachable if the\n  // endpoint is started without a store, which src/index.ts does not do; a\n  // typed refusal beats a 500 if that ever changes.\n  if (NEEDS_IDEMPOTENCY_KEY.has(action) && !ctx.store) {\n    throw new ActionError('action_not_allowed', `\"${action}\" needs the durable store`, {\n      logReason: 'action_needs_store',\n    });\n  }\n  if (NEEDS_SETTINGS_STORE.has(action) && !ctx.settings) {\n    throw new ActionError('action_not_allowed', `\"${action}\" needs the config store`, {\n      logReason: 'action_needs_settings',\n    });\n  }\n}\n"
     },
@@ -56,6 +56,14 @@
       "endLine": 82,
       "sha256": "cf18e5ed8f64ba84b49484eecf7ae7d40f01f4d7b86e65e7a9e918ffc6e72df7",
       "code": "export class ActionError extends Error {\n  code: ErrorCode;\n  logReason: string;\n  /** Seconds, for `rate_limited` only. */\n  retryAfter?: number;\n\n  constructor(code: ErrorCode, message: string, opts: { logReason?: string; retryAfter?: number } = {}) {\n    super(message);\n    this.name = 'ActionError';\n    this.code = code;\n    this.logReason = opts.logReason ?? code;\n    this.retryAfter = opts.retryAfter;\n  }\n}\n"
+    },
+    "settingsFlag": {
+      "path": "src/internal/config.ts",
+      "blob": "ff92c2470dad5f3a70ce7ac7f169851e2811649b",
+      "startLine": 100,
+      "endLine": 107,
+      "sha256": "4ad769450d8ad89aaa0b9007ed8a98997b7136e8ed97c1f5ad22a7b3bc13342b",
+      "code": "  // The admin dashboard's read and write path (TOG-3093 slice 2). Same\n  // arrangement as the two above and for the same reason: shipping the\n  // implementation must not widen the allowlist. The flag is the record of the\n  // CEO's sign-off, not a convenience, and it defaults off.\n  if (env.TWO_INTERNAL_ALLOW_SETTINGS === '1') {\n    enabled.add('settings.get');\n    enabled.add('settings.set');\n  }\n"
     }
   }
 }
