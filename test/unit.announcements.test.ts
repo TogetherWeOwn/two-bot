@@ -269,8 +269,10 @@ test('feed delivery claim has one owner and rejects stale completion or release'
 test('feed parser accepts RSS and Atom entries without executing markup', () => {
   const rss = parseXmlFeed(`<?xml version="1.0"?><rss><channel><item><guid>a&amp;b</guid><title><![CDATA[News <one>]]></title><link>https://example.com/a</link></item></channel></rss>`);
   const atom = parseXmlFeed(`<feed><entry><id>yt:1</id><title>Video</title><link rel="alternate" href="https://youtube.example/1" /></entry></feed>`);
+  const multi = parseXmlFeed(`<feed><entry><id>tag:1</id><title>Multi</title><link rel="alternate" href="https://example.com/alt" /><link rel="self" href="https://example.com/self" /></entry></feed>`);
   assert.deepEqual(rss, [{ key: 'a&b', title: 'News <one>', url: 'https://example.com/a' }]);
   assert.deepEqual(atom, [{ key: 'yt:1', title: 'Video', url: 'https://youtube.example/1' }]);
+  assert.deepEqual(multi, [{ key: 'tag:1', title: 'Multi', url: 'https://example.com/alt' }]);
 });
 
 test('feed parser rejects excessive entries without pathological regex scanning', () => {
