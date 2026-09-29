@@ -59,7 +59,7 @@ test('required workflow wrapper reaches owned storage in order and fails fast at
     const fake = join(work, 'npm');
     writeFileSync(fake, '#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$TRACE"\nif [[ "${FAIL_ON:-}" == "$*" ]]; then exit 23; fi\n');
     chmodSync(fake, 0o755);
-    const sequence = ['run check:script-targets', 'run check:credentials', 'run check:credentials:selftest', 'run deploy:selftest', 'run typecheck', 'run eval:funnel-attribution', 'run test:postgres', 'run test:restart-storage -- --provision', 'run verify:grant:selftest'];
+    const sequence = ['run check:script-targets', 'run check:credentials', 'run check:credentials:selftest', 'run check:env-drift', 'run check:env-drift:selftest', 'run deploy:selftest', 'run typecheck', 'run eval:funnel-attribution', 'run test:postgres', 'run test:restart-storage -- --provision', 'run verify:grant:selftest'];
     for (const failOn of ['', ...sequence]) {
       const trace = join(work, 'trace'); writeFileSync(trace, '');
       const result = spawnSync('bash', ['scripts/ci/run-check-job.sh'], {
