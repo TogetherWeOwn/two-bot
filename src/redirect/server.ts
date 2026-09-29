@@ -180,8 +180,13 @@ async function handle(
   let slug: string;
   try {
     slug = decodeURIComponent(path.replace(/^\/+/, '').replace(/\/+$/, '')).toLowerCase();
-  } catch {
-    // A malformed percent-escape throws. That is a 404, not a 500.
+  } catch (err) {
+    // A malformed percent-escape throws. That is a 404, not a 500 — but it is
+    // still logged with the raw path and the error class, because a sudden
+    // burst of these is a broken referrer (or a prober) worth knowing about.
+    // The raw path is the requested campaign slot, not visitor data: no IP,
+    // agent, cookie or referrer is read here (see docs/PRIVACY.md).
+    log.error('invite_redirect_decode_failed', { path, errorClass: errorClassOf(err) });
     res.writeHead(404, { 'content-type': 'text/plain' }).end('not found\n');
     return;
   }
@@ -199,7 +204,7 @@ async function handle(
   }
 
   const campaign = await opts.campaigns.lookup(slug).catch((err: unknown) => {
-    log.error('invite_redirect_lookup_failed', { slug, err: String(err) });
+    log.error('invite_redirect_lookup_failed', { slug, errorClass: errorClassOf(err), err: String(err) });
     return undefined;
   });
 
@@ -254,6 +259,17 @@ async function handle(
     // redirect for everyone, which is a lost member.
     log.error('invite_click_record_failed', { slug, err: String(err) });
   }
+}
+
+/**
+ * The constructor name of whatever was thrown, for log lines.
+ *
+ * `String(err)` keeps the message; this keeps the class, which is what tells
+ * a dead database (a driver `Error`) apart from a coding bug (`TypeError`) at
+ * 3am. Non-Error throws report their typeof instead of `undefined`.
+ */
+function errorClassOf(err: unknown): string {
+  return err instanceof Error ? err.name.slice(0, 120) : typeof err;
 }
 
 function redirect(res: ServerResponse, location: string): void {
