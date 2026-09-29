@@ -30,6 +30,11 @@ import { randomUUID } from 'node:crypto';
 import { log } from '../core/log.ts';
 import { TokenBuckets, type BucketSpec } from '../internal/rateLimit.ts';
 import { CampaignStore, inviteUrl, isValidInviteCode } from './campaigns.ts';
+import {
+  DEFAULT_TRUSTED_PROXIES,
+  createTrustedProxyChecker,
+  resolveClientIp,
+} from './clientIp.ts';
 
 /** What a click is recorded through. Kept to the one method we need. */
 export interface ClickRecorder {
@@ -53,6 +58,13 @@ export interface RedirectServerOptions {
   fallbackInviteCode?: string | null;
   bucket?: BucketSpec;
   now?: () => number;
+  /**
+   * Socket addresses whose X-Forwarded-For header is believed when picking a
+   * rate-limit bucket (TOG-9924). IPs and CIDRs; defaults to loopback, which
+   * is the same-box-proxy deployment. Pass `[]` to trust nothing - then every
+   * request buckets on its socket address and the header is ignored entirely.
+   */
+  trustedProxies?: readonly string[];
 }
 
 export interface RedirectServer {
@@ -88,6 +100,7 @@ const CLICK_BUCKET: BucketSpec = { capacity: 60, refillPerSecond: 1 };
 export async function startRedirectServer(opts: RedirectServerOptions): Promise<RedirectServer> {
   const buckets = new TokenBuckets({ now: opts.now });
   const bucket = opts.bucket ?? CLICK_BUCKET;
+  const isTrustedProxy = createTrustedProxyChecker(opts.trustedProxies ?? DEFAULT_TRUSTED_PROXIES);
 
   // Click writes outlive the response they belong to (see `drain`). Held so
   // shutdown - and tests - can wait for them instead of guessing.
@@ -103,7 +116,7 @@ export async function startRedirectServer(opts: RedirectServerOptions): Promise<
   };
 
   const server: Server = createServer((req, res) => {
-    track(handle(req, res, opts, buckets, bucket));
+    track(handle(req, res, opts, buckets, bucket, isTrustedProxy));
   });
 
   await new Promise<void>((resolve, reject) => {
@@ -144,6 +157,7 @@ async function handle(
   opts: RedirectServerOptions,
   buckets: TokenBuckets,
   bucket: BucketSpec,
+  isTrustedProxy: (ip: string) => boolean,
 ): Promise<void> {
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     res.writeHead(405, { allow: 'GET, HEAD' }).end();
@@ -168,10 +182,14 @@ async function handle(
   }
 
   // Per-caller cap, applied before the database is touched so a crawler cannot
-  // turn a URL walk into load. The address is read from the open socket, used
-  // to pick a bucket, and never stored, logged or written to an event - it does
-  // not survive this function. See docs/PRIVACY.md.
-  const caller = req.socket.remoteAddress ?? 'unknown';
+  // turn a URL walk into load. Behind the reverse proxy every request shares
+  // one socket address, so the bucket key is resolved through the trusted
+  // proxy chain instead (TOG-9924): a trusted socket believes X-Forwarded-For
+  // back to the leftmost untrusted hop, an untrusted socket ignores the header
+  // entirely. Either way the key is used to pick a bucket and never stored,
+  // logged or written to an event - it does not survive this function. See
+  // docs/PRIVACY.md.
+  const caller = resolveClientIp(req.socket.remoteAddress, req.headers['x-forwarded-for'], isTrustedProxy);
   if (!buckets.take(caller, bucket).allowed) {
     res.writeHead(429, { 'content-type': 'text/plain', 'retry-after': '1' }).end('slow down\n');
     return;
