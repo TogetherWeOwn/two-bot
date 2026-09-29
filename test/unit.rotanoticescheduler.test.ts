@@ -64,6 +64,30 @@ test('stop forwards cancellation to in-flight delivery and refuses manual ticks'
   assert.equal(calls, 0);
 });
 
+test('interval fires automatically on the injected clock; stop cancels it', async () => {
+  const seen: string[] = [];
+  let calls = 0;
+  const handle = startRotaNoticeScheduler(
+    delivery(async (now) => { calls++; seen.push(now); return []; }),
+    { now: () => '2026-09-01T23:35:00.000Z', intervalMs: 10 },
+  );
+  try {
+    const deadline = Date.now() + 1000;
+    while (calls === 0 && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    assert.ok(calls >= 1, 'the interval fired at least once without a manual tick');
+    assert.ok(seen.length >= 1 && seen.every((n) => n === '2026-09-01T23:35:00.000Z'),
+      'every auto-fire carries the injected clock, never a live send path');
+    handle.stop();
+    const frozen = calls;
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(calls, frozen, 'stop cancels the interval');
+  } finally {
+    handle.stop();
+  }
+});
+
 test('default tick interval is one minute', () => {
   assert.equal(ROTA_NOTICE_TICK_MS, 60_000);
 });

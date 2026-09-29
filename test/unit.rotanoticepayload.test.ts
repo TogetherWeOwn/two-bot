@@ -67,6 +67,12 @@ test('invalid snowflakes, pseudonyms, and clocks are refused', () => {
     { guildId: GUILD, destinationChannelId: CHANNEL }));
 });
 
+test('payload refuses content exceeding the Discord length', () => {
+  const base = candidate();
+  assert.throws(() => formatRotaNotice({ ...base, coverageBlock: 'x'.repeat(2000) },
+    { guildId: GUILD, destinationChannelId: CHANNEL }), /exceeds Discord content length/);
+});
+
 test('recovery identity pins the exact entry; other entries do not match', () => {
   const { entryId } = formatRotaNotice(candidate(), { guildId: GUILD, destinationChannelId: CHANNEL });
   const content = formatRotaNotice(candidate(), { guildId: GUILD, destinationChannelId: CHANNEL }).content;
