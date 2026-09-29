@@ -447,6 +447,41 @@ test('a failed unban is requeued and retried by the next sweep', async () => {
   await testDb.cleanup();
 });
 
+test('an uncertain unban failure strands the row running and the next sweep leaves it alone (TOG-8460)', async () => {
+  // runDueUnbans requeues only a definite pre-mutation refusal
+  // (discord_rejected). A timeout, 5xx or rate-limit leaves the row `running`
+  // with a claim token nobody owns - the exact stranding the shutdown
+  // preflight's refusal message now describes instead of promising a drain.
+  // Pin both halves: the state stays `running` (not back to `pending`), and
+  // the next sweep does NOT pick it up again (TOG-1659 at-most-once), so the
+  // member behind it keeps whatever Discord actually applied until an
+  // operator hand-releases the row.
+  const testDb = await openTestDb(import.meta.filename);
+  let attempts = 0;
+  const discord: ModerationDiscordClient = {
+    async ban() {}, async kick() {}, async timeout() {},
+    async unban() { attempts++; throw new ActionError('discord_unavailable', 'Discord returned 500', { logReason: 'discord_5xx' }); },
+    async purge(_c, count) { return count; }, async setSlowmode() {},
+    async getEveryoneOverwrite() { return { allow: '0', deny: '0' }; },
+    async deleteEveryoneOverwrite() {},
+    async putEveryoneOverwrite() {},
+  };
+  let t = Date.parse('2026-09-08T12:00:00.000Z');
+  const store = new ModerationStore(testDb.db, () => t);
+  const service = new ModerationService(discord, store, policy, () => t);
+  await service.execute({ ...request('moderation.tempban'), requestId: 'r-u500', idempotencyKey: 'k-u500' });
+  t += 120_000;
+  await assert.rejects(() => service.runDueUnbans());
+  const stranded = await testDb.db
+    .prepare(`SELECT state FROM moderation_scheduled_unbans WHERE request_id = 'r-u500'`)
+    .get();
+  assert.equal(stranded?.state, 'running', 'an uncertain failure must not go back to pending');
+  t += 24 * 60 * 60 * 1000;
+  assert.equal(await service.runDueUnbans(), 0, 'the next sweep claims nothing');
+  assert.equal(attempts, 1, 'the next sweep must not retry a stranded running claim');
+  await testDb.cleanup();
+});
+
 test('a failed job does not strand later jobs in the same claimed batch', async () => {
   const testDb = await openTestDb(import.meta.filename);
   const attempts: string[] = [];
