@@ -176,7 +176,7 @@ export async function digestFile(path: string): Promise<FileDigest> {
 export function parseMee6Export(text: string): Mee6ImportRow[] {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    parsed = JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text);
   } catch (error) {
     throw new Mee6ExportError([`file is not valid JSON: ${(error as Error).message}`]);
   }
