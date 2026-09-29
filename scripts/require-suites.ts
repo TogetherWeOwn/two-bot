@@ -195,6 +195,18 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     minTests: 3,
     why: 'the audit halt/resume/status CLI path itself, not just the helpers underneath it - without this floor a silent skip re-opens the audit-script gap',
   },
+  {
+    // TOG-6488. The presence-trend CLI executed end to end through the real
+    // script: closed text pins every seeded bucket row plus the tally and
+    // verdict lines, --days slices the table but never the verdict, --json
+    // is exactly one object with the count and verdict, --web-live on three
+    // qualifying days fires with exit 2, and an empty window explains
+    // itself. Counted from the 5 top-level test() blocks; CI's postgres job
+    // confirms the count on the first run after this commit.
+    file: 'test/e2e.presencetrend-cli.test.ts',
+    minTests: 5,
+    why: 'the presence-trend output CLI itself, not just the helpers underneath it - without this floor a silent skip re-opens the unpinned staffing/event-slot numbers gap',
+  },
 ];
 
 /**
