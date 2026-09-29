@@ -177,13 +177,16 @@ function textValue(value: unknown): string {
   return record ? textValue(record['#text']) : '';
 }
 
+const XML_ENTITIES: Record<string, string> = {
+  '&lt;': '<',
+  '&gt;': '>',
+  '&quot;': '"',
+  '&#39;': "'",
+  '&amp;': '&',
+};
+
 function decodeXml(value: string): string {
-  return value
-    .replaceAll('&amp;', '&')
-    .replaceAll('&lt;', '<')
-    .replaceAll('&gt;', '>')
-    .replaceAll('&quot;', '"')
-    .replaceAll('&#39;', "'");
+  return value.replace(/&(lt|gt|quot|#39|amp);/g, (entity) => XML_ENTITIES[entity] ?? entity);
 }
 
 export function announcementCommandData() {
