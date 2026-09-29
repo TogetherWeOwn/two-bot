@@ -28,7 +28,7 @@ Warnings live in `moderation_warnings`. Every successful action has a row in `mo
 
 - **One atomic claim per operation.** `(guild_id, idempotency_key)` is claimed in `moderation_idempotency` via `INSERT ... ON CONFLICT DO NOTHING` BEFORE any Discord mutation, for slash commands and internal actions alike. A concurrent duplicate loses the claim and gets `in_progress`; a retry of a completed key replays the stored result; a key reused with different content is refused as a mismatch; a failed attempt releases its claim so a retry is a real second attempt.
 - **Tempban expiry is written before the ban.** A crash after Discord accepts the ban still leaves a pending unban job; the worst case is an unban of a re-appliable ban, never a permanent ban the moderator asked to be temporary. Re-tempbanning the same user moves the one pending job (partial unique index) instead of forking a second.
-- **Unban sweeps claim rows.** `runDueUnbans()` moves due rows `pending -> running` with one `UPDATE ... RETURNING`, so two overlapping sweeps cannot process the same job. A failed unban is requeued; a `running` claim older than 60 seconds is taken over by the next sweep (crash recovery).
+- **Unban sweeps claim rows.** `runDueUnbans()` moves due rows `pending -> running` with one `UPDATE ... RETURNING`, so two overlapping sweeps cannot process the same job. A definite pre-mutation refusal (`discord_rejected`) is requeued; any other failure - timeout, 5xx, rate-limit - or a crash between claim and complete leaves the row `running` with a claim nobody owns. Claims are never reclaimed by age (TOG-1659: a timed takeover cannot tell a dead process from a slow Discord request, and taking one over could unban twice), so a stranded `running` row needs the hand-release under "Turning moderation off" and blocks a disable until then.
 - **Lockdown preserves the @everyone overwrite.** Lock reads the current overwrite, stores the prior allow/deny masks in `moderation_lockdowns`, and writes back the prior bits plus a `SendMessages` deny. Unlock restores the recorded masks exactly. With no recorded state (a lock that predates this table), unlock clears only the `SendMessages` deny - the minimal change that cannot grant anything new.
 - **Backups carry all of it.** `moderation_warnings`, `moderation_scheduled_unbans`, `moderation_audit`, `moderation_lockdowns`, and `moderation_idempotency` are in `DUMP_TABLES` and covered by the pg-backup/pg-restore round trip.
 
@@ -61,7 +61,7 @@ It writes nothing, runs no migrations, and never calls Discord. Exit `0` means n
 
 Outstanding state is read from Postgres, never from Discord. A REST call that failed would report "nothing outstanding", and that answer is exactly the one that lets a bad disable through.
 
-**To clear it:** leave `TWO_MODERATION=1` and let the 30-second unban poller drain the schedule and `/unlock` release the channels, or release the named members and channels by hand.
+**To clear it:** leave `TWO_MODERATION=1` and let the 30-second unban poller drain the staged/pending rows and `/unlock` release the channels, or release the named members and channels by hand. Rows tagged `[running]` in the refusal never drain on their own - the poller only claims `pending` rows and never re-reads a claim - so each one needs the ban-list check and hand-release the refusal message spells out.
 
 **Emergency override:**
 
