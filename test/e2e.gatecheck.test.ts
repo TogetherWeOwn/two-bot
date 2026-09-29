@@ -10,8 +10,9 @@
  *
  * Fixture (one synthetic guild, never live/staging):
  *   seeded staging fixtures(property A) -> 10 attributed joins
- *     (invite:qa-alpha x6, invite:qa-beta x4), 0 unattributed, no WEB-HOMEPAGE
- *   B one join on invite:WEB-HOMEPAGE    -> web-code-row flips fail -> ok
+ *     (invite:qa-alpha x6, invite:qa-beta x4), 0 unattributed, no invite:4GwEDNRTtx
+ *     row (the bound code behind the WEB-HOMEPAGE slot)
+ *   B one join on invite:4GwEDNRTtx      -> web-code-row flips fail -> ok
  *   C backfill-only baseline             -> 0 attributed, 3 unattributed
  *     (the ledger §0 shape: history reconstructed from the server log carries
  *     no invite code, so it must never satisfy the attributed-join criterion)
@@ -158,15 +159,18 @@ test('seeded fixtures report 10 attributed joins and no WEB-HOMEPAGE row', { tim
   assert.match(join.detail, /10 attributed join\(s\) on file/);
 
   // Criterion 3 needs the code as its own funnel ROW: bound-but-never-joined
-  // is not a row, and no fixture join arrives on WEB-HOMEPAGE.
+  // is not a row, and no fixture join arrives on the resolved WEB-HOMEPAGE
+  // source (invite:4GwEDNRTtx from the default TWO_GATE_JOIN_DESTINATION).
   const row = checkOf(json, 'web-code-row');
   assert.equal(row.status, 'fail');
-  assert.match(row.detail, /WEB-HOMEPAGE has no row in the funnel/);
+  assert.match(row.detail, /invite:4GwEDNRTtx has no row in the funnel/);
 });
 
 test('a WEB-HOMEPAGE join flips the code-row criterion without touching attribution', { timeout: 60_000 }, async () => {
   await seedFixtures(harness.db, { guildId: GUILD, now: TEST_NOW });
-  await insertJoin(WEB_MEMBER, '2026-08-10T12:00:00.000Z', 'invite:WEB-HOMEPAGE', 'tog6478-web-1');
+  // The funnel stores the raw Discord code, not the slot label: the probe
+  // join arrives on the resolved invite:4GwEDNRTtx source.
+  await insertJoin(WEB_MEMBER, '2026-08-10T12:00:00.000Z', 'invite:4GwEDNRTtx', 'tog6478-web-1');
 
   const result = await cli(['--json']);
   assert.equal(result.code, 1, result.output);
@@ -178,7 +182,7 @@ test('a WEB-HOMEPAGE join flips the code-row criterion without touching attribut
 
   const row = checkOf(json, 'web-code-row');
   assert.equal(row.status, 'ok');
-  assert.match(row.detail, /WEB-HOMEPAGE appears in the funnel report as its own row/);
+  assert.match(row.detail, /invite:4GwEDNRTtx appears in the funnel report as its own row/);
 });
 
 test('a backfill-only baseline counts 0 attributed with 3 unattributed on file', { timeout: 60_000 }, async () => {
