@@ -102,6 +102,28 @@ test('configuration rejects reaction panels over Discord\'s 20-reaction cap', ()
   assert.equal(loadSelfRolePanels(reactionPanel(20)).length, 1);
 });
 
+test('configuration rejects button labels over Discord\'s 80-char limit', () => {
+  const buttonPanel = (label: string) => JSON.stringify([{
+    ...panel,
+    id: 'labels',
+    mode: 'button',
+    exclusive: false,
+    color: false,
+    options: [{ ...panel.options[0], label }],
+  }]);
+  assert.throws(() => loadSelfRolePanels(buttonPanel('x'.repeat(90))), /no longer than 80 characters/);
+  assert.equal(loadSelfRolePanels(buttonPanel('x'.repeat(80))).length, 1);
+  const selectPanel = JSON.stringify([{
+    ...panel,
+    id: 'labels',
+    mode: 'select',
+    exclusive: false,
+    color: false,
+    options: [{ ...panel.options[0], label: 'x'.repeat(90) }],
+  }]);
+  assert.equal(loadSelfRolePanels(selectPanel).length, 1);
+});
+
 test('configuration rejects role ids reused across panels', () => {
   assert.throws(
     () => loadSelfRolePanels(JSON.stringify([

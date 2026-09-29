@@ -178,7 +178,8 @@ function parsePanel(value: unknown, index: number): SelfRolePanel {
     const oat = `${at}.options[${optionIndex}]`;
     const o = record(option, oat);
     const key = shortKey(o.key, `${oat}.key`);
-    const label = text(o.label, `${oat}.label`, 100);
+    // Discord caps button labels at 80 chars; select option labels allow 100.
+    const label = text(o.label, `${oat}.label`, mode === 'button' ? 80 : 100);
     const roleId = snowflake(o.roleId, `${oat}.roleId`);
     const permissions = permissionMask(o.permissions, `${oat}.permissions`);
     const disallowed = findSelfRoleDisallowedPermission(permissions);
