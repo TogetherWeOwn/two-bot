@@ -33,7 +33,7 @@ test('TOG-4104 shipped proof, recovery and operator wrapper fixtures', async () 
     'cache lag cannot turn a presence-only read into a successful roundtrip',
     'container resource UUID grounds the app check without a forwarded app UUID',
     'own private interface address passes the URL check with full roundtrip',
-    ...['wrong app', 'neither app UUID matches', 'wrong runtime', 'missing runtime', 'missing source',
+    ...['wrong app', 'neither app UUID matches', 'malformed runtime', 'missing runtime', 'missing source',
       'wrong guild', 'missing guild', 'missing flag', 'malformed signing key', 'no exclusive window',
       'public endpoint', 'foreign private endpoint', 'DNS endpoint', 'URL credentials']
       .map((name) => `${name} refuses before mutation`),
@@ -41,8 +41,9 @@ test('TOG-4104 shipped proof, recovery and operator wrapper fixtures', async () 
     'redirect is not followed with signing headers',
     'unwired settings endpoint refuses before mutation with a settings-unavailable reason',
     ...['run', 'recover'].map((mode) => `wrapper runs ${mode} through the immutable container ID`),
-    ...['wrong runtime', 'missing runtime declaration']
+    ...['malformed runtime', 'missing runtime declaration']
       .map((name) => `wrapper refuses ${name} before any Docker operation`),
+    'wrapper refuses a touched surface after inspection but before copying',
     ...['wrong container', 'stopped container', 'wrong image', 'missing image receipt']
       .map((name) => `wrapper refuses ${name} before copying or executing`),
     'wrapper refuses unresolvable container address before copying or executing',

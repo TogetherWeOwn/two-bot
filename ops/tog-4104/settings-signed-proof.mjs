@@ -15,13 +15,18 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 const APP = 'uy4d9ndeygjcem6lgayhxgub';
 const GUILD = '1545644954272137297';
-const RUNTIME = '47c48197d46647e34132544523e863e3c92d82ff';
+// Reviewed settings-wiring surface baseline (TOG-8977): the wrapper verifies
+// the container's surface files are byte-identical to the baseline recorded
+// in test/fixtures/tog4104-runtime-source.json before executing this engine.
+// The engine takes the operator-declared running commit (already
+// surface-checked by the wrapper) as its runtime identity for the journal
+// and receipt.
 const PATH = '/internal/actions';
 const ACTOR = '900000000000009999';
 const KEYS = ['TWO_RAID_JOIN_THRESHOLD', 'TWO_RAID_WINDOW_SECONDS'];
 const FIXTURES = ['7', '42'];
 const mode = process.argv[2] ?? 'run';
-let stage = 'preflight', state, secret, kid, url, encryptionKey;
+let stage = 'preflight', state, secret, kid, url, encryptionKey, RUNTIME;
 let dir, journal, lock, lockOwned = false, interrupted = false, uncertain = false, journalHealthy = true;
 class ProofError extends Error {
   constructor(code) { super(); this.code = code; }
@@ -82,7 +87,10 @@ function preflight() {
   // additionally forwards STAGING_APP_UUID after exact-name validation. Either
   // grounds the app check in container-measured identity.
   check(process.env.STAGING_APP_UUID === APP || process.env.COOLIFY_RESOURCE_UUID === APP, 'preflight.app');
-  check(process.env.PROOF_RUNTIME_REVISION === RUNTIME, 'preflight.runtime');
+  // Full-SHA form only; the wrapper already proved this commit's surface is
+  // byte-identical to the reviewed baseline before executing the engine.
+  check(/^[a-f0-9]{40}$/.test(process.env.PROOF_RUNTIME_REVISION ?? ''), 'preflight.runtime');
+  RUNTIME = process.env.PROOF_RUNTIME_REVISION;
   check(process.env.DISCORD_GUILD_ID === GUILD, 'preflight.guild');
   check(/^[a-f0-9]{40}$/.test(process.env.PROOF_SOURCE_SHA ?? ''), 'preflight.source');
   check(process.env.PROOF_EXCLUSIVE_WINDOW === 'staging-writers-quiesced', 'preflight.exclusivity');
