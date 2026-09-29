@@ -1,5 +1,8 @@
 # two-bot
 
+> **Maintenance mode (2026-09-29, TOG-9788):** bug and security fixes only — new
+> development continues in two-bot-next.
+
 The Discord bot and funnel instrumentation for the TWO gaming community.
 
 Its one job right now: **produce trustworthy numbers about how people find us,
