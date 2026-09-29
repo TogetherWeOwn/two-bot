@@ -4,7 +4,10 @@
 
 Requires **Node 24 or newer** plus a running **Postgres 17+** with a scratch
 database for the suite (e.g. `createdb two_bot_test` — CI provides its own
-throwaway service). No Docker, no build step.
+throwaway service; Paperclip agents use the `agent-testdb` sandbox database,
+one database per card). No Docker, no build step. The suite refuses any test
+host outside `scripts/test-db-guard.ts` (TOG-9656): never point
+`TWO_TEST_DATABASE_URL` at production or staging.
 
 ```bash
 git clone https://github.com/TogetherWeOwn/two-bot.git

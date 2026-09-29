@@ -9,6 +9,7 @@
 import { basename } from 'node:path';
 import { openDb, isPostgresSpec, type Db } from '../../src/store/db.ts';
 import { webSchemaFor } from '../../src/store/webContract.ts';
+import { assertTestDatabaseHost } from '../../scripts/test-db-guard.ts';
 
 function requiredTestDatabaseUrl(): string {
   const url = process.env.TWO_TEST_DATABASE_URL?.trim() ?? '';
@@ -20,7 +21,9 @@ function requiredTestDatabaseUrl(): string {
   if (!isPostgresSpec(url)) {
     throw new Error('TWO_TEST_DATABASE_URL must use postgres:// or postgresql://.');
   }
-  return url;
+  // TOG-9656: refuse production/staging hosts before opening any connection,
+  // so before any migration runs. See scripts/test-db-guard.ts.
+  return assertTestDatabaseHost(url);
 }
 
 export const TEST_PG_URL = requiredTestDatabaseUrl();

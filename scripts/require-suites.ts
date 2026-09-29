@@ -376,9 +376,29 @@ if (invokedDirectly) {
   if (existing) {
     resultsPath = existing;
   } else {
-    if (!process.env.TWO_TEST_DATABASE_URL?.trim()) {
-      // Fail before spawning dozens of files that all require the same URL.
+    // Fail before spawning dozens of files that all require the same URL —
+    // and refuse a non-test host before any migration runs (TOG-9656). The
+    // allowlist is inline here, not imported, because
+    // test/unit.restartstorageci.test.ts executes this file from a bare
+    // fixture tree containing only this file plus test-report.ts.
+    const testDbUrl = process.env.TWO_TEST_DATABASE_URL?.trim() ?? '';
+    const allowedTestDbHosts = new Set(['agent-testdb', '127.0.0.1', 'localhost', '::1', '[::1]', 'postgres']);
+    let testDbHost = '';
+    try {
+      testDbHost = new URL(testDbUrl).hostname.toLowerCase().replace(/\.$/, '');
+    } catch {
+      testDbHost = '';
+    }
+    if (!testDbUrl) {
       console.error('require-suites: TWO_TEST_DATABASE_URL is not set. This suite requires Postgres.');
+      process.exit(1);
+    }
+    if (!allowedTestDbHosts.has(testDbHost)) {
+      console.error(
+        `require-suites: TWO_TEST_DATABASE_URL host "${testDbHost || '(unparsable)'}" is not an isolated test ` +
+          'database, refusing to run. Tests may only target agent-testdb, 127.0.0.1/localhost, or the CI ' +
+          '"postgres" service container; production and staging hosts are never valid test targets.',
+      );
       process.exit(1);
     }
     resultsPath = join(tmpdir(), `two-bot-results-${process.pid}.ndjson`);
