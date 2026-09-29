@@ -51,6 +51,8 @@
     "check:snowflakes:selftest": "bash scripts/ci/check-src-snowflakes.test.sh",
     "check:credentials": "bash scripts/ci/check-systemd-credentials.sh",
     "check:credentials:selftest": "bash scripts/ci/check-systemd-credentials.test.sh",
+    "check:console": "bash scripts/ci/check-src-console.sh",
+    "check:console:selftest": "bash scripts/ci/check-src-console.test.sh",
     "check:script-targets": "node scripts/check-script-targets.ts",
     "deploy:selftest": "node --test scripts/deploy-target-selftest.mjs",
     "backup": "node scripts/pg-backup.ts",
