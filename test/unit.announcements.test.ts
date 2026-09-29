@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import test, { after, beforeEach } from 'node:test';
 import { AnnouncementsService, normalizeFeedSource, parseRoleSpec, type FeedItem } from '../src/announcements/service.ts';
 import { loadAnnouncementsConfig } from '../src/announcements/config.ts';
@@ -241,6 +242,73 @@ test('feed delivery claim has one owner and rejects stale completion or release'
   await store.releaseDelivery('feed-claim', 'item', 'owner-b');
   assert.equal(await store.markDelivered('feed-claim', 'item', 'owner-b', 'wrong', '2026-09-10T10:01:00.000Z'), false);
   assert.equal(await store.markDelivered('feed-claim', 'item', 'owner-a', 'right', '2026-09-10T10:01:00.000Z'), true);
+});
+
+test('feed delivery reclaims a crashed owner claim after the lease expires', async () => {
+  await store.putFeed({
+    id: 'feed-stale-claim', guildId: GUILD, channelId: CHANNEL, kind: 'rss', source: 'https://example.com/stale.xml',
+    enabled: true, lastCheckedAt: null, createdBy: USER, createdAt: '2026-09-10T10:00:00.000Z', updatedAt: '2026-09-10T10:00:00.000Z',
+  });
+  await store.claimDelivery({
+    feedId: 'feed-stale-claim', itemKey: 'item', nonce: 'nonce', state: 'pending', messageId: null,
+    firstSeenAt: '2026-09-10T10:00:00.000Z', deliveredAt: null, claimToken: 'crashed-owner', claimedAt: '2026-09-10T10:00:00.000Z',
+  });
+  // A live claim must not be stolen: the second owner loses while the lease holds.
+  assert.equal(await store.claimDelivery({
+    feedId: 'feed-stale-claim', itemKey: 'item', nonce: 'nonce', state: 'pending', messageId: null,
+    firstSeenAt: '2026-09-10T10:01:00.000Z', deliveredAt: null, claimToken: 'owner-b', claimedAt: '2026-09-10T10:01:00.000Z',
+  }, '2026-09-10T09:59:00.000Z'), null);
+  // Past the lease, a later worker takes over with its own token.
+  const reclaimed = await store.claimDelivery({
+    feedId: 'feed-stale-claim', itemKey: 'item', nonce: 'nonce', state: 'pending', messageId: null,
+    firstSeenAt: '2026-09-10T10:02:00.000Z', deliveredAt: null, claimToken: 'owner-c', claimedAt: '2026-09-10T10:02:00.000Z',
+  }, '2026-09-10T10:01:00.000Z');
+  assert.equal(reclaimed?.claimToken, 'owner-c');
+  // The crashed owner's token can no longer settle or release the row.
+  await store.releaseDelivery('feed-stale-claim', 'item', 'crashed-owner');
+  assert.equal(await store.markDelivered('feed-stale-claim', 'item', 'crashed-owner', 'stale', '2026-09-10T10:02:00.000Z'), false);
+  assert.equal(await store.markDelivered('feed-stale-claim', 'item', 'owner-c', 'right', '2026-09-10T10:02:00.000Z'), true);
+});
+
+test('feed delivery never reclaims a delivered row', async () => {
+  await store.putFeed({
+    id: 'feed-no-steal', guildId: GUILD, channelId: CHANNEL, kind: 'rss', source: 'https://example.com/nosteal.xml',
+    enabled: true, lastCheckedAt: null, createdBy: USER, createdAt: '2026-09-10T10:00:00.000Z', updatedAt: '2026-09-10T10:00:00.000Z',
+  });
+  const first = await store.claimDelivery({
+    feedId: 'feed-no-steal', itemKey: 'item', nonce: 'nonce', state: 'pending', messageId: null,
+    firstSeenAt: '2026-09-10T10:00:00.000Z', deliveredAt: null, claimToken: 'owner-a', claimedAt: '2026-09-10T10:00:00.000Z',
+  });
+  assert.equal(first?.claimToken, 'owner-a');
+  assert.equal(await store.markDelivered('feed-no-steal', 'item', 'owner-a', 'msg', '2026-09-10T10:01:00.000Z'), true);
+  // Delivered rows clear claimed_at, so the reclaim must be fenced on state.
+  assert.equal(await store.claimDelivery({
+    feedId: 'feed-no-steal', itemKey: 'item', nonce: 'nonce', state: 'pending', messageId: null,
+    firstSeenAt: '2026-09-10T10:05:00.000Z', deliveredAt: null, claimToken: 'owner-b', claimedAt: '2026-09-10T10:05:00.000Z',
+  }, '2026-09-10T10:04:00.000Z'), null);
+});
+
+test('pollFeeds delivers an item wedged by a crashed claim', async () => {
+  const discord = new FakeDiscord();
+  const items: FeedItem[] = [{ key: 'wedged-1', title: 'Wedged', url: 'https://example.com/wedged' }];
+  const reader = { read: async (_feed: FeedRelayRow) => items };
+  const service = new AnnouncementsService(store, discord, reader);
+  await service.addFeed({
+    id: 'feed-wedged', guildId: GUILD, channelId: CHANNEL, kind: 'rss', source: 'https://example.com/wedged.xml', actorId: USER,
+  });
+  // Simulate a worker that claimed the row then crashed before settle:
+  // same item key derivation as the service, token never released or settled.
+  const itemKey = createHash('sha256').update('wedged-1').digest('hex');
+  await store.claimDelivery({
+    feedId: 'feed-wedged', itemKey, nonce: 'crashed', state: 'pending', messageId: null,
+    firstSeenAt: '2026-09-10T10:00:00.000Z', deliveredAt: null, claimToken: 'crashed-token', claimedAt: '2026-09-10T10:00:00.000Z',
+  });
+  // A poll inside the lease skips the wedged item; past the lease it delivers.
+  assert.equal(await service.pollFeeds(GUILD, new Date('2026-09-10T10:00:30.000Z')), 0);
+  assert.equal(await service.pollFeeds(GUILD, new Date('2026-09-10T10:02:00.000Z')), 1);
+  assert.equal(discord.posts.length, 1);
+  const delivery = await dbFixture.db.prepare(`SELECT state FROM feed_deliveries WHERE feed_id = ?`).get<{ state: string }>('feed-wedged');
+  assert.equal(delivery?.state, 'delivered');
 });
 
 test('feed parser accepts RSS and Atom entries without executing markup', () => {
