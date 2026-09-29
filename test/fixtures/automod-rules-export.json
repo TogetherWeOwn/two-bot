@@ -1,0 +1,58 @@
+{
+  "_comment": "Synthetic Discord AutoMod export for TOG-9134. Every id is in the 9000000000000000 reserved block that Discord never allocates, so nothing here is a real guild, channel, role or rule. The three rules deliberately exercise distinct trigger types (keyword, spam, mention_spam), both enabled states, multi-action rules, exempt roles/channels, and trigger_metadata variants. Pinned by test/unit.automodexport.test.ts: if you change this file, update the expected shape in that test in the same commit.",
+  "rules": [
+    {
+      "id": "900000000000000101",
+      "guild_id": "900000000000000000",
+      "name": "slur blocklist",
+      "creator_id": "900000000000000001",
+      "event_type": 1,
+      "trigger_type": 1,
+      "trigger_metadata": {
+        "keyword_filter": ["very bad", "worse phrase"],
+        "regex_patterns": ["b[a@]d\\d+"],
+        "allow_list": ["very bad movie night"]
+      },
+      "actions": [
+        { "type": 1, "metadata": { "custom_message": "That word is not welcome here." } },
+        { "type": 2, "metadata": { "channel_id": "900000000000000010" } }
+      ],
+      "enabled": true,
+      "exempt_roles": ["900000000000000111"],
+      "exempt_channels": ["900000000000000012"]
+    },
+    {
+      "id": "900000000000000102",
+      "guild_id": "900000000000000000",
+      "name": "spam throttle",
+      "creator_id": "900000000000000001",
+      "event_type": 1,
+      "trigger_type": 3,
+      "trigger_metadata": {},
+      "actions": [
+        { "type": 3, "metadata": { "duration_seconds": 600 } }
+      ],
+      "enabled": true,
+      "exempt_roles": [],
+      "exempt_channels": []
+    },
+    {
+      "id": "900000000000000103",
+      "guild_id": "900000000000000000",
+      "name": "mention spam guard",
+      "creator_id": "900000000000000001",
+      "event_type": 1,
+      "trigger_type": 5,
+      "trigger_metadata": {
+        "mention_total_limit": 5,
+        "mention_raid_protection_enabled": true
+      },
+      "actions": [
+        { "type": 1, "metadata": {} }
+      ],
+      "enabled": false,
+      "exempt_roles": ["900000000000000111", "900000000000000112"],
+      "exempt_channels": []
+    }
+  ]
+}
