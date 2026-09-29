@@ -71,10 +71,18 @@ permissions:
 jobs:
   deploy-staging:
     name: deploy-staging
+    # Fork hardening for the public repo (Steward audit TOG-8951 §2A): a fork
+    # PR from a branch named `main` fires this `workflow_run` with a `success`
+    # conclusion, so conclusion alone is a pwn request. Require a push event
+    # on OUR main — same-repo head — before touching COOLIFY_TOKEN.
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
-    runs-on: [self-hosted, two-selfhosted]
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     # Creates the GitHub Deployment record (with status updates) that the
     # Shipping KPI reads. Decorative as protection on some plans; the record
@@ -155,7 +163,7 @@ jobs:
     # `github.event_name` arm below is false.)
     needs: [deploy-staging]
     if: github.event_name == 'workflow_dispatch' && (needs.deploy-staging.result == 'success' || needs.deploy-staging.result == 'skipped')
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     # The required reviewer lives here. Stays gated until TOG-6903 says the
     # Community Platform may go live — the first production launch needs owner

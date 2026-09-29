@@ -28,7 +28,7 @@ jobs:
   # this workflow to hosted runners. On a hosted runner there is no host of
   # ours to protect and this would only turn away contributions.
   fork-gate:
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
@@ -65,7 +65,7 @@ jobs:
 
   check:
     needs: fork-gate
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
 
     services:
@@ -135,7 +135,7 @@ jobs:
   # required check has proved the full Postgres-backed suite.
   postgres:
     needs: [fork-gate, check]
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
 
     services:

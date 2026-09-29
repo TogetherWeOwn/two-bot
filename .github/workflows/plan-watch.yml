@@ -104,7 +104,7 @@ jobs:
   # The "reports only on a PR" rule above is about the plan changing, which is
   # nobody's fault. Coming from a fork is a different thing and does fail.
   fork-gate:
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
@@ -134,7 +134,7 @@ jobs:
 
   protection-available:
     needs: fork-gate
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
