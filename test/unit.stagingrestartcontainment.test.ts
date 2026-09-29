@@ -102,11 +102,11 @@ test('missing staging database binding is refused', () => {
   assert.match(r.reason!, /TWO_STAGING_DATABASE_URL/);
 });
 
-test('non-loopback, option-injected, or wrongly-named databases are refused', () => {
+test('non-allowlisted, option-injected, or wrongly-named databases are refused', () => {
   const host = checkStagingRestartPreflight(
     env(), controls({ databaseUrl: 'postgres://two@db.internal:5432/two_staging' }));
   assert.equal(host.ok, false);
-  assert.match(host.reason!, /loopback/);
+  assert.match(host.reason!, /isolated test database/);
   const noPort = checkStagingRestartPreflight(
     env(), controls({ databaseUrl: 'postgres://two@127.0.0.1/two_staging' }));
   assert.equal(noPort.ok, false);
@@ -130,6 +130,12 @@ test('a database target matching the staging binding is refused', () => {
 
 test('a fully-bound staging preflight passes', () => {
   const r = checkStagingRestartPreflight(env(), controls());
+  assert.equal(r.ok, true);
+});
+
+test('TOG-9656: the sanctioned sandbox host passes the staging preflight', () => {
+  const r = checkStagingRestartPreflight(
+    env(), controls({ databaseUrl: 'postgres://agent_test@agent-testdb:5432/two_bot_test_tog9656' }));
   assert.equal(r.ok, true);
 });
 
@@ -274,7 +280,7 @@ test('real boot refuses unsafe credential files even when plain env looks safe',
   try {
     for (const fixture of [
       { token: tokenFor(LIVE_BOT_APPLICATION_ID), database: LOOPBACK_DB, reason: /staging bot token/ },
-      { token: tokenFor(STAGING_BOT_APPLICATION_ID), database: 'postgres://two@db.invalid:5432/two_staging', reason: /loopback database/ },
+      { token: tokenFor(STAGING_BOT_APPLICATION_ID), database: 'postgres://two@db.invalid:5432/two_staging', reason: /disposable isolated test database/ },
     ]) {
       writeFileSync(join(dir, 'discord_token'), fixture.token, { mode: 0o600 });
       writeFileSync(join(dir, 'database_url'), fixture.database, { mode: 0o600 });

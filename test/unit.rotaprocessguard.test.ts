@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
-import { resolve } from 'node:path';
+import { spawn, spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { ALLOWED_TEST_DATABASE_HOSTS } from '../scripts/test-db-guard.ts';
+
+const ROOT = resolve(import.meta.dirname, '..');
 
 test('process guard intercepts all bot transports before socket I/O', { timeout: 10_000 }, async () => {
   // Replace the final socket connect first: even a broken guard cannot send a
@@ -61,4 +65,82 @@ test('process guard intercepts all bot transports before socket I/O', { timeout:
   } finally {
     clearTimeout(timer);
   }
+});
+
+test('TOG-9656: the preload database mirror matches the guard allowlist', () => {
+  // The preload is CJS loaded via --require before any TS runs, so it carries
+  // the allowlist as a literal. Parse that literal out of the source and pin
+  // it against the single source of truth, so a drift fails here, not in a
+  // hung e2e hours later.
+  const source = readFileSync(join(ROOT, 'test/helpers/rotaProcessGuard.cjs'), 'utf8');
+  const match = source.match(/ALLOWED_TEST_DB_HOSTS = new Set\(\[([\s\S]*?)\]\)/);
+  assert.ok(match, 'preload must declare its mirrored allowlist as ALLOWED_TEST_DB_HOSTS');
+  const mirrored = new Set(
+    [...match[1].matchAll(/'([^']+)'/g)].map((m) => m[1]),
+  );
+  assert.deepEqual(mirrored, new Set(ALLOWED_TEST_DATABASE_HOSTS));
+});
+
+for (const dbHost of ['agent-testdb', 'postgres']) {
+  test(`TOG-9656: the preload admits the isolated database host ${dbHost}`, () => {
+    const run = spawnSync(
+      process.execPath,
+      ['-e', 'require("./test/helpers/rotaProcessGuard.cjs"); console.log("preload accepted")'],
+      {
+        cwd: ROOT,
+        env: {
+          PATH: process.env.PATH,
+          DISCORD_API_BASE: 'http://127.0.0.1:32101/api',
+          TWO_DATABASE_URL: `postgres://synthetic@${dbHost}:32102/fixture`,
+        },
+        encoding: 'utf8',
+        timeout: 10_000,
+      },
+    );
+    const output = `${run.stdout ?? ''}${run.stderr ?? ''}`;
+    assert.equal(run.status, 0, output);
+    assert.match(output, /preload accepted/);
+  });
+}
+
+test('TOG-9656: the preload refuses a production database host', () => {
+  const run = spawnSync(
+    process.execPath,
+    ['-e', 'require("./test/helpers/rotaProcessGuard.cjs")'],
+    {
+      cwd: ROOT,
+      env: {
+        PATH: process.env.PATH,
+        DISCORD_API_BASE: 'http://127.0.0.1:32101/api',
+        TWO_DATABASE_URL: 'postgres://synthetic@db.internal:5432/fixture',
+      },
+      encoding: 'utf8',
+      timeout: 10_000,
+    },
+  );
+  const output = `${run.stdout ?? ''}${run.stderr ?? ''}`;
+  assert.notEqual(run.status, 0, `preload exited 0: ${output.slice(0, 1000)}`);
+  assert.match(output, /isolated test host/);
+});
+
+test('TOG-9740: the preload refuses a query-param host override on an allowlisted host', () => {
+  // node-postgres promotes ?host= over the hostname, so the hostname check
+  // alone would admit this URL. Only the query-string refusal can catch it.
+  const run = spawnSync(
+    process.execPath,
+    ['-e', 'require("./test/helpers/rotaProcessGuard.cjs")'],
+    {
+      cwd: ROOT,
+      env: {
+        PATH: process.env.PATH,
+        DISCORD_API_BASE: 'http://127.0.0.1:32101/api',
+        TWO_DATABASE_URL: 'postgres://synthetic@127.0.0.1:32102/fixture?host=db.internal',
+      },
+      encoding: 'utf8',
+      timeout: 10_000,
+    },
+  );
+  const output = `${run.stdout ?? ''}${run.stderr ?? ''}`;
+  assert.notEqual(run.status, 0, `preload exited 0: ${output.slice(0, 1000)}`);
+  assert.match(output, /query string/);
 });

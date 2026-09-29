@@ -17,13 +17,16 @@ import assert from 'node:assert/strict';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { resolve } from 'node:path';
 import { startMockDiscord, type MockDiscord } from '../tools/mock-discord/server.ts';
+import { isAllowedTestDatabaseUrl } from '../scripts/test-db-guard.ts';
 import { openTestDb, TEST_PG_URL, type TestDb } from './helpers/testDb.ts';
 import { STAGING_BOT_APPLICATION_ID, TWO_STAGING_GUILD_ID } from '../src/staging/spec.ts';
 import { buildRestartEnvironment } from '../src/staging/restartPreparation.ts';
 
 // Refuse before openTestDb can create/drop a schema, not merely at bot boot.
+// TOG-9656: any isolated test host (agent-testdb, loopback, CI service), never
+// production/staging — see scripts/test-db-guard.ts.
 const databaseUrl = new URL(TEST_PG_URL);
-assert.equal(databaseUrl.hostname, '127.0.0.1', 'staging-restart harness requires disposable loopback Postgres');
+assert.equal(isAllowedTestDatabaseUrl(TEST_PG_URL), true, 'staging-restart harness requires a disposable isolated test database');
 assert.ok(databaseUrl.port, 'explicit disposable Postgres port required');
 assert.equal(databaseUrl.search, '', 'no connection option injection');
 assert.match(
