@@ -1108,9 +1108,7 @@ back to them instead of repeating.
 | `audit:report` | Raw dump → `audit/channels.csv`, `roles.csv`, `invites.csv`, `summary.json` + walkthrough (never calls Discord). | Tables written, exit `0`. |
 | `audit:halt`, `audit:resume`, `audit:switch` | Kill switch: stop all mirror sends / resume / show state. DB row, survives restart, idempotent. | `audit:switch` shows expected state, held rows deliver after resume. |
 
-Note: `scripts/audit-scrub.ts` (PII scrubber for the collector) has no npm
-entry point; run it as `node scripts/audit-scrub.ts`. Green is a scrubbed dump
-with ids preserved and usernames/avatars removed.
+| `audit:scrub` | Usage for the PII scrubber behind the collector (a library: `stripUsers` imported by `audit-collect.ts`). | Usage prints, exit `0`. |
 
 ### Redesign waves and guild config
 
