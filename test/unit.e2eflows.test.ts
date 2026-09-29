@@ -360,6 +360,13 @@ test('ticket-buttons fails when no channel is created, pressing only open', asyn
   assert.equal(t.buttonCalls.length, 1);
 });
 
+test('ticket-buttons fails when the controls greeting never arrives, pressing only open', async () => {
+  const t = ticketSuccessTransport();
+  t.events.messageCreate = [];
+  await rejectsWithStep(flowByKey('ticket-buttons')!.run(ctx(t)), 'ticket-controls-posted');
+  assert.deepEqual(t.buttonCalls.map((b) => b.customId), [TICKET_OPEN_ID]);
+});
+
 test('ticket-buttons fails when the claim ack is not ephemeral, never pressing close', async () => {
   const t = ticketSuccessTransport();
   t.events.messageCreate = [ticketControls(), claimAck({ flags: 0 })];
@@ -395,6 +402,24 @@ test('denial hands the open ticket to staff up front and ends with it still open
 test('denial runs without a handoff sink when executed directly', async () => {
   const t = denialSuccessTransport();
   await flowByKey('ticket-open-denial')!.run(ctx(t));
+});
+
+test('denial fails when no channel is created, keeping only the pre-open handoff', async () => {
+  const t = denialSuccessTransport();
+  t.events.channelCreate = [];
+  const handoffs: string[] = [];
+  await rejectsWithStep(flowByKey('ticket-open-denial')!.run(ctx(t, TARGETS, handoffs)), 'ticket-channel-created');
+  assert.equal(handoffs.length, 1, 'the channel-bound handoff cannot exist without a channel');
+  assert.deepEqual(t.buttonCalls.map((b) => b.customId), [TICKET_OPEN_ID]);
+});
+
+test('denial fails when the controls greeting never arrives, after handing the channel to staff', async () => {
+  const t = denialSuccessTransport();
+  t.events.messageCreate = [];
+  const handoffs: string[] = [];
+  await rejectsWithStep(flowByKey('ticket-open-denial')!.run(ctx(t, TARGETS, handoffs)), 'ticket-controls-posted');
+  assert.match(handoffs[1]!, /ticket-42/, 'the open channel is handed off even though controls never arrive');
+  assert.deepEqual(t.buttonCalls.map((b) => b.customId), [TICKET_OPEN_ID]);
 });
 
 const notARefusal: [string, Record<string, unknown>][] = [
