@@ -427,6 +427,12 @@ export interface ImportRunOptions extends PlanOptions {
  * `reconciled: false` is the loud failure: it means the projection derived from
  * the export disagrees with what the database actually holds, and the caller is
  * expected to exit non-zero on it.
+ *
+ * `--apply` holds a transaction-scoped per-guild advisory lock from planning
+ * through the post-write read, so two concurrent imports serialize instead of
+ * landing between each other's projection and measurement and both failing
+ * reconcile on healthy rows (TOG-9916). Dry runs take no lock: they write
+ * nothing and have no post-write check to race.
  */
 export async function runMee6Import(
   db: Db,
@@ -439,23 +445,60 @@ export async function runMee6Import(
   const contents = await readFile(filePath);
   const file = digestBuffer(filePath, contents);
   const rows = parseMee6Export(contents.toString('utf8'));
-  const plan = await planMee6Import(db, guildId, rows, options);
 
-  const reconciliationErrors: string[] = [];
-  if (!plan.accounting.balances) {
-    reconciliationErrors.push(
-      `row accounting does not balance: ${JSON.stringify(plan.accounting)}`,
-    );
+  if (!options.apply) {
+    const plan = await planMee6Import(db, guildId, rows, options);
+    const reconciliationErrors: string[] = [];
+    if (!plan.accounting.balances) {
+      reconciliationErrors.push(
+        `row accounting does not balance: ${JSON.stringify(plan.accounting)}`,
+      );
+    }
+    return {
+      manifestVersion: MANIFEST_VERSION,
+      guildId,
+      mode: 'dry-run',
+      file,
+      totalXpIn: plan.totalXpIn,
+      uniqueXpIn: plan.uniqueXpIn,
+      accounting: plan.accounting,
+      rowsWritten: plan.accounting.inserted + plan.accounting.updated,
+      importedXpWritten: plan.importedXpWritten,
+      skipped: plan.skipped,
+      skippedByReason: tally(plan.skipped),
+      inventoryBefore: plan.inventoryBefore,
+      inventoryAfter: null,
+      totalXpAfterProjected: plan.totalXpAfterProjected,
+      totalXpAfterMeasured: null,
+      reconciled: reconciliationErrors.length === 0,
+      reconciliationErrors,
+      importSummary: null,
+    };
   }
 
-  let importSummary: ImportSummary | null = null;
-  let inventoryAfter: LevelInventory | null = null;
-  let totalXpAfterMeasured: number | null = null;
+  // Apply path: plan, write, and measure inside one transaction holding a
+  // per-guild advisory lock, so a concurrent import cannot land between this
+  // run's projection and its measurement (TOG-9916). The lock is
+  // transaction-scoped and released on commit; unrelated guilds hash to
+  // different keys and stay concurrent. LevelingService.importMee6 reuses the
+  // same connection when handed the transaction handle (see postgresDriver),
+  // so the write stays inside this transaction.
+  return db.transaction(async (tx) => {
+    await tx.prepare(`SELECT pg_advisory_xact_lock(hashtextextended(?, 0))`).get(
+      `mee6_import:${guildId}`,
+    );
+    const plan = await planMee6Import(tx, guildId, rows, options);
 
-  if (options.apply) {
+    const reconciliationErrors: string[] = [];
+    if (!plan.accounting.balances) {
+      reconciliationErrors.push(
+        `row accounting does not balance: ${JSON.stringify(plan.accounting)}`,
+      );
+    }
+
     // plan.apply excludes declined rows, so the audit row would understate
     // the file without the file-level counts (TOG-9915).
-    importSummary = await new LevelingService(db).importMee6(
+    const importSummary = await new LevelingService(tx).importMee6(
       guildId,
       plan.apply,
       options.importedAt,
@@ -465,8 +508,8 @@ export async function runMee6Import(
         duplicateRows: plan.accounting.duplicateRows,
       },
     );
-    inventoryAfter = await inventory(db, guildId);
-    totalXpAfterMeasured = inventoryAfter.totalXp;
+    const inventoryAfter = await inventory(tx, guildId);
+    const totalXpAfterMeasured = inventoryAfter.totalXp;
 
     if (totalXpAfterMeasured !== plan.totalXpAfterProjected) {
       reconciliationErrors.push(
@@ -483,26 +526,26 @@ export async function runMee6Import(
         reconciliationErrors.push(`service reported ${field}=${actual}, planned ${planned}`);
       }
     }
-  }
 
-  return {
-    manifestVersion: MANIFEST_VERSION,
-    guildId,
-    mode: options.apply ? 'apply' : 'dry-run',
-    file,
-    totalXpIn: plan.totalXpIn,
-    uniqueXpIn: plan.uniqueXpIn,
-    accounting: plan.accounting,
-    rowsWritten: plan.accounting.inserted + plan.accounting.updated,
-    importedXpWritten: plan.importedXpWritten,
-    skipped: plan.skipped,
-    skippedByReason: tally(plan.skipped),
-    inventoryBefore: plan.inventoryBefore,
-    inventoryAfter,
-    totalXpAfterProjected: plan.totalXpAfterProjected,
-    totalXpAfterMeasured,
-    reconciled: reconciliationErrors.length === 0,
-    reconciliationErrors,
-    importSummary,
-  };
+    return {
+      manifestVersion: MANIFEST_VERSION,
+      guildId,
+      mode: 'apply',
+      file,
+      totalXpIn: plan.totalXpIn,
+      uniqueXpIn: plan.uniqueXpIn,
+      accounting: plan.accounting,
+      rowsWritten: plan.accounting.inserted + plan.accounting.updated,
+      importedXpWritten: plan.importedXpWritten,
+      skipped: plan.skipped,
+      skippedByReason: tally(plan.skipped),
+      inventoryBefore: plan.inventoryBefore,
+      inventoryAfter,
+      totalXpAfterProjected: plan.totalXpAfterProjected,
+      totalXpAfterMeasured,
+      reconciled: reconciliationErrors.length === 0,
+      reconciliationErrors,
+      importSummary,
+    };
+  });
 }

@@ -227,6 +227,34 @@ test('re-applying the same export is a no-op the manifest reports as unchanged',
   assert.equal(second.reconciled, true);
 });
 
+test('two concurrent --apply runs against disjoint members both reconcile (TOG-9916)', async () => {
+  // The issue's repro: plan-then-write-then-measure with no serialization let
+  // each run land between the other's projection and measurement, so both
+  // exited 1 with "did not reconcile" on healthy rows. The per-guild
+  // advisory lock serializes the two runs; each then reconciles, and the
+  // table holds both rows.
+  const alice = exportFile('conc-alice.json', [{ id: ALICE, xp: 100 }]);
+  const bob = exportFile('conc-bob.json', [{ id: BOB, xp: 40 }]);
+  const [a, b] = await Promise.all([
+    cli(['--guild', GUILD, '--file', alice, '--apply']),
+    cli(['--guild', GUILD, '--file', bob, '--apply']),
+  ]);
+  assert.equal(a.code, 0, a.stdout + a.stderr);
+  assert.equal(b.code, 0, b.stdout + b.stderr);
+  for (const result of [a, b]) {
+    const manifest = JSON.parse(result.stdout.slice(result.stdout.indexOf('{')));
+    assert.equal(manifest.reconciled, true, JSON.stringify(manifest.reconciliationErrors));
+    assert.deepEqual(manifest.reconciliationErrors, []);
+  }
+  assert.deepEqual(await inventory(harness.db, GUILD), {
+    guildId: GUILD,
+    memberRows: 2,
+    totalXp: 140,
+    totalOrganicXp: 0,
+    totalImportedXp: 140,
+  });
+});
+
 test('duplicate rows collapse max-wins and the loser is named, not silently dropped', async () => {
   const path = exportFile('dupes.json', [
     { id: ALICE, xp: 100 },
