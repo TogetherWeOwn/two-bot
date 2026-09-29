@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadRedirectConfig } from '../src/redirect/config.ts';
-import { CampaignStore } from '../src/redirect/campaigns.ts';
+import { CampaignStore, isReservedSlug, isValidSlug } from '../src/redirect/campaigns.ts';
 import type { Db, RunResult, Statement } from '../src/store/driver.ts';
 
 interface CampaignRow {
@@ -224,6 +224,22 @@ test('add() refuses repointing and invalid shapes, and invalidates the cache', a
   const getsBefore = calls.get;
   assert.equal((await store.lookup('reddit'))?.inviteCode, 'A');
   assert.equal(calls.get, getsBefore + 1, 'add() must invalidate the cached entry');
+});
+
+test('add() refuses the reserved healthz slug (TOG-9925)', async () => {
+  const { db, calls } = fakeDb();
+  const store = new CampaignStore(db, { ttlMs: 30_000 });
+
+  // healthz is valid per isValidSlug but would silently die: GET /healthz is
+  // answered before campaign lookup, so no redirect and no click.
+  assert.ok(isValidSlug('healthz'), 'healthz passes the shape check - that is the trap');
+  assert.ok(isReservedSlug('healthz'));
+  assert.ok(!isReservedSlug('reddit'));
+  await assert.rejects(
+    store.add({ slug: 'healthz', inviteCode: 'A', label: 'post', createdAt: NOW }),
+    /reserved/,
+  );
+  assert.equal(calls.run, 0, 'a reserved slug must never reach the database');
 });
 
 test('disable() retires a campaign once, and the lookup sees it', async () => {
