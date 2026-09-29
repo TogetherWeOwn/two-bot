@@ -78,3 +78,60 @@ describe('toPrune', () => {
     }
   });
 });
+
+describe('retention window boundaries', () => {
+  const five = ['n1', 'n2', 'n3', 'n4', 'n5']; // newest first
+
+  test('an exact-fit window prunes nothing', () => {
+    // keep == list length is the night the window fills: deleting anything
+    // here would mean the window never actually holds what it promises.
+    assert.deepEqual(toPrune(five, 5), []);
+    assert.deepEqual(toPrune(['only'], 1), []);
+  });
+
+  test('one backup past the window prunes exactly the oldest', () => {
+    // keep == length - 1 is the first night over the window. Only the oldest
+    // goes; the newest four are untouched.
+    assert.deepEqual(toPrune(five, 4), ['n5']);
+  });
+
+  test('one slot of headroom still prunes nothing', () => {
+    assert.deepEqual(toPrune(five, 6), []);
+  });
+
+  test('a nightly window of DEFAULT_KEEP slides one backup per night', () => {
+    const nights = (n: number) => Array.from({ length: n }, (_, i) => `night-${i + 1}`);
+    assert.deepEqual(toPrune(nights(14), DEFAULT_KEEP), []);
+    assert.deepEqual(toPrune(nights(15), DEFAULT_KEEP), ['night-15']);
+    assert.deepEqual(toPrune(nights(20), DEFAULT_KEEP), [
+      'night-15', 'night-16', 'night-17', 'night-18', 'night-19', 'night-20',
+    ]);
+  });
+
+  test('survivors are always the newest min(keep, n), never fewer', () => {
+    // The partition property: no keep value loses or reorders a backup, so a
+    // run can never end with fewer backups than the window promises.
+    for (let keep = 1; keep <= 7; keep++) {
+      const pruned = toPrune(five, keep);
+      const survivors = five.slice(0, five.length - pruned.length);
+      assert.equal(survivors.length, Math.min(keep, five.length), `keep=${keep}`);
+      assert.deepEqual([...survivors, ...pruned], five, `keep=${keep} lost or reordered a backup`);
+    }
+  });
+
+  test('spelling the default explicitly keeps the default behaviour', () => {
+    assert.equal(parseKeep(String(DEFAULT_KEEP)), DEFAULT_KEEP);
+  });
+
+  test('zero with width or padding is still zero and is refused', () => {
+    // '00' passes a digit-only check and ' 0 ' survives trimming, so both
+    // must reach the < 1 refusal rather than slice their way to an empty disk.
+    for (const raw of ['00', ' 0 ', '000']) {
+      assert.throws(
+        () => parseKeep(raw),
+        RetentionError,
+        `TWO_BACKUP_KEEP=${JSON.stringify(raw)} should be refused, not guessed at`,
+      );
+    }
+  });
+});
