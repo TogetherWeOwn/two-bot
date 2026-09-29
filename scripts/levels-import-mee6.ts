@@ -5,7 +5,8 @@
  * import that runs by accident against a guild with organic XP is not something
  * you can undo from a manifest.
  *
- * Exit codes: 0 fine, 1 the export or the write did not reconcile, 2 usage.
+ * Exit codes: 0 fine, 1 the export or the write did not reconcile, 2 usage
+ * or bad config (unknown flag/command, bad --guild, bad TWO_DB_POOL_MAX).
  */
 import { statSync, writeFileSync } from 'node:fs';
 import { openDb } from '../src/store/db.ts';
@@ -46,15 +47,45 @@ function optional(name: string): string | null {
   return value;
 }
 
-const rawCommand = process.argv[2];
-if (rawCommand !== undefined && !rawCommand.startsWith('--') && rawCommand !== 'inventory' && rawCommand !== 'import') {
-  console.error(`Unknown subcommand "${rawCommand}".`);
+// Any bare word that is not a flag value is a subcommand candidate: the only
+// accepted ones are `import` (the default when no subcommand is given) and
+// `inventory`. Anything else (e.g. a typo like `inventroy`) is a usage error,
+// exit 2, before the guild is parsed and before the database opens — so a
+// read-only intent can never become a write just because `--apply` is present
+// (TOG-9912).
+const VALUE_FLAGS = new Set(['--guild', '--file', '--manifest']);
+const KNOWN_FLAGS = new Set([...VALUE_FLAGS, '--apply', '--allow-lower', '--allow-live-guild']);
+const bareWords: string[] = [];
+for (let i = 2; i < process.argv.length; i++) {
+  const token = process.argv[i];
+  if (VALUE_FLAGS.has(token)) {
+    i++;
+    continue;
+  }
+  if (token.startsWith('--')) {
+    // A typo'd write-intent flag (e.g. --aply) must fail loudly: silently
+    // ignoring it turns an intended --apply into a dry run with exit 0
+    // (TOG-9913).
+    if (!KNOWN_FLAGS.has(token)) {
+      console.error(`Unknown flag "${token}".`);
+      usage();
+    }
+    continue;
+  }
+  bareWords.push(token);
+}
+const unknown = bareWords.find((word) => word !== 'import' && word !== 'inventory');
+if (unknown !== undefined || bareWords.length > 1) {
+  console.error(`Unknown subcommand "${unknown ?? bareWords[1]}".`);
   usage();
 }
-const command = rawCommand === 'inventory' ? 'inventory' : 'import';
+const command = bareWords[0] === 'inventory' ? 'inventory' : 'import';
 
 const guildId = arg('--guild');
-if (!/^\d{17,20}$/.test(guildId)) throw new Error('--guild must be a Discord snowflake');
+if (!/^\d{17,20}$/.test(guildId)) {
+  console.error('--guild must be a Discord snowflake (17-20 digits).');
+  usage();
+}
 
 // Before the database opens, so a mistyped guild fails on the fence rather than
 // on a connection string.
@@ -94,9 +125,15 @@ if (command === 'import' && manifestPath) {
 
 const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
 if (!databaseUrl) throw new Error('TWO_DATABASE_URL is required.');
-const db = await openDb(databaseUrl, {
-  poolMax: Number(process.env.TWO_DB_POOL_MAX ?? 5),
-});
+// A non-numeric TWO_DB_POOL_MAX must fail here, not as NaN handed to pg-pool
+// with a passing exit code (TOG-9913).
+const poolMaxRaw = process.env.TWO_DB_POOL_MAX ?? '5';
+const poolMax = Number(poolMaxRaw);
+if (!Number.isInteger(poolMax) || poolMax <= 0) {
+  console.error(`TWO_DB_POOL_MAX must be a positive integer, got "${poolMaxRaw}".`);
+  usage();
+}
+const db = await openDb(databaseUrl, { poolMax });
 
 let manifest: ImportManifest | null = null;
 try {

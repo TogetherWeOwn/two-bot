@@ -117,6 +117,61 @@ test('staging remains accepted without the live rollout override', async (t) => 
   assert.match(result.output, /"inserted": 1/);
 });
 
+test('an unknown subcommand word is a usage error, never an import (TOG-9912)', async () => {
+  const { exportPath } = fixture();
+  // Unreachable on purpose: the unknown word must fail before the guild is
+  // parsed and before the database opens, so a typo of `inventory` plus
+  // `--apply` can never become a write.
+  const unreachableDb = { TWO_DATABASE_URL: 'postgres://127.0.0.1:1/must-not-connect' };
+  const variants = [
+    ['inventroy', '--guild', STAGING_GUILD_ID, '--file', exportPath, '--apply'],
+    ['--guild', STAGING_GUILD_ID, '--file', exportPath, '--apply', 'inventroy'],
+    ['--guild', STAGING_GUILD_ID, '--file', exportPath, 'import', 'inventroy', '--apply'],
+    ['import', '--guild', STAGING_GUILD_ID, '--file', exportPath, '--apply', 'extra'],
+  ];
+  for (const args of variants) {
+    const result = await runScript(IMPORT_SCRIPT, args, unreachableDb);
+    assert.equal(result.code, 2, `args [${args.join(' ')}]: ${result.output}`);
+    assert.match(result.output, /Unknown subcommand "inventroy"|Unknown subcommand "extra"/);
+    assert.doesNotMatch(result.output, /ECONNREFUSED|database/i);
+  }
+});
+
+test('a typo of a write-intent flag, a bad pool size and a bad guild are usage errors, never a silent dry run (TOG-9913)', async () => {
+  const { exportPath } = fixture();
+  // Unreachable on purpose: every case must fail before the database opens.
+  // A typo'd --apply that fell through to the import would exit 0 with a
+  // dry-run manifest while the operator believes the write happened.
+  const unreachableDb = { TWO_DATABASE_URL: 'postgres://127.0.0.1:1/must-not-connect' };
+  const cases: Array<{ args: string[]; env?: Record<string, string>; match: RegExp }> = [
+    {
+      args: ['--guild', STAGING_GUILD_ID, '--file', exportPath, '--aply'],
+      match: /Unknown flag "--aply"/,
+    },
+    {
+      args: ['--guild', STAGING_GUILD_ID, '--file', exportPath, '--apply', '--allow-lowerx'],
+      match: /Unknown flag "--allow-lowerx"/,
+    },
+    {
+      args: ['--guild', 'not-a-snowflake', '--file', exportPath],
+      match: /--guild must be a Discord snowflake/,
+    },
+    {
+      args: ['--guild', STAGING_GUILD_ID, '--file', exportPath],
+      env: { TWO_DB_POOL_MAX: 'abc' },
+      match: /TWO_DB_POOL_MAX must be a positive integer/,
+    },
+  ];
+  for (const { args, env, match } of cases) {
+    const result = await runScript(IMPORT_SCRIPT, args, { ...unreachableDb, ...env });
+    assert.equal(result.code, 2, `args [${args.join(' ')}]: ${result.output}`);
+    assert.match(result.output, match);
+    assert.match(result.output, /Usage:/);
+    // No manifest (silent success), no connection attempt, no stack trace.
+    assert.doesNotMatch(result.output, /"mode"|ECONNREFUSED|^\s+at\s/m);
+  }
+});
+
 test('the import writes nothing without --apply, and inventory reads the live guild', async (t) => {
   const { exportPath } = fixture();
   const harness = await openTestDb(`${import.meta.filename}_dryrun`);
