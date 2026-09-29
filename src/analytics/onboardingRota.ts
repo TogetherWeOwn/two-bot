@@ -38,6 +38,12 @@ export interface OnboardingRotaConfig {
   primaryActorId?: string;
 }
 
+export interface RotaErasureCounts {
+  factsByActor: number;
+  factsByResponder: number;
+  auditNotices: number;
+}
+
 export interface RotaNoticeCandidate {
   memberId: string;
   actionId: string;
@@ -327,6 +333,49 @@ export class OnboardingRota {
       // Atomic pair: a duration must never exist without its actual human reply.
       await this.write(tx, input, memberId, 'onboarding_first_human_reply', enrollment, metadata);
       await this.write(tx, input, memberId, 'onboarding_reply_latency', enrollment, metadata);
+    });
+  }
+
+  /**
+   * Authorized erasure for one rota subject. Takes the raw member id and
+   * derives the guild-separated pseudonym through `memberId()`; the raw id
+   * and the pseudonym never leave this call. Deletes in one transaction with
+   * bound parameters only:
+   * (a) derived `community_facts` rows keyed by the subject pseudonym,
+   * (b) reply/ack/latency rows where the subject acted as responder
+   * (`metadata.responderId`), scoped to the responderId-bearing event types,
+   * (c) `rota_notice` audit rows addressed to the subject pseudonym.
+   * Operator-invoked on authorized request; not called from live paths.
+   *
+   * (c) uses a guild-scoped inline delete rather than
+   * `OperationalAuditStore.eraseMember()`: eraseMember matches actor OR target
+   * across all guilds inside its own transaction, while this erasure must stay
+   * guild-scoped, rota_notice-only, and atomic inside this transaction.
+   */
+  async eraseSubject(guildId: string, rawMemberId: string): Promise<RotaErasureCounts> {
+    const pseudonym = this.memberId(guildId, rawMemberId);
+    return this.db.transaction(async (tx) => {
+      const byActor = await tx.prepare(
+        `DELETE FROM community_facts WHERE guild_id = ? AND actor_id = ?`,
+      ).run(guildId, pseudonym);
+      const byResponder = await tx.prepare(
+        `DELETE FROM community_facts
+          WHERE guild_id = ?
+            AND event_type IN (
+              'welcome_rota_acknowledged', 'welcome_rota_replied',
+              'onboarding_first_human_reply', 'onboarding_reply_latency'
+            )
+            AND metadata::json->>'responderId' = ?`,
+      ).run(guildId, pseudonym);
+      const notices = await tx.prepare(
+        `DELETE FROM operational_audit_log
+          WHERE guild_id = ? AND event_kind = 'rota_notice' AND target_id = ?`,
+      ).run(guildId, pseudonym);
+      return {
+        factsByActor: byActor.changes,
+        factsByResponder: byResponder.changes,
+        auditNotices: notices.changes,
+      };
     });
   }
 }

@@ -71,11 +71,31 @@ added to the derived rows. Raw `community_facts` observations retain the existin
 privacy policy. Rota-log reader authorization is the accepted primary, Community
 Manager and President & COO; do not expose these rows via public views.
 
-For an authorized erasure, compute the subject's pseudonym with the same key and
-guild, then delete matching derived and operational `actor_id` rows and rows whose
-metadata's `responderId` matches, including `welcome_rota_acknowledged` and
-`welcome_rota_replied`. Use bound parameters; do not put a raw ID into a work
-product. This is additional to the existing raw-fact/member erasure policy.
+For an authorized erasure, call `OnboardingRota.eraseSubject(guildId, rawMemberId)`
+(`src/analytics/onboardingRota.ts`). It derives the subject's guild-separated
+pseudonym through `memberId()` and, in one transaction with bound parameters
+only, deletes (a) derived `community_facts` rows keyed by the subject
+pseudonym, (b) reply/ack/latency rows where the subject acted as responder
+(`metadata.responderId`), scoped to the responderId-bearing event types
+(`welcome_rota_acknowledged`, `welcome_rota_replied`,
+`onboarding_first_human_reply`, `onboarding_reply_latency`), and (c)
+`rota_notice` audit rows addressed to the subject pseudonym. It returns
+per-table delete counts. The manual equivalent, with `$pseudonym` computed off
+the key with the same HMAC first (never the raw ID):
+
+```sql
+DELETE FROM community_facts WHERE guild_id = $1 AND actor_id = $2;
+DELETE FROM community_facts
+ WHERE guild_id = $1
+   AND event_type IN ('welcome_rota_acknowledged', 'welcome_rota_replied',
+                      'onboarding_first_human_reply', 'onboarding_reply_latency')
+   AND metadata::json->>'responderId' = $2;
+DELETE FROM operational_audit_log
+ WHERE guild_id = $1 AND event_kind = 'rota_notice' AND target_id = $2;
+```
+
+Use bound parameters; do not put a raw ID into a work product. This is
+additional to the existing raw-fact/member erasure policy.
 
 ## Runtime observations
 

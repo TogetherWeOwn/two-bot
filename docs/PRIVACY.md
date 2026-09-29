@@ -87,7 +87,9 @@ in the database. Do not expose rota rows through public reporting views.
 Authorized rota-log readers are the accepted human primary, Community Manager
 and President & COO. An authorized erasure must also delete derived rows for the
 member pseudonym and any reply/latency/acknowledgement rows containing that responder pseudonym;
-see the measurement document for the key/guild scope. Disabling measurement is
+`OnboardingRota.eraseSubject()` performs the rota portion in one transaction
+(see [ONBOARDING_ROTA.md](ONBOARDING_ROTA.md) for the key/guild scope and the
+exact queries). Disabling measurement is
 not erasure and does not rotate the pseudonym key.
 
 ## Retention
@@ -129,6 +131,15 @@ DELETE FROM event_rsvps                WHERE user_id = '<id>';
 DELETE FROM lfg_signups                WHERE user_id = '<id>';
 DELETE FROM self_role_audit            WHERE member_id = '<id>';
 DELETE FROM self_role_panel_claims     WHERE member_id = '<id>';
+-- Rota pseudonym erasure (guild-separated HMAC pseudonym, NOT the raw ID:
+-- compute it with the rota key first, or use OnboardingRota.eraseSubject()).
+-- <id> below is the pseudonym; <guild> is the guild ID. All bound parameters.
+DELETE FROM community_facts            WHERE guild_id = '<guild>' AND actor_id = '<id>';
+DELETE FROM community_facts            WHERE guild_id = '<guild>'
+                                         AND event_type IN ('welcome_rota_acknowledged', 'welcome_rota_replied',
+                                                            'onboarding_first_human_reply', 'onboarding_reply_latency')
+                                         AND metadata::json->>'responderId' = '<id>';
+DELETE FROM operational_audit_log      WHERE guild_id = '<guild>' AND event_kind = 'rota_notice' AND target_id = '<id>';
 DELETE FROM temp_voice_creates         WHERE user_id = '<id>';
 DELETE FROM temp_voice_audit           WHERE actor_id = '<id>';
 DELETE FROM temp_voice_channels        WHERE owner_id = '<id>' OR generator_id = '<id>'
