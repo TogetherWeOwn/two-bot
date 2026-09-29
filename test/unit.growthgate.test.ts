@@ -14,10 +14,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { observeApprovedPublicSite, observeTrackedJoinPath } from '../src/growth/joinPath.ts';
+import {
+  inviteCodeFromDestination,
+  observeApprovedPublicSite,
+  observeTrackedJoinPath,
+  webCodeRowSource,
+} from '../src/growth/joinPath.ts';
 import {
   EXIT_CODE,
-  WEB_HOMEPAGE_CODE,
+  WEB_HOMEPAGE_SLOT,
   allChecks,
   botChecks,
   failing,
@@ -142,9 +147,46 @@ test('every criterion that is not ok names an owner and an action', () => {
 });
 
 test('the website code row is about a funnel row, not a bound code', () => {
-  const row = websiteChecks({ ...GREEN, webCodeRowPresent: false }).find((c) => c.id === 'web-code-row')!;
+  const row = websiteChecks({
+    ...GREEN,
+    webCodeRowSource: 'invite:4GwEDNRTtx',
+    webCodeRowPresent: false,
+    webCodeRowDetail: 'invite:4GwEDNRTtx has no row in the funnel - no join has ever arrived on it.',
+  }).find((c) => c.id === 'web-code-row')!;
   assert.equal(row.status, 'fail');
-  assert.match(row.detail, new RegExp(WEB_HOMEPAGE_CODE));
+  assert.match(row.detail, /invite:4GwEDNRTtx/);
+  assert.doesNotMatch(row.detail, new RegExp(`invite:${WEB_HOMEPAGE_SLOT}`));
+});
+
+test('the website code row matches the resolved code, never the slot label', () => {
+  // TOG-5037: the funnel stores raw Discord codes (`invite:<code>`), while the
+  // registry names the SLOT (`WEB-HOMEPAGE`). Matching the funnel on the slot
+  // label can never hit a row, so the criterion must read the resolved source.
+  const present = websiteChecks({
+    ...GREEN,
+    webCodeRowSource: 'invite:4GwEDNRTtx',
+    webCodeRowPresent: true,
+    webCodeRowDetail: 'invite:4GwEDNRTtx has 2 attributed join(s).',
+  }).find((c) => c.id === 'web-code-row')!;
+  assert.equal(present.status, 'ok');
+  assert.match(present.detail, /invite:4GwEDNRTtx/);
+  assert.doesNotMatch(present.detail, new RegExp(`invite:${WEB_HOMEPAGE_SLOT}`));
+});
+
+test('the join destination resolves to the raw Discord code behind the slot', () => {
+  // The single derivation both the join-path observation and the funnel match
+  // share: one source (`TWO_GATE_JOIN_DESTINATION`), no second copy of the code.
+  assert.equal(inviteCodeFromDestination('https://discord.gg/4GwEDNRTtx'), '4GwEDNRTtx');
+  assert.equal(webCodeRowSource('https://discord.gg/4GwEDNRTtx'), 'invite:4GwEDNRTtx');
+  assert.equal(
+    webCodeRowSource('https://discord.gg/4GwEDNRTtx'),
+    'invite:4GwEDNRTtx',
+    'the funnel source is exactly what the tracker writes',
+  );
+  assert.equal(inviteCodeFromDestination('https://discord.com/invite/4GwEDNRTtx'), '4GwEDNRTtx');
+  assert.equal(inviteCodeFromDestination('not a url'), undefined);
+  assert.equal(inviteCodeFromDestination('https://togetherweown.com/join'), undefined);
+  assert.equal(webCodeRowSource('https://togetherweown.com/join'), undefined);
 });
 
 test('the approved vanity domain redirects only to the public Phase 1 host', async () => {
