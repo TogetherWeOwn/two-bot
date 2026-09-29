@@ -57,7 +57,8 @@ export class DiscordAnnouncements implements AnnouncementDiscord {
       allowed_mentions: { parse: [] },
       ...(options.nonce ? { nonce: options.nonce, enforce_nonce: true } : {}),
     }) as { id?: unknown } | null;
-    return typeof json?.id === 'string' ? json.id : '';
+    if (typeof json?.id !== 'string') throw new Error('Discord request failed: missing message id');
+    return json.id;
   }
 
   async editMessage(channelId: string, messageId: string, content: string, components: unknown[] = []): Promise<void> {
