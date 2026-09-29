@@ -113,6 +113,10 @@ export class LevelingService {
     occurredAt: string,
     channelId?: string,
   ): Promise<XpAward> {
+    // TOG-7512: a non-finite duration must award nothing. Math.floor(NaN) is
+    // NaN, and NaN slips past the `amount <= 0` guard in award(), so without
+    // this an unmeasurable session could write garbage XP.
+    if (!Number.isFinite(durationSeconds)) return this.currentAward(guildId, memberId);
     const minutes = Math.floor(Math.max(0, durationSeconds) / 60);
     return this.award(
       guildId,
@@ -133,7 +137,10 @@ export class LevelingService {
     channelId?: string,
   ): Promise<XpAward> {
     const at = isoOrThrow(occurredAt);
-    if (amount <= 0) return this.currentAward(guildId, memberId);
+    // TOG-7512: NaN slips past `amount <= 0` (every comparison on NaN is
+    // false), so a non-finite amount must be refused explicitly - no write,
+    // no cooldown claim, current totals back.
+    if (!Number.isFinite(amount) || amount <= 0) return this.currentAward(guildId, memberId);
     const cooldownSeconds = source === 'message' ? MESSAGE_COOLDOWN_SECONDS : VOICE_COOLDOWN_SECONDS;
 
     try {

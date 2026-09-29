@@ -59,7 +59,7 @@ export interface OutstandingModerationState {
   activeLockdownCount: number;
   pendingUnbans: OutstandingUnban[];
   activeLockdowns: OutstandingLockdown[];
-  /** True when at least one list hit `OUTSTANDING_ID_LIMIT`. */
+  /** True when rows were actually cut: exact count exceeds the returned list. */
   truncated: boolean;
   total: number;
 }
@@ -111,7 +111,7 @@ export async function readOutstandingModerationState(
     pendingUnbans,
     activeLockdowns,
     truncated:
-      pendingUnbans.length >= OUTSTANDING_ID_LIMIT || activeLockdowns.length >= OUTSTANDING_ID_LIMIT,
+      pendingUnbanCount > pendingUnbans.length || activeLockdownCount > activeLockdowns.length,
     total: pendingUnbanCount + activeLockdownCount,
   };
 }
