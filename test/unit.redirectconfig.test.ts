@@ -139,6 +139,47 @@ test('misses are cached too, and invalid slugs never reach the database', async 
   assert.equal(calls.get, 1, 'an invalid slug must never reach the database');
 });
 
+test('a miss expires on the short negative TTL, so a just-added slug resolves (TOG-9926)', async () => {
+  let now = 1_000_000;
+  const { db } = fakeDb();
+  // Two stores sharing one table but not one cache: the redirect process and
+  // the CLI process. The CLI's add() can only invalidate its own cache.
+  const redirect = new CampaignStore(db, { ttlMs: 30_000, now: () => now });
+  const cli = new CampaignStore(db, { ttlMs: 30_000, now: () => now });
+
+  // Operator flow: go-live check 404s, then --add runs in a separate process.
+  assert.equal(await redirect.lookup('launch'), null);
+  await cli.add({ slug: 'launch', inviteCode: 'A', label: 'post', createdAt: NOW });
+
+  // The redirect process still holds the miss - but only for the short
+  // negative TTL, not the full 30s hit TTL.
+  now += 2_500;
+  assert.equal(
+    (await redirect.lookup('launch'))?.inviteCode,
+    'A',
+    'a slug added after a 404 must resolve once the negative TTL lapses',
+  );
+});
+
+test('a hit stays cached for the full TTL while a miss is re-checked quickly', async () => {
+  let now = 1_000_000;
+  const { db, calls } = fakeDb([
+    { slug: 'reddit', invite_code: 'A', label: 'post', disabled_at: null, created_at: NOW },
+  ]);
+  const store = new CampaignStore(db, { ttlMs: 30_000, now: () => now });
+
+  assert.equal((await store.lookup('reddit'))?.inviteCode, 'A');
+  assert.equal(await store.lookup('nope'), null);
+  assert.equal(calls.get, 2);
+
+  // Past the negative TTL but well within the hit TTL: the miss is
+  // re-checked, the hit is served from cache.
+  now += 2_500;
+  assert.equal((await store.lookup('reddit'))?.inviteCode, 'A');
+  assert.equal(await store.lookup('nope'), null);
+  assert.equal(calls.get, 3, 'only the expired miss must query again');
+});
+
 test('add() refuses repointing and invalid shapes, and invalidates the cache', async () => {
   const { db, calls } = fakeDb();
   const store = new CampaignStore(db, { ttlMs: 30_000 });

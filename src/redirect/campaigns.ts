@@ -65,11 +65,18 @@ export class CampaignStore {
   private db: Db;
   private cache = new Map<string, { value: Campaign | null; expiresAt: number }>();
   private ttlMs: number;
+  private negativeTtlMs: number;
   private now: () => number;
 
-  constructor(db: Db, opts: { ttlMs?: number; now?: () => number } = {}) {
+  constructor(db: Db, opts: { ttlMs?: number; negativeTtlMs?: number; now?: () => number } = {}) {
     this.db = db;
     this.ttlMs = opts.ttlMs ?? 30_000;
+    // Misses (404s) get a much shorter TTL than hits. The CLI runs in a
+    // separate process whose add() can only invalidate its own in-memory
+    // cache, so a miss cached at full TTL would keep 404ing a just-added
+    // slug in the redirect process for up to 30s (TOG-9926). Clamped to the
+    // hit TTL so ttlMs: 0 still means "no caching at all".
+    this.negativeTtlMs = opts.negativeTtlMs ?? Math.min(2_000, this.ttlMs);
     this.now = opts.now ?? Date.now;
   }
 
@@ -103,10 +110,13 @@ export class CampaignStore {
         }
       : null;
 
-    // Misses are cached too, at the same TTL. Otherwise a bot walking URLs
-    // turns every 404 into a database query, which is the cheapest denial of
-    // service anyone could mount against us.
-    this.cache.set(slug, { value, expiresAt: this.now() + this.ttlMs });
+    // Misses are cached too, but at a short negative TTL. Otherwise a bot
+    // walking URLs turns every 404 into a database query, which is the
+    // cheapest denial of service anyone could mount against us - while a
+    // full-TTL miss would keep 404ing a just-added slug (the CLI runs in a
+    // separate process) for up to 30s after --add (TOG-9926).
+    const ttl = value === null ? this.negativeTtlMs : this.ttlMs;
+    this.cache.set(slug, { value, expiresAt: this.now() + ttl });
     return value;
   }
 
