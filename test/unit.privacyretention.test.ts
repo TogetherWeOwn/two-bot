@@ -6,6 +6,9 @@
  *
  *  - ticket transcripts live exactly 90 days past close (`purge_after`), and
  *    the startup purge deletes only rows whose `purge_after` has passed;
+ *  - attachment URLs are references to Discord's copy, not retained bytes
+ *    (docs/PRIVACY.md retention row): fetchTranscript embeds only `url`,
+ *    and a saved transcript round-trips URL-only with no byte column;
  *  - member erasure removes the member's rows from the ticket tables and the
  *    operational audit log (including rows whose opaque `entry_id` embeds the
  *    member ID for event identity), while leaving other members' rows alone;
@@ -16,8 +19,9 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { Collection, type TextChannel } from 'discord.js';
 import { openEphemeralTestDb as openDb } from './helpers/testDb.ts';
-import { TicketStore, ticketTestHelpers } from '../src/discord/tickets.ts';
+import { fetchTranscript, TicketStore, ticketTestHelpers } from '../src/discord/tickets.ts';
 import { OperationalAuditStore } from '../src/audit/store.ts';
 
 const GUILD = '111111111111111111';
@@ -77,6 +81,102 @@ describe('PRIVACY.md retention compliance', () => {
       assert.equal(await store.purgeExpired('2026-09-09T12:01:00.000Z'), 1);
       assert.equal(await store.transcriptExists(reserved.id), false);
       assert.equal(await store.transcriptExists(reserved2.id), true);
+    } finally {
+      await db.close();
+    }
+  });
+
+  test('saved transcript with attachments retains only URL references, not bytes', async () => {
+    // docs/PRIVACY.md retention row: "Attachment URLs are references to
+    // Discord's copy, not retained attachment bytes, and may expire sooner."
+    // fetchTranscript embeds only `attachment.url` (src/discord/tickets.ts),
+    // so the fixture below plants byte-like decoys in the fields a
+    // bytes-retaining implementation would read (`attachment`/`data`). If a
+    // future change embeds bytes — or adds a byte-holding column to
+    // ticket_transcripts — this reds. Fixture channel only: no live Discord,
+    // no live guild writes.
+    const ATTACH_URL = 'https://cdn.discordapp.com/attachments/111111111111111111/222222222222222222/report.png';
+    const BYTE_MARKER = 'BYTE-PAYLOAD-MARKER-7f3a9c-should-never-persist';
+    const attachment = {
+      url: ATTACH_URL,
+      // Decoys: what a bytes-embedding implementation would copy into content.
+      attachment: BYTE_MARKER,
+      data: `data:image/png;base64,${BYTE_MARKER}`,
+    };
+    const rows = new Map<string, any>([
+      ['333333333333333333', {
+        createdTimestamp: Date.parse('2026-09-08T12:00:00.000Z'),
+        author: { tag: 'member#0001' },
+        content: 'see attached',
+        attachments: new Map([['att-1', attachment]]),
+      }],
+      ['333333333333333334', {
+        createdTimestamp: Date.parse('2026-09-08T12:00:10.000Z'),
+        author: { tag: 'staff#0002' },
+        content: 'noted',
+        attachments: new Map(),
+      }],
+    ]);
+    const messages: any = new Collection(rows);
+    const channel = {
+      messages: { fetch: async () => messages },
+    } as unknown as TextChannel;
+
+    const data = await fetchTranscript(channel);
+    assert.equal(data.messageCount, 2);
+    assert.ok(data.content.includes(ATTACH_URL), 'transcript keeps the attachment URL reference');
+    assert.ok(
+      !data.content.includes(BYTE_MARKER),
+      'transcript embeds no attachment byte payload',
+    );
+
+    const db = await openDb();
+    try {
+      const store = new TicketStore(db);
+      const reserved = (await store.reserve(GUILD, MEMBER, '2026-09-08T12:00:00.000Z'))!;
+      await store.activate(reserved.id, 'channel-a');
+      const closing = await store.beginClose('channel-a', '2026-09-08T12:00:30.000Z');
+      assert.ok(closing);
+      const saved = await store.saveTranscript({
+        ticketId: reserved.id,
+        guildId: GUILD,
+        channelId: 'channel-a',
+        openerId: MEMBER,
+        claimedBy: null,
+        content: data.content,
+        messageCount: data.messageCount,
+        createdAt: '2026-09-08T12:01:00.000Z',
+        purgeAfter: '2026-12-07T12:01:00.000Z',
+      }, closing.closingStartedAt);
+      assert.equal(saved, true);
+
+      const row = await db.prepare(
+        `SELECT content FROM ticket_transcripts WHERE ticket_id = ?`,
+      ).get<{ content: string }>(reserved.id);
+      assert.equal(row?.content, data.content);
+      assert.ok(row?.content.includes(ATTACH_URL), 'saved transcript keeps the URL reference');
+      assert.ok(
+        !row?.content.includes(BYTE_MARKER),
+        'saved transcript holds no byte payload',
+      );
+
+      // No byte-capable home for a future change to stash payloads in.
+      const columns = await db.prepare(
+        `SELECT column_name, udt_name FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = 'ticket_transcripts'
+          ORDER BY column_name`,
+      ).all<{ column_name: string; udt_name: string }>();
+      assert.ok(columns.length > 0, 'expected ticket_transcripts columns in information_schema');
+      const byteLike = columns.filter(
+        (c) => c.udt_name === 'bytea' || /attach|byte|blob|media|file/i.test(c.column_name),
+      );
+      assert.deepEqual(
+        byteLike,
+        [],
+        `ticket_transcripts must hold URL references only; byte-like storage found: ${JSON.stringify(byteLike)}. ` +
+          `Update docs/PRIVACY.md if bytes are ever retained.`,
+      );
     } finally {
       await db.close();
     }
