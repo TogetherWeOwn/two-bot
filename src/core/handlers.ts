@@ -359,10 +359,13 @@ export class FunnelHandlers {
    * duration spanning the member's absence.
    *
    * The end is credited to the open channel with the duration measured to
-   * leave time. `isBot` is unknown on this path - the gateway hands
-   * GuildMemberRemove no reliable bot flag at this layer - so the voice half
-   * is read from the tracker, not from a parameter: the only session we can
-   * close is one we saw start, and starts are only recorded for non-bots.
+   * leave time. The voice half is always recorded as human (TOG-7511): the
+   * only session we can close is one we saw start, and starts are only
+   * recorded for non-bots - so an open entry is human by construction.
+   * Passing the caller's bot flag through would close the tracker entry via
+   * onVoiceLeave's tracker-first ordering but hit its `isBot` early-return
+   * before the end row, losing the session from voice reports. The
+   * member_leave row below is unaffected: it has no bot gating.
    */
   async onLeave(
     guildId: string,
@@ -381,7 +384,12 @@ export class FunnelHandlers {
       await this.onVoiceLeave({
         guildId,
         memberId,
-        isBot: opts.isBot ?? false,
+        // Always human: an open entry exists only if onVoiceJoin recorded a
+        // start, which it does only for non-bots (TOG-7511). The caller's flag
+        // (the real member flag on the GuildMemberRemove path) must not reach
+        // onVoiceLeave: it closes the tracker entry first, then returns early
+        // on isBot before writing the end row - entry closed, session lost.
+        isBot: false,
         channelId: open.channelId,
         occurredAt: at,
       });
