@@ -10,6 +10,15 @@
  * with stop(), an interval that never keeps the process alive (unref), and
  * errors logged per tick rather than thrown, because a throwing interval
  * handler would take the process down on a transient database blip.
+ *
+ * Disable (TOG-8697) is the fourth half of the automations kill-path, next to
+ * deregistering commands (disable.ts), refusing invocations
+ * (`registerAutomationCommands({enabled: false})`), and never republishing
+ * (`CommandRegistry({automationsEnabled: false})`): with `enabled: false` a
+ * tick returns 0 without touching the store, so a disabled scheduler fires
+ * zero jobs and leaves due rows exactly as it found them. Rows stay enabled
+ * in the database - disable is not a destructive admin action - so the guard
+ * has to live here, not in the claim query.
  */
 import type { AutomationService } from './service.ts';
 import { log } from '../core/log.ts';
@@ -25,12 +34,16 @@ export interface SchedulerHandle {
 export function startScheduler(
   service: AutomationService,
   guildId: string,
-  opts: { intervalMs?: number; now?: () => string } = {},
+  opts: { intervalMs?: number; now?: () => string; enabled?: boolean } = {},
 ): SchedulerHandle {
   const intervalMs = opts.intervalMs ?? SCHEDULER_TICK_MS;
+  const enabled = opts.enabled ?? true;
   let running = false;
 
   const tick = async (): Promise<number> => {
+    // Disabled: scheduling stops without side effects. No store claim, no
+    // post, no audit - the due rows stay exactly as they were for re-enable.
+    if (!enabled) return 0;
     // Re-entrancy guard: a slow Discord call must not stack a second sweep
     // behind it. Ticks are cheap; skipping one is free.
     if (running) return 0;
