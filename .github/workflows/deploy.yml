@@ -99,7 +99,7 @@ jobs:
     # Fork hardening for the public repo (Steward audit TOG-8951 §2A): a fork
     # PR from a branch named `main` fires this `workflow_run` with a `success`
     # conclusion, so conclusion alone is a pwn request. Require a push event
-    # on OUR main — same-repo head — before touching COOLIFY_TOKEN.
+    # on OUR main — same-repo head — before touching the staging broker credential.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'workflow_run' &&
