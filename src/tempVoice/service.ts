@@ -361,7 +361,15 @@ export class TempVoiceService {
           );
         }
       } else {
-        await this.store.deleteById(row.id);
+        // No channel was created, so the reservation row AND the
+        // reservation-time cooldown stamp go back together: a failed join
+        // must not burn the creator's cooldown (TOG-9561).
+        await this.store.rollbackReservation({
+          reservationId: row.id,
+          guildId: input.guildId,
+          userId: input.userId,
+          stampedAt: createdAt,
+        });
       }
 
       const code = err instanceof TempVoiceGatewayError ? err.code : null;

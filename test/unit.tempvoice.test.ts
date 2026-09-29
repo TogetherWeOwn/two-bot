@@ -479,6 +479,21 @@ describe('creating a channel', () => {
     assert.equal((await join(svc, OWNER)).status, 'created');
   });
 
+  test('a failed pre-create join does not burn the creator cooldown (TOG-9561)', async () => {
+    const svc = service(config({ maxPerUser: 5, createCooldownSeconds: 30 }));
+    gateway.failCreate = new TempVoiceGatewayError('category full', CATEGORY_FULL_CODE);
+    const outcome = await join(svc, OWNER);
+    assert.equal(outcome.status, 'refused');
+    assert.equal(await store.countForOwner(GUILD, OWNER), 0, 'a failed create must roll its reservation back');
+    assert.equal(await store.lastCreatedAt(GUILD, OWNER), null, 'a failed join must not spend the cooldown stamp');
+
+    // No clock advance: without the clear, this retry lands inside the 30s
+    // window and is refused with 'cooldown' even though nothing was created.
+    gateway.failCreate = null;
+    assert.equal((await join(svc, OWNER)).status, 'created');
+    assert.notEqual(await store.lastCreatedAt(GUILD, OWNER), null, 'a real create still starts the cooldown');
+  });
+
   for (const recovery of ['sweep', 'restart', 'missing'] as const) {
     test(`retains provenance and cap accounting after rollback failure until ${recovery} cleanup`, async () => {
       const svc = service(config({ maxPerGuild: 1 }));
@@ -570,6 +585,7 @@ describe('creating a channel', () => {
     assert.match(reason, /admin/i);
     assert.match(reason, /MoveMembers/);
     assert.equal(await store.countForOwner(GUILD, OWNER), 0, 'a failed create must roll its reservation back');
+    assert.equal(await store.lastCreatedAt(GUILD, OWNER), null, 'a failed join must not spend the cooldown stamp');
   });
 });
 

@@ -263,6 +263,34 @@ export class TempVoiceStore {
     ).run(guildId, userId, at);
   }
 
+  /**
+   * Undo a reservation that failed before Discord created a channel: drop the
+   * reservation row AND the reservation-time cooldown stamp, atomically.
+   *
+   * The stamp delete is conditional on the instant this attempt wrote
+   * (`stampedAt`): a later reservation overwrites the stamp, and clearing it
+   * here would erase a live attempt's cooldown. A reservation only succeeds
+   * after any prior stamp's window already expired, so deleting our own stamp
+   * never resurrects an older cooldown either.
+   */
+  async rollbackReservation(input: {
+    reservationId: string;
+    guildId: string;
+    userId: string;
+    stampedAt: string;
+  }): Promise<boolean> {
+    return this.db.transaction(async (tx) => {
+      const deleted = await tx.prepare(
+        `DELETE FROM temp_voice_channels WHERE id = ?`,
+      ).run(input.reservationId);
+      await tx.prepare(
+        `DELETE FROM temp_voice_creates
+          WHERE guild_id = ? AND user_id = ? AND last_created_at = ?`,
+      ).run(input.guildId, input.userId, input.stampedAt);
+      return deleted.changes > 0;
+    });
+  }
+
   async audit(input: TempVoiceAuditInput, at: string): Promise<void> {
     await this.db.prepare(
       `INSERT INTO temp_voice_audit (id, guild_id, actor_id, channel_id, action, outcome, reason, created_at)
