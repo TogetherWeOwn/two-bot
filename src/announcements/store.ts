@@ -284,7 +284,15 @@ export class AnnouncementsStore {
     return result.changes > 0;
   }
 
-  async claimDelivery(row: FeedDeliveryRow): Promise<FeedDeliveryRow | null> {
+  /**
+   * Claim one delivery of a feed item. The INSERT is the fast path; when the
+   * row already exists the claim is refused unless the previous owner's lease
+   * expired — a worker that crashes between the claim insert and
+   * markDelivered/releaseDelivery must not wedge the item forever. Only
+   * `pending` rows are ever taken over: `delivered` rows also carry NULL
+   * `claimed_at`, so the state guard is what keeps them final.
+   */
+  async claimDelivery(row: FeedDeliveryRow, expiredClaimCutoffIso?: string): Promise<FeedDeliveryRow | null> {
     const inserted = await this.db.prepare(
       `INSERT INTO feed_deliveries
          (feed_id, item_key, nonce, state, message_id, first_seen_at, delivered_at, claim_token, claimed_at)
@@ -294,7 +302,17 @@ export class AnnouncementsStore {
       row.feedId, row.itemKey, row.nonce, row.state, row.messageId, row.firstSeenAt,
       row.deliveredAt, row.claimToken, row.claimedAt,
     );
-    if (inserted.changes === 0) return null;
+    if (inserted.changes === 0) {
+      if (!expiredClaimCutoffIso) return null;
+      const reclaimed = await this.db.prepare(
+        `UPDATE feed_deliveries
+           SET claim_token = ?, claimed_at = ?
+         WHERE feed_id = ? AND item_key = ? AND state = 'pending'
+           AND (claimed_at IS NULL OR claimed_at <= ?)
+         RETURNING *`,
+      ).get(row.claimToken, row.claimedAt, row.feedId, row.itemKey, expiredClaimCutoffIso);
+      return reclaimed ? mapDelivery(reclaimed) : null;
+    }
     const stored = await this.db.prepare(
       `SELECT * FROM feed_deliveries WHERE feed_id = ? AND item_key = ? AND claim_token = ?`,
     ).get(row.feedId, row.itemKey, row.claimToken);
