@@ -24,8 +24,12 @@ export interface TempVoiceRow {
   emptySince: string | null;
 }
 
+export const CREATE_BURST_WINDOW_SECONDS = 60;
+export const CREATE_BURST_PER_USER = 3;
+export const CREATE_BURST_PER_GUILD = 10;
+
 /** Why an anti-abuse claim was refused, before any Discord call was made. */
-export type TempVoiceRefusal = 'user_cap' | 'guild_cap' | 'cooldown';
+export type TempVoiceRefusal = 'user_cap' | 'guild_cap' | 'cooldown' | 'user_burst' | 'guild_burst';
 
 export interface TempVoiceAuditInput {
   guildId: string;
@@ -76,7 +80,8 @@ export class TempVoiceStore {
     categoryId: string;
     ownerId: string;
     name: string;
-    createdAt: string;
+    /** Runtime callers sample the clock after acquiring the reservation lock. */
+    createdAt: string | (() => string);
     maxPerUser: number;
     maxPerGuild: number;
     cooldownSeconds: number;
@@ -95,16 +100,34 @@ export class TempVoiceStore {
       ).get<{ total: number }>(input.guildId);
       if (Number(all?.total ?? 0) >= input.maxPerGuild) return { ok: false as const, reason: 'guild_cap' as const };
 
+      const createdAt = typeof input.createdAt === 'function' ? input.createdAt() : input.createdAt;
+      const nowMs = Date.parse(createdAt);
       if (input.cooldownSeconds > 0) {
         const last = await tx.prepare(
           `SELECT last_created_at FROM temp_voice_creates WHERE guild_id = ? AND user_id = ?`,
         ).get<{ last_created_at: unknown }>(input.guildId, input.ownerId);
         const lastAt = last?.last_created_at ? Date.parse(String(last.last_created_at)) : NaN;
-        const nowMs = Date.parse(input.createdAt);
         if (Number.isFinite(lastAt) && nowMs - lastAt < input.cooldownSeconds * 1000) {
           return { ok: false as const, reason: 'cooldown' as const };
         }
       }
+
+      // Count durable reservations, not live channels or successful responses:
+      // deletion, rollback, reconnect and restart must not refund a burst slot.
+      // The existing (guild_id, created_at) audit index bounds this window scan.
+      const burst = await tx.prepare(
+        `SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE actor_id = ?) AS mine
+         FROM temp_voice_audit
+         WHERE guild_id = ? AND created_at > ? AND action = 'create_reservation' AND outcome = 'accepted'`,
+      ).get<{ total: number; mine: number }>(
+        input.ownerId, input.guildId, new Date(nowMs - CREATE_BURST_WINDOW_SECONDS * 1000).toISOString(),
+      );
+      if (Number(burst?.mine ?? 0) >= CREATE_BURST_PER_USER) return { ok: false as const, reason: 'user_burst' as const };
+      if (Number(burst?.total ?? 0) >= CREATE_BURST_PER_GUILD) return { ok: false as const, reason: 'guild_burst' as const };
+      await tx.prepare(
+        `INSERT INTO temp_voice_audit (id, guild_id, actor_id, channel_id, action, outcome, created_at)
+         VALUES (?, ?, ?, NULL, 'create_reservation', 'accepted', ?)`,
+      ).run(randomUUID(), input.guildId, input.ownerId, createdAt);
 
       const id = randomUUID();
       await tx.prepare(
@@ -113,13 +136,13 @@ export class TempVoiceStore {
          VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?)`,
       ).run(
         id, input.guildId, input.generatorId, input.categoryId,
-        input.ownerId, input.ownerId, input.name, input.createdAt,
+        input.ownerId, input.ownerId, input.name, createdAt,
       );
       await tx.prepare(
         `INSERT INTO temp_voice_creates (guild_id, user_id, last_created_at)
          VALUES (?, ?, ?)
          ON CONFLICT (guild_id, user_id) DO UPDATE SET last_created_at = excluded.last_created_at`,
-      ).run(input.guildId, input.ownerId, input.createdAt);
+      ).run(input.guildId, input.ownerId, createdAt);
 
       return {
         ok: true as const,
@@ -133,7 +156,7 @@ export class TempVoiceStore {
           pendingOwnerId: null,
           createdBy: input.ownerId,
           name: input.name,
-          createdAt: input.createdAt,
+          createdAt,
           lastRenamedAt: null,
           emptySince: null,
         },

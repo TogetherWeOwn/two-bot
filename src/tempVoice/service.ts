@@ -18,7 +18,10 @@ import type { AutomodPolicy } from '../automod/types.ts';
 import { filterChannelName, renderNameTemplate } from './nameFilter.ts';
 import { RenameThrottle } from './rename.ts';
 import type { TempVoiceConfig, TempVoiceControl } from './config.ts';
-import type { TempVoiceRow, TempVoiceStore } from './store.ts';
+import {
+  CREATE_BURST_PER_GUILD, CREATE_BURST_PER_USER, CREATE_BURST_WINDOW_SECONDS,
+  type TempVoiceRow, type TempVoiceStore,
+} from './store.ts';
 
 /** Discord: "Maximum number of channels in category reached (50)". */
 export const CATEGORY_FULL_CODE = 50035;
@@ -288,7 +291,7 @@ export class TempVoiceService {
       categoryId: this.config.categoryId,
       ownerId: input.userId,
       name,
-      createdAt,
+      createdAt: () => this.iso(),
       maxPerUser: this.config.maxPerUser,
       maxPerGuild: this.config.maxPerGuild,
       cooldownSeconds: this.config.createCooldownSeconds,
@@ -298,6 +301,8 @@ export class TempVoiceService {
         user_cap: `You already have ${this.config.maxPerUser === 1 ? 'a' : String(this.config.maxPerUser)} temporary voice channel${this.config.maxPerUser === 1 ? '' : 's'}.`,
         guild_cap: 'This server has reached its temporary voice channel limit. Try again shortly.',
         cooldown: `Please wait ${this.config.createCooldownSeconds} seconds between creating channels.`,
+        user_burst: `Temporary voice rate limit: ${CREATE_BURST_PER_USER} creates per ${CREATE_BURST_WINDOW_SECONDS} seconds. Please try again shortly.`,
+        guild_burst: `This server's temporary voice rate limit is ${CREATE_BURST_PER_GUILD} creates per ${CREATE_BURST_WINDOW_SECONDS} seconds. Please try again shortly.`,
       }[claim.reason];
       await this.store.audit(
         { guildId: input.guildId, actorId: input.userId, channelId: null, action: 'create', outcome: 'refused', reason: claim.reason },
