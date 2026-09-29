@@ -1,0 +1,45 @@
+-- 0040_presence_trend_covering: cover the presence-trend reads (TOG-8322).
+--
+-- WHAT THIS IS
+-- ------------
+-- One covering btree on
+-- `presence_probe (guild_id, observed_at) INCLUDE (approximate_presence_count, bot_floor)`.
+--
+-- WHY
+-- ---
+-- The trend script (`scripts/presence-trend.ts`, via `readSeries` in
+-- src/jobs/presenceProbe.ts) reads one guild's window newest-relevant-first:
+-- `WHERE guild_id = ? AND observed_at >= ? ORDER BY observed_at ASC`, selecting
+-- the count and the floor. The shipping (guild_id, observed_at) index
+-- (`idx_presence_probe_observed`, migration 0004) finds the rows but carries
+-- neither selected column, so the planner bitmap-scans 14 buffers, fetches
+-- every row from the heap, and quicksorts - and can never do better no matter
+-- how the table grows. The bot-floor lookup (`lastBotFloorAt`:
+-- `MAX(observed_at) WHERE guild_id = ? AND bot_floor IS NOT NULL`) rides the
+-- same index backward but filters ~24 non-floor rows per floor row on the heap.
+--
+-- Measured 2026-09-29 on agent-testdb (Postgres 17.11, 2 guilds x 2 years
+-- hourly = ~35k rows, VACUUM ANALYZEd), query text unchanged:
+--   windowed series  before: Bitmap Heap Scan + quicksort, 10 buffers, exec 0.114ms
+--                    after:  Index Only Scan, Heap Fetches: 0, sort gone, 7 buffers, exec 0.038ms
+--   full series      before: Index Scan, 292 buffers
+--                    after:  Index Only Scan, Heap Fetches: 0, 166 buffers
+--   floor MAX        before: Index Scan Backward + heap Filter
+--                    after:  Index Only Scan Backward, Heap Fetches: 0
+-- A narrower partial index ((guild_id, observed_at) WHERE bot_floor IS NOT
+-- NULL) was rejected: it serves only the floor lookup and leaves the trend
+-- read on its bitmap+sort plan. The covering shape serves both reads with one
+-- btree. scripts/presence-trend-bench.ts reproduces both plans; run it before
+-- touching this index.
+--
+-- ADDITIVE AND SAFE
+-- -----------------
+-- `CREATE INDEX` (not CONCURRENTLY - the runner wraps each file in one
+-- transaction, and CONCURRENTLY cannot run inside one) on an hourly-write
+-- instrument: one extra btree per insert on a table that gains one row per
+-- hour per guild. `IF NOT EXISTS` so re-running is a no-op. Readers are
+-- untouched: no query text changes, the planner just stops sorting and
+-- stops touching the heap.
+CREATE INDEX IF NOT EXISTS idx_presence_probe_trend_covering
+  ON presence_probe (guild_id, observed_at)
+  INCLUDE (approximate_presence_count, bot_floor);

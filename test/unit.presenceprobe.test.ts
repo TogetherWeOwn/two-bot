@@ -185,6 +185,11 @@ describe('presence probe containment', () => {
       // TOG-7206 cost test. Seeds and reads the table to measure scan cost,
       // never renders it - same non-rendering status as this file.
       join('test', 'unit.presenceprobecost.test.ts'),
+      // TOG-8322 covering index + bench. The migration carries no query and
+      // the bench seeds/reads to print EXPLAIN plans but never renders -
+      // same non-rendering status as the cost test.
+      join('migrations', '0040_presence_trend_covering.sql'),
+      join('scripts', 'presence-trend-bench.ts'),
       join('test', 'helpers', 'testDb.ts'),
       // The role verifier names every bot-owned table so a specific denial is
       // proven in addition to the relation census. Its inventory test parses
