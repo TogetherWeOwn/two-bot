@@ -28,7 +28,7 @@ jobs:
   # commit, so the fork cannot supply the script that decides whether to trust
   # it; scripts/ci/check-fork-gate-coverage.mjs pins the exact step list.
   fork-gate:
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
@@ -57,7 +57,7 @@ jobs:
   pr-lint:
     name: pr-lint
     needs: fork-gate
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     # Job-level, not workflow-wide: the fork-gate coverage check rejects
     # workflow env because it would also reach the trusted gate.

@@ -23,6 +23,11 @@ Documentation=https://github.com/TogetherWeOwn/two-bot
 After=network-online.target
 Wants=network-online.target
 
+# Crash-loop cap. StartLimit* belongs in [Unit]: systemd 255+ ignores it in
+# [Service], silently dropping the cap this file claims.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
 [Service]
 Type=simple
 User=twobot
@@ -65,12 +70,11 @@ LoadCredential=internal_keys:/etc/two-bot/credentials/internal_keys
 EnvironmentFile=/etc/two-bot/two-bot.env
 
 # --- Restart policy ----------------------------------------------------------
-# Restart always, with backoff, but give up if it is crash-looping so we get
-# paged instead of silently burning the Discord identify budget.
+# Restart always, with backoff; the [Unit] crash-loop cap above gives up if it
+# is crash-looping so we get paged instead of silently burning the Discord
+# identify budget.
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=300
-StartLimitBurst=10
 
 # Stop cleanly: index.ts handles SIGTERM and closes the database.
 KillSignal=SIGTERM

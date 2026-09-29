@@ -26,6 +26,11 @@ Documentation=https://github.com/TogetherWeOwn/two-bot/blob/main/docs/INVITE_TRA
 After=network-online.target
 Wants=network-online.target
 
+# Crash-loop cap. StartLimit* belongs in [Unit]: systemd 255+ ignores it in
+# [Service], silently dropping the cap this file claims.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
 [Service]
 Type=simple
 User=twobot
@@ -38,8 +43,6 @@ ExecStart=/usr/bin/node scripts/redirect.ts
 # we cannot edit, and a member we never hear about.
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=300
-StartLimitBurst=10
 
 KillSignal=SIGTERM
 TimeoutStopSec=10

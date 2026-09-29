@@ -59,10 +59,21 @@ try {
     console.log('\nmoderation disable preflight: REFUSED');
     console.log(describeOutstanding(state));
     console.log('');
-    console.log('  Drain it: keep TWO_MODERATION=1 until the unban poller and /unlock clear these,');
-    console.log('  or release them by hand. The bot refuses to boot with TWO_MODERATION unset while');
-    console.log(`  any of it is outstanding, unless ${MODERATION_DISABLE_OVERRIDE_ENV}=1 is set - which`);
-    console.log('  proceeds and logs this exact set as `moderation_disable_stranded`.\n');
+    const running = state.pendingUnbans.filter((job) => job.state === 'running').length;
+    console.log('  Drain it: keep TWO_MODERATION=1 until the unban poller drains staged/pending rows');
+    console.log('  and /unlock clears the channels, or release them by hand. The bot refuses to boot');
+    console.log(`  with TWO_MODERATION unset while any of it is outstanding, unless ${MODERATION_DISABLE_OVERRIDE_ENV}=1`);
+    console.log('  is set - which proceeds and logs this exact set as `moderation_disable_stranded`.');
+    if (running > 0) {
+      // TOG-8460: the poller only claims pending rows and never re-reads a
+      // claim, so [running] rows survive every sweep - say so, with the exit.
+      console.log(`  ${running} claimed [running] row(s) above never drain on their own (TOG-1659).`);
+      console.log('  Check the ban list in Discord for each [running] member; unban by hand if still');
+      console.log('  banned, then close the row by request id:');
+      console.log(`    UPDATE moderation_scheduled_unbans SET state = 'done', completed_at = now()::text, claim_token = NULL WHERE request_id = '<request id>' AND state = 'running';\n`);
+    } else {
+      console.log('');
+    }
   }
 
   process.exitCode = state.total === 0 ? 0 : 1;
