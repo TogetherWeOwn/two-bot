@@ -669,15 +669,19 @@ describe('creating a channel', () => {
 });
 
 describe('permission preflight', () => {
-  test('the required set is exactly what the overwrites grant', () => {
+  test('the create path confers only what the bot can grant; the rest stays a category-level requirement', () => {
     const granted = new Set<OverwriteFlag>();
     for (const spec of tempVoiceOverwrites(GUILD, '1469137636663758888', OWNER)) {
       for (const flag of spec.allow ?? []) granted.add(flag);
     }
-    // Drift here is the 50013 above, deferred until a member hits the
-    // generator in production. Any flag added to the overwrites is a flag the
-    // bot must hold, and therefore a flag the preflight must check.
-    assert.deepEqual([...granted].sort(), [...TEMP_VOICE_REQUIRED_PERMISSIONS].sort());
+    // TOG-9541: live staging proved the bot holds ManageRoles on the category
+    // yet Discord 403/50013s any create (or PATCH) whose overwrites confer it.
+    // So the create path must confer exactly the required set MINUS
+    // ManageRoles, while the preflight still requires all six (the owner
+    // controls edit overwrites under the bot's category-level ManageRoles).
+    const conferrable = [...TEMP_VOICE_REQUIRED_PERMISSIONS].filter((flag) => flag !== 'ManageRoles');
+    assert.deepEqual([...granted].sort(), [...conferrable].sort());
+    assert.ok(TEMP_VOICE_REQUIRED_PERMISSIONS.includes('ManageRoles'), 'controls still need the category-level grant');
   });
 
   for (const permission of TEMP_VOICE_REQUIRED_PERMISSIONS) {
@@ -693,10 +697,14 @@ describe('permission preflight', () => {
     });
   }
 
-  test('ManageRoles belongs only to the bot channel overwrite, not the owner', () => {
+  test('no create-time overwrite confers ManageRoles — the bot cannot grant it (TOG-9541)', () => {
     const botId = gateway.botUserId();
     const overwrites = tempVoiceOverwrites(GUILD, botId, OWNER);
-    assert.deepEqual(overwrites.filter((spec) => spec.allow?.includes('ManageRoles')).map((spec) => spec.id), [botId]);
+    assert.deepEqual(
+      overwrites.filter((spec) => spec.allow?.includes('ManageRoles')),
+      [],
+      'conferring ManageRoles in a create fails live with 403/50013 even though preflight passes',
+    );
   });
 
   test('names the missing permission rather than failing opaquely', async () => {
