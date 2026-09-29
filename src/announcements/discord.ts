@@ -8,8 +8,8 @@ import {
 } from 'discord.js';
 import { XMLParser } from 'fast-xml-parser';
 import type { FeedItem, FeedReader, AnnouncementDiscord } from './service.ts';
-import { parseRoleSpec, AnnouncementsService } from './service.ts';
-import type { FeedRelayRow, RsvpStatus } from './store.ts';
+import { parseRoleSpec, AnnouncementsService, FEED_STALE_AFTER_FAILURES } from './service.ts';
+import type { FeedHealthRow, FeedRelayRow, RsvpStatus } from './store.ts';
 import { PublicFeedFetcher } from './feedHttp.ts';
 import { log } from '../core/log.ts';
 
@@ -309,14 +309,30 @@ async function handleCommand(
     }
     case 'feed-list': {
       if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) throw new Error('Manage Server permission is required.');
-      const feeds = await options.store.listFeeds(options.guildId);
-      const content = feeds.length
-        ? feeds.map((feed) => `\`${feed.id}\` ${feed.kind} → <#${feed.channelId}> ${feed.source}`).join('\n').slice(0, 2000)
-        : 'No feed relays configured.';
-      await interaction.reply({ content, ephemeral: true });
+      const health = await options.service.feedHealth(options.guildId);
+      await interaction.reply({ content: formatFeedList(health), ephemeral: true });
       break;
     }
   }
+}
+
+/**
+ * Render `/feed-list` rows with staleness markers (TOG-9128). Health comes
+ * from the audit-derived consecutive-failure count, so a feed failing N
+ * polls in a row is visible here instead of looking identical to a healthy
+ * silent feed. Rows are unchanged when a feed was never polled. Pure for
+ * offline testing; the handler supplies `service.feedHealth()`.
+ */
+export function formatFeedList(health: FeedHealthRow[]): string {
+  if (!health.length) return 'No feed relays configured.';
+  return health.map(({ feed, consecutiveFailures }) => {
+    const marker = consecutiveFailures >= FEED_STALE_AFTER_FAILURES
+      ? ` ⚠ stale (${consecutiveFailures} failed polls)`
+      : consecutiveFailures > 0
+        ? ` (${consecutiveFailures} failed poll${consecutiveFailures === 1 ? '' : 's'})`
+        : '';
+    return `\`${feed.id}\` ${feed.kind} → <#${feed.channelId}> ${feed.source}${marker}`;
+  }).join('\n').slice(0, 2000);
 }
 
 export function startFeedPoller(service: AnnouncementsService, guildId: string, seconds: number): { stop(): void } {

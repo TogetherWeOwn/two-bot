@@ -75,6 +75,29 @@ export interface AnnouncementsAuditInput {
   reason?: string;
 }
 
+/**
+ * One `feed.poll` audit row, newest-first (TOG-9128). The consecutive-failure
+ * count is derived from these rows so no schema change is needed.
+ */
+export interface FeedPollSample {
+  outcome: string;
+  reason: string | null;
+  createdAt: string;
+}
+
+/**
+ * One feed's health snapshot (TOG-9128). `consecutiveFailures` counts the
+ * trailing run of `failed` `feed.poll` outcomes; `lastOutcome`/`lastPollAt`
+ * come from the newest row (null when the feed was never polled).
+ */
+export interface FeedHealthRow {
+  feed: FeedRelayRow;
+  consecutiveFailures: number;
+  lastOutcome: string | null;
+  lastFailureReason: string | null;
+  lastPollAt: string | null;
+}
+
 function mapRsvp(row: Record<string, unknown>): EventRsvpRow {
   return {
     guildId: String(row.guild_id),
@@ -320,6 +343,53 @@ export class AnnouncementsStore {
 
   async markFeedChecked(feedId: string, checkedAt: string): Promise<void> {
     await this.db.prepare(`UPDATE feed_relays SET last_checked_at = ? WHERE id = ?`).run(checkedAt, feedId);
+  }
+
+  /**
+   * Newest-first `feed.poll` audit rows for one feed (TOG-9128). Powers the
+   * consecutive-failure count without a schema change.
+   */
+  listFeedPollHistory(feedId: string, limit: number): Promise<FeedPollSample[]> {
+    return this.db.prepare(
+      `SELECT outcome, reason, created_at
+       FROM announcements_audit_log
+       WHERE action = 'feed.poll' AND target_key = ?
+       ORDER BY created_at DESC
+       LIMIT ?`,
+    ).all<{ outcome: string; reason: string | null; created_at: string }>(feedId, limit)
+      .then((rows) => rows.map((row) => ({
+        outcome: String(row.outcome),
+        reason: row.reason === null || row.reason === undefined ? null : String(row.reason),
+        createdAt: String(row.created_at),
+      })));
+  }
+
+  /**
+   * One health snapshot row per relay (TOG-9128). The low-volume poll cadence
+   * (one `feed.poll` row per feed per poll, default 5 min) keeps the default
+   * 32-row window well above the staleness threshold; callers needing a
+   * longer streak can raise `limitPerFeed`.
+   */
+  async feedHealth(guildId: string, limitPerFeed = 32): Promise<FeedHealthRow[]> {
+    const feeds = await this.listFeeds(guildId);
+    return Promise.all(feeds.map(async (feed) => {
+      const history = await this.listFeedPollHistory(
+        feed.id, Math.min(200, Math.max(1, Math.floor(limitPerFeed))),
+      );
+      let consecutiveFailures = 0;
+      for (const sample of history) {
+        if (sample.outcome !== 'failed') break;
+        consecutiveFailures++;
+      }
+      const latest = history[0];
+      return {
+        feed,
+        consecutiveFailures,
+        lastOutcome: latest?.outcome ?? null,
+        lastFailureReason: latest?.outcome === 'failed' ? (latest.reason ?? null) : null,
+        lastPollAt: latest?.createdAt ?? null,
+      };
+    }));
   }
 
   async audit(row: AnnouncementsAuditInput, atIso: string): Promise<void> {

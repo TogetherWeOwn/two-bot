@@ -20,13 +20,15 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   AnnouncementsService,
   FEED_READ_TIMEOUT_MS,
+  FEED_STALE_AFTER_FAILURES,
   MAX_FEED_READ_TIMEOUT_MS,
   normalizeFeedSource,
   parseRoleSpec,
   type FeedItem,
   type LfgRoleInput,
 } from '../src/announcements/service.ts';
-import { AnnouncementsStore, type FeedRelayRow } from '../src/announcements/store.ts';
+import { AnnouncementsStore, type FeedHealthRow, type FeedRelayRow } from '../src/announcements/store.ts';
+import { formatFeedList } from '../src/announcements/discord.ts';
 import type { Db, Statement } from '../src/store/db.ts';
 
 const GUILD = '1550000000000000001';
@@ -177,6 +179,46 @@ async function auditCount(action: string, outcome?: string): Promise<number> {
 
 function readerFor(items: FeedItem[]) {
   return { read: async (_feed: FeedRelayRow) => items };
+}
+
+/**
+ * TOG-9128 helper: scripted per-feed outcomes across polls. `outcomes`
+ * maps feed id → per-poll results consumed in poll order (`'ok'` reads one
+ * item, an `Error` throws it). A feed absent from the map reads empty.
+ */
+function scriptedReader(outcomes: Record<string, Array<'ok' | Error>>) {
+  const calls: string[] = [];
+  return {
+    calls,
+    read: async (feed: FeedRelayRow): Promise<FeedItem[]> => {
+      calls.push(feed.id);
+      const next = outcomes[feed.id]?.shift() ?? 'ok';
+      if (next instanceof Error) throw next;
+      if (next === 'ok') return [{ key: `item-${feed.id}`, title: 'Item', url: 'https://example.com/item' }];
+      return [];
+    },
+  };
+}
+
+async function addRssFeed(service: AnnouncementsService, id: string): Promise<void> {
+  await service.addFeed({
+    id, guildId: GUILD, channelId: CHANNEL, kind: 'rss',
+    source: `https://example.com/${id}.xml`, actorId: USER, now: NOW,
+  });
+}
+
+function healthRow(id: string, consecutiveFailures: number): FeedHealthRow {
+  return {
+    feed: {
+      id, guildId: GUILD, channelId: CHANNEL, kind: 'rss',
+      source: `https://example.com/${id}.xml`, enabled: true, lastCheckedAt: null,
+      createdBy: USER, createdAt: NOW.toISOString(), updatedAt: NOW.toISOString(),
+    },
+    consecutiveFailures,
+    lastOutcome: consecutiveFailures > 0 ? 'failed' : 'read 1',
+    lastFailureReason: consecutiveFailures > 0 ? 'feed down' : null,
+    lastPollAt: NOW.toISOString(),
+  };
 }
 
 async function createOpenLfg(discord: FakeDiscord, id = 'lfg-offline', roles = [{ key: 'any', label: 'Any', slots: 2 }]) {
@@ -455,6 +497,150 @@ test('pollFeeds records a redirect refusal distinctly from a fetch failure', asy
   ).get<{ outcome: string; reason: string | null }>('feed.poll', 'feed-moved');
   assert.equal(row?.outcome, 'failed');
   assert.match(row?.reason ?? '', /^Feed redirect refused: cross-host redirect/);
+});
+
+// --- feed-health staleness (TOG-9128) --------------------------------------------
+
+function atMinutesAfterNow(minutes: number): Date {
+  return new Date(NOW.getTime() + minutes * 60_000);
+}
+
+test('pollFeeds emits one feed.stale row when failures first reach the threshold (TOG-9128)', async () => {
+  await reset();
+  assert.equal(FEED_STALE_AFTER_FAILURES, 3, 'threshold pins the operator-visible contract');
+  const discord = new FakeDiscord();
+  const reader = scriptedReader({
+    'feed-sick': [new Error('feed down'), new Error('feed down'), new Error('still down'), new Error('still down')],
+  });
+  const service = new AnnouncementsService(store, discord, reader);
+  await addRssFeed(service, 'feed-sick');
+  assert.equal(await service.pollFeeds(GUILD, atMinutesAfterNow(5)), 0);
+  assert.equal(await service.pollFeeds(GUILD, atMinutesAfterNow(10)), 0);
+  assert.equal(await auditCount('feed.stale', 'stale'), 0, 'below threshold: silence, no staleness row yet');
+  assert.equal(await service.pollFeeds(GUILD, atMinutesAfterNow(15)), 0);
+  assert.equal(await auditCount('feed.stale', 'stale'), 1, 'crossing the threshold emits exactly one row');
+  const stale = await db.prepare(
+    `SELECT outcome, reason, created_at FROM announcements_audit_log WHERE action = ? AND target_key = ?`,
+  ).get<{ outcome: string; reason: string | null; created_at: string }>('feed.stale', 'feed-sick');
+  assert.equal(stale?.outcome, 'stale');
+  assert.match(stale?.reason ?? '', /failed 3 consecutive polls/, 'row names the streak length');
+  assert.match(stale?.reason ?? '', /still down/, 'row names the last error, not the first');
+  assert.match(stale?.reason ?? '', /feed-sick\.xml/, 'row names the feed source for triage');
+  assert.equal(stale?.created_at, atMinutesAfterNow(15).toISOString());
+  assert.equal(await service.pollFeeds(GUILD, atMinutesAfterNow(20)), 0);
+  assert.equal(await auditCount('feed.stale', 'stale'), 1, 'same streak never re-emits');
+  assert.equal(await auditCount('feed.poll', 'failed'), 4);
+  assert.equal(discord.posts.length, 0);
+});
+
+test('a fresh streak after recovery emits feed.stale again (TOG-9128)', async () => {
+  await reset();
+  const discord = new FakeDiscord();
+  const reader = scriptedReader({
+    'feed-relapse': [
+      new Error('outage'), new Error('outage'), new Error('outage'),
+      'ok',
+      new Error('outage again'), new Error('outage again'), new Error('outage again'),
+    ],
+  });
+  const service = new AnnouncementsService(store, discord, reader);
+  await addRssFeed(service, 'feed-relapse');
+  for (const minutes of [5, 10, 15]) assert.equal(await service.pollFeeds(GUILD, atMinutesAfterNow(minutes)), 0);
+  assert.equal(await auditCount('feed.stale', 'stale'), 1);
+  assert.equal(await service.pollFeeds(GUILD, atMinutesAfterNow(20)), 1, 'recovery delivers and resets');
+  for (const minutes of [25, 30, 35]) assert.equal(await service.pollFeeds(GUILD, atMinutesAfterNow(minutes)), 0);
+  assert.equal(await auditCount('feed.stale', 'stale'), 2, 'the new streak gets its own crossing row');
+  const relapses = await db.prepare(
+    `SELECT reason FROM announcements_audit_log WHERE action = ? AND target_key = ? ORDER BY created_at`,
+  ).all<{ reason: string | null }>('feed.stale', 'feed-relapse');
+  assert.match(relapses[0]?.reason ?? '', /: outage$/, 'first crossing names the first outage');
+  assert.match(relapses[1]?.reason ?? '', /outage again/, 'second crossing names the new error');
+});
+
+test('a successful poll resets the consecutive-failure count (TOG-9128)', async () => {
+  await reset();
+  const discord = new FakeDiscord();
+  const reader = scriptedReader({
+    'feed-flaky': [new Error('blip'), new Error('blip'), 'ok', new Error('blip again')],
+  });
+  const service = new AnnouncementsService(store, discord, reader);
+  await addRssFeed(service, 'feed-flaky');
+  assert.equal(await service.pollFeeds(GUILD, atMinutesAfterNow(5)), 0);
+  assert.equal(await service.pollFeeds(GUILD, atMinutesAfterNow(10)), 0);
+  assert.equal(await service.pollFeeds(GUILD, atMinutesAfterNow(15)), 1, 'success delivers');
+  assert.equal(await service.pollFeeds(GUILD, atMinutesAfterNow(20)), 0);
+  const [health] = await service.feedHealth(GUILD);
+  assert.equal(health?.consecutiveFailures, 1, 'only the post-recovery failure counts');
+  assert.equal(health?.lastOutcome, 'failed');
+  assert.equal(health?.lastFailureReason, 'blip again');
+  assert.equal(health?.lastPollAt, atMinutesAfterNow(20).toISOString());
+  assert.equal(await auditCount('feed.stale', 'stale'), 0, 'a reset streak never reaches the threshold');
+});
+
+test('read timeouts count toward feed staleness (TOG-9128)', async () => {
+  await reset();
+  const discord = new FakeDiscord();
+  const reader = {
+    read: async (_feed: FeedRelayRow): Promise<FeedItem[]> => new Promise<FeedItem[]>(() => {}),
+  };
+  const service = new AnnouncementsService(store, discord, reader, { feedReadTimeoutMs: 50 });
+  await addRssFeed(service, 'feed-hung');
+  for (const minutes of [5, 10, 15]) assert.equal(await service.pollFeeds(GUILD, atMinutesAfterNow(minutes)), 0);
+  assert.equal(await auditCount('feed.poll', 'failed'), 3);
+  assert.equal(await auditCount('feed.stale', 'stale'), 1, 'hung feeds surface the same signal');
+  const stale = await db.prepare(
+    `SELECT reason FROM announcements_audit_log WHERE action = ? AND target_key = ?`,
+  ).get<{ reason: string | null }>('feed.stale', 'feed-hung');
+  assert.match(stale?.reason ?? '', /timed out/, 'stale row carries the timeout reason');
+});
+
+test('feedHealth reports per-feed streaks, last outcomes, and unpolled feeds (TOG-9128)', async () => {
+  await reset();
+  const discord = new FakeDiscord();
+  const reader = scriptedReader({ 'feed-bad': [new Error('feed down'), new Error('feed down')] });
+  const service = new AnnouncementsService(store, discord, reader);
+  await addRssFeed(service, 'feed-good');
+  await addRssFeed(service, 'feed-bad');
+  assert.equal(await service.pollFeeds(GUILD, atMinutesAfterNow(5)), 1, 'only the healthy feed delivers');
+  assert.equal(await service.pollFeeds(GUILD, atMinutesAfterNow(10)), 0);
+  // Created after both polls so one feed stays genuinely unpolled.
+  await addRssFeed(service, 'feed-never');
+  const byId = new Map((await service.feedHealth(GUILD)).map((row) => [row.feed.id, row]));
+  assert.equal(byId.get('feed-good')?.consecutiveFailures, 0);
+  assert.equal(byId.get('feed-good')?.lastOutcome, 'read 1');
+  assert.equal(byId.get('feed-good')?.lastFailureReason, null);
+  assert.equal(byId.get('feed-bad')?.consecutiveFailures, 2);
+  assert.equal(byId.get('feed-bad')?.lastOutcome, 'failed');
+  assert.equal(byId.get('feed-bad')?.lastFailureReason, 'feed down');
+  assert.equal(byId.get('feed-bad')?.lastPollAt, atMinutesAfterNow(10).toISOString());
+  assert.equal(byId.get('feed-never')?.consecutiveFailures, 0);
+  assert.equal(byId.get('feed-never')?.lastOutcome, null);
+  assert.equal(byId.get('feed-never')?.lastPollAt, null);
+});
+
+test('formatFeedList marks failing feeds and leaves healthy rows byte-identical (TOG-9128)', () => {
+  assert.equal(formatFeedList([]), 'No feed relays configured.');
+  assert.equal(
+    formatFeedList([healthRow('feed-ok', 0)]),
+    `\`feed-ok\` rss → <#${CHANNEL}> https://example.com/feed-ok.xml`,
+    'healthy rows keep the legacy feed-list shape',
+  );
+  assert.equal(
+    formatFeedList([healthRow('feed-warn', 1)]),
+    `\`feed-warn\` rss → <#${CHANNEL}> https://example.com/feed-warn.xml (1 failed poll)`,
+  );
+  assert.equal(
+    formatFeedList([healthRow('feed-warn2', 2)]),
+    `\`feed-warn2\` rss → <#${CHANNEL}> https://example.com/feed-warn2.xml (2 failed polls)`,
+  );
+  assert.equal(
+    formatFeedList([healthRow('feed-stale', 3)]),
+    `\`feed-stale\` rss → <#${CHANNEL}> https://example.com/feed-stale.xml ⚠ stale (3 failed polls)`,
+  );
+  assert.equal(
+    formatFeedList([healthRow('feed-dead', 9)]),
+    `\`feed-dead\` rss → <#${CHANNEL}> https://example.com/feed-dead.xml ⚠ stale (9 failed polls)`,
+  );
 });
 
 test('pollFeeds isolates a poison post failure: later items still deliver (TOG-9346 B2a)', async () => {

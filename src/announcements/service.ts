@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type {
   AnnouncementsStore,
+  FeedHealthRow,
   FeedKind,
   FeedRelayRow,
   LfgPostRow,
@@ -57,6 +58,19 @@ export interface LfgRoleInput {
 export const FEED_READ_TIMEOUT_MS = 15_000;
 /** Upper bound for any per-feed read deadline. Polls run on a fixed interval. */
 export const MAX_FEED_READ_TIMEOUT_MS = 60_000;
+
+/**
+ * Consecutive `failed` polls after which a feed counts as stale (TOG-9128).
+ *
+ * At the default 5-minute poll cadence this is ~15 minutes of continuous
+ * failure: long enough to ride out a transient upstream blip, short enough
+ * that a dead feed surfaces the same day. When a feed first reaches this
+ * count, the poll writes one `feed.stale` audit row (action `feed.stale`,
+ * outcome `stale`, reason naming the count and last error) so the operator
+ * sees the crossing even when they were not watching the count climb. The
+ * count itself resets on the next successful `read N` poll.
+ */
+export const FEED_STALE_AFTER_FAILURES = 3;
 
 export interface AnnouncementsServiceOptions {
   /**
@@ -373,13 +387,51 @@ export class AnnouncementsService {
             : {}),
         }, now.toISOString());
       } catch (error) {
+        const atIso = now.toISOString();
+        const reason = error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500);
         await this.store.audit({
           guildId, actorId: null, action: 'feed.poll', targetKey: feed.id,
-          outcome: 'failed', reason: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
-        }, now.toISOString());
+          outcome: 'failed', reason,
+        }, atIso);
+        await this.maybeMarkFeedStale(guildId, feed, reason, atIso);
       }
     }
     return delivered;
+  }
+
+  /**
+   * Per-feed consecutive-failure counts with last-poll detail (TOG-9128).
+   * Derived from `feed.poll` audit rows — no schema change. Rows whose
+   * `consecutiveFailures` reached {@link FEED_STALE_AFTER_FAILURES} are the
+   * feeds the operator should check first.
+   */
+  feedHealth(guildId: string): Promise<FeedHealthRow[]> {
+    return this.store.feedHealth(guildId);
+  }
+
+  /**
+   * Emit one `feed.stale` audit row when a feed first reaches the staleness
+   * threshold (TOG-9128). The just-written `failed` poll is the newest row,
+   * so a trailing run of exactly the threshold means this failure is the
+   * crossing. Longer runs (a later poll in the same streak) and shorter runs
+   * write nothing — the single crossing row per streak stays greppable, and
+   * a success between streaks lets the next streak emit again.
+   */
+  private async maybeMarkFeedStale(
+    guildId: string, feed: FeedRelayRow, reason: string, atIso: string,
+  ): Promise<void> {
+    const history = await this.store.listFeedPollHistory(feed.id, FEED_STALE_AFTER_FAILURES + 1);
+    let run = 0;
+    for (const sample of history) {
+      if (sample.outcome !== 'failed') break;
+      run++;
+    }
+    if (run !== FEED_STALE_AFTER_FAILURES) return;
+    await this.store.audit({
+      guildId, actorId: null, action: 'feed.stale', targetKey: feed.id,
+      outcome: 'stale',
+      reason: `failed ${FEED_STALE_AFTER_FAILURES} consecutive polls (source ${feed.source}): ${reason}`.slice(0, 500),
+    }, atIso);
   }
 
   private async readFeedWithTimeout(feed: FeedRelayRow): Promise<FeedItem[]> {
