@@ -30,7 +30,12 @@ import { buildFunnelReport } from '../src/analytics/funnelReport.ts';
 
 const rawArgs = process.argv.slice(2);
 const asJson = rawArgs.includes('--json');
-const days = Number(rawArgs.find((a) => !a.startsWith('-')) ?? 7);
+const daysRaw = rawArgs.find((a) => !a.startsWith('-')) ?? '7';
+const days = Number(daysRaw);
+if (!Number.isFinite(days) || days <= 0 || !Number.isInteger(days)) {
+  console.error(`Bad day count "${daysRaw}". Use a positive number of days, e.g. 7.`);
+  process.exit(2);
+}
 const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
 if (!databaseUrl) {
   console.error('funnel: TWO_DATABASE_URL is not set.');
