@@ -134,7 +134,13 @@ export class RestModerationResolver implements ModerationResolver {
         logReason: `discord_${res.status}`,
       });
     }
-    return await res.json() as T;
+    try {
+      return await res.json() as T;
+    } catch {
+      throw new ActionError('discord_unavailable', 'Discord returned an unreadable response', {
+        logReason: 'discord_json_parse',
+      });
+    }
   }
 }
 
