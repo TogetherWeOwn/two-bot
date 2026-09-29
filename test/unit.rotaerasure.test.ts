@@ -109,7 +109,7 @@ test('eraseSubject removes the subject pseudonym rows, responder rows and notice
     guildId: GUILD, eventType: 'message_created', actorId: 'raw-non-rota-member',
     sourceEventId: 'raw-message-1', occurredAt: FIRST, source: 'channel:general',
     idempotencyKey: 'raw-message-1',
-    classification: classifier.classify({ guildId: GUILD, actorId: 'raw-non-rota-member', pending: false }),
+    classification: classifier.classify({ guildId: GUILD, actorId: 'raw-non-rota-member' }),
     metadata: {},
   }), true);
 
