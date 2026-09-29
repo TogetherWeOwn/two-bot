@@ -500,25 +500,43 @@ test('an empty list is an error, not a run that removes nobody and reports succe
   assert.throws(() => parseIdList('# only a comment\n'), /no ids|empty/i);
 });
 
-test('pointing it at the committed server audit says why that file cannot be a target list', () => {
-  // It is the only committed JSON under data/ and it is the obvious wrong
-  // reach. Its own `note` field says it holds no member identities.
+test('pointing it at an audit snapshot says why that file cannot be a target list', () => {
+  // An audit snapshot is the obvious wrong reach: it is about channels and
+  // roles, not people. The retired committed one's own `note` field said so.
   const audit = JSON.stringify({
     note: 'No message content and no member identities are in this file.',
     summary: { members: { human_members: 84 } },
     channels: [],
     roles: [],
   });
-  assert.throws(() => parseIdList(audit, 'data/server-audit-2026-08-19.json'), /no member identities/);
+  assert.throws(() => parseIdList(audit, 'audit-snapshot.json'), /no member identities/);
 });
 
 // ---------------------------------------------------------------------------
 // The cross-check
 // ---------------------------------------------------------------------------
 
-test('the committed audit is read for the envelope it can honestly give', () => {
-  const ctx = readAuditContext(fileURLToPath(new URL('../data/server-audit-2026-08-19.json', import.meta.url)));
-  assert.ok(ctx, 'data/server-audit-2026-08-19.json is committed and must stay readable');
+test('the committed audit summary is read for the envelope it can honestly give', () => {
+  const ctx = readAuditContext(fileURLToPath(new URL('../audit/summary.json', import.meta.url)));
+  assert.ok(ctx, 'audit/summary.json is committed and must stay readable');
+  assert.equal(ctx.guildId, '326474832151838730');
+  assert.equal(ctx.humanMembers, 84);
+  assert.equal(ctx.stuckAtRulesScreening, 31);
+});
+
+test('the retired full snapshot shape still reads, for operators with a local copy', () => {
+  const wrapped = {
+    collected_at: '2026-08-19T20:19:24.719Z',
+    summary: {
+      guild: { id: '326474832151838730' },
+      members: { human_members: 84, stuck_at_rules_screening: 31 },
+    },
+  };
+  const dir = mkdtempSync(join(tmpdir(), 'two-raid-ctx-'));
+  const path = join(dir, 'snapshot.json');
+  writeFileSync(path, JSON.stringify(wrapped));
+  const ctx = readAuditContext(path);
+  assert.ok(ctx);
   assert.equal(ctx.guildId, '326474832151838730');
   assert.equal(ctx.humanMembers, 84);
   assert.equal(ctx.stuckAtRulesScreening, 31);

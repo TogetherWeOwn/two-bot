@@ -45,10 +45,11 @@ description = "Fixtures and documented placeholders, not live credentials"
 regexTarget = "match"
 
 paths = [
-  # Read-only snapshots of public server metadata. No credentials, checked by
+  # Derived audit tables of public server metadata. No credentials, checked by
   # hand before they were committed. Invite *codes* look high-entropy but are
   # public by definition - they are what we hand to new members.
-  '''^audit/raw/.*\.json$''',
+  # (Raw dumps used to be allowlisted here too; TOG-8963 removed them from
+  # HEAD entirely instead, so there is nothing left to exempt.)
   '''^audit/invites\.csv$''',
   # The local Discord stand-in. Its tokens are literally the string "mock".
   '''^tools/mock-discord/''',

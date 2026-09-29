@@ -76,7 +76,7 @@ const execute = flag('execute');
 const idsFrom = value('ids-from') ?? die(2, 'need --ids-from <file>, or --ids-from - to read stdin.');
 const auditPath = value('audit') ?? 'data/raid-removal-audit.jsonl';
 const guildId = value('guild') ?? process.env.DISCORD_GUILD_ID ?? GUILD_ID;
-const contextPath = value('context') ?? 'data/server-audit-2026-08-19.json';
+const contextPath = value('context') ?? 'audit/summary.json';
 const reason = value('reason') ?? 'Raid account removal (TOG-411). Never posted, never joined voice.';
 const expectRaw = value('expect');
 

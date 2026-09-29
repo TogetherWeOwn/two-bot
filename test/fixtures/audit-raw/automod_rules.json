@@ -1,0 +1,78 @@
+[
+ {
+  "id": "1094278154417352866",
+  "guild_id": "326474832151838730",
+  "creator_id": "900000000000000013",
+  "name": "Block Commonly Flagged Words",
+  "event_type": 1,
+  "actions": [
+   {
+    "type": 2,
+    "metadata": {
+     "channel_id": "1058572809607073832"
+    }
+   }
+  ],
+  "trigger_type": 4,
+  "enabled": true,
+  "exempt_roles": [],
+  "exempt_channels": [
+   "1058572809607073832"
+  ],
+  "trigger_metadata": {
+   "allow_list": [],
+   "presets": [
+    1,
+    2,
+    3
+   ]
+  }
+ },
+ {
+  "id": "1094278280623964290",
+  "guild_id": "326474832151838730",
+  "creator_id": "900000000000000013",
+  "name": "Block Suspected Spam Content",
+  "event_type": 1,
+  "actions": [
+   {
+    "type": 1,
+    "metadata": {}
+   },
+   {
+    "type": 2,
+    "metadata": {
+     "channel_id": "1058572809607073832"
+    }
+   }
+  ],
+  "trigger_type": 3,
+  "enabled": true,
+  "exempt_roles": [],
+  "exempt_channels": [
+   "1058572809607073832"
+  ],
+  "trigger_metadata": {}
+ },
+ {
+  "id": "1030554520465440818",
+  "guild_id": "326474832151838730",
+  "creator_id": "900000000000000000",
+  "name": "Block Mention Spam",
+  "event_type": 1,
+  "actions": [
+   {
+    "type": 1,
+    "metadata": {}
+   }
+  ],
+  "trigger_type": 5,
+  "enabled": true,
+  "exempt_roles": [],
+  "exempt_channels": [],
+  "trigger_metadata": {
+   "mention_total_limit": 20,
+   "mention_raid_protection_enabled": true
+  }
+ }
+]
