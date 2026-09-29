@@ -185,6 +185,10 @@ describe('presence probe containment', () => {
       // TOG-7206 cost test. Seeds and reads the table to measure scan cost,
       // never renders it - same non-rendering status as this file.
       join('test', 'unit.presenceprobecost.test.ts'),
+      // TOG-6488 CLI output test. Seeds the table to pin the trend script's
+      // buckets, verdict lines and exit codes, never renders it anywhere
+      // else - same non-rendering status as the cost test above.
+      join('test', 'e2e.presencetrend-cli.test.ts'),
       join('test', 'helpers', 'testDb.ts'),
       // The role verifier names every bot-owned table so a specific denial is
       // proven in addition to the relation census. Its inventory test parses
@@ -194,6 +198,12 @@ describe('presence probe containment', () => {
       // TOG-5718 privacy-retention doc test names the table once, in a comment
       // documenting the deliberate out-of-scope exclusion. No rendering path.
       join('test', 'unit.privacyretention.test.ts'),
+      // TOG-9074 backup path. The dump inventory names every bot-owned table
+      // and the e2e seeds rows to prove the round trip - rows move to and
+      // from a file, never to a page. Same non-rendering status as the role
+      // verifier above.
+      join('src', 'store', 'dump.ts'),
+      join('test', 'e2e.backup.test.ts'),
     ]);
     // The BARE identifier only. `\b` on both sides deliberately does not match
     // `presence_probe_enabled` (a log event name) or `0004_presence_probe.sql`

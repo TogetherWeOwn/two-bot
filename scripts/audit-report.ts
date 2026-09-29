@@ -1,27 +1,43 @@
 /**
  * Turn audit/raw/*.json into the tables a human reads.
  *
- *   node scripts/audit-report.ts
+ *   node scripts/audit-report.ts [--root <dir>]
  *
  * Writes audit/channels.csv, audit/roles.csv, audit/invites.csv,
  * audit/summary.json, and prints the new-member walkthrough to stdout.
  *
  * Pure function of the raw dump - it never calls Discord. Re-run it after
  * changing the rubric without re-scanning 130 channels.
+ *
+ * Library + CLI (TOG-6493): the report below is exported as runAuditReport
+ * and pinned by test/unit.auditcollectreport.test.ts. Importing this file
+ * never reads files, never exits and never touches the network; the raw
+ * read and every write only run inside runAuditReport, and the CLI call
+ * sits under the invokedDirectly block at the bottom. There is no Discord
+ * client anywhere in this file. --root aims it at a fixture tree.
+ *
+ * The dump itself is local-only: audit/raw/ is gitignored (TOG-8963) and
+ * never committed; only the tables this writes are committed. The golden
+ * test rebuilds its fixture root from a local copy, never from the repo.
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-// --help prints usage without touching audit/raw (the reads below run at import time).
-if (process.argv.includes('--help')) {
-  console.log('usage: node scripts/audit-report.ts');
-  console.log('');
-  console.log('Turn audit/raw/*.json into the human-readable tables (channels/roles/invites CSVs, summary).');
-  console.log('Pure function of the raw dump: no network, no Discord; --help reads nothing.');
-  process.exit(0);
-}
+/** Repo root when the script runs from its own checkout; --root overrides it. */
+export const AUDIT_REPORT_DEFAULT_ROOT = resolve(import.meta.dirname, '..');
 
-const RAW = 'audit/raw';
-const OUT = 'audit';
+/**
+ * Render every human-readable audit table from one raw dump. Reads only
+ * <rootDir>/audit/raw/*.json and writes only under <rootDir>/audit and
+ * <rootDir>/data. No env, no network, no Discord.
+ */
+export function runAuditReport(rootDir: string = AUDIT_REPORT_DEFAULT_ROOT): {
+  summaryJson: string;
+  walk: string;
+} {
+const RAW = join(rootDir, 'audit/raw');
+const OUT = join(rootDir, 'audit');
 const read = <T>(n: string): T => JSON.parse(readFileSync(`${RAW}/${n}.json`, 'utf8')) as T;
 
 const DISCORD_EPOCH = 1420070400000;
@@ -742,12 +758,12 @@ writeFileSync(`${OUT}/new-member-walkthrough.txt`, walk);
 // source for the migration, so it carries every channel's topic, position,
 // parent and permission overwrites exactly as they are today.
 const STAMP = new Date(now).toISOString().slice(0, 10);
-mkdirSync('data', { recursive: true });
+mkdirSync(join(rootDir, 'data'), { recursive: true });
 
-writeFileSync(`data/server-audit-${STAMP}.csv`, csv(rows as unknown as Record<string, unknown>[]));
+writeFileSync(join(rootDir, 'data', `server-audit-${STAMP}.csv`), csv(rows as unknown as Record<string, unknown>[]));
 
 writeFileSync(
-  `data/server-audit-${STAMP}.json`,
+  join(rootDir, 'data', `server-audit-${STAMP}.json`),
   JSON.stringify(
     {
       collected_at: meta.collected_at,
@@ -785,5 +801,37 @@ writeFileSync(
   ) + '\n',
 );
 
-process.stdout.write(walk);
-process.stdout.write('\n' + JSON.stringify(summary, null, 2) + '\n');
+  return {
+    summaryJson: JSON.stringify(summary, null, 2) + '\n',
+    walk,
+  };
+}
+
+const invokedDirectly =
+  process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (invokedDirectly) {
+  // --help prints usage without touching audit/raw (the reads run inside
+  // runAuditReport at CLI time, never at import).
+  if (process.argv.includes('--help')) {
+    console.log('usage: node scripts/audit-report.ts [--root <dir>]');
+    console.log('');
+    console.log('Turn audit/raw/*.json into the human-readable tables (channels/roles/invites CSVs, summary).');
+    console.log('Pure function of the raw dump: no network, no Discord; --help reads nothing.');
+    console.log('--root reads <dir>/audit/raw/ and writes <dir>/audit/ + <dir>/data/ instead of the repo.');
+    process.exit(0);
+  }
+
+  const flagValue = (name: string): string | undefined => {
+    const argv = process.argv.slice(2);
+    for (let i = 0; i < argv.length; i++) {
+      if (argv[i] === `--${name}`) return argv[i + 1];
+      if (argv[i]!.startsWith(`--${name}=`)) return argv[i]!.slice(name.length + 3);
+    }
+    return undefined;
+  };
+
+  const { summaryJson, walk } = runAuditReport(flagValue('root') ?? AUDIT_REPORT_DEFAULT_ROOT);
+  process.stdout.write(walk);
+  process.stdout.write('\n' + summaryJson);
+}

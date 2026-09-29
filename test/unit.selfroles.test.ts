@@ -82,6 +82,26 @@ test('configuration rejects duplicate panels, messages, roles, and unsafe color 
   );
 });
 
+test('configuration rejects reaction panels over Discord\'s 20-reaction cap', () => {
+  const reactionOption = (n: number) => ({
+    key: `opt-${n}`,
+    label: `Option ${n}`,
+    roleId: `7${String(n).padStart(16, '0')}`,
+    permissions: '0',
+    emoji: `${n}️⃣`,
+  });
+  const reactionPanel = (count: number) => JSON.stringify([{
+    ...panel,
+    id: 'reactions',
+    mode: 'reaction',
+    exclusive: false,
+    color: false,
+    options: Array.from({ length: count }, (_, i) => reactionOption(i)),
+  }]);
+  assert.throws(() => loadSelfRolePanels(reactionPanel(21)), /20-reaction limit/);
+  assert.equal(loadSelfRolePanels(reactionPanel(20)).length, 1);
+});
+
 test('configuration rejects role ids reused across panels', () => {
   assert.throws(
     () => loadSelfRolePanels(JSON.stringify([

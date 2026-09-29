@@ -59,7 +59,7 @@ export interface OutstandingModerationState {
   activeLockdownCount: number;
   pendingUnbans: OutstandingUnban[];
   activeLockdowns: OutstandingLockdown[];
-  /** True when at least one list hit `OUTSTANDING_ID_LIMIT`. */
+  /** True when rows were actually cut: exact count exceeds the returned list. */
   truncated: boolean;
   total: number;
 }
@@ -111,7 +111,7 @@ export async function readOutstandingModerationState(
     pendingUnbans,
     activeLockdowns,
     truncated:
-      pendingUnbans.length >= OUTSTANDING_ID_LIMIT || activeLockdowns.length >= OUTSTANDING_ID_LIMIT,
+      pendingUnbanCount > pendingUnbans.length || activeLockdownCount > activeLockdowns.length,
     total: pendingUnbanCount + activeLockdownCount,
   };
 }
@@ -152,17 +152,33 @@ export function describeOutstanding(state: OutstandingModerationState): string {
 }
 
 function refusalMessage(state: OutstandingModerationState): string {
-  return [
+  const running = state.pendingUnbans.filter((job) => job.state === 'running');
+  const lines = [
     `TWO_MODERATION is off but moderation still owes ${state.total} release(s). Refusing to start.`,
     describeOutstanding(state),
     '',
     'Do one of these:',
-    '  * set TWO_MODERATION=1 again and let the unban poller and /unlock drain the backlog; or',
+    '  * set TWO_MODERATION=1 again: the unban poller drains staged/pending rows and /unlock releases the channels; or',
     '  * release the members and channels named above by hand, then start again; or',
     `  * set ${MODERATION_DISABLE_OVERRIDE_ENV}=1 to proceed anyway. That strands everything`,
     '    named above until somebody releases it by hand. The full set is logged as',
     '    `moderation_disable_stranded` when you do.',
-  ].join('\n');
+  ];
+  if (running.length > 0) {
+    // TOG-8460: the poller only ever claims `pending` rows, so a `running` row
+    // survives every sweep - re-enabling moderation cannot drain it, and the
+    // first bullet must not promise otherwise. Claims are never reclaimed by
+    // age (TOG-1659: a timed takeover cannot tell a dead process from a slow
+    // Discord request), so the only exit is the hand-release below.
+    lines.push(
+      '',
+      `  ${running.length} claimed-but-unconfirmed unban(s) tagged [running] above will NOT drain on their own.`,
+      '  For each [running] row, check the ban list in Discord; if the member is still',
+      '  banned, unban by hand, then close the row by request id:',
+      `    UPDATE moderation_scheduled_unbans SET state = 'done', completed_at = now()::text, claim_token = NULL WHERE request_id = '<request id>' AND state = 'running';`,
+    );
+  }
+  return lines.join('\n');
 }
 
 export function isOverrideSet(env: NodeJS.ProcessEnv): boolean {

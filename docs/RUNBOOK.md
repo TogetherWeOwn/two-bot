@@ -27,6 +27,81 @@ What a gap in coverage actually costs, precisely: **invite attribution and
 first-message timing are lost for good**, because Discord keeps no per-member
 record of either. **Join dates are not lost** — see the next section.
 
+## Staging checks cadence: staging-doctor + preflight
+
+Two scripts, two different questions. Run the right one:
+
+| Script | Question it answers | Needs | Side effects |
+|---|---|---|---|
+| `node scripts/staging-doctor.ts` | "Can I run the integration suite yet?" | the staging trio below, plus the staging DB reachable | none — writes nothing, never contacts Discord, never prints a token |
+| `node scripts/preflight.ts` | "Will the funnel actually collect data?" | live bot token + network to Discord | read-only against Discord; writes nothing to the DB |
+
+The staging trio (see `docs/STAGING.md` for where each comes from):
+`TWO_STAGING_DATABASE_URL`, `DISCORD_STAGING_GUILD_ID`,
+`DISCORD_STAGING_BOT_TOKEN`. These names are deliberately different from the
+live ones — a staging run must not be one forgotten variable away from writing
+into the real funnel.
+
+When to run each:
+
+- **doctor, at the start of every staging session.** Then again after every
+  `staging-reset.ts` and after every suite run — a suite that leaves state
+  behind is the normal way fixtures drift, and the doctor is how you notice.
+- **doctor, before opening a staging PR.** Green doctor output is the
+  "reproduced on the known state" half of the evidence.
+- **preflight, before every deploy.** `bootstrap-host.sh` already runs it and
+  refuses to start the service on a FAIL — a bot that is `active (running)`
+  while recording every join as `unknown` is worse than one that never started.
+- **preflight, after any portal change** (intents, roles, channels) and any
+  time joins start recording as `unknown`.
+
+What green looks like (both verified 2026-09-27, TOG-7192):
+
+```bash
+node scripts/staging-doctor.ts
+#   ok      staging bot token      Owen QA Test (1469137636663758888).
+#   ok      staging Discord server guild 1545644954272137297.
+#   ok      staging database       two_staging_test.
+#   ok      schema                 NN migration(s) applied.  (the count grows
+#                                  with migrations/ — green means zero pending)
+#   ok      fixtures               the known state.
+# Ready. `node scripts/staging-reset.ts` then run the suite.
+# exit 0 — five oks, then reset and run your suite.
+```
+
+```bash
+DISCORD_TOKEN=... DISCORD_GUILD_ID=... node scripts/preflight.ts
+# Ready to deploy.  0 fail, 3 warn
+# exit 0 — WARNs are fine (Administrator over-grant, unused Message Content
+# Intent, alert-channel-via-Administrator). Only FAIL blocks a deploy.
+```
+
+What red looks like, and whose job it is:
+
+- doctor exit `1` — a `FIX` line, yours. It carries the command, usually
+  `node scripts/staging-reset.ts` (a previous suite left state behind) or the
+  `TWO_DATABASE_URL="$TWO_STAGING_DATABASE_URL" node scripts/migrate.ts`
+  mapping. Run it, re-run the doctor. Proven: deleting the 7
+  `first_message` rows prints
+  `FIX fixtures 1 funnel count(s) off: first_message 0/7`, and a reset
+  recovers to green.
+- doctor exit `3` — `WAITING`, someone else's. The line names the owner and
+  the issue (e.g. founder, TWO-21). Raise it on TWO-25; do not work around it.
+- preflight exit `2` — no token at all
+  (`Missing bot token. Set DISCORD_TOKEN ...`). Nothing ran; supply it.
+- preflight exit `1` — a `FAIL` line. The funnel is broken or silently lying
+  (intents off, missing Manage Server, unreadable invite list). Fix it in the
+  developer portal before starting the service.
+
+Where to log it:
+
+- Green: one line on the card you are working —
+  `doctor exit 0 (5 ok) / preflight 0 fail 3 warn`. That is the whole record.
+- Red that you fixed: the FIX line plus the command that cleared it, same card.
+- Red that blocks: keep the card `blocked` against the real blocker, with the
+  red output quoted. Neither script prints a token — keep it that way and
+  never paste one alongside.
+
 ## Recover the history (one-off, no host needed)
 
 ```bash
@@ -110,8 +185,9 @@ The other three are always present on any exit except `2` and `3`.
 
 **These name individual members, and they must never reach GitHub.** `data/*`
 is gitignored precisely so they cannot be committed by accident — verified: all
-four paths are ignored, while `data/server-audit-*.json` is explicitly
-un-ignored because the drift check needs it as its base. Do not paste holder
+four paths are ignored. The old drift-check base (`data/server-audit-*.json`,
+retired from HEAD by TOG-8963) is gone too; the drift check now takes an
+explicit snapshot path or skips. Do not paste holder
 rows into an issue, a PR or a chat channel either. `docs/PRIVACY.md` permits
 storing member ids; it does not permit publishing them.
 
@@ -859,6 +935,66 @@ recorded in the operational audit log after both readbacks. The acceptance
 script writes an evidence bundle to `$OUT` and re-verifies absence through a
 separate API read, so the grant path never self-attests the cleanup.
 
+### Automations staging proof (TOG-1648)
+
+Exercises custom commands, scheduled messages and sticky messages through the
+real service + store against TWO Staging, in `#bot-log` — never
+member-facing. Every artefact the run creates it also removes: proof
+command/scheduled/sticky rows are deleted and any pre-proof definitions
+restored row-for-row, proof messages posted to `#bot-log` deleted, and the
+automation audit log is the only trace left — which is the point of the audit
+log. A concurrent admin edit made mid-run is left untouched (a
+`cleanup.*.concurrent` line) rather than overwritten.
+
+The script takes exactly one flag:
+
+```bash
+node scripts/staging-automations-proof.ts --help   # usage, exit 0, needs no token or database
+```
+
+A full run needs the staging token and the staging database, and nothing else:
+
+```bash
+DISCORD_STAGING_BOT_TOKEN=... TWO_DATABASE_URL=<staging> \
+  node scripts/staging-automations-proof.ts
+```
+
+Without both it refuses before touching anything (exit `2`, `need
+DISCORD_STAGING_BOT_TOKEN and TWO_DATABASE_URL`). Point `TWO_DATABASE_URL` at
+the staging database — the proof writes and deletes automation rows in
+whatever database it is given. Guild and channel are pinned in the script
+(`scripts/staging-automations-proof.ts:34-35`); there is no flag that
+retargets them, so a full run cannot be aimed at the live guild by typo.
+
+Green: `N/N pass, 0 fail`, exit `0`. Any `FAIL` line means not proven — do not
+relabel an interrupted run as a pass.
+
+`scripts/staging-automations-proof-state.ts` is the cleanup/restore library
+the proof imports (`cleanupDecision`, `restoredStickyRow` — also covered by
+`test/unit.automations.test.ts`). It is not run directly: invoked without
+`--help` it exits `2`; with `--help` it prints usage and exits `0`, touching
+nothing.
+
+### Running the proof check offline (no token, no database, no Discord)
+
+The reviewer path. Run `npm ci` first (the proof script imports `discord.js`,
+so `--help` needs installed dependencies — but nothing else). Everything below
+runs with no credentials set and makes no network calls:
+
+```bash
+npm ci                                             # once per checkout
+npm run staging:automations-proof -- --help        # usage names the script, exit 0
+npm run staging:automations-state -- --help        # usage names the script, exit 0
+node --test test/unit.automationsproofhelp.test.ts # 4/4, exit 0
+```
+
+Green: each `--help` prints a `usage:` line naming its script file and exits
+`0` even with every `DISCORD_*`/`TOKEN`/`DATABASE` variable unset; the test
+passes `4/4` (both registry entries exist and target real files; both boot on
+`--help` under a scrubbed environment). That proves both entries are wired
+and boot — not that staging is green. The full proof above still needs the
+staging token and staging database.
+
 ### AutoMod export (staging)
 
 Exports the staging guild's AutoMod rules to a JSON file (default
@@ -906,6 +1042,7 @@ back to them instead of repeating.
 | `migrate` | Apply pending migrations (`--status` to preview). Bot also migrates at boot; this is belt-and-braces. | Nothing pending; see "The database". |
 | `web:views` | Apply `sql/web_v1.sql` contract views (`--status` lists, changes nothing). | All views present, exit `0`. |
 | `internal-actions:host`, `internal-actions:host-real` | Standalone internal-actions host for the TOG-463 acceptance harness: mock-Discord variant, and real staging-token variant. | Serves `/internal/actions`; harness passes against it. |
+| `internal-actions:acceptance` | TOG-463 acceptance run against a live endpoint (`TWO_ACCEPT_*` env; `--help` needs no env/network). | Usage prints, exit `0` on `--help`. |
 | `redirect` | go.two.gg redirect service (separate process, no credential, default `127.0.0.1:8088`). | Binds and answers one public GET. |
 | `moderation:disable-preflight` | "Can I turn moderation off right now?" — same read the boot preflight performs, on demand (`--json` available). | Exit `0` (nothing blocking); `1` lists blockers; `2` usage. |
 
@@ -967,13 +1104,11 @@ back to them instead of repeating.
 
 | script | purpose | green signal |
 |---|---|---|
-| `audit:collect` | Read-only inventory of the live server → `audit/raw/*.json` (GET-only by construction). | Raw files written, exit `0`. |
+| `audit:collect` | Read-only inventory of the live server → local `audit/raw/*.json` (GET-only by construction; gitignored since TOG-8963, never committed). | Raw files written, exit `0`. |
 | `audit:report` | Raw dump → `audit/channels.csv`, `roles.csv`, `invites.csv`, `summary.json` + walkthrough (never calls Discord). | Tables written, exit `0`. |
 | `audit:halt`, `audit:resume`, `audit:switch` | Kill switch: stop all mirror sends / resume / show state. DB row, survives restart, idempotent. | `audit:switch` shows expected state, held rows deliver after resume. |
 
-Note: `scripts/audit-scrub.ts` (PII scrubber for the collector) has no npm
-entry point; run it as `node scripts/audit-scrub.ts`. Green is a scrubbed dump
-with ids preserved and usernames/avatars removed.
+| `audit:scrub` | Usage for the PII scrubber behind the collector (a library: `stripUsers` imported by `audit-collect.ts`). | Usage prints, exit `0`. |
 
 ### Redesign waves and guild config
 
@@ -1027,6 +1162,7 @@ with ids preserved and usernames/avatars removed.
 | `e2e:harness`, `e2e:selftest` | Drive end-to-end member flows against TWO Staging (`--dry-run` no credential; `--flow`, `--kill-switch`). | Flows pass; `--dry-run` exits `0` with no network. |
 | `onboarding:web:acceptance` | Offline acceptance for the next two-web onboarding slice (`--two-web <path>`). | Slice checks pass, exit `0` (`2` = usage/incomplete checkout). |
 | `mutate:tempvoice` | Mutation harness for the temp-voice delete path (`--staging`, needs `TWO_TEST_DATABASE_URL`). Rewrites a file per mutation and runs the unit suite. | Surviving mutants listed; exit `0` when all killed. |
+| `bench:temp-voice` | Temp-voice index audit + EXPLAIN harness: seeds 100 guilds × 40 rows through the store in an isolated schema (dropped on exit), prints read timings + plan shapes. Needs `TWO_DATABASE_URL` at a scratch DB, never production. | `VERDICT: INDEXED`, exit `0`. |
 | `test:report` | `node:test` reporter writing one JSON object per test point (`--test-reporter` + `--test-reporter-destination`). | Results ndjson written; skips explicit, never silent. |
 
 ### Tests, typecheck, repo checks

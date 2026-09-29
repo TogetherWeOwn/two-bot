@@ -19,8 +19,10 @@ import {
   MODERATION_DISABLE_OVERRIDE_ENV,
   MODERATION_DISABLE_OVERRIDE_REASON_ENV,
   ModerationShutdownRefusal,
+  OUTSTANDING_ID_LIMIT,
   enforceModerationShutdownPreflight,
   evaluateModerationShutdown,
+  readOutstandingModerationState,
 } from '../src/moderation/shutdownPreflight.ts';
 import { MODERATION_ACTIONS } from '../src/moderation/types.ts';
 import { loadModerationConfig } from '../src/moderation/config.ts';
@@ -252,6 +254,78 @@ test('staged and running unban jobs do block a disable', async () => {
     assert.equal(verdict.decision, 'refused', `state ${state} must block the disable`);
     assert.equal(verdict.outstanding?.pendingUnbanCount, 1);
   }
+});
+
+test('a running claim gets hand-release instructions, not a drain promise (TOG-8460)', async () => {
+  // The poller only ever claims `pending` rows and never re-reads a claim, so
+  // "set TWO_MODERATION=1 again and let the poller drain the backlog" strands
+  // an operator on a disable that can never clear. The refusal must name
+  // [running] rows distinctly, say they will not drain, and give the ban-list
+  // check plus the close-by-request-id exit.
+  await store.stageUnban(GUILD, USER, inFuture(60), 'r', 'req-running-strand');
+  await harness.db.prepare(
+    `UPDATE moderation_scheduled_unbans SET state = 'running', claimed_at = ?, claim_token = ? WHERE request_id = ?`,
+  ).run(new Date().toISOString(), 'dead-token', 'req-running-strand');
+
+  const verdict = await evaluateModerationShutdown({ enabled: false, store, env: {} });
+  assert.equal(verdict.decision, 'refused');
+  assert.match(verdict.message, /\[running\]/);
+  assert.match(verdict.message, /req-running-strand/);
+  assert.match(verdict.message, /will NOT drain on their own/);
+  assert.match(verdict.message, /check the ban list in Discord/);
+  assert.match(verdict.message, /moderation_scheduled_unbans SET state = 'done'/);
+});
+
+test('a pending-only refusal carries no running hand-release paragraph', async () => {
+  // Control for the case above: without a `running` row the refusal stays the
+  // plain staged/pending drain advice, or every disable refusal grows the
+  // paragraph and the distinction stops meaning anything.
+  await seedPendingUnban();
+  const verdict = await evaluateModerationShutdown({ enabled: false, store, env: {} });
+  assert.equal(verdict.decision, 'refused');
+  assert.doesNotMatch(verdict.message, /will NOT drain on their own/);
+});
+
+// --- truncated means rows were actually cut, not merely full ------------------
+//
+// TOG-8459: length >= LIMIT misreported a complete 500-row list as truncated.
+// The counts are exact (COUNT(*)); only count > list means a cut.
+
+function fakeStore(unbans: number, locks: number) {
+  const makeUnbans = (n: number) =>
+    Array.from({ length: Math.min(n, OUTSTANDING_ID_LIMIT) }, (_, i) => ({
+      requestId: `req-${i}`,
+      guildId: GUILD,
+      userId: USER,
+      state: 'pending',
+      executeAt: inFuture(60),
+      reason: 'r',
+    }));
+  const makeLocks = (n: number) =>
+    Array.from({ length: Math.min(n, OUTSTANDING_ID_LIMIT) }, (_, i) => ({
+      channelId: `${CHANNEL}-${i}`,
+      guildId: GUILD,
+      reason: 'r',
+      lockedAt: inFuture(60),
+    }));
+  return {
+    countOutstandingUnbans: async () => unbans,
+    listOutstandingUnbans: async () => makeUnbans(unbans),
+    countActiveLockdowns: async () => locks,
+    listActiveLockdowns: async () => makeLocks(locks),
+  };
+}
+
+test('exactly OUTSTANDING_ID_LIMIT rows with a complete list is not truncated', async () => {
+  const state = await readOutstandingModerationState(fakeStore(OUTSTANDING_ID_LIMIT, 0));
+  assert.equal(state.pendingUnbans.length, OUTSTANDING_ID_LIMIT);
+  assert.equal(state.truncated, false);
+});
+
+test('one row over the cap is truncated', async () => {
+  const state = await readOutstandingModerationState(fakeStore(OUTSTANDING_ID_LIMIT + 1, 0));
+  assert.equal(state.pendingUnbans.length, OUTSTANDING_ID_LIMIT);
+  assert.equal(state.truncated, true);
 });
 
 // --- moderation staying on is not a shutdown --------------------------------

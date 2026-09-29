@@ -1,19 +1,22 @@
-# Staging signed settings proof — runnable packet (TOG-4705)
+# Staging signed settings proof — runnable packet (TOG-8977)
 
-This packet re-pins the TOG-4104 proof to the wired runtime
-`47c48197d46647e34132544523e863e3c92d82ff` (PR #229, the commit staging runs
-per the operator 23:21Z hand-back on TOG-7034) and lifts the HOLD **only for
-that pin**. At that commit startup passes the initialized settings store to
-`startInternalActions`, so both settings verbs are served with the existing
-flags enabled. See [SOURCE_IDENTITY.md](SOURCE_IDENTITY.md) for pin choice,
-topology, excerpt provenance and review/CI records.
+This packet pins the TOG-4104 proof to the settings-wiring surface measured
+at baseline `c2a00876d9772c0e341e7aed643518cf02d100a3` (the staging runtime
+the operator measured 2026-09-28T15:15Z) and lifts the HOLD **only for
+runtimes whose surface is byte-identical to that baseline**. At the baseline
+startup passes the initialized settings store to `startInternalActions`, so
+both settings verbs are served with the existing flags enabled. See
+[SOURCE_IDENTITY.md](SOURCE_IDENTITY.md) for baseline choice, topology,
+excerpt provenance and review/CI records.
 
-`run-proof.sh` validates source, runtime, image identity and the exclusive
-window, then resolves the running staging container once by exact name and
-copies/executes only through the immutable container ID. Any other runtime
-refuses before any Docker operation; the offline test proves it with the
-rejected `f5fd3e1` runtime as the negative case. There is no override flag.
-Do not invoke the engine directly to bypass this gate.
+`run-proof.sh` validates source, runtime declaration, image identity and the
+exclusive window, then resolves the running staging container once by exact
+name and byte-compares the six wiring files copied out of the container
+against the reviewed baseline (`verify-surface.sh`) before copying or
+executing anything. A newer staging SHA with an untouched surface runs; any
+touched surface refuses. The offline tests prove both directions: the
+rejected drifted surface is the negative case. There is no override flag. Do
+not invoke the engine directly to bypass this gate.
 
 [TOG-3706](/TOG/issues/TOG-3706) remains the sole host execution card. No
 duplicate Operator card, restart, flag write, database provisioning,
@@ -27,23 +30,23 @@ production, flags, credentials or the DB. The existing flags remain at 1.
 | App | `uy4d9ndeygjcem6lgayhxgub` |
 | Exact container | `bot-uy4d9ndeygjcem6lgayhxgub` |
 | Guild | `1545644954272137297` (TWO Staging) |
-| Pinned runtime | `47c48197d46647e34132544523e863e3c92d82ff` (PR #229, contains `15b8f6c`) |
-| Proof source | This packet's merged head, passed as `$2` and byte-checked against `ops/tog-4104` |
+| Surface baseline | `c2a00876d9772c0e341e7aed643518cf02d100a3` (contains `15b8f6c`) |
+| Running runtime | Operator-measured `SOURCE_COMMIT`, declared as `PROOF_RUNTIME_REVISION`; must be a full SHA whose surface matches the baseline |
+| Proof source | This packet's merged head, passed as `$2` and byte-checked against `ops/tog-4104` + the fixture/tests |
 | Candidate keys | `TWO_RAID_JOIN_THRESHOLD`, `TWO_RAID_WINDOW_SECONDS` |
 | Offline fixtures | Numeric strings `7`, `42`, respectively |
 
 The rejected runtime `f5fd3e1d6d08847589d3bf48ebc0b0e198196e90` stays refused.
 An image tag is operator-measured metadata, not attestation of installed
-bytes. Do not replace the runtime pin with current main, an ancestor or a
-sibling.
+bytes. A declared SHA whose surface differs from the baseline refuses even
+when the SHA itself is well-formed.
 
 ## Operator steps (TOG-3706 only, after this packet merges)
 
-1. Confirm staging still runs `47c48197d46647e34132544523e863e3c92d82ff`
-   on `uy4d9ndeygjcem6lgayhxgub`. Record the Coolify
-   deployment id and the resulting immutable image ID (`sha256:…`). If
-   staging has been redeployed since, stop: this packet pins only that
-   commit.
+1. Read staging's current `SOURCE_COMMIT` on `uy4d9ndeygjcem6lgayhxgub`
+   (Coolify panel value). Record the Coolify deployment id and the resulting
+   immutable image ID (`sha256:…`). No redeploy dance is needed: any running
+   SHA whose surface matches the baseline may run.
 2. Quiesce all writers: no dashboard saves, other clients, direct DB writers,
    second bot process, in-flight save, or joins. The API has no
    CAS/distributed lock. Wait at least 20 seconds after quiescence for the
@@ -51,24 +54,26 @@ sibling.
 3. Run the proof from a checkout at this packet's merged head (`$SOURCE`):
    ```bash
    PROOF_EXCLUSIVE_WINDOW=staging-writers-quiesced \
-   PROOF_RUNTIME_REVISION=47c48197d46647e34132544523e863e3c92d82ff \
+   PROOF_RUNTIME_REVISION=<SOURCE_COMMIT from step 1> \
    PROOF_IMAGE_ID='<sha256 from step 1>' \
    ops/tog-4104/run-proof.sh run "$SOURCE"
    ```
-   The wrapper prints one `PROOF TARGET app=… container=<64-hex> image=…
-   ref=… runtime=… source=… mode=… url=…` line recording the immutable
-   container and image IDs plus the measured listener URL. Forwarded into the
-   container are only values already validated against the packet pin: the app
-   UUID, the pinned runtime, the writer-exclusion declaration, the measured
-   listener URL and the validated packet source SHA. Signing keys stay inside
-   the container: the script never reads or passes `TWO_INTERNAL_KEYS`. None
-   of the forwarded values is a secret.
-4. Capture the deployment id from step 1, the wrapper's `PROOF TARGET` line,
-   and the bot logs covering the run: `setting_changed`
-   (`src/index.ts:233`, emitted per changed hot-wired key with `from`/`to`)
-   and `settings_reloaded` (`src/core/settings.ts:217`, emitted on poll with
-   version/key counts). Post the receipt plus these three records as the
-   proof comment on TOG-3101.
+   The wrapper prints one `SURFACE OK container=<64-hex> baseline=…
+   files=…` line (the byte-comparison result) plus one `PROOF TARGET
+   app=… container=<64-hex> image=… ref=… runtime=… source=… mode=… url=…`
+   line recording the immutable container and image IDs plus the measured
+   listener URL. Forwarded into the container are only values already
+   validated against the packet pin: the app UUID, the declared running
+   runtime, the writer-exclusion declaration, the measured listener URL and
+   the validated packet source SHA. Signing keys stay inside the container:
+   the script never reads or passes `TWO_INTERNAL_KEYS`. None of the
+   forwarded values is a secret.
+4. Capture the deployment id from step 1, the wrapper's `SURFACE OK` and
+   `PROOF TARGET` lines, and the bot logs covering the run:
+   `setting_changed` (`src/index.ts:233`, emitted per changed hot-wired key
+   with `from`/`to`) and `settings_reloaded` (`src/core/settings.ts:217`,
+   emitted on poll with version/key counts). Post the receipt plus these
+   records as the proof comment on TOG-3101.
 5. On `PROOF FAIL` (exit 1) with an uncertain checkpoint, preserve the
    journal and the exclusive window and re-run with `recover` instead of
    `run`. Successful recovery emits RECOVERED, never PROOF PASS.
@@ -83,11 +88,12 @@ fixtures.
 
 `settings-signed-proof.mjs` refuses before mutation on: wrong/missing app
 (either `STAGING_APP_UUID` or the container's own `COOLIFY_RESOURCE_UUID`
-must equal the pin), runtime, guild, proof source, keys, flags, writer
-assertion, malformed pre-state, URL credentials, redirects or an endpoint
-that is neither literal loopback nor one of the process's own private
-interface addresses. DNS names, public addresses and foreign private
-addresses still refuse. Keys remain in the container environment.
+must equal the pin), malformed runtime declaration, guild, proof source,
+keys, flags, writer assertion, malformed pre-state, URL credentials,
+redirects or an endpoint that is neither literal loopback nor one of the
+process's own private interface addresses. DNS names, public addresses and
+foreign private addresses still refuse. Keys remain in the container
+environment.
 
 - Capture both actual stored values and JSON types; get never reads
   environment fallback. Stored values must be digit strings or integers in
@@ -128,10 +134,10 @@ plaintext. Never run with `set -x` or upload the private journal directory.
 
 ## Receipt interpretation
 
-- `0 PROOF PASS`: signed controls and exact cleanup passed on the pinned
-  runtime; staging acceptance still needs the TOG-3101 proof comment with
-  deployment id, `PROOF TARGET` line and the `setting_changed` /
-  `settings_reloaded` log capture.
+- `0 PROOF PASS`: signed controls and exact cleanup passed on a
+  surface-matching runtime; staging acceptance still needs the TOG-3101
+  proof comment with deployment id, `SURFACE OK` + `PROOF TARGET` lines and
+  the `setting_changed` / `settings_reloaded` log capture.
 - `0 RECOVERED`: offline rollback verified, not proof acceptance.
 - `1 PROOF FAIL`: assertion/interruption/uncertainty/cleanup failure.
 - `2 REFUSED`: this invocation has not attempted mutation; any older
@@ -149,7 +155,9 @@ and [TOG-4092](/TOG/issues/TOG-4092) capacity gate remain unchanged.
 ```bash
 node --check ops/tog-4104/settings-signed-proof.mjs
 bash -n ops/tog-4104/run-proof.sh
+bash -n ops/tog-4104/verify-surface.sh
 node ops/tog-4104/verify-runtime-source.mjs
+node ops/tog-4104/verify-runtime-source.mjs <candidate-sha>
 node --test test/tog4104-offline.test.ts test/tog4104-discovery.test.ts test/tog4104-runtime-wiring.test.ts
 ```
 

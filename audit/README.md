@@ -1,19 +1,27 @@
 # Server audit
 
-A point-in-time, read-only inventory of the live TWO Discord server, kept in
-the repo so the next audit is a `git diff` instead of a redo.
+A point-in-time, read-only inventory of the live TWO Discord server. The
+derived tables in this directory (`channels.csv`, `roles.csv`, `invites.csv`,
+`summary.json`) are committed so the next audit is a `git diff` instead of a
+redo; the verbatim dumps behind them are not.
 
 Built to the `audit-spec` document on TWO-13. The deliverable is the
 `server-audit` document on that issue; this directory is the working data
 behind it.
 
+Since the 2026-09-28 public-readiness pass (TOG-8963) the raw dumps
+(`audit/raw/*.json`) are gitignored and never committed: they carry community
+member user IDs. The pre-flip dumps live on in history before that commit —
+do not resurrect them. Maintainers re-running the audit rebuild `raw/`
+locally and commit only the tables.
+
 ## Re-running it
 
 ```bash
-DISCORD_BOT_TOKEN=<bot token> DISCORD_GUILD_ID=326474832151838730 \
-  node scripts/audit-collect.ts     # ~118 requests, ~3 min, writes audit/raw/
+DISCORD_BOT_TOKEN=<bot token> DISCORD_GUILD_ID=<guild id> \
+  node scripts/audit-collect.ts     # ~118 requests, ~3 min, writes audit/raw/ (local only, gitignored)
 node scripts/audit-report.ts        # no network, rebuilds every table
-git diff audit/ data/               # what moved since last time
+git diff audit/                     # what moved since last time
 ```
 
 `audit-collect.ts` is the only part that touches Discord, and it can only issue
@@ -45,8 +53,10 @@ Two more files land outside this directory, at the contract paths from
 | `../data/server-audit-<date>.json` | The rollback source for the migration: every channel's topic, position, parent and full permission overwrites as they were at collection time, plus guild config, welcome screen, onboarding and all roles. |
 
 `data/` is otherwise gitignored (it can hold generated reports and legacy
-database files); the two snapshot files are explicitly un-ignored because they
-are the point.
+database files). One channel table remains committed at
+`../data/server-audit-2026-08-19.csv` (per-channel traffic and verdicts —
+no people); the full JSON snapshot that used to sit beside it was removed
+from HEAD by TOG-8963 and lives on only in history.
 
 ## Privacy
 
@@ -60,8 +70,9 @@ identifies a person is written to disk. This matches `docs/PRIVACY.md`.
 Embedded user objects (invite inviters, integration users, integration
 application bots) are reduced to `{ id }` by `scripts/audit-scrub.ts` before
 anything is written - no usernames, avatars, or discriminators land in `raw/`.
-`test/unit.auditscrub.test.ts` pins this over every tracked raw artifact, so a
-new collector endpoint that embeds an identity fails the suite the day it lands.
+`test/unit.auditscrub.test.ts` pins this (no raw dump may be re-tracked, and
+the kept tables must stay clean), so a new collector endpoint that embeds an
+identity fails the suite the day it lands.
 
 ## The rubric
 

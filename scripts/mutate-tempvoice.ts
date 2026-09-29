@@ -34,6 +34,7 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { isAllowedTestDatabaseUrl } from './test-db-guard.ts';
 
 const ROOT = resolve(import.meta.dirname, '..');
 // Test hooks for the guard's own proof test: point the harness at a fixture
@@ -72,7 +73,11 @@ function flagValue(name: string): string | null {
 // database URL before touching anything. Checked before the target is even
 // read, so a refused run cannot fail halfway through a mutation.
 const databaseUrl = process.env.TWO_TEST_DATABASE_URL?.trim() ?? '';
-const isScratchDb = databaseUrl.startsWith('postgres://') || databaseUrl.startsWith('postgresql://');
+// TOG-9656: the URL must name an isolated test host, not just use a postgres
+// scheme — a production postgres:// URL used to satisfy this gate.
+const isScratchDb =
+  (databaseUrl.startsWith('postgres://') || databaseUrl.startsWith('postgresql://')) &&
+  isAllowedTestDatabaseUrl(databaseUrl);
 if (!process.argv.includes('--staging') || !isScratchDb) {
   console.error(
     'mutate-tempvoice: refusing to run without --staging and a scratch TWO_TEST_DATABASE_URL. ' +
@@ -149,6 +154,12 @@ const MUTATIONS: ReadonlyArray<Mutation> = [
         // Boot-time empties are deleted immediately`,
     to: `      if (true) {
         // Boot-time empties are deleted immediately`,
+  },
+  {
+    name: 'M7 create path confers ManageRoles the bot cannot grant',
+    guard: 'no create-time overwrite confers ManageRoles (TOG-9541: live 403/50013)',
+    from: `    { id: botId, type: 'member', allow: ['ViewChannel', 'Connect', 'ManageChannels', 'MoveMembers'] },`,
+    to: `    { id: botId, type: 'member', allow: ['ViewChannel', 'Connect', 'ManageChannels', 'MoveMembers', 'ManageRoles'] },`,
   },
 ];
 

@@ -31,6 +31,9 @@ before(async () => {
   dbEnv = {
     TWO_DATABASE_URL: process.env.TWO_TEST_DATABASE_URL!,
     PGOPTIONS: `-c search_path=${schema}`,
+    // TOG-8738: the funnel report is scoped to one guild and fails fast
+    // without it. The fixture seeds GUILD, so this is the server reported on.
+    DISCORD_GUILD_ID: GUILD,
   };
 });
 

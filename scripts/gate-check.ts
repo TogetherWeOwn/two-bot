@@ -37,10 +37,13 @@
  * Exit: 0 green, 1 red. Red is a normal weekly outcome, not a malfunction.
  */
 import { openDb } from '../src/store/db.ts';
-import { observeApprovedPublicSite, observeTrackedJoinPath } from '../src/growth/joinPath.ts';
+import {
+  observeApprovedPublicSite,
+  observeTrackedJoinPath,
+  webCodeRowSource,
+} from '../src/growth/joinPath.ts';
 import {
   EXIT_CODE,
-  WEB_HOMEPAGE_CODE,
   allChecks,
   failing,
   scoringLoopRuns,
@@ -174,11 +177,23 @@ if (!databaseUrl) {
       // Criterion 3 asks for the code to appear as its own ROW, which is a
       // stronger claim than "the code exists": a bound invite with no joins
       // produces a registry entry and no funnel row.
-      const web = rows.find((r) => r.source === `invite:${WEB_HOMEPAGE_CODE}`);
-      o.webCodeRowPresent = web !== undefined;
-      o.webCodeRowDetail = web
-        ? `${WEB_HOMEPAGE_CODE} has ${Number(web.n)} attributed join(s).`
-        : `${WEB_HOMEPAGE_CODE} has no row in the funnel - no join has ever arrived on it.`;
+      //
+      // The funnel stores raw Discord codes (`invite:<code>`), not the registry
+      // slot label - so the slot is resolved through the same join destination
+      // the website criterion checks (TOG-5037). No second copy of the code.
+      o.webCodeRowSource = webCodeRowSource(EXPECTED_JOIN_DESTINATION);
+      const webSource = o.webCodeRowSource;
+      if (webSource === undefined) {
+        o.webCodeRowPresent = undefined;
+        o.webCodeRowDetail =
+          `the WEB-HOMEPAGE slot could not be resolved to a Discord code from ${EXPECTED_JOIN_DESTINATION} - no funnel row can be matched.`;
+      } else {
+        const web = rows.find((r) => r.source === webSource);
+        o.webCodeRowPresent = web !== undefined;
+        o.webCodeRowDetail = web
+          ? `${webSource} has ${Number(web.n)} attributed join(s).`
+          : `${webSource} has no row in the funnel - no join has ever arrived on it.`;
+      }
     } catch (err) {
       const why = `the funnel could not be read: ${err instanceof Error ? err.message : String(err)}`;
       o.funnelDetail = why;

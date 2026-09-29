@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { after, before, test } from 'node:test';
@@ -17,6 +18,14 @@ import {
 // is asserted, not assumed. The token is minted offline the same way
 // unit.selfrolepanel-script.test.ts does (base64url app id + suffix) and the
 // dry-run path returns before any fetch, so no credential ever leaves.
+//
+// The counter only counts hits under a per-run nonce prefix
+// (`/<nonce>/...`). CI runs ~150 test files in parallel on five runners that
+// share one host (TOG-7982): background loopback scans from sibling suites
+// (or a squatter that rebound our ephemeral port, cf. the PortStolenError
+// handling in e2e.health.test.ts) land on bare `/` and must not trip the
+// assertion. Only traffic the script itself aims at its own base URL counts —
+// and the dry-run aims at nothing, so the floor stays 0.
 
 const run = promisify(execFile);
 const CHANNEL = '111111111111111111';
@@ -40,14 +49,18 @@ const fixturePanels = JSON.stringify([{
 let server: Server;
 let baseUrl = '';
 let hits = 0;
+// Random per-process prefix: only requests aimed at OUR base URL count. Stray
+// loopback scans from sibling suites hit bare `/` and are ignored.
+const nonce = randomBytes(16).toString('hex');
+const prefix = `/${nonce}`;
 
 before(async () => {
-  server = createServer((_req, res) => {
-    hits++;
+  server = createServer((req, res) => {
+    if ((req.url ?? '/').startsWith(`${prefix}/`) || req.url === prefix) hits++;
     res.writeHead(500).end();
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}${prefix}`;
 });
 
 after(async () => {

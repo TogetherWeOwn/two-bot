@@ -28,7 +28,7 @@ jobs:
   # this workflow to hosted runners. On a hosted runner there is no host of
   # ours to protect and this would only turn away contributions.
   fork-gate:
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
@@ -65,7 +65,7 @@ jobs:
 
   check:
     needs: fork-gate
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
 
     services:
@@ -95,6 +95,14 @@ jobs:
       # The ratchet is only worth its line in the workflow if it still refuses
       # things, so its own mutation cases run alongside it.
       - run: ./scripts/ci/check-src-snowflakes.test.sh
+
+      # No live console.* calls in src/ outside tests: they bypass the
+      # structured redaction-safe logger (TOG-8693). Hermetic bash+perl like
+      # the snowflake ratchet, so a violating PR fails in seconds. The
+      # self-test runs alongside for the same reason: a ban guard is only
+      # worth its line if it still refuses things.
+      - run: ./scripts/ci/check-src-console.sh
+      - run: ./scripts/ci/check-src-console.test.sh
 
       # Five runners share one host, so Docker assigns an unused host port
       # instead of every job fighting over 5432. Set the database URLs at
@@ -127,7 +135,7 @@ jobs:
   # required check has proved the full Postgres-backed suite.
   postgres:
     needs: [fork-gate, check]
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
 
     services:

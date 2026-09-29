@@ -9,7 +9,7 @@ import { runInNewContext } from 'node:vm';
 // the moving working tree. verify-runtime-source.mjs checks them against Git
 // objects.
 const fixture = JSON.parse(readFileSync(new URL('./fixtures/tog4104-runtime-source.json', import.meta.url), 'utf8'));
-assert.equal(fixture.revision, '47c48197d46647e34132544523e863e3c92d82ff');
+assert.equal(fixture.baseline, 'c2a00876d9772c0e341e7aed643518cf02d100a3');
 const blocks = fixture.blocks;
 for (const block of Object.values(blocks) as Array<{ code: string; sha256: string }>) {
   assert.equal(createHash('sha256').update(block.code).digest('hex'), block.sha256);
@@ -81,4 +81,36 @@ test('TOG-4705 null settings, disabled actions and missing durable store still r
   }
   assert.throws(() => gate({ ...opts, store: null }, 'settings.set'),
     (error: any) => error.code === 'action_not_allowed' && error.logReason === 'action_needs_store');
+});
+
+// Execute the pinned settings-flag excerpt: with the flag off the verbs stay
+// out of the enabled set (action_disabled), with the flag on both verbs are
+// added. The excerpt only touches the settings lines; nothing else in the
+// allowlist may change under it.
+function flagEnabled(env: Record<string, string>) {
+  const enabled = new Set(['role.assign', 'announcement.post', 'event.upsert']);
+  const sandbox = { env, enabled };
+  runInNewContext(`(function () { ${blocks.settingsFlag.code} })()`, sandbox, { timeout: 1000 });
+  return sandbox.enabled;
+}
+
+test('TOG-8977 pinned settings flag defaults off, enables both verbs when set', () => {
+  const off = flagEnabled({});
+  assert.ok(!off.has('settings.get') && !off.has('settings.set'));
+  for (const action of ['settings.get', 'settings.set']) {
+    assert.throws(() => gate({ enabled: off, store: {}, settings: {} }, action),
+      (error: any) => error.code === 'action_not_allowed' && error.logReason === 'action_disabled');
+  }
+  const on = flagEnabled({ TWO_INTERNAL_ALLOW_SETTINGS: '1' });
+  assert.ok(on.has('settings.get') && on.has('settings.set'));
+  // The gate's isImplemented check runs against the pinned IMPLEMENTED_ACTIONS
+  // excerpt, whose MODERATION_ACTIONS spread is stubbed empty in the sandbox —
+  // so pass the implemented-set membership from the same fixture explicitly.
+  const implemented = new Set(
+    blocks.implemented.code.match(/'([a-z]+\.[a-z_]+)'/g)?.map((q: string) => q.slice(1, -1)) ?? [],
+  );
+  assert.ok(implemented.has('settings.get') && implemented.has('settings.set'));
+  for (const action of ['settings.get', 'settings.set']) {
+    assert.doesNotThrow(() => gate({ enabled: on, store: {}, settings: {} }, action));
+  }
 });

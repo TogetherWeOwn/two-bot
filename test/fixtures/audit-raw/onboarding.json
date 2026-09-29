@@ -1,0 +1,506 @@
+{
+ "guild_id": "326474832151838730",
+ "prompts": [
+  {
+   "id": "1104845371248754760",
+   "title": "Where are you located?",
+   "options": [
+    {
+     "id": "1104845371248754763",
+     "title": "Europe",
+     "description": "",
+     "emoji": {
+      "id": "1087516936700706836",
+      "name": "Europe",
+      "animated": false
+     },
+     "role_ids": [
+      "1101306065246752768",
+      "1101312355608035398",
+      "1101315995764805712",
+      "1144789677057003636",
+      "1101314731089862778",
+      "1087897623538704475"
+     ],
+     "channel_ids": []
+    },
+    {
+     "id": "1104845371248754764",
+     "title": "North America",
+     "description": "",
+     "emoji": {
+      "id": "1087516937963184148",
+      "name": "North_America",
+      "animated": false
+     },
+     "role_ids": [
+      "1101306065246752768",
+      "1101312355608035398",
+      "1101315995764805712",
+      "1144789677057003636",
+      "1087897546741006456",
+      "1101314731089862778"
+     ],
+     "channel_ids": []
+    },
+    {
+     "id": "1104845371248754765",
+     "title": "South America",
+     "description": "",
+     "emoji": {
+      "id": "1087516941603835974",
+      "name": "South_America",
+      "animated": false
+     },
+     "role_ids": [
+      "1101306065246752768",
+      "1101312355608035398",
+      "1101315995764805712",
+      "1087897738265509938",
+      "1144789677057003636",
+      "1101314731089862778"
+     ],
+     "channel_ids": []
+    },
+    {
+     "id": "1104845371248754766",
+     "title": "Asia",
+     "description": "",
+     "emoji": {
+      "id": "1087516935027163227",
+      "name": "Asia",
+      "animated": false
+     },
+     "role_ids": [
+      "1101306065246752768",
+      "1101312355608035398",
+      "1101315995764805712",
+      "1087897790681731122",
+      "1144789677057003636",
+      "1101314731089862778"
+     ],
+     "channel_ids": []
+    },
+    {
+     "id": "1104845371248754767",
+     "title": "Africa",
+     "description": "",
+     "emoji": {
+      "id": "1087516933705965621",
+      "name": "Africa",
+      "animated": false
+     },
+     "role_ids": [
+      "1101306065246752768",
+      "1101312355608035398",
+      "1101315995764805712",
+      "1087897935045476402",
+      "1144789677057003636",
+      "1101314731089862778"
+     ],
+     "channel_ids": []
+    },
+    {
+     "id": "1104845371420717188",
+     "title": "Oceania",
+     "description": "",
+     "emoji": {
+      "id": "1087516939200516126",
+      "name": "Oceania_Australia",
+      "animated": false
+     },
+     "role_ids": [
+      "1101306065246752768",
+      "1101312355608035398",
+      "1101315995764805712",
+      "1087898062669750353",
+      "1144789677057003636",
+      "1101314731089862778"
+     ],
+     "channel_ids": []
+    }
+   ],
+   "single_select": true,
+   "required": true,
+   "in_onboarding": true,
+   "type": 0
+  },
+  {
+   "id": "1104845371420717189",
+   "title": "What platforms do you game on?",
+   "options": [
+    {
+     "id": "1104845371420717192",
+     "title": "PC",
+     "description": "",
+     "emoji": {
+      "id": "1092247524074586213",
+      "name": "pc",
+      "animated": false
+     },
+     "role_ids": [
+      "1092247753574330458",
+      "1101170473108242452"
+     ],
+     "channel_ids": []
+    },
+    {
+     "id": "1104845371420717193",
+     "title": "Xbox",
+     "description": "",
+     "emoji": {
+      "id": "1092245371595538572",
+      "name": "xbox",
+      "animated": false
+     },
+     "role_ids": [
+      "1087930995875008522",
+      "1101170473108242452"
+     ],
+     "channel_ids": []
+    },
+    {
+     "id": "1104845371420717194",
+     "title": "Playstation",
+     "description": "",
+     "emoji": {
+      "id": "1092245368198144103",
+      "name": "playstation",
+      "animated": false
+     },
+     "role_ids": [
+      "1101170473108242452",
+      "1087931108945039470"
+     ],
+     "channel_ids": []
+    },
+    {
+     "id": "1104845371420717195",
+     "title": "Switch",
+     "description": "",
+     "emoji": {
+      "id": "1092245369120895026",
+      "name": "switch",
+      "animated": false
+     },
+     "role_ids": [
+      "1092248449786855595",
+      "1101170473108242452"
+     ],
+     "channel_ids": []
+    },
+    {
+     "id": "1104845371420717196",
+     "title": "Mobile",
+     "description": "",
+     "emoji": {
+      "id": null,
+      "name": "\ud83d\udcf1",
+      "animated": false
+     },
+     "role_ids": [
+      "1092250849717264475",
+      "1101170473108242452"
+     ],
+     "channel_ids": []
+    }
+   ],
+   "single_select": false,
+   "required": true,
+   "in_onboarding": true,
+   "type": 0
+  },
+  {
+   "id": "1104845371420717197",
+   "title": "What notifacations do you want?",
+   "options": [
+    {
+     "id": "1104845371512983564",
+     "title": "Community News",
+     "description": "Stay informed about community news with regular pings, ensuring you're in the loop.",
+     "emoji": {
+      "id": null,
+      "name": "\ud83d\udce2",
+      "animated": false
+     },
+     "role_ids": [
+      "1088982029523226728",
+      "1101297505179816017"
+     ],
+     "channel_ids": []
+    },
+    {
+     "id": "1104845371512983565",
+     "title": "Events & Giveaways",
+     "description": "Never miss an event or giveaway. Receive pings to join in and engage with the community.",
+     "emoji": {
+      "id": null,
+      "name": "\ud83d\udcc5",
+      "animated": false
+     },
+     "role_ids": [
+      "1088982099375181864",
+      "1101297505179816017"
+     ],
+     "channel_ids": []
+    },
+    {
+     "id": "1104845371512983566",
+     "title": "Welcome Team",
+     "description": "Stay notified of new members joining the server, so you can extend a warm welcome.",
+     "emoji": {
+      "id": null,
+      "name": "\ud83d\udc4b",
+      "animated": false
+     },
+     "role_ids": [
+      "1090651387236450416",
+      "1101297505179816017"
+     ],
+     "channel_ids": []
+    },
+    {
+     "id": "1104845371512983567",
+     "title": "DM's Open",
+     "description": "Opt for \"DM's Closed\" to indicate that you're accepting direct messages.",
+     "emoji": {
+      "id": null,
+      "name": "\ud83d\udcac",
+      "animated": false
+     },
+     "role_ids": [
+      "1101297505179816017",
+      "1088982263292756059"
+     ],
+     "channel_ids": []
+    },
+    {
+     "id": "1104845371512983568",
+     "title": "DM's Closed",
+     "description": "Opt for \"DM's Closed\" to indicate that you're not accepting direct messages.",
+     "emoji": {
+      "id": null,
+      "name": "\u26d4",
+      "animated": false
+     },
+     "role_ids": [
+      "1101297505179816017",
+      "1088982372122374185"
+     ],
+     "channel_ids": []
+    }
+   ],
+   "single_select": false,
+   "required": true,
+   "in_onboarding": true,
+   "type": 0
+  },
+  {
+   "id": "1104845371512983570",
+   "title": "What type of games do you play?",
+   "options": [
+    {
+     "id": "1104845371617853524",
+     "title": "Shooters",
+     "description": "",
+     "emoji": {
+      "id": null,
+      "name": "\ud83c\udfaf",
+      "animated": false
+     },
+     "role_ids": [
+      "1051272877871222915"
+     ],
+     "channel_ids": []
+    },
+    {
+     "id": "1119052239235981366",
+     "title": "Horror",
+     "description": "",
+     "emoji": {
+      "id": null,
+      "name": "\ud83d\udc7b",
+      "animated": false
+     },
+     "role_ids": [
+      "1119666971584237679"
+     ],
+     "channel_ids": [
+      "1118994447036850369"
+     ]
+    },
+    {
+     "id": "1179263302099017823",
+     "title": "Survival",
+     "description": "",
+     "emoji": {
+      "id": "1179263053276139520",
+      "name": "asa",
+      "animated": false
+     },
+     "role_ids": [
+      "1179233034713702511"
+     ],
+     "channel_ids": []
+    }
+   ],
+   "single_select": false,
+   "required": false,
+   "in_onboarding": true,
+   "type": 0
+  },
+  {
+   "id": "1104907943138299959",
+   "title": "Hidden Channel Access",
+   "options": [
+    {
+     "id": "1104907943138299962",
+     "title": "NSFW Channel Access",
+     "description": "This channel will have content suited only for those aged 18 or older.",
+     "emoji": {
+      "id": null,
+      "name": "\ud83d\udd1e",
+      "animated": false
+     },
+     "role_ids": [
+      "1094046641008418816",
+      "1101297643503767582"
+     ],
+     "channel_ids": []
+    }
+   ],
+   "single_select": false,
+   "required": false,
+   "in_onboarding": false,
+   "type": 0
+  },
+  {
+   "id": "1119068132108144734",
+   "title": "What interests you?",
+   "options": [
+    {
+     "id": "1119068132108144737",
+     "title": "Automobiles",
+     "description": "",
+     "emoji": {
+      "id": null,
+      "name": "\ud83d\ude97",
+      "animated": false
+     },
+     "role_ids": [],
+     "channel_ids": [
+      "1055494371019071570"
+     ]
+    },
+    {
+     "id": "1119068132108144738",
+     "title": "Movies / TV",
+     "description": "",
+     "emoji": {
+      "id": null,
+      "name": "\ud83d\udcfa",
+      "animated": false
+     },
+     "role_ids": [
+      "1055499317361782864"
+     ],
+     "channel_ids": []
+    },
+    {
+     "id": "1119068132108144739",
+     "title": "Sports",
+     "description": "",
+     "emoji": {
+      "id": null,
+      "name": "\ud83c\udfc8",
+      "animated": false
+     },
+     "role_ids": [],
+     "channel_ids": [
+      "1055500237831151716"
+     ]
+    },
+    {
+     "id": "1119068132426907668",
+     "title": "Coding",
+     "description": "",
+     "emoji": {
+      "id": "1063252523332403210",
+      "name": "Coding",
+      "animated": false
+     },
+     "role_ids": [],
+     "channel_ids": [
+      "1063256513172484149"
+     ]
+    },
+    {
+     "id": "1119068132426907672",
+     "title": "Guns",
+     "description": "",
+     "emoji": {
+      "id": null,
+      "name": "\ud83d\udd2b",
+      "animated": false
+     },
+     "role_ids": [],
+     "channel_ids": [
+      "1056439011088007261"
+     ]
+    },
+    {
+     "id": "1119402309697421447",
+     "title": "Artwork",
+     "description": "",
+     "emoji": {
+      "id": null,
+      "name": "\ud83c\udfa8",
+      "animated": false
+     },
+     "role_ids": [],
+     "channel_ids": [
+      "1119296196373139587"
+     ]
+    }
+   ],
+   "single_select": false,
+   "required": false,
+   "in_onboarding": false,
+   "type": 0
+  }
+ ],
+ "default_channel_ids": [
+  "1092312335529541632",
+  "327082608611557377",
+  "1118994739799281664",
+  "1193301254877761536",
+  "1178933610586308739",
+  "1175127344072118405",
+  "1087198966346690570",
+  "1193299926914977802",
+  "1178936839151816715",
+  "1045950023663370260",
+  "1056447465286541333",
+  "1193299280685969428",
+  "1179216170591715348",
+  "1086368551729905694",
+  "1087201563405193247",
+  "1087199619546632232",
+  "1203435277322948780",
+  "1193297608249196594",
+  "1193300788655689778",
+  "1146611215511081012",
+  "1087201627980714044",
+  "1146899438699294801",
+  "1176294550294233169",
+  "1132448261253369939",
+  "1045943373007171674",
+  "1178933084075339866"
+ ],
+ "enabled": false,
+ "mode": 0,
+ "below_requirements": false,
+ "responses": [],
+ "onboarding_prompts_seen": {},
+ "onboarding_responses_seen": {}
+}

@@ -27,8 +27,10 @@
 #   DISCORD_BOT_TOKEN             the discord_bot_token secret
 #   TWO_DATABASE_URL              Postgres. NOT DATABASE_URL - see docs/DEPLOY.md §3
 # Optional:
-#   DISCORD_GUILD_ID              defaults to the live TWO server
 #   COOLIFY_SERVER_UUID           defaults to the box Coolify runs on
+# Required in the environment for a real deploy (no default — the live guild
+# id is not repository content):
+#   DISCORD_GUILD_ID              the guild the bot joins
 #   TWO_ONBOARDING_DRY_RUN        defaults to 1 - observes, grants no roles
 
 set -euo pipefail
@@ -50,9 +52,15 @@ APP_NAME="${COOLIFY_APP_NAME:-two-bot-dk}"
 # x-access-token clone URL 500s. The box mirrors the GitHub repo every 2 minutes
 # and Coolify clones from that mirror over SSH. Re-pointing this at github.com
 # breaks every future deploy of a bot that is currently running fine.
-GIT_REPO="${COOLIFY_GIT_REPO:-git@135.148.42.223:/srv/git/two-bot.git}"
+#
+# The mirror address is infrastructure addressing, not repository content, so it
+# has no default here: a wrong default would silently deploy the wrong repo.
+# The operator supplies it via COOLIFY_GIT_REPO (see docs/DEPLOY.md §2).
+: "${COOLIFY_GIT_REPO:?set COOLIFY_GIT_REPO to the mirror clone URL (docs/DEPLOY.md §2)}"
+GIT_REPO="$COOLIFY_GIT_REPO"
 GIT_BRANCH="${TWO_DEPLOY_BRANCH:-main}"
-GUILD_ID="${DISCORD_GUILD_ID:-326474832151838730}"
+: "${DISCORD_GUILD_ID:?set DISCORD_GUILD_ID to the guild the bot joins (docs/DEPLOY.md §3)}"
+GUILD_ID="$DISCORD_GUILD_ID"
 
 api() { # api METHOD PATH [JSON_BODY]
   local method="$1" path="$2" body="${3:-}"

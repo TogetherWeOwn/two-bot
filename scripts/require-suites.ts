@@ -184,6 +184,29 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     minTests: 2,
     why: 'the voice-sessions averages CLI itself, not just the helpers underneath it - without this floor a silent skip re-opens the startKnown averaging gap',
   },
+  {
+    // TOG-6493. The audit kill switch operated end to end through the real
+    // CLI: disengaged status on a fresh schema, halt engages and a second
+    // halt changes nothing, seeded pending rows are reported honestly, and
+    // resume disengages without dropping evidence. Counted from the 3
+    // top-level test() blocks; CI's postgres job confirms the count on the
+    // first run after this commit.
+    file: 'test/e2e.auditswitch.test.ts',
+    minTests: 3,
+    why: 'the audit halt/resume/status CLI path itself, not just the helpers underneath it - without this floor a silent skip re-opens the audit-script gap',
+  },
+  {
+    // TOG-6488. The presence-trend CLI executed end to end through the real
+    // script: closed text pins every seeded bucket row plus the tally and
+    // verdict lines, --days slices the table but never the verdict, --json
+    // is exactly one object with the count and verdict, --web-live on three
+    // qualifying days fires with exit 2, and an empty window explains
+    // itself. Counted from the 5 top-level test() blocks; CI's postgres job
+    // confirms the count on the first run after this commit.
+    file: 'test/e2e.presencetrend-cli.test.ts',
+    minTests: 5,
+    why: 'the presence-trend output CLI itself, not just the helpers underneath it - without this floor a silent skip re-opens the unpinned staffing/event-slot numbers gap',
+  },
 ];
 
 /**
@@ -353,9 +376,42 @@ if (invokedDirectly) {
   if (existing) {
     resultsPath = existing;
   } else {
-    if (!process.env.TWO_TEST_DATABASE_URL?.trim()) {
-      // Fail before spawning dozens of files that all require the same URL.
+    // Fail before spawning dozens of files that all require the same URL —
+    // and refuse a non-test host before any migration runs (TOG-9656). The
+    // allowlist is inline here, not imported, because
+    // test/unit.restartstorageci.test.ts executes this file from a bare
+    // fixture tree containing only this file plus test-report.ts. Mirrors
+    // scripts/test-db-guard.ts, including the query-string refusal:
+    // node-postgres promotes ?host=/?port= over the hostname, so a query
+    // string bypasses any hostname allowlist.
+    const testDbUrl = process.env.TWO_TEST_DATABASE_URL?.trim() ?? '';
+    const allowedTestDbHosts = new Set(['agent-testdb', '127.0.0.1', 'localhost', '::1', '[::1]', 'postgres']);
+    let testDbHost = '';
+    let testDbHasQuery = false;
+    try {
+      const parsedTestDbUrl = new URL(testDbUrl);
+      testDbHost = parsedTestDbUrl.hostname.toLowerCase().replace(/\.$/, '');
+      testDbHasQuery = parsedTestDbUrl.search !== '';
+    } catch {
+      testDbHost = '';
+    }
+    if (!testDbUrl) {
       console.error('require-suites: TWO_TEST_DATABASE_URL is not set. This suite requires Postgres.');
+      process.exit(1);
+    }
+    if (testDbHasQuery) {
+      console.error(
+        'require-suites: TWO_TEST_DATABASE_URL carries a query string, which node-postgres promotes over ' +
+          'the hostname (?host=/?port= retarget the connection), refusing to run. Pass a bare database URL.',
+      );
+      process.exit(1);
+    }
+    if (!allowedTestDbHosts.has(testDbHost)) {
+      console.error(
+        `require-suites: TWO_TEST_DATABASE_URL host "${testDbHost || '(unparsable)'}" is not an isolated test ` +
+          'database, refusing to run. Tests may only target agent-testdb, 127.0.0.1/localhost, or the CI ' +
+          '"postgres" service container; production and staging hosts are never valid test targets.',
+      );
       process.exit(1);
     }
     resultsPath = join(tmpdir(), `two-bot-results-${process.pid}.ndjson`);

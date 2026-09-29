@@ -309,9 +309,19 @@ test('the API base override refuses any host that is not loopback', async () => 
   assert.match(r.stderr, /only accepts loopback/);
 });
 
-test('the committed server audit is rejected as a target list, by name', async () => {
+test('an audit snapshot is rejected as a target list, by shape', async () => {
   const f = fixture(1);
-  const r = await runScript(['--ids-from', 'data/server-audit-2026-08-19.json', '--audit', f.audit]);
+  const snapshot = join(f.dir, 'snapshot.json');
+  writeFileSync(
+    snapshot,
+    JSON.stringify({
+      note: 'No message content and no member identities are in this file.',
+      summary: { members: { human_members: 84 } },
+      channels: [],
+      roles: [],
+    }),
+  );
+  const r = await runScript(['--ids-from', snapshot, '--audit', f.audit]);
   assert.equal(r.code, 2);
   assert.match(r.stderr, /no member identities/);
 });

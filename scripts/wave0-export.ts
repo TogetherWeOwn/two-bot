@@ -54,7 +54,9 @@ if (!TOKEN) {
 
 const argv = process.argv.slice(2);
 const outDir = argv[argv.indexOf('--out') + 1] && argv.includes('--out') ? argv[argv.indexOf('--out') + 1] : 'data/wave0';
-const AUDIT = process.env.WAVE0_AUDIT_PATH ?? 'data/server-audit-2026-08-19.json';
+// TOG-8963 removed the snapshot from HEAD (member user IDs); it lives on in
+// history. Point at a local copy, or leave unset to skip the drift check.
+const AUDIT = process.env.WAVE0_AUDIT_PATH;
 const VOICE_LOG_CHANNEL = process.env.WAVE0_VOICE_LOG_ID ?? '1139711709980925962'; // #voice-log
 const VOICE_DAYS = 90;
 
@@ -124,7 +126,7 @@ const writeCsv = (file: string, header: string[], rows: string[][]) => {
 
 say('');
 say('TWO Wave 0 pre-flight — read-only. No change is issued to the server.');
-say(`guild ${GUILD}   audit base ${AUDIT}`);
+say(`guild ${GUILD}   audit base ${AUDIT ?? '(none — drift check skipped)'}`);
 say('');
 
 // ---------------------------------------------------------------------------
@@ -304,11 +306,11 @@ if (scan.messages.length === 0) {
 // ---------------------------------------------------------------------------
 // 5. Drift: live vs the 2026-08-19 snapshot (§7 Wave 0.4).
 // ---------------------------------------------------------------------------
-say('## 5. Drift against ' + AUDIT);
+say('## 5. Drift against ' + (AUDIT ?? '(no snapshot — skipped)'));
 say('');
-if (!existsSync(AUDIT)) {
-  say(`- ${AUDIT} not found; skipped. This is the diff base §7 Wave 0.4 requires.`);
-  drift.push(`audit snapshot ${AUDIT} missing — no drift check performed`);
+if (!AUDIT || !existsSync(AUDIT)) {
+  say(`- ${AUDIT ?? 'no snapshot configured'}; skipped. This is the diff base §7 Wave 0.4 requires.`);
+  drift.push(`audit snapshot ${AUDIT ?? 'unconfigured'} — no drift check performed`);
 } else {
   interface AuditRole { role_id: string; name: string; members_holding: number; dangerous_permissions?: string }
   interface Audit { roles: AuditRole[]; channels: { id: string; name: string }[]; categories: { id: string; name: string }[] }

@@ -16,7 +16,14 @@
  *   TWO_HOST_DB=postgres://... TWO_HOST_SECRET=... \
  *   TWO_HOST_CHANNEL_KEY=qa-throwaway:<thread id> \
  *   DISCORD_STAGING_BOT_TOKEN=... DISCORD_STAGING_GUILD_ID=... \
- *   node internal-actions-host-real.ts
+ *   node internal-actions-host-real.ts --live
+ *
+ * Requires --live (TOG-6496). Without it the script refuses with exit 2
+ * before reading credentials or contacting Discord: every action this host
+ * serves is a real effect in the staging guild, so a copy-pasted mock-host
+ * command line must not boot against the real transport by accident. --live
+ * means the real transport, not the live guild: the guild is still staging,
+ * bound by DISCORD_STAGING_GUILD_ID.
  *
  * The channel key MUST name a throwaway. `announcement.post` here puts a real
  * message in front of real people if it names a member-facing channel, and this
@@ -36,6 +43,7 @@ import { KeyRing } from '../src/internal/signing.ts';
 import { DiscordActions } from '../src/internal/discordActions.ts';
 import { InternalActionStore } from '../src/internal/store.ts';
 import { buildRoleKeys, buildChannelKeys, IMPLEMENTED_ACTIONS } from '../src/internal/actions.ts';
+import { SettingsStore } from '../src/core/settings.ts';
 import { openDb } from '../src/store/db.ts';
 
 function env(name: string, fallback?: string): string {
@@ -51,12 +59,30 @@ function env(name: string, fallback?: string): string {
 // runs before env() can exit(2) on missing TWO_HOST_DB. --help needs no env,
 // no database, no Discord, no socket.
 if (process.argv.includes('--help')) {
-  console.log('usage: TWO_HOST_DB=postgres://... TWO_HOST_SECRET=... TWO_HOST_CHANNEL_KEY=qa-throwaway:<thread> DISCORD_STAGING_BOT_TOKEN=... node scripts/internal-actions-host-real.ts');
+  console.log('usage: TWO_HOST_DB=postgres://... TWO_HOST_SECRET=... TWO_HOST_CHANNEL_KEY=qa-throwaway:<thread> DISCORD_STAGING_BOT_TOKEN=... node scripts/internal-actions-host-real.ts --live');
   console.log('');
   console.log('TOG-463 step 1: internal-actions host wired to the REAL Discord REST API and staging token.');
   console.log('Prints one JSON line `acceptance_host_ready`, then serves until SIGTERM.');
   console.log('The channel key MUST name a throwaway: announcement.post puts a real message in the staging guild.');
+  console.log('Requires --live: without it the script refuses before reading credentials or contacting Discord.');
   process.exit(0);
+}
+
+// TOG-6496: --live is the only thing that may boot this host. Every action it
+// serves is a real effect in the staging guild, so a copy-pasted mock-host
+// command line must not boot against the real transport by accident. First
+// statement of the body, before any env() read: with required variables
+// missing the run should still refuse for the missing flag, not for a
+// credential, and --help above stays flag-free.
+const LIVE_FLAG = '--live';
+if (!process.argv.includes(LIVE_FLAG)) {
+  console.error(
+    'Refusing to start the REAL-transport host without --live. ' +
+      'This process issues live Discord REST calls against the staging guild; ' +
+      'add --live to declare that intent, or run scripts/internal-actions-host.ts (mock transport) instead. ' +
+      'Nothing was read, nothing was contacted.',
+  );
+  process.exit(2);
 }
 
 const DB_SPEC = env('TWO_HOST_DB');
@@ -116,6 +142,12 @@ if (!meRes.ok) {
 const db = await openDb(DB_SPEC, { schema: SCHEMA, applicationName: `two-bot-qa:${SCHEMA}` });
 const store = new InternalActionStore(db);
 
+// Same composition as src/index.ts (TOG-4230): the config store behind
+// settings.get / settings.set. Without it both verbs refuse with
+// action_not_allowed, and this host would not be measuring the bot.
+const settings = new SettingsStore(db);
+await settings.load();
+
 const srv = await startInternalActions({
   host: '127.0.0.1',
   port: PORT,
@@ -127,6 +159,7 @@ const srv = await startInternalActions({
   channelKeys: buildChannelKeys(CHANNEL_SPEC),
   enabled: new Set<string>(IMPLEMENTED_ACTIONS),
   store,
+  settings,
 });
 
 console.log(
