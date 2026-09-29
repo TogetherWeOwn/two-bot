@@ -349,7 +349,7 @@ test('pollFeeds without a reader throws before any send', async () => {
   assert.equal(discord.posts.length, 0);
 });
 
-test('pollFeeds caps at 20 items, delivers oldest first, then dedupes', async () => {
+test('pollFeeds advances past the 20-post cap across polls, then dedupes (TOG-9345)', async () => {
   await reset();
   const discord = new FakeDiscord();
   const items: FeedItem[] = Array.from({ length: 25 }, (_, i) => ({
@@ -360,14 +360,26 @@ test('pollFeeds caps at 20 items, delivers oldest first, then dedupes', async ()
     id: 'feed-cap', guildId: GUILD, channelId: CHANNEL, kind: 'rss',
     source: 'https://example.com/feed.xml', actorId: USER, now: NOW,
   });
+  // Poll 1: oldest 20 post (k24..k5), newest 5 defer — no silent drop.
   assert.equal(await service.pollFeeds(GUILD, NOW), 20);
   assert.equal(discord.posts.length, 20);
-  assert.ok(discord.posts[0]?.content.includes('T19'), 'oldest of the capped window posts first');
-  assert.ok(discord.posts[19]?.content.includes('T0'));
+  assert.ok(discord.posts[0]?.content.includes('T24'), 'oldest of the listing posts first');
+  assert.ok(discord.posts[19]?.content.includes('T5'));
   for (const post of discord.posts) assert.match(post.nonce ?? '', /^[a-f0-9]{24}$/);
-  assert.equal(await service.pollFeeds(GUILD, NOW), 0, 'second poll delivers nothing new');
-  assert.equal(discord.posts.length, 20);
-  assert.equal(await auditCount('feed.poll'), 2);
+  const firstPoll = await db.prepare(
+    `SELECT outcome, reason FROM announcements_audit_log WHERE action = ? AND target_key = ? ORDER BY created_at LIMIT 1`,
+  ).get<{ outcome: string; reason: string | null }>('feed.poll', 'feed-cap');
+  assert.equal(firstPoll?.outcome, 'read 25');
+  assert.match(firstPoll?.reason ?? '', /deferred 5 by per-poll cap/, 'overflow is distinguished from delivered');
+  // Poll 2: the window advances onto the deferred tail (k4..k0), oldest first.
+  assert.equal(await service.pollFeeds(GUILD, NOW), 5);
+  assert.equal(discord.posts.length, 25);
+  assert.ok(discord.posts[20]?.content.includes('T4'));
+  assert.ok(discord.posts[24]?.content.includes('T0'));
+  // Poll 3: everything delivered — dedupe holds.
+  assert.equal(await service.pollFeeds(GUILD, NOW), 0, 'third poll delivers nothing new');
+  assert.equal(discord.posts.length, 25);
+  assert.equal(await auditCount('feed.poll'), 3);
 });
 
 test('pollFeeds bounds every read with an AbortSignal.timeout at or below 60s', async () => {
