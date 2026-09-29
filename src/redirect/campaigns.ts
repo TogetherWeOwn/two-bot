@@ -34,6 +34,23 @@ export function isValidSlug(slug: string): boolean {
 }
 
 /**
+ * Slugs the redirect will never hand to a campaign (TOG-9925).
+ *
+ * `GET /healthz` is answered before campaign lookup in server.ts so the
+ * liveness probe never touches the database - so a campaign named `healthz`
+ * would silently die: the exact-lowercase path returns 200 with no redirect
+ * and no click, while only case variants (lowercased before lookup) redirect.
+ * Refuse it at add() time instead of reordering the probe, which health
+ * checks depend on. `/favicon.ico` and `/robots.txt` need no entry here: the
+ * `.` already keeps them out of SLUG, so add() refuses them as invalid.
+ */
+export const RESERVED_SLUGS: ReadonlySet<string> = new Set(['healthz']);
+
+export function isReservedSlug(slug: string): boolean {
+  return RESERVED_SLUGS.has(slug.toLowerCase());
+}
+
+/**
  * A Discord invite code as it appears after `discord.gg/`.
  *
  * Discord's own codes are alphanumeric; vanity URLs additionally allow hyphens.
@@ -144,6 +161,11 @@ export class CampaignStore {
     if (!isValidSlug(c.slug)) {
       throw new Error(
         `Invalid campaign slug "${c.slug}". Lowercase letters, digits and hyphens, 2-40 characters.`,
+      );
+    }
+    if (isReservedSlug(c.slug)) {
+      throw new Error(
+        `Campaign slug "${c.slug}" is reserved - GET /${c.slug.toLowerCase()} is answered before campaign lookup and would never redirect. Pick another slug.`,
       );
     }
     if (!isValidInviteCode(c.inviteCode)) {
