@@ -307,8 +307,16 @@ export class AnnouncementsService {
               const messageId = await this.discord.postMessage(feed.channelId, content, { nonce });
               if (await this.store.markDelivered(feed.id, itemKey, claimToken, messageId, now.toISOString())) delivered++;
             } catch (error) {
-              await this.store.releaseDelivery(feed.id, itemKey, claimToken);
-              throw error;
+              // TOG-9347: ambiguous send (accept-then-reset) must reconcile by
+              // nonce before releasing the claim, mirroring createLfg above.
+              // Without this the next poll re-sends the same nonce content.
+              const recovered = await this.discord.findMessageByNonce?.(feed.channelId, nonce).catch(() => null);
+              if (recovered) {
+                if (await this.store.markDelivered(feed.id, itemKey, claimToken, recovered, now.toISOString())) delivered++;
+              } else {
+                await this.store.releaseDelivery(feed.id, itemKey, claimToken);
+                throw error;
+              }
             }
           } catch (error) {
             await this.store.audit({
