@@ -185,6 +185,18 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     why: 'the voice-sessions averages CLI itself, not just the helpers underneath it - without this floor a silent skip re-opens the startKnown averaging gap',
   },
   {
+    // TOG-9993. The voice-reconcile sweep run twice end to end through the
+    // real npm entry: byte-identical reports (3 resolved, 4 flagged, 1
+    // complete) and an unchanged events table. Read-only by design, so the
+    // double run is the property; without this floor a future write path or
+    // unstable output would stay green while every re-run drifted. Counted
+    // from the 2 top-level test() blocks; CI's postgres job confirms the
+    // count on the first run after this commit.
+    file: 'test/e2e.voicereconcile-idempotency.test.ts',
+    minTests: 2,
+    why: 'the voice-reconcile idempotency proof itself - without this floor a silent skip re-opens the double-run drift gap',
+  },
+  {
     // TOG-6493. The audit kill switch operated end to end through the real
     // CLI: disengaged status on a fresh schema, halt engages and a second
     // halt changes nothing, seeded pending rows are reported honestly, and
