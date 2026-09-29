@@ -115,6 +115,10 @@ export const SETTING_CLASSES: Readonly<Record<string, SettingClass>> = {
   TWO_HEALTH_PORT: 'env_only',
   TWO_REDIRECT_BIND_HOST: 'env_only',
   TWO_REDIRECT_PORT: 'env_only',
+  // Whose X-Forwarded-For the redirect believes when picking its throttle
+  // bucket (src/redirect/config.ts:58). A stored value could bless a spoofed
+  // header, so this stays with the network binds, never in guild_settings.
+  TWO_REDIRECT_TRUSTED_PROXIES: 'env_only',
   // Repoints discord.js at another API host. Intended for tools/mock-discord;
   // settable from a web UI it is a redirect of every token-bearing request.
   DISCORD_API_BASE: 'env_only',
