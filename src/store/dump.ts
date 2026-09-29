@@ -189,8 +189,10 @@ export interface DumpManifest {
   tables: DumpTableInfo[];
   /**
    * High-water mark per BIGSERIAL table, so a restore can put each id
-   * sequence back where it belongs. `eventsSequence` is kept for readers of
-   * v3 dumps; v4 restores use `sequences`.
+   * sequence back where it belongs. `eventsSequence` is the v3-era field,
+   * carried forward so v4 manifests stay structurally comparable; there is
+   * no v3 read path (`inspect()` refuses any version != 4, pinned in
+   * test/unit.dumpread.test.ts), and v4 restores use `sequences`.
    */
   eventsSequence: number;
   sequences: Partial<Record<DumpTable, number>>;
