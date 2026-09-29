@@ -30,13 +30,20 @@ export const MISSING_PERMISSIONS_CODE = 50013;
 export type OverwriteFlag = 'ViewChannel' | 'Connect' | 'Speak' | 'ManageChannels' | 'MoveMembers' | 'ManageRoles';
 
 /**
- * Every permission `overwritesFor` hands out, which is the same thing as every
- * permission the bot must itself hold.
+ * Every permission the bot must hold on the voice category for the feature to
+ * work: creating channels, moving members, and editing overwrites for the
+ * owner controls (lock/hide/permit/reject/claim/transfer).
  *
- * Discord refuses with 50013 when a bot creates an overwrite granting a
- * permission it does not hold, so a single missing flag here turns every join
- * of the generator into a failed create. A test asserts this list is exactly
- * the union of the flags `overwritesFor` allows, so the two cannot drift.
+ * This is deliberately NOT the same set the create path confers. Live staging
+ * proof (TOG-9541, 2026-09-29): the bot holds all six flags on the category
+ * (preflight `missing: []`), yet any create whose overwrites confer
+ * ManageRoles fails `403 code 50013`, while the identical create with
+ * ManageRoles stripped from ALL overwrites succeeds (`201`). A post-create
+ * PATCH self-grant of ManageRoles fails the same way. The bot can hold
+ * category-level ManageRoles and exercise it on later overwrite edits, but it
+ * cannot confer the flag in a create or PATCH overwrite. So ManageRoles stays
+ * required here (controls need it) while `tempVoiceOverwrites` must never
+ * grant it. A test pins that split so the two cannot silently re-merge.
  */
 export const TEMP_VOICE_REQUIRED_PERMISSIONS: readonly OverwriteFlag[] = [
   'ViewChannel',
@@ -134,16 +141,25 @@ export interface ReconcileReport {
 const MIN_BITRATE = 8000;
 
 /**
- * Module-level so a test can assert its granted flags are exactly
- * TEMP_VOICE_REQUIRED_PERMISSIONS without reaching into a private method.
+ * Module-level so tests can assert on its granted flags without reaching into
+ * a private method.
+ *
+ * The bot overwrite deliberately confers NO ManageRoles (TOG-9541). Live
+ * staging proof shows the staging bot holds category-level ManageRoles yet
+ * Discord 403/50013s any create — or post-create PATCH — whose overwrites
+ * confer the flag. Owner controls (lock/hide/permit/reject/claim/transfer)
+ * keep working because they only ever touch ViewChannel/Connect/Speak and
+ * ManageChannels/MoveMembers grants, which the bot edits under its
+ * category-level ManageRoles; no control ever confers ManageRoles itself.
  */
 export function tempVoiceOverwrites(guildId: string, botId: string, ownerId: string): OverwriteSpec[] {
   return [
     // Public by default. `lock` denies Connect for @everyone; `hide` denies
     // ViewChannel. Both are per-channel edits of this same overwrite.
     { id: guildId, type: 'role', allow: ['ViewChannel', 'Connect', 'Speak'] },
-    // Only the bot needs ManageRoles to edit channel overwrites for controls.
-    { id: botId, type: 'member', allow: ['ViewChannel', 'Connect', 'ManageChannels', 'MoveMembers', 'ManageRoles'] },
+    // NOTE: no ManageRoles here — the bot cannot confer it in a create or
+    // PATCH overwrite (403/50013 live), even while holding it on the category.
+    { id: botId, type: 'member', allow: ['ViewChannel', 'Connect', 'ManageChannels', 'MoveMembers'] },
     { id: ownerId, type: 'member', allow: ['ViewChannel', 'Connect', 'Speak', 'ManageChannels', 'MoveMembers'] },
   ];
 }
@@ -378,8 +394,9 @@ export class TempVoiceService {
       }
       if (code === MISSING_PERMISSIONS_CODE) {
         // Retrying cannot fix this, so the message must not ask for a retry.
-        // The overwrite names permissions the bot has to hold itself, and the
-        // usual cause is exactly one of them missing on the category.
+        // The create path confers only flags the bot can grant (TOG-9541), so
+        // a 50013 here means a category-level grant the preflight also checks
+        // is missing — the usual cause is exactly one of them.
         await this.store.audit(
           { guildId: input.guildId, actorId: input.userId, channelId: null, action: 'create', outcome: 'refused', reason: 'missing_permissions' },
           this.iso(),
