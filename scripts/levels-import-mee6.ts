@@ -7,7 +7,7 @@
  *
  * Exit codes: 0 fine, 1 the export or the write did not reconcile, 2 usage.
  */
-import { writeFileSync } from 'node:fs';
+import { statSync, writeFileSync } from 'node:fs';
 import { openDb } from '../src/store/db.ts';
 import { LIVE_GUILD_ID } from '../src/staging/spec.ts';
 import {
@@ -46,8 +46,12 @@ function optional(name: string): string | null {
   return value;
 }
 
-const positional = process.argv.slice(2).filter((a) => !a.startsWith('--'));
-const command = positional[0] === 'inventory' || positional[0] === 'import' ? positional[0] : 'import';
+const rawCommand = process.argv[2];
+if (rawCommand !== undefined && !rawCommand.startsWith('--') && rawCommand !== 'inventory' && rawCommand !== 'import') {
+  console.error(`Unknown subcommand "${rawCommand}".`);
+  usage();
+}
+const command = rawCommand === 'inventory' ? 'inventory' : 'import';
 
 const guildId = arg('--guild');
 if (!/^\d{17,20}$/.test(guildId)) throw new Error('--guild must be a Discord snowflake');
@@ -72,6 +76,22 @@ if (command === 'import' && guildId === LIVE_GUILD_ID && !process.argv.includes(
 const file = command === 'import' ? arg('--file') : null;
 const manifestPath = optional('--manifest');
 
+// Fail fast before the database opens: a manifest destination that is already
+// a directory can never accept the evidence write, so refusing here keeps a
+// doomed --apply from mutating member_levels first (TOG-9914).
+if (command === 'import' && manifestPath) {
+  let destinationIsDirectory = false;
+  try {
+    destinationIsDirectory = statSync(manifestPath).isDirectory();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+  }
+  if (destinationIsDirectory) {
+    console.error(`--manifest destination is a directory, refusing to import: ${manifestPath}`);
+    process.exit(2);
+  }
+}
+
 const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
 if (!databaseUrl) throw new Error('TWO_DATABASE_URL is required.');
 const db = await openDb(databaseUrl, {
@@ -88,8 +108,20 @@ try {
       allowLower: process.argv.includes('--allow-lower'),
     });
     const rendered = JSON.stringify(manifest, null, 2);
-    if (manifestPath) writeFileSync(manifestPath, `${rendered}\n`);
+    // Stdout first, so a failed --manifest file write never destroys the only
+    // copy of what was just mutated (TOG-9914).
     console.log(rendered);
+    if (manifestPath) {
+      try {
+        writeFileSync(manifestPath, `${rendered}\n`);
+      } catch (error) {
+        console.error(
+          `Failed to write --manifest ${manifestPath}: ${(error as Error).message}. ` +
+            'The manifest above was still printed to stdout.',
+        );
+        process.exitCode = 1;
+      }
+    }
   }
 } catch (error) {
   if (!(error instanceof Mee6ExportError)) throw error;
