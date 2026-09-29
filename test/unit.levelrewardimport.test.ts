@@ -43,6 +43,12 @@ test('the fixture is one real export: XP and reward parsers both read it', () =>
   assert.equal(parseMee6RoleRewards(exportText).length, 7);
 });
 
+test('parseMee6Export strips a leading UTF-8 BOM (TOG-9917)', () => {
+  // Windows editors / Excel round-trips commonly leave a BOM; without the
+  // strip this throws "file is not valid JSON" on otherwise valid JSON.
+  assert.equal(parseMee6Export('\uFEFF' + exportText).length, 3);
+});
+
 test('every reward in the fixture is classified, once, with its reason', () => {
   const report = plan(parseMee6RoleRewards(exportText));
 
