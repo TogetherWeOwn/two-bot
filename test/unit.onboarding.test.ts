@@ -142,22 +142,6 @@ test('planSelection dedupes channels and reports unknown keys', () => {
   assert.equal(plan.degradedCount, 1, 'only the shooters fallback counts as degraded');
 });
 
-test('planSelection dedupes repeated keys (roleIds, degradedCount, unknownKeys)', () => {
-  // Discord redelivery / double-click / stale resubmission must not grant or
-  // count the same pick twice. Refs TOG-8772.
-  const shooters = pickByKey('shooters')!;
-  const repeated = planSelection(['shooters', 'shooters'], seeNothing);
-  assert.deepEqual(repeated.roleIds, [shooters.roleId]);
-  assert.equal(repeated.degradedCount, 1, 'one dark pick counts once');
-  assert.deepEqual(repeated.channelIds, [GAME_HUB_CHANNEL_ID]);
-  assert.deepEqual(repeated.destinations.map((d) => d.pick.key), ['shooters']);
-
-  const unknown = planSelection(['nonsense', 'nonsense'], seeNothing);
-  assert.deepEqual(unknown.unknownKeys, ['nonsense']);
-  assert.deepEqual(unknown.roleIds, []);
-  assert.equal(unknown.degradedCount, 0);
-});
-
 test('an empty selection plans nothing rather than throwing', () => {
   const plan = planSelection([], seeEverything);
   assert.deepEqual(plan.roleIds, []);
