@@ -107,7 +107,7 @@ test('TOG-8977 pinned settings flag defaults off, enables both verbs when set', 
   // excerpt, whose MODERATION_ACTIONS spread is stubbed empty in the sandbox —
   // so pass the implemented-set membership from the same fixture explicitly.
   const implemented = new Set(
-    blocks.implemented.code.match(/'([a-z]+\.[a-z_]+)'/g)?.map((q) => q.slice(1, -1)) ?? [],
+    blocks.implemented.code.match(/'([a-z]+\.[a-z_]+)'/g)?.map((q: string) => q.slice(1, -1)) ?? [],
   );
   assert.ok(implemented.has('settings.get') && implemented.has('settings.set'));
   for (const action of ['settings.get', 'settings.set']) {
