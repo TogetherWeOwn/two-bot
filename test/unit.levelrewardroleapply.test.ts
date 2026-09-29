@@ -268,3 +268,103 @@ test('a revoke that does not read back fails loudly and says the role may remain
   const fake = fakePort(TWO_STAGING_GUILD_ID, [], { revokeDoesNotLand: true });
   await assert.rejects(() => run(fake.port), /may still be on the member/);
 });
+
+test('a report with no guild at all is refused, naming (missing)', () => {
+  const { guildId, ...rest } = report();
+  void guildId;
+  assert.throws(
+    () => selectMappedReward(rest),
+    (err: unknown) =>
+      err instanceof RewardRoleApplyError &&
+      err.exitCode === 2 &&
+      /\(missing\)/.test(err.message) &&
+      /not the TWO Staging guild/.test(err.message),
+  );
+});
+
+test('same-level mapped rewards break ties by role id, deterministically', () => {
+  const tied = report({
+    mapped: [
+      { level: 5, roleId: '900000000000000024', roleName: 'Level 5 Alt', position: 12 },
+      { level: 5, roleId: '900000000000000020', roleName: 'Level 5', position: 10 },
+    ],
+  });
+  assert.equal(selectMappedReward(tied).roleId, '900000000000000020');
+  assert.equal(selectMappedReward(tied, 5).roleId, '900000000000000020');
+});
+
+test('a role with no permission bitfield contributes nothing to the effective mask', () => {
+  const roles: PartialRole[] = [
+    { id: 'e', name: '@everyone', position: 0, managed: false, permissions: '0' },
+    { id: 'b', name: 'bot', position: 5, managed: true },
+  ] as PartialRole[];
+  assert.equal(effectivePermissions(roles, ['b'], 'e'), 0n);
+});
+
+test('the logger is optional: a run without one still grants, verifies and cleans up', async () => {
+  const fake = fakePort(TWO_STAGING_GUILD_ID, [OTHER_ROLE]);
+  const summary = await applyRewardRole(fake.port, {
+    memberId: MEMBER,
+    target: selectMappedReward(report()),
+    roles: ROLES,
+    botId: BOT_ID,
+    ownerId: null,
+  });
+  assert.equal(summary.alreadyHeld, false);
+  assert.equal(summary.residueRestored, true);
+  assert.deepEqual(fake.current(), [OTHER_ROLE]);
+});
+
+test('residue drift is reported, not hidden: a role lost mid-run reads back as not restored', async () => {
+  // A concurrent change drops the member's other role between grant and final
+  // readback: the revoke still verifies, but the summary says residue is unrestored.
+  let roles = [OTHER_ROLE];
+  const calls: Call[] = [];
+  const port: RewardRolePort = {
+    guildId: TWO_STAGING_GUILD_ID,
+    async memberRoles(memberId) {
+      calls.push({ op: 'read', guildId: TWO_STAGING_GUILD_ID, memberId });
+      return [...roles];
+    },
+    async grantRole(memberId, roleId) {
+      calls.push({ op: 'grant', guildId: TWO_STAGING_GUILD_ID, memberId, roleId });
+      if (!roles.includes(roleId)) roles.push(roleId);
+    },
+    async revokeRole(memberId, roleId) {
+      calls.push({ op: 'revoke', guildId: TWO_STAGING_GUILD_ID, memberId, roleId });
+      // The revoke lands, but the member's unrelated role vanished meanwhile.
+      roles = roles.filter((id) => id !== roleId && id !== OTHER_ROLE);
+    },
+  };
+  const summary = await applyRewardRole(port, {
+    memberId: MEMBER,
+    target: selectMappedReward(report()),
+    roles: ROLES,
+    botId: BOT_ID,
+    ownerId: null,
+  });
+  assert.equal(summary.positiveReadback, true);
+  assert.equal(summary.negativeReadback, true);
+  assert.equal(summary.residueRestored, false);
+  assert.ok(calls.every((c) => c.guildId === TWO_STAGING_GUILD_ID));
+  assert.ok(!calls.some((c) => c.guildId === LIVE_GUILD_ID));
+});
+
+test('a dry run resolves the target, pre-checks and reads once - zero grants, zero revokes', async () => {
+  const fake = fakePort(TWO_STAGING_GUILD_ID, [OTHER_ROLE]);
+  // The script's dry-run ordering, without the script's Discord or database:
+  // pick the reward from the probe artifact, re-check hierarchy, read the member.
+  const target = selectMappedReward(report());
+  const eligibility = precheckGrantEligibility({
+    roles: ROLES,
+    botId: BOT_ID,
+    ownerId: null,
+    targetRoleId: target.roleId,
+  });
+  assert.equal(eligibility.ownerBypass, false);
+  assert.deepEqual(await fake.port.memberRoles(MEMBER), [OTHER_ROLE]);
+  assert.deepEqual(fake.current(), [OTHER_ROLE]);
+  assert.deepEqual(fake.calls.map((c) => c.op), ['read']);
+  assert.ok(fake.calls.every((c) => c.guildId === TWO_STAGING_GUILD_ID));
+  assert.ok(!fake.calls.some((c) => c.guildId === LIVE_GUILD_ID));
+});
