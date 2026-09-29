@@ -21,6 +21,12 @@ export interface TempVoiceRow {
   name: string;
   createdAt: string;
   lastRenamedAt: string | null;
+  /**
+   * A throttled rename the service promised would land ("queued"), journaled
+   * the way pendingOwnerId is. Cleared when the name lands; reseeded into the
+   * throttle by boot reconcile so a restart cannot silently drop the promise.
+   */
+  pendingChannelName: string | null;
   emptySince: string | null;
 }
 
@@ -51,6 +57,7 @@ function mapRow(row: Record<string, unknown>): TempVoiceRow {
     name: String(row.name),
     createdAt: String(row.created_at),
     lastRenamedAt: text(row.last_renamed_at),
+    pendingChannelName: text(row.pending_channel_name),
     emptySince: text(row.empty_since),
   };
 }
@@ -135,6 +142,7 @@ export class TempVoiceStore {
           name: input.name,
           createdAt: input.createdAt,
           lastRenamedAt: null,
+          pendingChannelName: null,
           emptySince: null,
         },
       };
@@ -236,10 +244,26 @@ export class TempVoiceStore {
     return result.changes === 1;
   }
 
+  /**
+   * A name landing also clears any queued intent: the journal records what the
+   * user was promised, and a landed name means nothing is owed anymore. Writes
+   * the clear unconditionally so a stale intent can never outlive its window,
+   * even if the journaled name and the landed name disagree.
+   */
   async setName(id: string, name: string, renamedAt: string): Promise<void> {
     await this.db.prepare(
-      `UPDATE temp_voice_channels SET name = ?, last_renamed_at = ? WHERE id = ?`,
+      `UPDATE temp_voice_channels SET name = ?, last_renamed_at = ?, pending_channel_name = NULL WHERE id = ?`,
     ).run(name, renamedAt, id);
+  }
+
+  /**
+   * Journal a throttled rename BEFORE the service replies "queued". `null`
+   * reverts the journal without touching the landed name.
+   */
+  async setPendingName(id: string, pendingName: string | null): Promise<void> {
+    await this.db.prepare(
+      `UPDATE temp_voice_channels SET pending_channel_name = ? WHERE id = ?`,
+    ).run(pendingName, id);
   }
 
   /** `null` clears the marker when a channel is occupied again. */

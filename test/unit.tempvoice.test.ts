@@ -363,6 +363,20 @@ describe('rename throttling', () => {
     assert.equal(throttle.request('c', 'one', 2000).apply, false);
   });
 
+  test('a restart restores the queued name, not just the window (TOG-9560)', () => {
+    // The card's probe: queue `second` 60s after `first`, then restart with
+    // only the timestamp reseeded. Before the fix, pending() was null.
+    const before = new RenameThrottle();
+    before.request('c', 'first', 0);
+    before.request('c', 'second', 60_000);
+    assert.equal(before.pending('c', 'first'), 'second');
+
+    const restarted = new RenameThrottle();
+    restarted.seed('c', 0, 'second');
+    assert.equal(restarted.pending('c', 'first'), 'second');
+    assert.equal(restarted.ready('c', RENAME_MIN_INTERVAL_MS), true);
+  });
+
   test('opens again once the window passes', () => {
     const throttle = new RenameThrottle();
     throttle.request('c', 'one', 0);
@@ -894,6 +908,34 @@ describe('owner controls', () => {
     clock += RENAME_MIN_INTERVAL_MS;
     await svc.sweep(GUILD);
     assert.equal(gateway.channels.get(channelId)!.name, 'second', 'the queued name lands once the window opens');
+  });
+
+  test('a queued rename survives a restart and still lands (TOG-9560)', async () => {
+    await setup();
+    assert.equal((await svc.rename(ctx(OWNER, channelId), 'first')).status, 'ok');
+
+    clock += 60_000;
+    const queued = await svc.rename(ctx(OWNER, channelId), 'second');
+    assert.match(queued.message, /queued/);
+    assert.equal(
+      (await store.getByChannel(GUILD, channelId))?.pendingChannelName,
+      'second',
+      'the queued promise is journaled before the reply',
+    );
+
+    // Restart: brand new service (fresh in-memory throttle), same database.
+    const restarted = service();
+    await restarted.reconcile(GUILD);
+    assert.equal(gateway.channels.get(channelId)!.name, 'first', 'the window has not opened yet');
+
+    clock += RENAME_MIN_INTERVAL_MS;
+    await restarted.sweep(GUILD);
+    assert.equal(gateway.channels.get(channelId)!.name, 'second', 'the queued name lands after the restart');
+    assert.equal(
+      (await store.getByChannel(GUILD, channelId))?.pendingChannelName,
+      null,
+      'landing clears the journal',
+    );
   });
 
   test('a filtered name never reaches Discord', async () => {

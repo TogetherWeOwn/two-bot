@@ -1,0 +1,11 @@
+-- TOG-9560: persist a throttled (queued) rename across restarts.
+--
+-- `rename` answers a throttled request with "queued and lands in about Xs",
+-- which is a promise the process must keep even if it restarts before the
+-- window opens. The queued name lived only in the in-memory RenameThrottle,
+-- so a restart silently dropped it and the rename never landed.
+--
+-- The column is the journal (like pending_owner_id from 0037): rename writes
+-- the intent before replying, setName clears it when the name lands, and boot
+-- reconcile reseeds the throttle from the row so the sweep can flush it.
+ALTER TABLE temp_voice_channels ADD COLUMN IF NOT EXISTS pending_channel_name TEXT;

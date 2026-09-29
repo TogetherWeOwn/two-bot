@@ -2,9 +2,11 @@
  * Temp-voice index audit, pinned as a test (TOG-6476).
  *
  * Follow-up to TOG-5709 (event-store benchmark + index migration):
- * migrations/0036_temp_voice.sql and 0037_temp_voice_owner_transition.sql
- * land temp-voice tables incl. the pending_owner_id column the ownership
- * transition journal writes on. The EXPLAIN verdict is INDEXED - every hot
+ * migrations/0036_temp_voice.sql, 0037_temp_voice_owner_transition.sql and
+ * 0039_temp_voice_pending_rename.sql land temp-voice tables incl. the
+ * pending_owner_id column the ownership transition journal writes on and the
+ * pending_channel_name column the queued-rename journal writes on (TOG-9560).
+ * The EXPLAIN verdict is INDEXED - every hot
  * path already rides an index, so no new migration ships here. This file
  * guards the wiring the verdict depends on: the four temp-voice indexes
  * exist with the expected definitions, and the owner-transition journal

@@ -533,8 +533,10 @@ export class TempVoiceService {
       if (row.pendingOwnerId !== null && !(await this.recoverOwnerChange(guildId, channelId))) continue;
       await this.store.setEmptySince(row.id, null);
       // Only a real rename starts a window. Seeding from `createdAt` would
-      // make a restart silently cost the owner their first rename.
-      if (row.lastRenamedAt) this.throttle.seed(channelId, Date.parse(row.lastRenamedAt));
+      // make a restart silently cost the owner their first rename. The queued
+      // name is reseeded too (TOG-9560): without it a restart drops the rename
+      // the service already promised would land, and the sweep never flushes.
+      if (row.lastRenamedAt) this.throttle.seed(channelId, Date.parse(row.lastRenamedAt), row.pendingChannelName);
       report.adopted++;
     }
 
@@ -597,9 +599,26 @@ export class TempVoiceService {
     return report;
   }
 
-  /** Apply a rename that was throttled earlier, once its window has opened. */
+  /**
+   * Apply a rename that was throttled earlier, once its window has opened.
+   *
+   * The journaled name is the fallback source: reconcile normally reseeds the
+   * throttle from it at boot, but a sweep that runs without a reconcile (or
+   * with a reconcile that predates the queue) must still honor the promise.
+   * The throttle still decides readiness, so the window is never skipped.
+   */
   private async flushPendingRename(row: TempVoiceRow, channelId: string): Promise<void> {
-    const pending = this.throttle.pending(channelId, row.name);
+    let pending = this.throttle.pending(channelId, row.name);
+    if (!pending && row.pendingChannelName) {
+      if (row.pendingChannelName === row.name) {
+        // Landed out of band (renamed directly on Discord): nothing is owed,
+        // so retire the journal instead of carrying it forever.
+        await this.store.setPendingName(row.id, null);
+        return;
+      }
+      this.throttle.seed(channelId, row.lastRenamedAt ? Date.parse(row.lastRenamedAt) : 0, row.pendingChannelName);
+      pending = this.throttle.pending(channelId, row.name);
+    }
     if (!pending || !this.throttle.ready(channelId, this.now())) return;
     try {
       await this.gateway.renameChannel(channelId, pending);
@@ -684,6 +703,11 @@ export class TempVoiceService {
 
     const decision = this.throttle.request(channelId, filtered.name, this.now());
     if (!decision.apply) {
+      // Journal the promise BEFORE replying "queued": the name must survive a
+      // restart (TOG-9560). The journal write and the memory write carry the
+      // same name, so a crash between them can only leave a name the sweep
+      // would converge to anyway once the window opens.
+      await this.store.setPendingName(row.id, filtered.name);
       const seconds = Math.ceil(decision.retryAfterMs / 1000);
       return this.record(ctx, channelId, 'name', {
         status: 'ok',

@@ -42,11 +42,13 @@ export class RenameThrottle {
   /**
    * `lastAppliedAt` comes from the persisted row, so the throttle survives a
    * restart instead of handing a fresh process a free rename per channel.
+   * `pendingName` is the journaled queued rename (TOG-9560): without it a
+   * restart silently drops the name the service already promised would land.
    */
-  seed(channelId: string, lastAppliedAt: number): void {
+  seed(channelId: string, lastAppliedAt: number, pendingName?: string | null): void {
     const existing = this.state.get(channelId);
     if (existing && existing.lastAppliedAt >= lastAppliedAt) return;
-    this.state.set(channelId, { name: existing?.name ?? '', lastAppliedAt });
+    this.state.set(channelId, { name: pendingName ?? existing?.name ?? '', lastAppliedAt });
   }
 
   request(channelId: string, name: string, now: number): RenameDecision {
