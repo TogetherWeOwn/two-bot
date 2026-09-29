@@ -18,12 +18,37 @@ import { formatRosterText } from '../src/analytics/cliFormat.ts';
 import { DiscordRest } from '../src/discord/rest.ts';
 
 const argv = process.argv.slice(2);
-const days = Number(argv.find((a) => /^\d+$/.test(a)) ?? 7);
+
+if (argv.includes('--help') || argv.includes('-h')) {
+  console.log(`roster: list recent members and where they got to (TOG-9791).
+
+Usage:
+  node scripts/roster.ts [days] [--names]
+
+  no args      last 7 days
+  days         last N days, e.g. 30 (a positive integer)
+  --names      resolve display names from Discord (needs DISCORD_TOKEN)
+  --help       this usage, no database needed
+
+Exit codes: 0 the report printed; 1 TWO_DATABASE_URL missing; 2 bad day count.`);
+  process.exit(0);
+}
+
+const daysRaw = argv.find((a) => !a.startsWith('-')) ?? '7';
+const days = Number(daysRaw);
+if (!Number.isFinite(days) || !Number.isInteger(days) || days <= 0) {
+  console.error(`Bad day count "${daysRaw}". Use a positive number of days, e.g. 7.`);
+  process.exit(2);
+}
 const withNames = argv.includes('--names');
 const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
 const guildId = process.env.DISCORD_GUILD_ID ?? '';
 if (!databaseUrl) {
   console.error('roster: TWO_DATABASE_URL is not set.');
+  process.exit(1);
+}
+if (!guildId) {
+  console.error('roster: DISCORD_GUILD_ID is not set - there is no server to report on.');
   process.exit(1);
 }
 
