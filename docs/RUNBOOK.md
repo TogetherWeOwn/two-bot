@@ -185,8 +185,9 @@ The other three are always present on any exit except `2` and `3`.
 
 **These name individual members, and they must never reach GitHub.** `data/*`
 is gitignored precisely so they cannot be committed by accident — verified: all
-four paths are ignored, while `data/server-audit-*.json` is explicitly
-un-ignored because the drift check needs it as its base. Do not paste holder
+four paths are ignored. The old drift-check base (`data/server-audit-*.json`,
+retired from HEAD by TOG-8963) is gone too; the drift check now takes an
+explicit snapshot path or skips. Do not paste holder
 rows into an issue, a PR or a chat channel either. `docs/PRIVACY.md` permits
 storing member ids; it does not permit publishing them.
 
@@ -1103,7 +1104,7 @@ back to them instead of repeating.
 
 | script | purpose | green signal |
 |---|---|---|
-| `audit:collect` | Read-only inventory of the live server → `audit/raw/*.json` (GET-only by construction). | Raw files written, exit `0`. |
+| `audit:collect` | Read-only inventory of the live server → local `audit/raw/*.json` (GET-only by construction; gitignored since TOG-8963, never committed). | Raw files written, exit `0`. |
 | `audit:report` | Raw dump → `audit/channels.csv`, `roles.csv`, `invites.csv`, `summary.json` + walkthrough (never calls Discord). | Tables written, exit `0`. |
 | `audit:halt`, `audit:resume`, `audit:switch` | Kill switch: stop all mirror sends / resume / show state. DB row, survives restart, idempotent. | `audit:switch` shows expected state, held rows deliver after resume. |
 

@@ -79,7 +79,8 @@ const member = (id: string, roles: string[], username = `u${id}`, bot = false) =
 const role = (id: string, name: string, permissions = '0') => ({ id, name, permissions });
 
 /**
- * Holder counts exactly as data/server-audit-2026-08-19.json recorded them.
+ * Holder counts exactly as the 2026-08-19 audit recorded them
+ * (audit/summary.json; the full snapshot lives on in history).
  *
  * Ids are built with BigInt on purpose: a snowflake is well past
  * Number.MAX_SAFE_INTEGER, so `900000000000000000 + n` silently yields the same

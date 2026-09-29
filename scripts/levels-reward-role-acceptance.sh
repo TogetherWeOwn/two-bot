@@ -102,8 +102,8 @@ api_get() {
   printf '%s' "$code"
 }
 
-# --- step 1: staging roles snapshot (never audit/raw/roles.json: that dump
-# --- is the LIVE guild, so mapping against it silently maps nothing). ---
+# --- step 1: staging roles snapshot (always fetch staging fresh: the archived
+# --- audit dump is the LIVE guild, so mapping against it silently maps nothing). ---
 fetch_roles() {
   echo "== step 1: staging roles snapshot =="
   local code;

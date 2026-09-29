@@ -4,10 +4,12 @@
 # looked at it. test/unit.repohygiene.test.ts holds the line.
 node_modules
 data/*
-# the audit snapshots are the whole point of the audit - they are the rollback
-# source for the server migration and the diff base for the next audit
-!data/server-audit-*.json
-!data/server-audit-*.csv
+# Raw server dumps carry community member user IDs, so since the 2026-09-28
+# public-readiness pass (TOG-8963) they stay out of the tree entirely.
+# The derived CSV/aggregate tables in audit/ are the committed record; the
+# collector rebuilds raw/ locally on a maintainer machine when needed.
+# History before that commit still holds the old dumps — do not resurrect them.
+audit/raw/
 # the effort log's FORMAT is committed; the log itself is not. growth-effort.json
 # is hand-kept per deployment, and `npm run review` reports an absent one as
 # absent rather than scoring it as zero hours

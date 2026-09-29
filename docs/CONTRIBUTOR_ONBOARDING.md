@@ -123,7 +123,6 @@ Pick **one** lane. All three count, all three get reviewed by a human.
 [CONTRIBUTING.md](../CONTRIBUTING.md)):
 
 ```bash
-gh auth setup-git   # once per machine; without it git cannot reach the private repo
 git clone https://github.com/TogetherWeOwn/two-bot.git
 cd two-bot
 npm ci --include=dev
@@ -136,17 +135,17 @@ TWO_TEST_DATABASE_URL=postgres://localhost:5432/two_bot_test npm test   # must p
 Without `TWO_TEST_DATABASE_URL` the suite fails fast with
 `TWO_TEST_DATABASE_URL is required` (verified: `npm test` with no database
 errors out of `test/helpers/testDb.ts`, it never runs silently green).
-Open the PR from your branch against `main` **from inside this repo** —
-a fork's PR is refused on purpose (self-hosted runners execute workflow
-code, so `scripts/ci/refuse-fork-pr.sh` fails fork PRs; a maintainer can
-push your branch here instead). CI runs the check job (script-target and
+Fork the repo, branch off `main` in your fork, and open the PR back here.
+First-time contributors need a maintainer to approve the CI run, and the
+self-hosted jobs refuse fork code by policy
+(`scripts/ci/refuse-fork-pr.sh`) — so a maintainer may push your branch into
+this repo instead. Either way, CI runs the check job (script-target and
 credential guards, typecheck, funnel-attribution eval, `test:postgres`
 wrapper, restart-storage provisioning, grant self-test) and the
 postgres job (migrate, web views, website-role checks), plus a secret scan —
 all must be green (full list: [CONTRIBUTING.md](../CONTRIBUTING.md)). A code
-owner reviews it; you cannot approve your own PR (note: review is
-auto-requested from the owner via `.github/CODEOWNERS` but not
-server-enforced on this plan — see [CONTRIBUTING.md](../CONTRIBUTING.md)).
+owner reviews it; you cannot approve your own PR (see
+[CONTRIBUTING.md](../CONTRIBUTING.md)).
 Name branches `type/short-description` (`docs/…`, `fix/…`, `feat/…`).
 Never put a token or private key in a commit — a pushed secret gets rotated,
 not just deleted (the secret scan walks full history, so removing it in a

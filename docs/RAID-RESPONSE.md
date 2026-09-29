@@ -168,12 +168,14 @@ permission thirty times.
 Exit codes: `0` clean · `1` aborted, or some accounts failed · `2` refused to
 start (bad list, count mismatch, no token).
 
-The dry run also cross-checks against `data/server-audit-2026-08-19.json`. That
-file holds **no member roster** — its own `note` says so, and pointing
-`--ids-from` at it gets a specific error rather than an empty run. What it does
+The dry run also cross-checks against `audit/summary.json`. That
+file holds **no member roster** — pointing `--ids-from` at an audit snapshot
+gets a specific error rather than an empty run. What it does
 hold is the envelope: 84 human members, 31 stuck at the rules gate. Every
 confirmed raid account was pending at that gate, so a target list longer than 31
-is flagged as containing something that evidence does not explain.
+is flagged as containing something that evidence does not explain. Pass
+`--context <path>` to cross-check against a different snapshot (e.g. a local
+copy of the retired `data/server-audit-<date>.json` full dump from history).
 
 Execution itself is TOG-411, and it is blocked: the Discord credentials for this
 server are not held by this company (TOG-432). `--execute` without a token says

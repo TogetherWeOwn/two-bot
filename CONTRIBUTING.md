@@ -6,17 +6,16 @@ Requires **Node 24 or newer** plus a running **Postgres 17+** with a scratch
 database for the suite (e.g. `createdb two_bot_test` — CI provides its own
 throwaway service). No Docker, no build step.
 
-All three repos are **private**, so authenticate git first (once per machine —
-`gh` reads `GH_TOKEN` from the environment, and this hands the same token to
-git), then:
-
 ```bash
-gh auth setup-git
 git clone https://github.com/TogetherWeOwn/two-bot.git
 cd two-bot
 npm ci --include=dev
 TWO_TEST_DATABASE_URL=postgres://localhost:5432/two_bot_test npm test
 ```
+
+Outside contributors: fork the repo, branch off `main` in your fork, and open
+a pull request back here. CI runs automatically after a maintainer approves
+the run; all checks must be green before merge.
 
 Without `TWO_TEST_DATABASE_URL` the suite fails fast with
 `TWO_TEST_DATABASE_URL is required` — dozens of test files, including many
@@ -54,17 +53,10 @@ environment file.
 
 ## Branches
 
-Nothing lands on `main` except through a pull request. That applies to me too.
-
-How strongly that is enforced depends on the org's GitHub plan, and it is worth
-knowing which one you are working under, because the failure looks different:
-
-| | What stops you |
-|---|---|
-| **GitHub Team** | The server rejects the push. There is no way around it. |
-| **GitHub Free** (private repos) | GitHub enforces nothing. The `pre-push` hook in your clone refuses, and `main-guard` turns any push that gets through into a red X on `main` within a minute. |
-
-On the free plan the rule is real but the wall is not, so treat a `main-guard`
+Nothing lands on `main` except through a pull request. Branch protection
+rejects direct pushes on the server; the `pre-push` hook in your clone
+catches the mistake earlier, and `main-guard` turns anything that gets
+through into a red X on `main` within a minute. Treat a `main-guard`
 failure as something to go and talk about, not a flaky job to re-run.
 
 Name branches `type/short-description`:

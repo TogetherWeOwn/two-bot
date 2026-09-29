@@ -10,13 +10,15 @@
  * changing the rubric without re-scanning 130 channels.
  *
  * Library + CLI (TOG-6493): the report below is exported as runAuditReport
- * and pinned by test/unit.auditcollectreport.test.ts against the committed
- * audit/raw dump (byte-identical to audit/*.csv, summary.json and
- * data/server-audit-*.json). Importing this file never reads files, never
- * exits and never touches the network; the raw read and every write only run
- * inside runAuditReport, and the CLI call sits under the invokedDirectly
- * block at the bottom. There is no Discord client anywhere in this file.
- * --root aims it at a fixture tree.
+ * and pinned by test/unit.auditcollectreport.test.ts. Importing this file
+ * never reads files, never exits and never touches the network; the raw
+ * read and every write only run inside runAuditReport, and the CLI call
+ * sits under the invokedDirectly block at the bottom. There is no Discord
+ * client anywhere in this file. --root aims it at a fixture tree.
+ *
+ * The dump itself is local-only: audit/raw/ is gitignored (TOG-8963) and
+ * never committed; only the tables this writes are committed. The golden
+ * test rebuilds its fixture root from a local copy, never from the repo.
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';

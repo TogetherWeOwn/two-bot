@@ -1,5 +1,5 @@
 {
-  "_comment": "Synthetic Discord roles snapshot for TOG-3481, same field shape as audit/raw/roles.json. The bot's own role sits at position 50, which is the single fact that makes 'Staff' at position 80 ungrantable and 'Level 5' at 10 grantable. Every id is in the 90000000000000 reserved block Discord never allocates. Role 900000000000000099, referenced by the export, is deliberately absent. Paired with test/fixtures/mee6-export-role-rewards.json.",
+  "_comment": "Synthetic Discord roles snapshot for TOG-3481, same field shape as a Discord roles array. The bot's own role sits at position 50, which is the single fact that makes 'Staff' at position 80 ungrantable and 'Level 5' at 10 grantable. Every id is in the 90000000000000 reserved block Discord never allocates. Role 900000000000000099, referenced by the export, is deliberately absent. Paired with test/fixtures/mee6-export-role-rewards.json.",
   "roles": [
     {
       "id": "900000000000000000",

@@ -6,8 +6,9 @@
  * anyone's username or avatar in the repo. The collector's original scrubber
  * covered `user` / `inviter` / `target_user` but missed
  * `integrations[].application.bot` - a full user object (username,
- * global_name, avatar, discriminator, banner) that landed verbatim in the
- * tracked `audit/raw/integrations.json`. This module is the single place the
+ * global_name, avatar, discriminator, banner) that landed verbatim in
+ * `audit/raw/integrations.json` and was removed from HEAD with the rest of
+ * the raw dumps by TOG-8963. This module is the single place the
  * rule lives, so the next embedded-user shape is fixed once, here.
  *
  * Pure function, no network, no Discord token. Safe to import from tests:

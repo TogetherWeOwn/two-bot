@@ -6,8 +6,9 @@ in the secrets store. Tokens go in the secrets store; see `docs/SECRETS.md`.
 
 Source: the TWO-13 audit snapshot, collected 2026-08-19T20:19Z read-only against
 the live server. Regenerate with `node scripts/audit-collect.ts` (see
-`audit/README.md`). Raw data behind every number below is `audit/raw/roles.json`
-and `audit/roles.csv`.
+`audit/README.md`). Data behind every number below is the committed
+`audit/roles.csv`; the verbatim dumps the tables were built from
+(`audit/raw/`) were removed from HEAD by TOG-8963 and live on only in history.
 
 ## Guild
 
@@ -18,7 +19,7 @@ and `audit/roles.csv`.
 | Members at snapshot | 107 (84 human, 23 bots) |
 
 Self-check: Discord always gives the `@everyone` role the same snowflake as the
-guild. `@everyone` in `audit/raw/roles.json` is `326474832151838730`. If those two
+guild. `@everyone` in `audit/roles.csv` is `326474832151838730`. If those two
 ever disagree, one of them was typed by hand.
 
 ## Staff roles
@@ -43,8 +44,8 @@ Why a role ID and not the owner's user ID: the website's permission check is
 role-based and already built, wired, and tested. Pinning to SySOp needs an env
 value and no code. A hard owner-only check would be a code change in the
 website, and it would also mean that handing someone the keys later requires a
-deploy. If a hard pin is ever wanted anyway, the owner's user ID is
-`275483498603741184` (`audit/raw/guild.json` → `owner_id`).
+deploy. (Member user IDs are not published in this repo — see `audit/README.md` —
+so a hard pin would need the ID from the operator, not from here.)
 
 The trade to be aware of: this grants the panel to *whoever holds SySOp*, not to
 the owner as a person. Today those are the same — verified, not assumed, on

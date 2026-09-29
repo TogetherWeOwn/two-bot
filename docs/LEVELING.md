@@ -79,7 +79,7 @@ Duplicate member rows resolve to the highest XP, and the losing row is reported 
 TWO_DATABASE_URL=postgres://... npm run levels:roles:probe -- \
   --guild 1545644954272137297 \
   --file mee6-levels.json \
-  --roles audit/raw/roles.json \
+  --roles roles.json \
   --bot-id OWEN_APPLICATION_ID \
   --report reward-probe.json
 ```
