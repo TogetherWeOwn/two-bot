@@ -77,6 +77,28 @@ These are proof-only transport settings, not changes to production retry policy.
   that followers get an additional notification, or that LFG closure is wired
   automatically to scheduled-event cancellation.
 
+## Feed staleness signal (TOG-9128)
+
+A feed that fails every poll is silent by design — no message is posted and
+`last_checked_at` is never touched — so a dead feed used to look identical
+to a healthy quiet one. Two surfaces now expose it, both derived from the
+existing `feed.poll` audit rows, so no migration is needed:
+
+- **Threshold.** `FEED_STALE_AFTER_FAILURES = 3` consecutive `failed` polls
+  (`src/announcements/service.ts`). At the default 5-minute poll cadence
+  that is ~15 minutes of continuous failure. Read timeouts count as
+  failures, and any successful `read N` poll resets the count.
+- **`feed.stale` audit row.** When a feed first reaches the threshold, the
+  poll writes one row with `action = 'feed.stale'`, `outcome = 'stale'`, and
+  `reason` naming the streak length, the feed source, and the last error.
+  Longer streaks do not re-emit; a success resets the streak, so a fresh
+  streak emits its own crossing row. Query: `SELECT * FROM
+  announcements_audit_log WHERE action = 'feed.stale' ORDER BY created_at
+  DESC`.
+- **`/feed-list`.** Each row carries its consecutive-failure count:
+  `(1 failed poll)` below the threshold, `⚠ stale (N failed polls)` at or
+  above it. Healthy rows keep the legacy shape.
+
 ## Ownership and cleanup
 
 A random run marker tags every created Discord artifact. Cleanup inspects
