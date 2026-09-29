@@ -14,6 +14,8 @@
  */
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { openEphemeralTestDb as openDb } from './helpers/testDb.ts';
 import { TicketStore, ticketTestHelpers } from '../src/discord/tickets.ts';
 import { OperationalAuditStore } from '../src/audit/store.ts';
@@ -220,6 +222,108 @@ describe('PRIVACY.md retention compliance', () => {
       );
     } finally {
       await db.close();
+    }
+  });
+
+  test('rota responderId JSON erasure covers every responderId-bearing event type', () => {
+    // Deliberately out of scope for the column sweep above, with a reason:
+    // `community_facts.metadata` is a TEXT column, so `responderId` never
+    // appears in information_schema and the sweep cannot see it. Erasure of
+    // that JSON key is pinned here instead, in three directions: every event
+    // type written with a `responderId` field in src/analytics/onboardingRota.ts
+    // must appear in eraseSubject()'s responder delete and in the deletion
+    // block in docs/PRIVACY.md, or an authorized erasure would leave the
+    // subject's pseudonym inside another member's row.
+    const root = join(import.meta.dirname, '..');
+    const producer = readFileSync(join(root, 'src/analytics/onboardingRota.ts'), 'utf8');
+
+    // Argument list of each this.write() call, paren-balanced and
+    // string/comment-aware, so a responderId stored far after an early write
+    // site cannot leak into that site's scan (and vice versa). A fixed
+    // character window around the type name gets this wrong in both
+    // directions: the reply/latency pair is missed, and an unrelated later
+    // site is misattributed.
+    function writeCallArgs(src: string): string[] {
+      const out: string[] = [];
+      const needle = 'this.write(';
+      let from = 0;
+      while (true) {
+        const start = src.indexOf(needle, from);
+        if (start < 0) break;
+        let i = start + needle.length;
+        let depth = 1;
+        let quote: string | null = null;
+        let escaped = false;
+        let lineComment = false;
+        let blockComment = false;
+        for (; i < src.length && depth > 0; i++) {
+          const c = src[i];
+          const next = src[i + 1];
+          if (lineComment) {
+            if (c === '\n') lineComment = false;
+            continue;
+          }
+          if (blockComment) {
+            if (c === '*' && next === '/') { blockComment = false; i++; }
+            continue;
+          }
+          if (quote) {
+            if (escaped) { escaped = false; continue; }
+            if (c === '\\') { escaped = true; continue; }
+            if (c === quote) {
+              if (quote === "'" && next === "'") { i++; continue; }
+              quote = null;
+            }
+            continue;
+          }
+          if (c === '/' && next === '/') { lineComment = true; i++; continue; }
+          if (c === '/' && next === '*') { blockComment = true; i++; continue; }
+          if (c === "'" || c === '"' || c === '`') { quote = c; continue; }
+          if (c === '(') depth++;
+          else if (c === ')') depth--;
+        }
+        out.push(src.slice(start + needle.length, i - 1));
+        from = i;
+      }
+      return out;
+    }
+
+    const calls = writeCallArgs(producer);
+    assert.ok(calls.length > 0, 'expected community_facts write sites in onboardingRota.ts');
+    const responderTypes = new Set<string>();
+    for (const args of calls) {
+      const type = args.match(/'([a-z_]+)'/)?.[1];
+      if (type && args.includes('responderId:')) responderTypes.add(type);
+    }
+    // The reply/latency pair passes a shared `metadata` const rather than an
+    // inline literal; resolve that indirection only when the const itself
+    // carries the key.
+    if (/const metadata = \{[^}]*responderId:/s.test(producer)) {
+      for (const args of calls) {
+        const type = args.match(/'([a-z_]+)'/)?.[1];
+        if (type && /,\s*metadata\s*$/.test(args.trim())) responderTypes.add(type);
+      }
+    }
+    assert.deepEqual(
+      [...responderTypes].sort(),
+      ['onboarding_first_human_reply', 'onboarding_reply_latency', 'welcome_rota_acknowledged', 'welcome_rota_replied'],
+      'responderId producers drifted; update eraseSubject() and docs/PRIVACY.md to match',
+    );
+
+    const erasure = producer.slice(producer.indexOf('async eraseSubject'));
+    assert.ok(erasure.length > 0, 'expected OnboardingRota.eraseSubject in onboardingRota.ts');
+    for (const type of responderTypes) {
+      assert.ok(
+        erasure.includes(`'${type}'`),
+        `eraseSubject() responder delete no longer names ${type}`,
+      );
+    }
+    const doc = readFileSync(join(root, 'docs/PRIVACY.md'), 'utf8');
+    for (const type of responderTypes) {
+      assert.ok(
+        doc.includes(type),
+        `docs/PRIVACY.md deletion block no longer names ${type}`,
+      );
     }
   });
 });
