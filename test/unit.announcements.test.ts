@@ -356,6 +356,11 @@ test('feed parser accepts RSS and Atom entries without executing markup', () => 
   assert.deepEqual(multi, [{ key: 'tag:1', title: 'Multi', url: 'https://example.com/alt' }]);
 });
 
+test('feed parser decodes each entity exactly once', () => {
+  const items = parseXmlFeed(`<?xml version="1.0"?><rss><channel><item><guid>e1</guid><title>a &amp;lt; b &amp;amp; &amp;lt;script&amp;gt;</title><link>https://example.com/e1</link></item></channel></rss>`);
+  assert.equal(items[0]?.title, 'a &lt; b &amp; &lt;script&gt;');
+});
+
 test('feed parser rejects excessive entries without pathological regex scanning', () => {
   const malformed = `${'<item>'.repeat(201)}${'x'.repeat(240_000)}`;
   const started = performance.now();
