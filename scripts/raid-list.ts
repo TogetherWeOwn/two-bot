@@ -32,6 +32,15 @@ const argv = process.argv.slice(2);
 const idsOnly = argv.includes('--ids');
 const verify = argv.includes('--verify');
 const scan = argv.includes('--scan');
+
+// --help boots with no database, no token, no network.
+if (argv.includes('--help')) {
+  console.log('usage: node scripts/raid-list.ts [--ids] [--verify] [--scan]');
+  console.log('');
+  console.log('Read-only raid-account list: never-active joins inside the known raid windows (TOG-56).');
+  console.log('Kicks, bans, messages and writes nothing; --help reads no database and needs no token.');
+  process.exit(0);
+}
 const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
 const guildId = process.env.DISCORD_GUILD_ID ?? '';
 if (!databaseUrl) {

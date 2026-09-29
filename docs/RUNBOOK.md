@@ -27,6 +27,81 @@ What a gap in coverage actually costs, precisely: **invite attribution and
 first-message timing are lost for good**, because Discord keeps no per-member
 record of either. **Join dates are not lost** — see the next section.
 
+## Staging checks cadence: staging-doctor + preflight
+
+Two scripts, two different questions. Run the right one:
+
+| Script | Question it answers | Needs | Side effects |
+|---|---|---|---|
+| `node scripts/staging-doctor.ts` | "Can I run the integration suite yet?" | the staging trio below, plus the staging DB reachable | none — writes nothing, never contacts Discord, never prints a token |
+| `node scripts/preflight.ts` | "Will the funnel actually collect data?" | live bot token + network to Discord | read-only against Discord; writes nothing to the DB |
+
+The staging trio (see `docs/STAGING.md` for where each comes from):
+`TWO_STAGING_DATABASE_URL`, `DISCORD_STAGING_GUILD_ID`,
+`DISCORD_STAGING_BOT_TOKEN`. These names are deliberately different from the
+live ones — a staging run must not be one forgotten variable away from writing
+into the real funnel.
+
+When to run each:
+
+- **doctor, at the start of every staging session.** Then again after every
+  `staging-reset.ts` and after every suite run — a suite that leaves state
+  behind is the normal way fixtures drift, and the doctor is how you notice.
+- **doctor, before opening a staging PR.** Green doctor output is the
+  "reproduced on the known state" half of the evidence.
+- **preflight, before every deploy.** `bootstrap-host.sh` already runs it and
+  refuses to start the service on a FAIL — a bot that is `active (running)`
+  while recording every join as `unknown` is worse than one that never started.
+- **preflight, after any portal change** (intents, roles, channels) and any
+  time joins start recording as `unknown`.
+
+What green looks like (both verified 2026-09-27, TOG-7192):
+
+```bash
+node scripts/staging-doctor.ts
+#   ok      staging bot token      Owen QA Test (1469137636663758888).
+#   ok      staging Discord server guild 1545644954272137297.
+#   ok      staging database       two_staging_test.
+#   ok      schema                 NN migration(s) applied.  (the count grows
+#                                  with migrations/ — green means zero pending)
+#   ok      fixtures               the known state.
+# Ready. `node scripts/staging-reset.ts` then run the suite.
+# exit 0 — five oks, then reset and run your suite.
+```
+
+```bash
+DISCORD_TOKEN=... DISCORD_GUILD_ID=... node scripts/preflight.ts
+# Ready to deploy.  0 fail, 3 warn
+# exit 0 — WARNs are fine (Administrator over-grant, unused Message Content
+# Intent, alert-channel-via-Administrator). Only FAIL blocks a deploy.
+```
+
+What red looks like, and whose job it is:
+
+- doctor exit `1` — a `FIX` line, yours. It carries the command, usually
+  `node scripts/staging-reset.ts` (a previous suite left state behind) or the
+  `TWO_DATABASE_URL="$TWO_STAGING_DATABASE_URL" node scripts/migrate.ts`
+  mapping. Run it, re-run the doctor. Proven: deleting the 7
+  `first_message` rows prints
+  `FIX fixtures 1 funnel count(s) off: first_message 0/7`, and a reset
+  recovers to green.
+- doctor exit `3` — `WAITING`, someone else's. The line names the owner and
+  the issue (e.g. founder, TWO-21). Raise it on TWO-25; do not work around it.
+- preflight exit `2` — no token at all
+  (`Missing bot token. Set DISCORD_TOKEN ...`). Nothing ran; supply it.
+- preflight exit `1` — a `FAIL` line. The funnel is broken or silently lying
+  (intents off, missing Manage Server, unreadable invite list). Fix it in the
+  developer portal before starting the service.
+
+Where to log it:
+
+- Green: one line on the card you are working —
+  `doctor exit 0 (5 ok) / preflight 0 fail 3 warn`. That is the whole record.
+- Red that you fixed: the FIX line plus the command that cleared it, same card.
+- Red that blocks: keep the card `blocked` against the real blocker, with the
+  red output quoted. Neither script prints a token — keep it that way and
+  never paste one alongside.
+
 ## Recover the history (one-off, no host needed)
 
 ```bash
@@ -774,6 +849,337 @@ pg_restore --clean --no-owner --dbname "$TWO_RESTORE_URL" two-funnel-<stamp>.dum
 It is not installed today, and a backup procedure that only works on a machine
 we do not have is not a backup procedure. `scripts/pg-backup.ts` does the same
 job in plain Node with no system dependency, and has actually been restored.
+
+## New-member roster, presence trend, levels, AutoMod export, community scorecard
+
+These are the ops scripts added since the last runbook pass (TOG-7208). Each
+entry: what it is for, the command, and what "green" looks like.
+
+### The new-member roster
+
+One line per member who joined recently: which invite brought them, and how
+far into the community they actually got (first message, first voice, or left).
+This is the question TWO-5 exists to answer, printed directly rather than
+inferred from a funnel total.
+
+```bash
+cd /opt/two-bot
+sudo -u twobot --preserve-env=TWO_DATABASE_URL node scripts/roster.ts 7    # last 7 days
+sudo -u twobot --preserve-env=TWO_DATABASE_URL node scripts/roster.ts 30   # last 30 days
+sudo -u twobot --preserve-env=TWO_DATABASE_URL node scripts/roster.ts 7 --names  # + display names
+```
+
+Green: a table prints and the exit code is `0`. Needs `TWO_DATABASE_URL` (and
+`DISCORD_GUILD_ID` for guild scoping). `--names` additionally needs
+`DISCORD_TOKEN`/`DISCORD_BOT_TOKEN`, fetches names from Discord at print time,
+and never writes them to the database (see `docs/PRIVACY.md`). Without a token
+it warns and prints ids instead of failing.
+
+### Presence trend (TOG-469)
+
+Reads the internal presence series and prints a verdict on the web-presence
+question. This prints to a terminal and that is the ONLY way anyone sees these
+numbers — no view, no endpoint, no page.
+
+```bash
+cd /opt/two-bot
+sudo -u twobot --preserve-env=TWO_DATABASE_URL npm run presence:trend              # whole series + verdict
+sudo -u twobot --preserve-env=TWO_DATABASE_URL npm run presence:trend -- --days 14 # last 14 days in the table
+sudo -u twobot --preserve-env=TWO_DATABASE_URL npm run presence:trend -- --json    # same verdict, machine readable
+```
+
+Green: exit `0` means nothing to do (including "not enough data"). Exit `2`
+means the trigger fired. Without `--web-live` the trigger reports `armed` at
+most, never `fires` — a human asserts the live site with `--web-live` because a
+number alone must not reopen the decision. Needs Postgres `TWO_DATABASE_URL`
+plus `DISCORD_GUILD_ID`.
+
+### Levels: MEE6 import, role rewards, probe, apply, acceptance
+
+The leveling migration chain, in the order an operator runs it. Every step
+refuses the live guild by default; `--allow-live-guild` exists only for an
+owner-approved rollout.
+
+```bash
+# 1. What XP is in the MEE6 export? (dry run is the default; --apply is the only write)
+node scripts/levels-import-mee6.ts import --guild <snowflake> --file <export.json>
+node scripts/levels-import-mee6.ts import --guild <snowflake> --file <export.json> --apply
+npm run levels:inventory -- --guild <snowflake>   # reconciliation manifest without importing
+
+# 2. Which MEE6 level roles could Owen actually grant? (zero writes, always)
+node scripts/levels-import-rewards-probe.ts --guild <snowflake> --file <export.json> \
+  --roles <roles-snapshot.json> --bot-id <snowflake>
+# ... --require-all-mapped exits 1 when any reward is unmapped (CI gate); --no-db needs no database
+
+# 3. Current reward configuration (print; --set replaces the whole config)
+npm run levels:roles -- --guild <snowflake>
+npm run levels:roles -- --guild <snowflake> --set 5:<roleId>,10:<roleId>
+
+# 4. Exercise one reward against one disposable STAGING member (staging only, no live override exists)
+node scripts/levels-reward-role-apply.ts --report <probe-output.json> --member <user-id>   # plan only
+node scripts/levels-reward-role-apply.ts --report <probe-output.json> --member <user-id> --apply
+
+# 5. Full QA driver around step 4 (TOG-4874)
+MEMBER=<staging-user-id> ROLE_ID=<disposable-role-id> OUT=/tmp/tog4874-out \
+  bash scripts/levels-reward-role-acceptance.sh
+bash scripts/levels-reward-role-acceptance.sh --selftest   # offline checks, no network
+```
+
+Green: import exits `0` (reconciled), `1` (export or write did not
+reconcile), `2` (usage / refused guild). The probe balances and prints the
+mapping report. The apply prints `Done. Positive readback: role ... present
+after grant. Negative readback: role absent after revoke.` — grant, both
+readbacks and revoke happen inside the one operation, and the grant is
+recorded in the operational audit log after both readbacks. The acceptance
+script writes an evidence bundle to `$OUT` and re-verifies absence through a
+separate API read, so the grant path never self-attests the cleanup.
+
+### Automations staging proof (TOG-1648)
+
+Exercises custom commands, scheduled messages and sticky messages through the
+real service + store against TWO Staging, in `#bot-log` — never
+member-facing. Every artefact the run creates it also removes: proof
+command/scheduled/sticky rows are deleted and any pre-proof definitions
+restored row-for-row, proof messages posted to `#bot-log` deleted, and the
+automation audit log is the only trace left — which is the point of the audit
+log. A concurrent admin edit made mid-run is left untouched (a
+`cleanup.*.concurrent` line) rather than overwritten.
+
+The script takes exactly one flag:
+
+```bash
+node scripts/staging-automations-proof.ts --help   # usage, exit 0, needs no token or database
+```
+
+A full run needs the staging token and the staging database, and nothing else:
+
+```bash
+DISCORD_STAGING_BOT_TOKEN=... TWO_DATABASE_URL=<staging> \
+  node scripts/staging-automations-proof.ts
+```
+
+Without both it refuses before touching anything (exit `2`, `need
+DISCORD_STAGING_BOT_TOKEN and TWO_DATABASE_URL`). Point `TWO_DATABASE_URL` at
+the staging database — the proof writes and deletes automation rows in
+whatever database it is given. Guild and channel are pinned in the script
+(`scripts/staging-automations-proof.ts:34-35`); there is no flag that
+retargets them, so a full run cannot be aimed at the live guild by typo.
+
+Green: `N/N pass, 0 fail`, exit `0`. Any `FAIL` line means not proven — do not
+relabel an interrupted run as a pass.
+
+`scripts/staging-automations-proof-state.ts` is the cleanup/restore library
+the proof imports (`cleanupDecision`, `restoredStickyRow` — also covered by
+`test/unit.automations.test.ts`). It is not run directly: invoked without
+`--help` it exits `2`; with `--help` it prints usage and exits `0`, touching
+nothing.
+
+### Running the proof check offline (no token, no database, no Discord)
+
+The reviewer path. Run `npm ci` first (the proof script imports `discord.js`,
+so `--help` needs installed dependencies — but nothing else). Everything below
+runs with no credentials set and makes no network calls:
+
+```bash
+npm ci                                             # once per checkout
+npm run staging:automations-proof -- --help        # usage names the script, exit 0
+npm run staging:automations-state -- --help        # usage names the script, exit 0
+node --test test/unit.automationsproofhelp.test.ts # 4/4, exit 0
+```
+
+Green: each `--help` prints a `usage:` line naming its script file and exits
+`0` even with every `DISCORD_*`/`TOKEN`/`DATABASE` variable unset; the test
+passes `4/4` (both registry entries exist and target real files; both boot on
+`--help` under a scrubbed environment). That proves both entries are wired
+and boot — not that staging is green. The full proof above still needs the
+staging token and staging database.
+
+### AutoMod export (staging)
+
+Exports the staging guild's AutoMod rules to a JSON file (default
+`audit/staging-automod-rules.json`, mode `0600`).
+
+```bash
+DISCORD_STAGING_BOT_TOKEN=... npm run automod:export [output-path]
+```
+
+Green: `wrote N staging AutoMod rule(s) to <path>`. A payload with
+unidentifiable rules is refused before anything is written (exit `1`,
+"Refusing a partial AutoMod export - nothing was written") — a partial file
+that looks complete is worse than no file. Needs the staging token, which must
+pass the staging-token check (a live token is refused).
+
+### Community scorecard
+
+Scores the previous closed community week as JSON (coverage, classifier
+version, recommendations unless `TWO_COMMUNITY_RECOMMENDATIONS=0`).
+
+```bash
+cd /opt/two-bot
+sudo -u twobot --preserve-env=TWO_DATABASE_URL npm run community:scorecard
+```
+
+Green: JSON prints and the exit code is `0`. Exit `2` means
+`coverageState: "incomplete"` — the numbers printed are not the whole picture.
+Needs `TWO_DATABASE_URL` and `DISCORD_GUILD_ID`.
+
+## Script index: every npm script
+
+Acceptance for TOG-7208: each row names the purpose, the runnable command,
+and the green signal. Entries already covered in full sections above point
+back to them instead of repeating.
+
+### Bot lifecycle and deploy checks
+
+| script | purpose | green signal |
+|---|---|---|
+| `start` | Run the bot (`node src/index.ts`). | `{"msg":"ready",...}` in logs; see "Is it alive?" |
+| `dev` | Run the bot with `.env` file. | Same as `start`, local only. |
+| `preflight` | Pre-deploy credential/permission check; run before starting on a new box and whenever joins go `unknown`. | `Ready to deploy.`; any `FAIL` blocks deploy. See "Before you deploy". |
+| `health:check` | Automated "Is it alive?" against the mock-Discord harness (TOG-5689). | Pass per check; `systemctl`/`journalctl` listed as skipped. |
+| `verify:grant`, `verify:grant:selftest` | Prove the LIVE permission grant equals exactly the intended bit set (catches over-applied grants preflight cannot). Run after any human grant edit; `--selftest` offline. | Grant matches exactly, exit `0`. |
+| `migrate` | Apply pending migrations (`--status` to preview). Bot also migrates at boot; this is belt-and-braces. | Nothing pending; see "The database". |
+| `web:views` | Apply `sql/web_v1.sql` contract views (`--status` lists, changes nothing). | All views present, exit `0`. |
+| `internal-actions:host`, `internal-actions:host-real` | Standalone internal-actions host for the TOG-463 acceptance harness: mock-Discord variant, and real staging-token variant. | Serves `/internal/actions`; harness passes against it. |
+| `internal-actions:acceptance` | TOG-463 acceptance run against a live endpoint (`TWO_ACCEPT_*` env; `--help` needs no env/network). | Usage prints, exit `0` on `--help`. |
+| `redirect` | go.two.gg redirect service (separate process, no credential, default `127.0.0.1:8088`). | Binds and answers one public GET. |
+| `moderation:disable-preflight` | "Can I turn moderation off right now?" — same read the boot preflight performs, on demand (`--json` available). | Exit `0` (nothing blocking); `1` lists blockers; `2` usage. |
+
+### Growth and funnel
+
+| script | purpose | green signal |
+|---|---|---|
+| `funnel` | Crude-but-accurate funnel report (`30` for 30 days, `--json` for schema 1). | Numbers print, exit `0`. See "What are the numbers?" |
+| `attribution` | Same funnel split by invite code: click → join → AM7 → AM30 (`-- 30`, `-- all`, `-- 90 --csv`). | Table/CSV prints, exit `0`. |
+| `unknown-attribution` | Weekly unknown-attribution report: is the unknown share going down, and what still produces it. | One line per Monday, exit `0`. |
+| `eval:funnel-attribution` | Offline golden eval for the ambiguous-vs-unknown split (no network/DB/token). | All golden cases pass, exit `0`. |
+| `gate` | Rules-gate conversion report, read-only (`--months 6`). | Cohort table prints, exit `0`. |
+| `gate:check` | Friday growth gate: six criteria, all required. Read-only, prints no identities. | All six green (five of six is red), exit `0`. |
+| `gate:timeout` | Report members stuck behind the rules gate 14+ days. Report-only unless `--execute --expect N` (circuit breaker). | Report lists exact accounts; execute removes exactly N. |
+| `review` | Friday growth review: rank portfolio, kill/scale rules, ledger entry (`--weeks 8`, `--json`, `--force` while gate red). Read-only. | Verdicts print, exit `0`. |
+| `dashboard` | Build weekly growth dashboard HTML (`--json`, `--serve`, `--weeks 26`). Same DB the bot writes. | `data/dashboard.html` written, exit `0`. |
+| `campaigns` | Manage tracked invite links: list, `--add <slot> <code> <label>`, `--retire <slot>`. No deploy needed. | List reflects the change, exit `0`. |
+| `voice` | Voice-session timing report for scheduling the community event (`90 --offset=-5`). See "When should we run the community event?" | Coverage ≥ 28 days, exit `0`. |
+| `roster` | New-member roster: source + first message/voice per recent joiner. | Table prints, exit `0`. See above. |
+| `presence:trend` | Presence series + web-presence verdict. | Exit `0` (nothing to do) / `2` (fires). See above. |
+| `community:scorecard` | Previous closed community week as JSON. | Exit `0`; `2` = incomplete coverage. See above. |
+| `event:sunday-squad` | Create/repair the recurring Sunday Squad scheduled event (`--dry-run` needs no token). | Event exists with right schedule, exit `0`. |
+| `reengage` | Weekly re-engagement list, Mondays (`--names`, `--csv` → `data/reengagement-<date>.csv`). List only — acting on it needs CEO sign-off. | List prints, exit `0`. |
+
+### History recovery and capture
+
+| script | purpose | green signal |
+|---|---|---|
+| `backfill` | One-shot history recovery: join dates, log-channel joins/leaves/voice, invite baseline (`--dry-run` first, `--max-pages` for depth). Idempotent. | `already on file` on re-run; no `INCOMPLETE` cap warning. See "Recover the history". |
+| `backfill:messages` | Backfill message milestones from channel history (the expensive half; makes AM7 text half exact). | Milestones recorded, exit `0`. |
+| `capture` | Host-less join capture between backfill and deploy; run every few hours (`--dry-run` first). Idempotent. | Counters diffed, joins recorded. See "Keep attribution alive". |
+| `events:dedupe` | One-off repair: delete joins/leaves double-recorded by parallel logging bots (`--dry-run` counts first). | Dry run then real run agree; `0` remaining duplicates. |
+
+### Levels (see detail above)
+
+| script | purpose | green signal |
+|---|---|---|
+| `levels:import:mee6` | Import MEE6 XP (dry run default; `--apply` writes). | Exit `0` reconciled / `1` not reconciled / `2` usage. |
+| `levels:inventory` | Reconciliation manifest without importing. | Manifest JSON prints, exit `0`. |
+| `levels:roles` | Print (`--guild`) or replace (`--set`) reward config. | Config JSON prints, exit `0`. |
+| `levels:roles:probe` | Zero-write reward mappability probe (`--require-all-mapped` CI gate, `--no-db` offline). | Report balances, exit `0`. |
+| `levels:roles:apply` | Staging-only grant/readback/revoke/readback for one member. | Both readbacks verified, `Done.` line. |
+| `levels:roles:acceptance`, `levels:roles:acceptance:selftest` | Full QA driver + evidence bundle (`MEMBER`/`ROLE_ID`/`OUT`); `--selftest` offline. | Evidence bundle in `$OUT`, exit `0`. |
+
+### Roles, channels, members
+
+| script | purpose | green signal |
+|---|---|---|
+| `roles:consolidation` | Build `audit/role-consolidation.csv` from the TWO-13 snapshot (no network; re-runnable rubric). | CSV written, exit `0`. |
+| `channels:game-access` | Light up the three game categories (dry run prints diff; `--apply` / `--revert` only after CEO sign-off). | Diff empty after apply, exit `0`. |
+| `self-role:panel` | Render/post one self-role panel (dry run default; `--apply` posts + prints config entry; staging only). | Panel renders; `--apply` prints exact config to persist. |
+| `web:role` | Create the website's least-privilege DB role (`two_web_ro`). | Role exists with documented grants, exit `0`. |
+| `verify:web-role` | Prove the website role reads contract views and nothing else. | All checks pass, exit `0`. |
+| `verify:catalog` | Check the onboarding catalog against the live server, read-only. | Every catalog role resolves, exit `0`. |
+| `raid:list` | Raid-account list, read-only (`--ids` for piping, `--verify` re-checks membership, `--scan`). | List prints with safety checks, exit `0`. |
+| `raid:remove` | Remove raid accounts; dry run default, `--execute --expect N` from `--ids-from <file\|->`. | Exactly N removed, exit `0`. |
+
+### Audit mirror (see "Stop the audit mirror right now" for the kill switch)
+
+| script | purpose | green signal |
+|---|---|---|
+| `audit:collect` | Read-only inventory of the live server → `audit/raw/*.json` (GET-only by construction). | Raw files written, exit `0`. |
+| `audit:report` | Raw dump → `audit/channels.csv`, `roles.csv`, `invites.csv`, `summary.json` + walkthrough (never calls Discord). | Tables written, exit `0`. |
+| `audit:halt`, `audit:resume`, `audit:switch` | Kill switch: stop all mirror sends / resume / show state. DB row, survives restart, idempotent. | `audit:switch` shows expected state, held rows deliver after resume. |
+
+Note: `scripts/audit-scrub.ts` (PII scrubber for the collector) has no npm
+entry point; run it as `node scripts/audit-scrub.ts`. Green is a scrubbed dump
+with ids preserved and usernames/avatars removed.
+
+### Redesign waves and guild config
+
+| script | purpose | green signal |
+|---|---|---|
+| `wave0` | Wave 0 pre-flight exports + drift check for the TOG-34 redesign (read-only). | Exits `0` (no drift) / `1` (drift found, artefacts still written). See "Wave 0 pre-flight". |
+| `wave2` | Wave 2 additive-only wave (dry run default; `--apply` creates). | Plan empty after apply, exit `0`. |
+| `wave6:hierarchy` | Wave 6 hierarchy pre-flight: can Owen's top role reach all 159 doomed roles? Read-only. | `159/159`, exit `0`; anything blocked lists the fix (ours to run). |
+| `guild:clean-slate`, `guild:clean-slate-rollback` | Apply the owner-accepted clean-slate structure to the live guild (additive only, never removes); rollback deterministically undoes an applied manifest. | Structure matches manifest; rollback restores prior state. |
+| `backup:guild-config` | Sealed snapshot of the staging guild config + drift report → `$TWO_GUILD_CONFIG_BACKUP_DIR`. | Snapshot + drift files written, exit `0`. |
+| `restore:guild-config` | Plan (default) or `--confirm-staging-guild --apply` a snapshot restore; refuses tampered backups (exit `3`) and the live guild. | Post-restore plan shows `0` remaining operations. |
+
+### Live cleanup
+
+| script | purpose | green signal |
+|---|---|---|
+| `cleanup:live`, `cleanup:live-rollback` | Apply the live clean-slate plan (journaled, checkpointed) / undo it in reverse. | Journal shows applied; rollback restores. |
+| `cleanup:drift-diff` | Would a drift gate accept snapshot B against A, and on which fields (`<a/pre.json> <b/pre.json>`). | Verdict prints, exit `0` = accepted. |
+| `cleanup:derive-pins` | Re-derive the pinned expected-operations fixture after planner changes (never hand-edit). | Fixture regenerated; e2e pin test passes. |
+| `cleanup:audit-visibility` | Independent post-plan visibility audit: only Owner, Owen and manifest Administrators still see legacy channels. | Clean run, exit `0`. |
+
+### Backups (see "Backups" for the full procedure)
+
+| script | purpose | green signal |
+|---|---|---|
+| `backup`, `backup:pg` | Nightly funnel-log dump (`two-funnel-<stamp>.ndjson.gz`, 14 kept, off-box upload). | Non-zero row counts, exit `0`. |
+| `backup:upload-s3` | The uploader `TWO_BACKUP_UPLOAD_CMD` points at (one signed PUT per dump). | `stored ...` with byte count, exit `0`. |
+| `restore:pg` | Restore into `TWO_RESTORE_URL` (`--force` required; `--dry-run` verifies only). | `RESTORE VERIFIED`, per-table counts match. |
+
+### Staging and QA (all staging-only unless noted)
+
+| script | purpose | green signal |
+|---|---|---|
+| `staging:doctor` | "Can I run the integration suite yet?" — env + staging DB read-only, no Discord, writes nothing. Run first, every time. | Exit `0` ready / `1` fixable (line says how) / `3` waiting on someone (line says who). |
+| `staging:provision` | Build TWO Staging content (dry run default; `--apply`, `--invite`, `--grant-admin`). Never creates the server itself. | Plan empty after apply, exit `0`. |
+| `staging:reset`, `staging:check` | Reset staging DB to fixtures / report-only check. Five guards pin it to staging (name contains staging/test, never the live DB). | Fixtures reseeded; `--check` clean. |
+| `staging:verify` | Check staging server against `src/staging/spec.ts` (role positions first — a low bot role fails silently as wrong numbers). | All checks pass, exit `0`. |
+| `staging:goodbye-live-verify` | Live-gateway proof `session_goodbye_posted` fires on staging (self-driven, re-runnable). | Exit `0` proved / `1` disproved / `2` precondition unmet (nothing touched). |
+| `staging:anti-nuke` | Bounded staging gateway acceptance for TOG-3787 (read-only preflight default; `drive --apply` only command creating fixtures). | Preflight green; drive matches expected incident state. |
+| `staging:clean-slate` | Rebuild TWO Staging to the clean-slate layout (read-only unless `--apply`; `--export`, `--invite`). | Layout matches spec, exit `0`. |
+| `staging:discord-fetch` | Library: proof-only Discord 429 transport (`--help` only direct use; no token/network/side effects). | `--help` exits `0`. |
+| `staging:session-demo` | TOG-1644 demo driver: posts the real welcome panel to #welcome, writes owner invite (`--verify` to check). | Panel renders on the real platform, exit `0`. |
+| `staging:temp-voice-demo` | TOG-3052 evidence: `create` / `restart` / `cleanup` as separate processes, assertions re-read Discord over REST. | All three phases pass, exit `0`. |
+| `staging:voice-occupant` | Hold a voice state open in staging `<channelId>` until killed (outlives the bot under test; no audio). | State visible in channel member list. |
+| `staging:announcements-proof` | TOG-3845 proof run: real REST + isolated staging Postgres (`--output=<report.json>`). | Report written, exit `0`. |
+| `staging:announcements-state` | Library: proof config/validators (`--help` only direct use). | `--help` exits `0`. |
+| `staging:announcements-verify` | Read-only readback of a proof report (`--proof=<report.json>`; never migrates/posts/repairs). | Proof verifies, exit `0`. |
+| `staging:automations-proof` | TOG-1648 proof run: custom commands, scheduled + sticky messages against TWO Staging (`--help` needs no token/DB). | Usage prints, exit `0` on `--help`. |
+| `staging:automations-state` | Library: proof cleanup/restore helpers (`--help` only direct use). | `--help` exits `0`. |
+| `automod:export` | Staging AutoMod rules export. | `wrote N ... rule(s)`, exit `0`. See above. |
+| `e2e:harness`, `e2e:selftest` | Drive end-to-end member flows against TWO Staging (`--dry-run` no credential; `--flow`, `--kill-switch`). | Flows pass; `--dry-run` exits `0` with no network. |
+| `onboarding:web:acceptance` | Offline acceptance for the next two-web onboarding slice (`--two-web <path>`). | Slice checks pass, exit `0` (`2` = usage/incomplete checkout). |
+| `mutate:tempvoice` | Mutation harness for the temp-voice delete path (`--staging`, needs `TWO_TEST_DATABASE_URL`). Rewrites a file per mutation and runs the unit suite. | Surviving mutants listed; exit `0` when all killed. |
+| `bench:temp-voice` | Temp-voice index audit + EXPLAIN harness: seeds 100 guilds × 40 rows through the store in an isolated schema (dropped on exit), prints read timings + plan shapes. Needs `TWO_DATABASE_URL` at a scratch DB, never production. | `VERDICT: INDEXED`, exit `0`. |
+| `test:report` | `node:test` reporter writing one JSON object per test point (`--test-reporter` + `--test-reporter-destination`). | Results ndjson written; skips explicit, never silent. |
+
+### Tests, typecheck, repo checks
+
+| script | purpose | green signal |
+|---|---|---|
+| `test` | Full suite (`node --test test/*.test.ts`). | All green, exit `0`. |
+| `test:unit` | Unit tests only. | All green, exit `0`. |
+| `test:e2e` | E2E tests only. | All green, exit `0`. |
+| `test:postgres` | Postgres-backed suite gate: fails unless critical suites report expected floors with no skips (needs `TWO_TEST_DATABASE_URL`; `--results FILE` checks a run without re-running). | Floors met, no skips, exit `0`. |
+| `test:restart-storage` | Owned-cluster restart-storage profile (`--provision`, `--results`). | Report passes, exit `0`. |
+| `typecheck` | `tsc --noEmit`. | No output, exit `0`. |
+| `check:script-targets` | Every `node scripts/<file>` target in package.json exists on disk (TOG-6810). | All targets resolve, exit `0`. |
+| `check:snowflakes`, `check:snowflakes:selftest` | No hardcoded Discord snowflakes in `src/` (selftest proves the check). | No hits, exit `0`. |
+| `check:credentials`, `check:credentials:selftest` | Systemd credential wiring documented (selftest proves the check). | Checks pass, exit `0`. |
+| `hooks:install`, `prepare` | Install git hooks (prepare runs on `npm install`, failures swallowed). | Hooks present, exit `0`. |
 
 ## Common problems
 

@@ -35,6 +35,14 @@ const GUILD = '1545644954272137297'; // TWO Staging
 const CHANNEL = '1546451670500642826'; // #bot-log
 const ACTOR = 'staging-proof:tog-1648';
 
+if (process.argv.includes('--help')) {
+  console.log('usage: node scripts/staging-automations-proof.ts [--help]');
+  console.log('');
+  console.log('TOG-1648: custom commands, scheduled and sticky messages against TWO Staging.');
+  console.log('Requires DISCORD_STAGING_BOT_TOKEN and TWO_DATABASE_URL; --help needs neither.');
+  process.exit(0);
+}
+
 const token = process.env.DISCORD_STAGING_BOT_TOKEN;
 const dbUrl = process.env.TWO_DATABASE_URL;
 if (!token || !dbUrl) {

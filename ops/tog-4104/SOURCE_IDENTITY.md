@@ -1,24 +1,28 @@
-# Source identity: pinned wired runtime 5f57256d
+# Source identity: pinned wired runtime 47c48197
 
 ## Pin choice
 
-- Pinned runtime `5f57256d41130b056389f3098f3b0c84a9d9e261`: merge commit of
-  PR #176 (TOG-3314), merged 2026-09-27T02:23:40Z. This is the commit staging
-  runs (redeployed 2026-09-27); the prior pin
-  `7995b3fb13feda26ae35356bc5227c67870370c9` is an ancestor of it
-  (`git merge-base --is-ancestor 7995b3f 5f57256d` → true). It is an ancestor
-  of `origin/main` (`git merge-base --is-ancestor 5f57256d origin/main` →
+- Pinned runtime `47c48197d46647e34132544523e863e3c92d82ff`: squash-merge of
+  PR #229 (TOG-7211, docs-only Sunday Squad activation checklist), merged
+  2026-09-27T21:06:15Z. This is the commit staging runs per the operator
+  23:21Z hand-back on TOG-7034; the prior pin
+  `5f57256d41130b056389f3098f3b0c84a9d9e261` (and before it
+  `7995b3fb13feda26ae35356bc5227c67870370c9`) is an ancestor of it
+  (`git merge-base --is-ancestor 5f57256d 47c48197` → true). It is an ancestor
+  of `origin/main` (`git merge-base --is-ancestor 47c48197 origin/main` →
   true).
-- Why this commit: it is the deployed main-line merge that still contains the
+- Why this commit: it is the deployed main-line commit that still contains the
   startup wiring fix `15b8f6c2` (PR #172, TOG-4230, merged 2026-09-24):
-  `git merge-base --is-ancestor 15b8f6c 5f57256d` → true. That fix passes the
+  `git merge-base --is-ancestor 15b8f6c 47c48197` → true. That fix passes the
   already-loaded `settings` store into `startInternalActions` beside the
   durable store, so with the existing settings flags enabled both settings
   verbs are served instead of refused with `action_not_allowed`.
-- The only runtime-surface change from `7995b3f` to this pin is one line in
-  `src/index.ts` (`goodbyeChannelIds: cfg.goodbyeChannelIds` →
-  `goodbyeChannelIds: () => liveCfg.goodbyeChannelIds`, PR #176). It sits
-  outside every pinned excerpt below and does not touch the settings wiring.
+- The delta from the prior pin `5f57256d` to this pin adds staging-only
+  temp-voice join-to-create wiring plus unrelated test/docs/community merges.
+  It does not touch the settings-wiring path: the `startup` excerpt text is
+  byte-identical to the prior pin (same sha256, verified below); only its
+  line range and file blob shifted. The other six excerpts are unchanged
+  (identical blobs).
 - The rejected runtime `f5fd3e1d6d08847589d3bf48ebc0b0e198196e90` (TOG-4104
   HOLD) shares no ancestry with this pin in either direction. The prior
   packet's HOLD conclusion for that runtime stands; this packet does not
@@ -28,10 +32,10 @@
 Reproduce the topology (no moving refs, no abbreviated SHAs):
 
 ```bash
-PIN=5f57256d41130b056389f3098f3b0c84a9d9e261
+PIN=47c48197d46647e34132544523e863e3c92d82ff
 FIX=15b8f6c278c58c5653fe0ef85f1695a57a4361e8
 OLD=f5fd3e1d6d08847589d3bf48ebc0b0e198196e90
-PREV=7995b3fb13feda26ae35356bc5227c67870370c9
+PREV=5f57256d41130b056389f3098f3b0c84a9d9e261
 for o in "$PIN" "$FIX" "$OLD" "$PREV"; do git cat-file -t "$o"; done
 git merge-base --is-ancestor "$FIX" "$PIN" && echo fix-in-pin
 git merge-base --is-ancestor "$PREV" "$PIN" && echo prev-in-pin
@@ -42,13 +46,13 @@ git merge-base --is-ancestor "$PIN" "$OLD" || echo pin-not-in-old
 
 ## Review and CI provenance of the pin (recorded, not re-asserted)
 
-- PR #176 records no reviews; author and merger are the same identity. This
-  packet does **not** claim independent review of the pin.
-- Check-runs on the pin commit report success for `check`, `gitleaks`,
-  `fork-gate` and `arrived-by-pr`, and **failure** for `postgres` (queried
-  2026-09-27 via the check-runs API). The postgres failure is recorded here,
-  not explained away: pin source identity is unaffected (static Git
-  comparison, verified below), but the failure stands as pin provenance.
+- PR #229 records no reviews; author is `Rick7C2`, merger is
+  `togetherweown[bot]` (bot squash-merge). This packet does **not** claim
+  independent review of the pin.
+- Check-runs on the pin's head report success for `check`, `postgres`,
+  `gitleaks` and `fork-gate` (queried 2026-09-27 via the check-runs API;
+  `[code]smith` skipped). Pin source identity is unaffected (static Git
+  comparison, verified below).
 - Image provenance is **not** established by source identity: the operator
   must deploy exactly this commit and supply the resulting immutable image ID
   as `PROOF_IMAGE_ID`. The wrapper compares it against the live container's
@@ -59,7 +63,7 @@ git merge-base --is-ancestor "$PIN" "$OLD" || echo pin-not-in-old
 
 ## Wired startup at the pin
 
-At `5f57256d`, `src/index.ts:881-910` passes `settings` (the initialized
+At `47c48197`, `src/index.ts:946-975` passes `settings` (the initialized
 `SettingsStore`, constructed and loaded earlier in startup) into
 `startInternalActions`. `src/internal/server.ts:303-305` evaluates
 `opts.settings ?? null`, and `src/internal/actions.ts:215-242`
@@ -70,12 +74,12 @@ the verbs enabled, both `settings.get` and `settings.set` are allowed.
 Seven byte-exact excerpts (file blob IDs and line ranges) are committed in
 `test/fixtures/tog4104-runtime-source.json` so shallow/offline CI can execute
 the pinned startup without a full checkout. The `startup` excerpt text is
-byte-identical to the prior pin (same lines, same sha256); only its file blob
-changed with the one-line goodbye fix above:
+byte-identical to the prior pin (same sha256, verified 2026-09-27); only its
+line range and file blob shifted with the temp-voice insertions above:
 
 | Block | Path | Blob | Lines |
 |---|---|---|---|
-| `startup` | `src/index.ts` | `9949f6993410e571109103d79311ed449adf99a2` | 881-910 |
+| `startup` | `src/index.ts` | `f89e5100dffd12630eac24d9a18f3d3988dbad14` | 946-975 |
 | `serverGate` | `src/internal/server.ts` | `5fe42441a964a5c4c2bbd4758d305ee2cdc2fa92` | 303-305 |
 | `implemented` | `src/internal/actions.ts` | `3421bcb86d670dcd32a916653cea92f9e9a6aa3c` | 29-40 |
 | `needsStores` | `src/internal/actions.ts` | `3421bcb86d670dcd32a916653cea92f9e9a6aa3c` | 50-68 |

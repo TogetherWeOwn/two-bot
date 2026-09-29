@@ -444,6 +444,51 @@ describe('web_v1 contract', () => {
     );
   });
 
+  test('rank_counts keeps rank_order 1-5 on an empty database', async () => {
+    // TOG-7762: the ladder is keyed by rank_key and sorted by rank_order, so
+    // the website sorts by the number and never alphabetically. A drift that
+    // renumbers or reorders the ladder must red here, not on a page.
+    const rows = await db.prepare(`SELECT rank_key, rank_order FROM ${web}.rank_counts`).all();
+    assert.deepEqual(
+      rows.map((r) => [r.rank_key, r.rank_order]),
+      [
+        ['prospect', 1],
+        ['member', 2],
+        ['soldier', 3],
+        ['veteran', 4],
+        ['legend', 5],
+      ],
+    );
+  });
+
+  test('funnel_by_source preserves every documented source value verbatim', async () => {
+    // TOG-7762: docs/EVENTS.md §source names invite:<code>, ambiguous:a+b,
+    // vanity, unknown and web:one_click. The view passes source through
+    // untouched - a label, a fold of unknown into a real code, or a dropped
+    // value would silently rewrite the dashboard's rows.
+    for (const id of ['111', '222', '333', '444', '555']) {
+      await db
+        .prepare(`INSERT INTO members (guild_id, member_id, joined_at, is_bot) VALUES (?, ?, ?, ?)`)
+        .run(GUILD, id, '2026-08-01T10:00:00.000Z', 0);
+    }
+
+    const insert = db.prepare(
+      `INSERT INTO events (event_type, member_id, guild_id, occurred_at, source, idempotency_key)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+    await insert.run('member_join', '111', GUILD, '2026-08-01T10:00:00.000Z', 'invite:aB3xY9', 'v1');
+    await insert.run('member_join', '222', GUILD, '2026-08-01T11:00:00.000Z', 'ambiguous:aB3xY9+cD4eZ1', 'v2');
+    await insert.run('member_join', '333', GUILD, '2026-08-01T12:00:00.000Z', 'vanity', 'v3');
+    await insert.run('member_join', '444', GUILD, '2026-08-01T13:00:00.000Z', 'unknown', 'v4');
+    await insert.run('member_join', '555', GUILD, '2026-08-01T14:00:00.000Z', 'web:one_click', 'v5');
+
+    const rows = await db.prepare(`SELECT * FROM ${web}.funnel_by_source ORDER BY source`).all();
+    assert.deepEqual(
+      rows.map((r) => r.source),
+      ['ambiguous:aB3xY9+cD4eZ1', 'invite:aB3xY9', 'unknown', 'vanity', 'web:one_click'],
+    );
+  });
+
   // -------------------------------------------------------------------------
   // The role. "and nothing else", attempted rather than asserted.
   // -------------------------------------------------------------------------

@@ -15,7 +15,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 const APP = 'uy4d9ndeygjcem6lgayhxgub';
 const GUILD = '1545644954272137297';
-const RUNTIME = '5f57256d41130b056389f3098f3b0c84a9d9e261';
+const RUNTIME = '47c48197d46647e34132544523e863e3c92d82ff';
 const PATH = '/internal/actions';
 const ACTOR = '900000000000009999';
 const KEYS = ['TWO_RAID_JOIN_THRESHOLD', 'TWO_RAID_WINDOW_SECONDS'];

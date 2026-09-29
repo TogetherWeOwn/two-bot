@@ -28,6 +28,7 @@ import { startInternalActions } from '../src/internal/server.ts';
 import { KeyRing } from '../src/internal/signing.ts';
 import { DiscordActions } from '../src/internal/discordActions.ts';
 import { InternalActionStore } from '../src/internal/store.ts';
+import { SettingsStore } from '../src/core/settings.ts';
 import { buildRoleKeys, buildChannelKeys, IMPLEMENTED_ACTIONS } from '../src/internal/actions.ts';
 import { openDb } from '../src/store/db.ts';
 import { startMockDiscord } from '../tools/mock-discord/server.ts';
@@ -39,6 +40,19 @@ function env(name: string, fallback?: string): string {
     process.exit(2);
   }
   return v;
+}
+
+// First statement of the body: imports above are side-effect-free, so this
+// runs before env() can exit(2) on missing TWO_HOST_DB. --help needs no env,
+// no database, no mock, no socket.
+if (process.argv.includes('--help')) {
+  console.log('usage: TWO_HOST_DB=postgres://.../two_bot_staging TWO_HOST_SECRET=... node scripts/internal-actions-host.ts');
+  console.log('');
+  console.log('Standalone internal-actions host for TOG-463 acceptance (mock Discord, real Postgres).');
+  console.log('Prints one JSON line `acceptance_host_ready`, then serves until SIGTERM.');
+  console.log('Env: TWO_HOST_DB, TWO_HOST_SECRET, TWO_HOST_CHANNEL_KEY (default qa-throwaway),');
+  console.log('TWO_HOST_KEY_ID (default web-staging), TWO_HOST_PORT (default 8787), TWO_HOST_SCHEMA (default qa_tog463).');
+  process.exit(0);
 }
 
 const DB_SPEC = env('TWO_HOST_DB');
@@ -62,6 +76,12 @@ const db = await openDb(DB_SPEC, { schema: SCHEMA, applicationName: `two-bot-qa:
 
 const store = new InternalActionStore(db);
 
+// Same composition as src/index.ts (TOG-4230): the config store behind
+// settings.get / settings.set. Without it both verbs refuse with
+// action_not_allowed, and this host would not be measuring the bot.
+const settings = new SettingsStore(db);
+await settings.load();
+
 const srv = await startInternalActions({
   host: '127.0.0.1',
   port: PORT,
@@ -72,6 +92,7 @@ const srv = await startInternalActions({
   channelKeys: buildChannelKeys(`${CHANNEL_KEY}:1045943373007171674`),
   enabled: new Set<string>(IMPLEMENTED_ACTIONS),
   store,
+  settings,
 });
 
 console.log(

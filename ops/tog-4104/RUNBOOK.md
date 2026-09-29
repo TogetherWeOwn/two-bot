@@ -1,9 +1,9 @@
 # Staging signed settings proof — runnable packet (TOG-4705)
 
 This packet re-pins the TOG-4104 proof to the wired runtime
-`5f57256d41130b056389f3098f3b0c84a9d9e261` (the commit staging runs,
-redeployed 2026-09-27) and lifts the HOLD **only for that
-pin**. At that commit startup passes the initialized settings store to
+`47c48197d46647e34132544523e863e3c92d82ff` (PR #229, the commit staging runs
+per the operator 23:21Z hand-back on TOG-7034) and lifts the HOLD **only for
+that pin**. At that commit startup passes the initialized settings store to
 `startInternalActions`, so both settings verbs are served with the existing
 flags enabled. See [SOURCE_IDENTITY.md](SOURCE_IDENTITY.md) for pin choice,
 topology, excerpt provenance and review/CI records.
@@ -27,7 +27,7 @@ production, flags, credentials or the DB. The existing flags remain at 1.
 | App | `uy4d9ndeygjcem6lgayhxgub` |
 | Exact container | `bot-uy4d9ndeygjcem6lgayhxgub` |
 | Guild | `1545644954272137297` (TWO Staging) |
-| Pinned runtime | `5f57256d41130b056389f3098f3b0c84a9d9e261` (PR #176 merge, contains `15b8f6c`) |
+| Pinned runtime | `47c48197d46647e34132544523e863e3c92d82ff` (PR #229, contains `15b8f6c`) |
 | Proof source | This packet's merged head, passed as `$2` and byte-checked against `ops/tog-4104` |
 | Candidate keys | `TWO_RAID_JOIN_THRESHOLD`, `TWO_RAID_WINDOW_SECONDS` |
 | Offline fixtures | Numeric strings `7`, `42`, respectively |
@@ -39,8 +39,8 @@ sibling.
 
 ## Operator steps (TOG-3706 only, after this packet merges)
 
-1. Confirm staging still runs `5f57256d41130b056389f3098f3b0c84a9d9e261`
-   on `uy4d9ndeygjcem6lgayhxgub` (redeployed 2026-09-27). Record the Coolify
+1. Confirm staging still runs `47c48197d46647e34132544523e863e3c92d82ff`
+   on `uy4d9ndeygjcem6lgayhxgub`. Record the Coolify
    deployment id and the resulting immutable image ID (`sha256:…`). If
    staging has been redeployed since, stop: this packet pins only that
    commit.
@@ -51,7 +51,7 @@ sibling.
 3. Run the proof from a checkout at this packet's merged head (`$SOURCE`):
    ```bash
    PROOF_EXCLUSIVE_WINDOW=staging-writers-quiesced \
-   PROOF_RUNTIME_REVISION=5f57256d41130b056389f3098f3b0c84a9d9e261 \
+   PROOF_RUNTIME_REVISION=47c48197d46647e34132544523e863e3c92d82ff \
    PROOF_IMAGE_ID='<sha256 from step 1>' \
    ops/tog-4104/run-proof.sh run "$SOURCE"
    ```

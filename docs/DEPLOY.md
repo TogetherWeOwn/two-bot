@@ -44,7 +44,7 @@ one — the same application backs the website's OAuth client.
 
 | Field | Value |
 |---|---|
-| Repository | `git@135.148.42.223:/srv/git/two-bot.git` |
+| Repository | `git@<mirror-host>:/srv/git/two-bot.git` (host from the operator — never commit it here) |
 | Branch | `main` |
 | Compose file | `docker-compose.yml` |
 | Build context | `/` (repo root) |
@@ -52,8 +52,9 @@ one — the same application backs the website's OAuth client.
 **Do not point this at `github.com`.** Coolify on this box cannot clone from
 GitHub: a deploy key is refused by the GitHub *enterprise* policy (TOG-1175), an
 embedded `x-access-token` clone URL 500s, and `private_key_uuid` 422s. The box
-keeps a mirror of the GitHub repo at the path above and re-mirrors every 2
-minutes; Coolify clones from that over SSH.
+keeps a mirror of the GitHub repo at the repository path above and re-mirrors
+every 2 minutes; Coolify clones from that over SSH. Get the mirror host from
+the operator — it is infrastructure addressing, not repository content.
 
 The failure mode if you get this wrong is quiet: the deploy ends in a few
 seconds with a **zero-byte build log**, which looks like a broken server rather
@@ -73,9 +74,9 @@ silently writes real data somewhere nobody looks.
 | Variable | Required | Value | Notes |
 |---|---|---|---|
 | `DISCORD_BOT_TOKEN` | **yes** | the `discord_bot_token` secret | **Mark as secret** in Coolify so it is masked in build logs |
-| `DISCORD_GUILD_ID` | **yes** | `326474832151838730` | TogetherWeOwn |
+| `DISCORD_GUILD_ID` | **yes** | your guild's snowflake, e.g. `123456789012345678` | The example is synthetic, not a live server |
 | `TWO_DATABASE_URL` | **yes** | `postgres://…` | **Not** `DATABASE_URL` — see below |
-| `DISCORD_STAFF_ALERT_CHANNEL_ID` | recommended | `1138590808715571300` | Settled on TOG-412. Staff-only: the alert lists member ids |
+| `DISCORD_STAFF_ALERT_CHANNEL_ID` | recommended | e.g. `123456789012345679` (synthetic) | Staff-only: the alert lists member ids. Use the real staff alerts channel — settled on TOG-412 |
 | `DISCORD_LANDING_CHANNEL_IDS` | no | empty | Onboarding does not run while empty. Set it only when you want the picker posted |
 | `TWO_ONBOARDING_MODE` | no | `legacy` | Set `session` for roleless routing; requires the next three settings, removes `role.assign` from internal actions, stops leveling reward roles, and refuses to boot with a non-empty `TWO_SELF_ROLE_PANELS` or an armed `TWO_ANTI_NUKE` (see [ANTI-NUKE.md](ANTI-NUKE.md)) |
 | `DISCORD_GOODBYE_CHANNEL_IDS` | session only | empty | Comma-separated, guild-scoped goodbye targets |
@@ -140,7 +141,7 @@ Run preflight against the live server. It is read-only and takes seconds, and it
 catches the failures that otherwise appear as a permanent hole in the numbers:
 
 ```bash
-DISCORD_TOKEN=... DISCORD_GUILD_ID=326474832151838730 node scripts/preflight.ts
+DISCORD_TOKEN=... DISCORD_GUILD_ID=123456789012345678 node scripts/preflight.ts
 ```
 
 `Ready to deploy.` means the funnel will collect. A `FAIL` on the **Server
@@ -161,7 +162,7 @@ deliverable today is that `Owen` still carries **Administrator**. When TOG-64
 trims that bit, `View` goes false while `Send` stays true — the channel keeps
 looking healthy to anything that checks `Send` alone, and alerts silently stop.
 Before the trim lands, add a channel overwrite allowing `View Channel` to the
-`Owen` role (`1539718644953514087`). Preflight reports this as a `WARN`, not a
+`Owen` role (ask the operator for the role id). Preflight reports this as a `WARN`, not a
 `FAIL`, because it is correct today; `src/discord/channelAccess.ts` does the
 overwrite arithmetic and `test/unit.channelaccess.test.ts` pins the live shape.
 
@@ -213,6 +214,67 @@ proxy `404 page not found`. That 404 is correct and is not an outage. `/readyz`
 is reached by the compose healthcheck *inside* the container, which is what
 makes `running:healthy` meaningful: it means the gateway is connected and the
 database answered.
+
+## 6.2 Deploy-on-merge gates (`.github/workflows/deploy.yml`)
+
+Merges to `main` deploy themselves — no manual trigger needed. The workflow has
+two jobs, and every step in them is unconditional: a missing target fails the
+job red on purpose (TOG-913 — a gate that once skipped-and-passed told the
+owner a page was live when nothing had shipped, so no step here may gain a
+"skip and pass" branch).
+
+**Staging deploys automatically.** `deploy-staging` runs when the `ci` workflow
+completes green on `main` (`workflow_run`), so "main moved" is never confused
+with "main passed". A manual re-deploy of staging uses `workflow_dispatch`.
+There is deliberately no environment picker: a choice list with `production` on
+it is how the ignored gate gets rebuilt by accident.
+
+**Production deploys only by operator dispatch.** `deploy-production` runs on
+`workflow_dispatch` only — never automatically — after `deploy-staging` on the
+same dispatch, behind the `production` environment and its required reviewer.
+It stays gated until TOG-6903 says the Community Platform may go live; the
+first production launch needs owner approval. Plan caveat: on GitHub Free with
+a private repo, environment protection rules are ignored, so the real gate
+today is the human click plus the required reviewer the operator sets on the
+production environment. If the plan cannot enforce the reviewer, keep
+production manual from the Coolify dashboard (§6.1) instead of weakening the
+workflow file.
+
+Each deploy — staging or production — runs the same five gates in order:
+
+1. **Wait for the host mirror** (`scripts/wait-for-host-mirror.mjs`). Coolify
+   clones the host mirror (§2), never github.com, and the box re-mirrors
+   roughly every 2 minutes. This step waits out one mirror interval so the
+   deploy builds the merged commit rather than its parent; the log records the
+   merge SHA so a stale deploy can be told apart from a lagging mirror. Same
+   rule as §6.1, automated.
+2. **Deploy-target gate** (`scripts/check-deploy-target.mjs`). Fails the job
+   when the Coolify bearer credential, panel URL, or app UUID secrets are
+   missing — printing secret NAMES only, never values. A missing deploy target
+   is red, naming the secrets that clear it.
+3. **Record deploy start time.** A freshness anchor: the smoke step's `ready`
+   line must prove THIS deploy, not the previous release's surviving log tail.
+4. **Trigger Coolify deploy and wait for healthy**
+   (`scripts/wait-for-coolify-deploy.mjs`). POSTs the bearer-header trigger
+   (§6.1), then polls until the deployment reports `finished` AND the app
+   reports `running:healthy` — the compose healthcheck hits `/readyz`
+   in-container, which returns 200 only when the gateway is connected and
+   Postgres answers. A 200 from the trigger only queued the deploy; green here
+   means it is live. Never skips: an unanswered panel or an app that never
+   reports healthy fails.
+5. **Post-deploy smoke** (`scripts/smoke-staging-deploy.mjs`). Through the
+   panel, not a URL — the bot publishes no ports, so the sslip.io address 404s
+   by design (§6.1). Three checks: `running:healthy`; a FRESH
+   `{"msg":"ready","guilds":N>=1}` log line timestamped at or after the deploy
+   start; and log timestamps advancing between two reads a minute apart. Any of
+   them missing fails.
+
+Migrations need no gate step: the bot migrates at startup under an advisory
+lock, so a normal deploy applies pending migrations before serving.
+
+Rollback for either environment is §7: `git revert` on `main`, wait for the
+mirror, re-run the deploy. Migrations do not roll back; every migration here
+is additive.
 
 ## 7. Rollback
 
