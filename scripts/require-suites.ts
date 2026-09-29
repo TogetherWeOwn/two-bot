@@ -219,6 +219,17 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     minTests: 5,
     why: 'the presence-trend output CLI itself, not just the helpers underneath it - without this floor a silent skip re-opens the unpinned staffing/event-slot numbers gap',
   },
+  {
+    // TOG-9998. The dedupe-events repair script run end to end through the
+    // real script: --dry-run counts without deleting, the real run deletes
+    // exactly the copies (keeping the earliest of each cluster) and a second
+    // run deletes nothing with a byte-identical digest. Counted from the 2
+    // top-level test() blocks; CI's postgres job confirms the count on the
+    // first run after this commit.
+    file: 'test/e2e.dedupeevents.test.ts',
+    minTests: 2,
+    why: 'the dedupe-events duplicate-detection and idempotent-delete proof itself - without this floor a silent skip re-opens the phantom-join count gap',
+  },
 ];
 
 /**
