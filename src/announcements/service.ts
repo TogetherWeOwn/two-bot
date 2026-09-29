@@ -340,11 +340,24 @@ export class AnnouncementsService {
                 postedThisPoll++;
               }
             } catch (error) {
-              // No visible message landed, so no budget is consumed — the
-              // released claim is retried on a later poll without starving
-              // the items behind it.
-              await this.store.releaseDelivery(feed.id, itemKey, claimToken);
-              throw error;
+              // TOG-9347: ambiguous send (accept-then-reset) must reconcile by
+              // nonce before releasing the claim, mirroring createLfg above.
+              // Without this the next poll re-sends the same nonce content.
+              const recovered = await this.discord.findMessageByNonce?.(feed.channelId, nonce).catch(() => null);
+              if (recovered) {
+                // The recovered message is visible, so it consumes one
+                // per-poll budget slot, matching the success path above.
+                if (await this.store.markDelivered(feed.id, itemKey, claimToken, recovered, now.toISOString())) {
+                  delivered++;
+                  postedThisPoll++;
+                }
+              } else {
+                // No visible message landed, so no budget is consumed — the
+                // released claim is retried on a later poll without starving
+                // the items behind it.
+                await this.store.releaseDelivery(feed.id, itemKey, claimToken);
+                throw error;
+              }
             }
           } catch (error) {
             await this.store.audit({
