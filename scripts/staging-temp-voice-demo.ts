@@ -297,10 +297,27 @@ if (phase === 'restart') {
   check('no ghost row: the channel and the row still agree', !!stillThere, { rowId: stillThere?.id });
 
   // Re-adopted means re-adopted: the controls still work after the restart.
+  // The rename may legitimately queue rather than apply: `create` renamed
+  // <5min ago and `reconcile` re-seeds the throttle from `lastRenamedAt`, so
+  // status `ok` with a queued message is a healthy system (TOG-9562). Assert
+  // controllability on status, and accept either applied-now or queued.
   const renamed = await service.rename(ctx(row.channelId), 'adopted after restart');
   const named = await rest(`/channels/${row.channelId}`);
+  const appliedNow = renamed.status === 'ok' && named.body.name === 'adopted after restart';
+  const queuedOk = renamed.status === 'ok'
+    && renamed.message.includes('queued')
+    && named.body.name !== 'adopted after restart';
   check('the re-adopted channel is still controllable',
-    renamed.status === 'ok' && named.body.name === 'adopted after restart', { outcome: renamed, name: named.body.name });
+    appliedNow || queuedOk, { outcome: renamed, name: named.body.name, appliedNow, queuedOk });
+  if (queuedOk) {
+    // The rename is queued, so prove liveness with a control the throttle
+    // does not cover; the queued name itself is flushed by a later sweep
+    // once the window opens (unit-covered in test/unit.tempvoice.test.ts).
+    const limit = await service.setLimit(ctx(row.channelId), 4);
+    check('a non-rename control applies on the re-adopted channel even while the rename is queued',
+      limit.status === 'ok' && (await rest(`/channels/${row.channelId}`)).body.user_limit === 4, { outcome: limit });
+    await service.setLimit(ctx(row.channelId), 0);
+  }
 
   await assertBystandersSurvive('after reconcile');
   record({ event: 'phase_end', channelId: row.channelId });
