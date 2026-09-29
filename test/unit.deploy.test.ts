@@ -7,8 +7,8 @@
 // This suite is the fence. Every `*.service` / `*.timer` in deploy/ is
 // validated on every run - discovered from the directory, so a new unit is
 // covered without anyone remembering to register it. Validation is two-tier:
-// `systemd-analyze verify` where the binary exists (the self-hosted CI
-// runners), else a small in-test parser that enforces the invariants a broken
+// `systemd-analyze verify` where the binary exists (CI runners, where systemd
+// ships), else a small in-test parser that enforces the invariants a broken
 // unit actually violates (missing ExecStart, bad Type, timer with no
 // calendar, Unit= pointing at nothing). Compose gets structural lint without
 // a YAML dependency, and the Dockerfile gets hadolint-style basics.
@@ -246,16 +246,75 @@ function checkHardening(unit: ParsedUnit): string[] {
         `${name}: [Service] long-running units need Restart=always (got ${restart ?? 'missing'}) - the bot comes back without anyone noticing`,
       );
     }
-    for (const key of ['RestartSec', 'StartLimitIntervalSec', 'StartLimitBurst']) {
-      if (!getOne(unit, 'Service', key)) {
+    if (!getOne(unit, 'Service', 'RestartSec')) {
+      problems.push(
+        `${name}: [Service] RestartSec is missing - restart without backoff burns the Discord identify budget silently`,
+      );
+    }
+    // The crash-loop cap lives in [Unit]: systemd 255+ ignores StartLimit* in
+    // [Service] and the cap is silently dropped (TOG-9539: hosted CI caught
+    // three units claiming a cap that was never enforced).
+    for (const key of ['StartLimitIntervalSec', 'StartLimitBurst']) {
+      if (!getOne(unit, 'Unit', key)) {
         problems.push(
-          `${name}: [Service] ${key} is missing - restart without backoff and a crash-loop cap burns the Discord identify budget silently`,
+          `${name}: [Unit] ${key} is missing - restart without a crash-loop cap burns the Discord identify budget silently`,
         );
       }
     }
   }
 
+  // A cap in [Service] is a comment, not a cap - flag the misplacement on any
+  // unit type so the next one fails here instead of on a hosted runner.
+  for (const key of ['StartLimitIntervalSec', 'StartLimitBurst']) {
+    if (getOne(unit, 'Service', key)) {
+      problems.push(
+        `${name}: [Service] ${key} belongs in [Unit] - systemd 255+ ignores it here, so the crash-loop cap is silently dropped`,
+      );
+    }
+  }
+
   return problems;
+}
+
+/**
+ * `systemd-analyze verify` lines that describe the verifying machine, not the
+ * unit. /usr/bin/node is the bootstrap contract (scripts/bootstrap-host.sh
+ * installs Node so every unit pins the interpreter); hosted CI runners carry
+ * node under the toolcache instead, so "not executable: No such file" for
+ * exactly this path is environmental. Anything else missing - a typo'd
+ * interpreter, a wrong path - still fails, because that would fail on the
+ * host too.
+ */
+function isEnvironmentalVerifyNoise(line: string): boolean {
+  return line.includes('/usr/bin/node') && line.includes('No such file or directory');
+}
+
+function verifyWithSystemd(path: string): string | null {
+  let stderr = '';
+  try {
+    execFileSync('systemd-analyze', ['verify', path], { encoding: 'utf8', stdio: 'pipe' });
+    return null;
+  } catch (err) {
+    stderr =
+      err instanceof Error && 'stderr' in err ? String((err as { stderr: unknown }).stderr) : '';
+    if (!stderr.trim()) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return `${path}: systemd-analyze verify failed: ${msg.trim().split('\n')[0]}`;
+    }
+  }
+  const real = stderr
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l !== '' && !isEnvironmentalVerifyNoise(l));
+  if (real.length === 0) {
+    // Loud skip, same philosophy as a missing binary: the parser tier above
+    // already ran, and silence would hide that this tier contributed nothing.
+    console.log(
+      `${path}: systemd-analyze verify reports only the missing host node - parser-tier checks are the gate here`,
+    );
+    return null;
+  }
+  return `${path}: systemd-analyze verify failed: ${real[0]}`;
 }
 
 /** `systemd-analyze verify` where the binary exists; null when it does not. */
@@ -268,17 +327,6 @@ function systemdVerifyAvailable(): boolean {
     // (EACCES, ...) also means verify cannot run here - the parser covers it.
     if (err instanceof Error && 'code' in err) return false;
     return false;
-  }
-}
-
-function verifyWithSystemd(path: string): string | null {
-  try {
-    execFileSync('systemd-analyze', ['verify', path], { encoding: 'utf8', stdio: 'pipe' });
-    return null;
-  } catch (err) {
-    const stderr = err instanceof Error && 'stderr' in err ? String((err as { stderr: unknown }).stderr) : '';
-    const msg = err instanceof Error ? err.message : String(err);
-    return `${path}: systemd-analyze verify failed: ${(stderr || msg).trim().split('\n')[0]}`;
   }
 }
 
@@ -415,10 +463,10 @@ const HARDENED_ONESHOT = [
   '',
 ].join('\n');
 
-const HARDENED_LONG_RUNNING = HARDENED_ONESHOT.replace('Type=oneshot', 'Type=simple').replace(
-  'MemoryMax=512M',
-  'Restart=always\nRestartSec=5\nStartLimitIntervalSec=300\nStartLimitBurst=10\nMemoryMax=512M',
-);
+const HARDENED_LONG_RUNNING = HARDENED_ONESHOT.replace('Type=oneshot', 'Type=simple')
+  // The crash-loop cap lives in [Unit]: systemd 255+ ignores it in [Service].
+  .replace('Description=hardened', 'Description=hardened\nStartLimitIntervalSec=300\nStartLimitBurst=10')
+  .replace('MemoryMax=512M', 'Restart=always\nRestartSec=5\nMemoryMax=512M');
 
 function hardeningProblems(name: string, text: string): string[] {
   return checkHardening(parseUnit(text, name));
@@ -427,7 +475,7 @@ function hardeningProblems(name: string, text: string): string[] {
 test('a service missing the sandbox baseline fails', () => {
   const problems = hardeningProblems(
     'bare.service',
-    '[Unit]\nDescription=bare\n\n[Service]\nType=simple\nExecStart=/usr/bin/node x.ts\nRestart=always\nRestartSec=5\nStartLimitIntervalSec=300\nStartLimitBurst=10\n\n[Install]\nWantedBy=multi-user.target\n',
+    '[Unit]\nDescription=bare\nStartLimitIntervalSec=300\nStartLimitBurst=10\n\n[Service]\nType=simple\nExecStart=/usr/bin/node x.ts\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n',
   );
   for (const key of ['NoNewPrivileges', 'ProtectSystem', 'CapabilityBoundingSet', 'MemoryMax']) {
     assert.ok(
@@ -476,6 +524,21 @@ test('a long-running service with no crash-loop cap fails', () => {
   assert.ok(
     problems.some((p) => p.includes('StartLimitBurst')),
     `expected a crash-loop-cap problem, got: ${problems}`,
+  );
+});
+
+test('a crash-loop cap in [Service] instead of [Unit] fails', () => {
+  // TOG-9539: three units carried StartLimit* in [Service], which systemd
+  // 255+ ignores - the cap was a comment and hosted CI caught it. Moving the
+  // keys back under [Service] must fail here, not on a hosted runner.
+  const text = HARDENED_LONG_RUNNING.replace(
+    'StartLimitIntervalSec=300\nStartLimitBurst=10\n',
+    '',
+  ).replace('RestartSec=5\n', 'RestartSec=5\nStartLimitIntervalSec=300\nStartLimitBurst=10\n');
+  const problems = hardeningProblems('misplaced-cap.service', text);
+  assert.ok(
+    problems.some((p) => p.includes('belongs in [Unit]')),
+    `expected a misplaced-cap problem, got: ${problems}`,
   );
 });
 
