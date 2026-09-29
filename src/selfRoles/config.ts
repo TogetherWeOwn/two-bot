@@ -1,4 +1,4 @@
-import { emojiIdentity } from './plan.ts';
+import { emojiIdentity, selfRoleCustomId } from './plan.ts';
 import {
   findSelfRoleDisallowedPermission,
   findSelfRoleUnsafeChannelGrant,
@@ -202,6 +202,18 @@ function parsePanel(value: unknown, index: number): SelfRolePanel {
     if (emojiKey) emojis.add(emojiKey);
     return { key, label, roleId, permissions, ...(emoji ? { emoji } : {}), ...(description ? { description } : {}) };
   });
+
+  if (mode === 'button') {
+    for (const [optionIndex, option] of options.entries()) {
+      const customId = selfRoleCustomId(id, option.key);
+      if (customId.length > 100) {
+        throw new SelfRoleConfigError(
+          `panel[${index}].options[${optionIndex}].key "${option.key}" builds button custom_id ` +
+            `"${customId}" (${customId.length} chars), over Discord's 100-char custom_id limit`,
+        );
+      }
+    }
+  }
 
   return { id, channelId, messageId, mode, exclusive, color, options };
 }
