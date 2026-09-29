@@ -122,7 +122,11 @@ describe('inspect: table names it refuses', () => {
 
 describe('inspect: files it refuses for shape', () => {
   test('legacy dumps cannot omit newly-owned tables', async () => {
-    for (const version of [1, 2]) {
+    // TOG-9074: v3 is refused too - a v3 dump omits 36 tables and would fail
+    // the manifest-completeness gate even if the version check let it past.
+    // There is no v3 read path; `eventsSequence` survives only as a
+    // structurally comparable manifest field (see src/store/dump.ts).
+    for (const version of [1, 2, 3]) {
       const objs = goodDump();
       (objs[0] as { version: number }).version = version;
       await assert.rejects(

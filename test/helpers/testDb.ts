@@ -110,6 +110,13 @@ const TABLES = [
   'temp_voice_audit',
   'temp_voice_creates',
   'temp_voice_channels',
+  // TOG-9074: invite campaigns and internal-actions state. rank_ladder and
+  // web_contract_meta stay out - they are migration seed rows, not test data.
+  'invite_campaigns',
+  'internal_action_log',
+  'internal_discord_events',
+  'internal_idempotency',
+  'internal_nonces',
 ];
 
 export interface TestDb {
