@@ -167,6 +167,9 @@ function parsePanel(value: unknown, index: number): SelfRolePanel {
   if (mode === 'select' && panel.options.length > 25) {
     throw new SelfRoleConfigError(`${at} has more than Discord's 25-option select limit`);
   }
+  if (mode === 'reaction' && panel.options.length > 20) {
+    throw new SelfRoleConfigError(`${at} has more than Discord's 20-reaction limit`);
+  }
 
   const optionKeys = new Set<string>();
   const roleIds = new Set<string>();
