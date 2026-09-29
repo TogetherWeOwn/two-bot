@@ -73,6 +73,9 @@ before(async () => {
   dbEnv = {
     TWO_DATABASE_URL: process.env.TWO_TEST_DATABASE_URL!,
     PGOPTIONS: `-c search_path=${schema}`,
+    // TOG-8738: the funnel report is scoped to one guild and fails fast
+    // without it. The fixture seeds GUILD, so this is the server reported on.
+    DISCORD_GUILD_ID: GUILD,
   };
 });
 
@@ -297,6 +300,90 @@ test('raid-day tracked-source join is set aside in headline and campaign counts'
     { slug: 'acc-link', clicks: 3, joins: 3 },
   );
   assert.equal(r.totalEvents, 17);
+});
+
+test('a second guild in the same database does not leak into the report', async () => {
+  await seedFixture();
+  // TOG-8738: a staging DB with fixtures for two guilds must report only the
+  // DISCORD_GUILD_ID guild. Mirror every fixture row under a foreign guild -
+  // equal size, so any unscoped query visibly doubles the report.
+  const OTHER_GUILD = '999999999999999001';
+  const db = harness.db;
+  const rows = await db
+    .prepare(`SELECT event_type, member_id, occurred_at, source, metadata FROM events`)
+    .all<{ event_type: string; member_id: string | null; occurred_at: string; source: string; metadata: string | null }>();
+  const idem = db.prepare(
+    `SELECT COUNT(*) AS n FROM events WHERE idempotency_key LIKE 'funnel-accuracy-%'`,
+  );
+  const seededKeys = Number((await idem.get<{ n: number }>())?.n ?? 0);
+  const insEvent = db.prepare(
+    `INSERT INTO events (event_type, member_id, guild_id, occurred_at, source, metadata, idempotency_key)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+  );
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i]!;
+    await insEvent.run(r.event_type, r.member_id, OTHER_GUILD, r.occurred_at, r.source, r.metadata, `funnel-accuracy-other-${i}`);
+  }
+  const members = await db
+    .prepare(`SELECT member_id, joined_at, first_message_at, first_voice_at, last_active_at, left_at, gate_cleared_at, is_bot FROM members`)
+    .all<{
+      member_id: string; joined_at: string | null; first_message_at: string | null;
+      first_voice_at: string | null; last_active_at: string | null; left_at: string | null;
+      gate_cleared_at: string | null; is_bot: number;
+    }>();
+  const insMember = db.prepare(
+    `INSERT INTO members (guild_id, member_id, joined_at, first_message_at, first_voice_at,
+      last_active_at, left_at, gate_cleared_at, is_bot)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  );
+  for (const m of members) {
+    await insMember.run(
+      OTHER_GUILD, m.member_id, m.joined_at, m.first_message_at, m.first_voice_at,
+      m.last_active_at, m.left_at, m.gate_cleared_at, m.is_bot,
+    );
+  }
+  assert.equal(seededKeys, 16, 'precondition: the fixture seeds 16 keyed events');
+
+  const machine = await cli(['--json']);
+  assert.equal(machine.code, 0, machine.stdout + machine.stderr);
+  const r = JSON.parse(machine.stdout) as FunnelReport;
+
+  // Identical hand-computed expectations as the single-guild test above: the
+  // foreign guild's mirror rows must not move a single number.
+  assert.deepEqual(
+    {
+      clicks: r.funnel.clicks,
+      joins: r.funnel.joins,
+      gateCleared: r.funnel.gateCleared,
+      joiners: r.funnel.joiners,
+      stuckAtGate: r.funnel.stuckAtGate,
+      firstMessage: r.funnel.firstMessage,
+      firstVoice: r.funnel.firstVoice,
+      leaves: r.funnel.leaves,
+      neverPosted: r.neverPosted,
+      totalEvents: r.totalEvents,
+    },
+    {
+      clicks: 3,
+      joins: 5,
+      gateCleared: 2,
+      joiners: 4,
+      stuckAtGate: 1,
+      firstMessage: 2,
+      firstVoice: 1,
+      leaves: 1,
+      neverPosted: 1,
+      totalEvents: 16,
+    },
+  );
+  assert.deepEqual(
+    r.retention.map((x) => [x.day, x.retained, x.cohort]),
+    [
+      [1, 2, 4],
+      [7, 0, 0],
+      [30, 0, 0],
+    ],
+  );
 });
 
 test('text report prints the same hand-computed numbers', async () => {
