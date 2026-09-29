@@ -70,9 +70,13 @@ export interface FeedResponse {
 
 export class PublicFeedFetcher {
   private lookup: FeedLookup;
+  private fetchImpl: typeof undiciFetch;
 
-  constructor(lookup: FeedLookup = dnsLookup) {
+  // fetchImpl is injectable so tests can drive the guarded path with a mock
+  // transport; production always uses undiciFetch with the public-only dispatcher.
+  constructor(lookup: FeedLookup = dnsLookup, fetchImpl: typeof undiciFetch = undiciFetch) {
     this.lookup = lookup;
+    this.fetchImpl = fetchImpl;
   }
 
   async read(source: string, signal: AbortSignal): Promise<FeedResponse> {
@@ -81,7 +85,7 @@ export class PublicFeedFetcher {
     const connector = buildConnector({ lookup: createPublicLookup(this.lookup) });
     const dispatcher: Dispatcher = new Agent({ connect: connector, maxResponseSize: MAX_FEED_BYTES });
     try {
-      const response = await undiciFetch(url, {
+      const response = await this.fetchImpl(url, {
         headers: { 'User-Agent': 'Owen/1.0 (+https://two.gg)' },
         redirect: 'error',
         signal,
