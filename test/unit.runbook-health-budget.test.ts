@@ -62,7 +62,7 @@ interface Scenario {
   crashFirst?: boolean;
   stopDelay?: number;
   refuseTerm?: boolean;
-  portAfterStop?: 'hang' | 'answers';
+  portAfterStop?: 'hang' | 'answers' | 'body-error';
   closeHangs?: boolean;
   releaseHangs?: boolean;
 }
@@ -137,6 +137,14 @@ function fixture(t: TestContext, scenario: Scenario = {}) {
       if (child.exitCode !== null) {
         if (scenario.portAfterStop === 'hang') return hang(signal);
         if (scenario.portAfterStop === 'answers') return new Response('ok');
+        // Headers received but the body is truncated: a server is still
+        // listening, so this must never certify a released port.
+        if (scenario.portAfterStop === 'body-error') {
+          return {
+            ok: true, status: 200,
+            text: async () => { throw new TypeError('terminated: truncated HTTP body'); },
+          } as unknown as Response;
+        }
         throw new Error('ECONNREFUSED');
       }
       const live = url.endsWith('/healthz');
@@ -290,6 +298,15 @@ test('port-release fetch timeout is not mistaken for a refused connection', asyn
   assert.equal(Date.now(), 11_500);
   failure(report, 'port-released', false);
   assert.equal(f.signals.at(-1)!.aborted, true);
+  f.clean();
+});
+
+test('response-body failure after shutdown is not mistaken for a released port', async (t) => {
+  const f = fixture(t, { portAfterStop: 'body-error' });
+  const report = await finish(t, f.run(2_000));
+  assert.equal(Date.now(), 11_500);
+  failure(report, 'port-released', false);
+  assert.ok(f.signals.length > 1, 'probe kept polling instead of certifying release on first headers');
   f.clean();
 });
 

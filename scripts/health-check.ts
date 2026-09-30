@@ -612,15 +612,23 @@ export async function runHealthCheck(
 
 async function assertPortReleased(healthUrl: string, deadline: Deadline, fetchProbe: typeof fetch): Promise<void> {
   await waitFor(async (signal) => {
+    let res: Response;
     try {
-      const res = await fetchProbe(healthUrl, { signal });
-      await res.text();
-      return null;
+      res = await fetchProbe(healthUrl, { signal });
     } catch (err) {
       // A canceled/hung request is NOT proof of a refused connection.
       if (signal.aborted) throw err;
       return true;
     }
+    // Headers received means a server is still listening: a body failure
+    // (truncated HTTP body, bad encoding) must not certify release.
+    try {
+      await res.text();
+    } catch (err) {
+      if (signal.aborted) throw err;
+      return null;
+    }
+    return null;
   }, deadline);
 }
 
