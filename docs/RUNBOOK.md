@@ -653,6 +653,13 @@ sudo systemctl start two-bot
 sudo -u twobot --preserve-env=TWO_DATABASE_URL node scripts/funnel.ts 7
 ```
 
+The CLI requires exactly one backup file and exactly one mode: `--force` or
+`--dry-run`, in either order. Unknown options (including a misspelled
+`--dry-run` beside `--force`), duplicate flags, extra files, and combined modes
+fail with a usage error before the backup is read or the target is opened.
+Use `--help` alone for side-effect-free usage. For a filename starting with
+`-`, pass its path with a `./` prefix.
+
 The restore script takes `TWO_RESTORE_URL`, deliberately not `TWO_DATABASE_URL`.
 Restoring wipes the target, and the one mistake you must not be able to make by
 accident is aiming it at production because the variable happened to be in your
