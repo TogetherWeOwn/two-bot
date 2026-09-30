@@ -1,7 +1,11 @@
 /**
  * Temp-voice index audit + EXPLAIN harness (TOG-6476).
  *
- *   TWO_DATABASE_URL=postgres://two:two@127.0.0.1:5432/two_test node scripts/temp-voice-index-bench.ts [guilds]
+ *   TWO_DATABASE_URL=postgres://agent_test@agent-testdb:5432/two_bot_test_tog10236 node scripts/temp-voice-index-bench.ts [guilds]
+ *
+ * TWO_DATABASE_URL must explicitly name an isolated test database. Ambient
+ * DATABASE_URL is ignored; the shared test-host guard refuses nonallowlisted
+ * hosts and query strings before openDb can create or migrate any schema.
  *
  * Follow-up to TOG-5709 (event-store benchmark + index migration):
  * migrations/0036_temp_voice.sql and 0037_temp_voice_owner_transition.sql
@@ -34,19 +38,17 @@
 import { openDb } from '../src/store/db.ts';
 import { TempVoiceStore } from '../src/tempVoice/store.ts';
 import { PER_GUILD, SEED_BASE, seedTempVoiceBenchmark } from './temp-voice-index-bench-seed.ts';
+import { assertTestDatabaseHost } from './test-db-guard.ts';
 
-const spec = process.env.TWO_DATABASE_URL?.trim() ?? process.env.DATABASE_URL?.trim() ?? '';
+const spec = process.env.TWO_DATABASE_URL?.trim() ?? '';
 if (!spec) {
-  console.error('temp-voice-index-bench: set TWO_DATABASE_URL (or DATABASE_URL) to an isolated database, never production.');
+  console.error('temp-voice-index-bench: set TWO_DATABASE_URL explicitly to an isolated test database; DATABASE_URL is ignored.');
   process.exit(2);
 }
+assertTestDatabaseHost(spec, 'temp-voice-index-bench: TWO_DATABASE_URL');
 const GUILDS = Math.max(1, Number(process.argv[2] ?? 100) || 100);
 if (!Number.isInteger(GUILDS) || GUILDS > 5000) {
   console.error('temp-voice-index-bench: guilds must be an integer 1..5000.');
-  process.exit(2);
-}
-if (/prod/i.test(spec)) {
-  console.error('temp-voice-index-bench: refusing a spec that looks like production.');
   process.exit(2);
 }
 
