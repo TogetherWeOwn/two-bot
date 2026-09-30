@@ -235,26 +235,20 @@ export function createClient(
   });
 }
 
-async function snapshotInvites(guild: Guild, invites: InviteTracker): Promise<string[]> {
+async function fetchInvites(guild: Guild): Promise<InviteState[] | null> {
   try {
     const fetched = await guild.invites.fetch();
-    const states: InviteState[] = fetched.map((i) => ({
+    return fetched.map((i) => ({
       code: i.code,
       uses: i.uses ?? 0,
       inviterId: i.inviter?.id ?? null,
       channelId: i.channel?.id ?? null,
     }));
-    // `return await`, not a bare `return`: the store became async with the
-    // Postgres migration, and a returned-but-not-awaited promise rejects
-    // outside this try/catch. That turns a recoverable "could not read
-    // invites" into an unhandled rejection, which index.ts answers by exiting
-    // the process - on every join.
-    return await invites.diffAndStore(guild.id, states);
   } catch (err) {
-    // Missing ManageGuild permission is the usual cause. Joins still get
-    // recorded, just with source 'unknown'.
+    // Handle fetch failures immediately, even while earlier writes are pending.
+    // null is not an empty snapshot: it must not erase the stored baseline.
     log.error('invite_snapshot_failed', { guildId: guild.id, err: String(err) });
-    return [];
+    return null;
   }
 }
 
@@ -290,46 +284,41 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     });
   };
 
-  /**
-   * One chain per guild for invite snapshots, not one concurrent handler per
-   * join (TOG-8306). discord.js dispatches every gateway event to an async
-   * listener without awaiting the previous one, and `diffAndStore` is a
-   * read-modify-write across several statements with awaits between them. Two
-   * joins through different codes on the same tick interleaved like this:
-   *
-   *   join A fetches (A +1) -> join B fetches (A +1, B +1) ->
-   *   A reads the stored baseline -> B reads the SAME stored baseline ->
-   *   A stores its snapshot -> B diffs against the stale baseline and sees
-   *   both codes grow, attributing an exactly-attributable join
-   *   `ambiguous:A+B` (and A's stored write can clobber B's counter back
-   *   down, poisoning the next join too).
-   *
-   * Chaining the whole fetch-plus-diff per guild closes it: the second
-   * snapshot's baseline read cannot run until the first snapshot's write has
-   * committed, and invite counters only move up, so each join sees exactly
-   * its own delta. The InviteCreate refresh takes the same chain so a new
-   * code cannot shift the baseline mid-join either. Same per-subject
-   * precedent as the voice frames below (TOG-5981): a stuck fetch for guild
-   * A never stalls guild B. Scoped to this call so each test bus gets a
-   * fresh map; single-process scope is enough because one bot owns the
-   * gateway for a guild.
-   */
-  const inviteChains = new Map<string, Promise<unknown>>();
-  const chainedSnapshotInvites = (guild: Guild): Promise<string[]> => {
-    // Reserve synchronously at dispatch: both same-tick joins for one guild
-    // are ordered in the chain before either awaits anything.
-    const prev = inviteChains.get(guild.id) ?? Promise.resolve();
-    const next = prev.then(() => snapshotInvites(guild, invites));
-    // snapshotInvites never rejects (it catches into []), but the stored
-    // guard must never reject either or the chain breaks for every later
-    // join; the waiter still gets the real outcome via `next`.
-    const guard: Promise<unknown> = next.catch(() => {});
-    inviteChains.set(guild.id, guard);
-    void guard.finally(() => {
-      if (inviteChains.get(guild.id) === guard) inviteChains.delete(guild.id);
+  const enqueue = <T>(
+    chains: Map<string, Promise<void>>, key: string, work: () => Promise<T>,
+  ): Promise<T> => {
+    const next = (chains.get(key) ?? Promise.resolve()).then(work);
+    // Reserve synchronously and never poison subsequent events on failure.
+    const guard = next.then(() => {}, () => {});
+    chains.set(key, guard);
+    void guard.then(() => {
+      if (chains.get(key) === guard) chains.delete(key);
     });
     return next;
   };
+
+  // Fetch at gateway receipt, not after a potentially slow earlier DB write:
+  // a queued background refresh must not start reading a later join's counters.
+  // Only the read-modify-write is serialized, in dispatch order (TOG-8306).
+  // REST counters are still best-effort, not atomic per-member evidence.
+  const inviteChains = new Map<string, Promise<void>>();
+  const chainedSnapshotInvites = (guild: Guild): Promise<string[]> => {
+    const fetched = fetchInvites(guild);
+    return enqueue(inviteChains, guild.id, async () => {
+      const states = await fetched;
+      if (states === null) return [];
+      try {
+        return await invites.diffAndStore(guild.id, states);
+      } catch (err) {
+        log.error('invite_snapshot_failed', { guildId: guild.id, err: String(err) });
+        return [];
+      }
+    });
+  };
+
+  // Invite I/O may delay a join. Its gate/leave/rejoin writes must not overtake
+  // it and then be undone by that older join's membership projection.
+  const memberChains = new Map<string, Promise<void>>();
 
   client.once(Events.ClientReady, async (c) => {
     log.info('ready', { user: c.user.tag, guilds: c.guilds.cache.size });
@@ -343,16 +332,17 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
   client.on(Events.GuildMemberAdd, async (member) => {
     if (!accepts(member.guild.id, member.id)) return;
     const observedAt = nowIso();
-    const joining = (async () => {
-      // Snapshot regardless of how this member arrived, so the counters stay
-      // current for the next organic join. A one-click join consumes no invite,
-      // so for it the diff legitimately shows nothing grew.
-      const grew = contained ? [] : await chainedSnapshotInvites(member.guild);
+    // Consume the short-lived web note at receipt, before any queue can expire it.
+    const expected = contained ? null : expectedJoins?.consume(member.guild.id, member.id) ?? null;
+    const snapshot = contained ? Promise.resolve([]) : chainedSnapshotInvites(member.guild);
+    const occurredAt = member.joinedAt?.toISOString();
+    const gateCleared = !member.pending;
+    const joining = enqueue(memberChains, `${member.guild.id}:${member.id}`, async () => {
+      // Keep the snapshot even for one-click joins so counters stay current.
+      const grew = await snapshot;
 
-      // The web path's expected join beats the invite diff: a code that grew in
-      // the same window belongs to some other join's event. Contained runs have
-      // no invitation evidence: do not read real inviter rows or invent a cohort.
-      const expected = contained ? null : expectedJoins?.consume(member.guild.id, member.id) ?? null;
+      // Web evidence beats the invite diff. Contained runs have no invitation
+      // evidence: do not read real inviter rows or invent a cohort.
       const source = contained ? 'unknown' : expected ?? invites.attribute(grew, !!member.guild.vanityURLCode);
       const inviterId =
         !expected && grew.length === 1 ? await invites.inviterFor(member.guild.id, grew[0]) : null;
@@ -362,27 +352,23 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
         isBot: !!member.user?.bot,
         source,
         inviterId,
-        occurredAt: member.joinedAt?.toISOString(),
-        sourceEventId: `${member.guild.id}:${member.id}:${member.joinedAt?.toISOString() ?? 'observed'}`,
+        occurredAt,
+        sourceEventId: `${member.guild.id}:${member.id}:${occurredAt ?? 'observed'}`,
       });
+      // Members who accepted the rules on the invite screen converted at join.
+      if (gateCleared) {
+        await handlers.onGateCleared({
+          guildId: member.guild.id,
+          memberId: member.id,
+          isBot: !!member.user?.bot,
+          occurredAt,
+        });
+      }
       return source;
-    })();
+    });
     // Reserve before the first await; the welcome listener runs concurrently.
     void deps.onboardingRota?.join(member, joining, observedAt);
     const source = await joining;
-
-    // Someone who arrives with the gate already cleared - they accepted the
-    // rules on the invite screen before the join landed - converted instantly.
-    // Recording it here as well as on the update keeps the denominator honest:
-    // otherwise the fastest members are the ones missing from the numerator.
-    if (!member.pending) {
-      await handlers.onGateCleared({
-        guildId: member.guild.id,
-        memberId: member.id,
-        isBot: !!member.user?.bot,
-        occurredAt: member.joinedAt?.toISOString(),
-      });
-    }
 
     // Burst check last, and never at the expense of the join record: an alert
     // that throws must not lose the event it was alerting about.
@@ -421,11 +407,14 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
       void deps.onboardingRota?.gateCleared(newMember, nowIso());
     }
     if (oldMember.pending && !newMember.pending) {
-      await handlers.onGateCleared({
-        guildId: newMember.guild.id,
-        memberId: newMember.id,
-        isBot: !!newMember.user?.bot,
-      });
+      const occurredAt = nowIso();
+      await enqueue(memberChains, `${newMember.guild.id}:${newMember.id}`, () =>
+        handlers.onGateCleared({
+          guildId: newMember.guild.id,
+          memberId: newMember.id,
+          isBot: !!newMember.user?.bot,
+          occurredAt,
+        }));
     }
 
     // A partial old member has no trustworthy role/nickname baseline. Skipping
@@ -461,7 +450,9 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     if (!accepts(member.guild.id, member.id)) return;
     // A server-leave is also a voice-leave: Discord drops them from voice with
     // no VoiceStateUpdate, so onLeave closes any open session (TOG-6122).
-    await handlers.onLeave(member.guild.id, member.id, undefined, { isBot: !!member.user?.bot });
+    const occurredAt = nowIso();
+    await enqueue(memberChains, `${member.guild.id}:${member.id}`, () =>
+      handlers.onLeave(member.guild.id, member.id, occurredAt, { isBot: !!member.user?.bot }));
   });
 
   const inspectAutomod = async (msg: {
