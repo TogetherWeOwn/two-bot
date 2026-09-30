@@ -27,6 +27,11 @@ import {
 import { ModerationStore } from '../src/moderation/store.ts';
 import { openDb } from '../src/store/db.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/moderation-disable-preflight.ts [--json]');
+  process.exit(0);
+}
+
 const json = process.argv.includes('--json');
 
 const url = process.env.TWO_DATABASE_URL?.trim() ?? '';

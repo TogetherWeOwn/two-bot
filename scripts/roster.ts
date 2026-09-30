@@ -17,6 +17,11 @@ import { openDb } from '../src/store/db.ts';
 import { formatRosterText } from '../src/analytics/cliFormat.ts';
 import { DiscordRest } from '../src/discord/rest.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/roster.ts [days] [--names]');
+  process.exit(0);
+}
+
 const argv = process.argv.slice(2);
 const days = Number(argv.find((a) => /^\d+$/.test(a)) ?? 7);
 const withNames = argv.includes('--names');

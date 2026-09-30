@@ -262,6 +262,10 @@ const invokedDirectly =
   process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (invokedDirectly) {
+  if (process.argv.includes('--help')) {
+    console.log('Usage: node scripts/verify-catalog.ts');
+    process.exit(0);
+  }
   const API_BASE = process.env.VERIFY_CATALOG_API_BASE ?? 'https://discord.com/api/v10';
   if (
     API_BASE !== 'https://discord.com/api/v10' &&

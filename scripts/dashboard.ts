@@ -24,6 +24,11 @@ import { formatDashboardSummary } from '../src/analytics/cliFormat.ts';
 import { buildDashboard, type ChannelSnapshot } from '../src/analytics/dashboard.ts';
 import { renderHtml } from '../src/analytics/render.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/dashboard.ts [--weeks <count>] [--out <file>] [--json] [--serve [--host <host>] [--port <port>]]');
+  process.exit(0);
+}
+
 const argv = process.argv.slice(2);
 const flag = (name: string) => argv.includes(`--${name}`);
 const value = (name: string, fallback: string) => {

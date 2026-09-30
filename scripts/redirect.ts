@@ -20,6 +20,11 @@ import { loadRedirectConfig } from '../src/redirect/config.ts';
 import { CampaignStore } from '../src/redirect/campaigns.ts';
 import { startRedirectServer } from '../src/redirect/server.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/redirect.ts');
+  process.exit(0);
+}
+
 setLogLevel((process.env.LOG_LEVEL as 'debug' | 'info' | 'error') || 'info');
 
 const cfg = loadRedirectConfig();

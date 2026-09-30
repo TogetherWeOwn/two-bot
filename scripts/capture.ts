@@ -55,6 +55,11 @@ import { InviteTracker, inviteGrowth, attributeJoins } from '../src/core/inviteT
 import type { FunnelEvent } from '../src/core/events.ts';
 import { DiscordRest, fetchAllMembers, type RawInvite } from '../src/discord/rest.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/capture.ts [--dry-run]');
+  process.exit(0);
+}
+
 const argv = process.argv.slice(2);
 const dryRun = argv.includes('--dry-run');
 const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
