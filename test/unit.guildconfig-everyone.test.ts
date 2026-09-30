@@ -52,6 +52,11 @@ function memoryApi(current: GuildConfigSnapshot, heldRoleIds = [BOT_ROLE]) {
         assert.deepEqual(Object.keys(body), ['permissions']);
         current.roles.find((role) => role.id === GUILD)!.permissions = body.permissions;
         response = current.roles.find((role) => role.id === GUILD);
+      } else if (method === 'PATCH' && path.startsWith(`/guilds/${GUILD}/roles/`)) {
+        const role = current.roles.find((item) => path === `/guilds/${GUILD}/roles/${item.id}`);
+        if (!role) throw new Error(`Unexpected fixture request: ${method} ${path}`);
+        Object.assign(role, body);
+        response = role;
       } else throw new Error(`Unexpected fixture request: ${method} ${path}`);
       return Response.json(response);
     },
@@ -181,6 +186,20 @@ function addOwner(snapshot: GuildConfigSnapshot) {
   });
 }
 
+const HELPER = '900000000000000006';
+const SEND_MESSAGES = 1n << 10n;
+
+function addHelper(snapshot: GuildConfigSnapshot, permissions: string, position = 2) {
+  snapshot.roles.push({
+    id: HELPER, name: 'Helper', managed: false, color: 0, hoist: false,
+    permissions, mentionable: false, position,
+  });
+}
+
+function elevateBot(snapshot: GuildConfigSnapshot, position = 10) {
+  snapshot.roles.find((role) => role.id === BOT_ROLE)!.position = position;
+}
+
 test('everyone-only preflight ignores an unchanged higher unmanaged role', async () => {
   const source = fixture();
   const current = fixture('1024');
@@ -301,6 +320,89 @@ test('position batch preflight includes unchanged higher roles that are still se
   await assert.rejects(() => api.assertRestorePermissions(before, plan), /Owner \(10\)/);
   assert.ok(calls.every((call) => call.method === 'GET'));
   assert.equal(api.writes, 0);
+});
+
+test('retained-authority preflight refuses a plan that revokes the only Manage Roles before the final everyone write', async () => {
+  const source = fixture('0', 1024n);
+  elevateBot(source);
+  addHelper(source, '0');
+  const current = fixture('1024', 1024n);
+  elevateBot(current);
+  addHelper(current, String(MANAGE_ROLES));
+  const currentBefore = structuredClone(current);
+  const { api, calls } = memoryApi(current, [BOT_ROLE, HELPER]);
+  const before = await api.capture();
+  const plan = planRestore(source, before);
+  assert.deepEqual(plan.operations.map((operation) => operation.label), ['patch role Helper', 'restore @everyone permissions']);
+  await assert.rejects(async () => {
+    await api.assertRestorePermissions(before, plan);
+    await applyRestorePlan(api, plan);
+  }, /Restore retained-authority preflight failed: restore @everyone permissions needs Manage Roles/);
+  assert.ok(calls.every((call) => call.method === 'GET'));
+  assert.equal(api.writes, 0);
+  assert.deepEqual(current, currentBefore);
+});
+
+test('retained-authority preflight refuses a final everyone grant orphaned by an earlier held-role narrowing', async () => {
+  const source = fixture('1024', MANAGE_ROLES);
+  elevateBot(source);
+  addHelper(source, String(MANAGE_ROLES));
+  const current = fixture('0', MANAGE_ROLES);
+  elevateBot(current);
+  addHelper(current, String(MANAGE_ROLES | SEND_MESSAGES));
+  const currentBefore = structuredClone(current);
+  const { api, calls } = memoryApi(current, [BOT_ROLE, HELPER]);
+  const before = await api.capture();
+  const plan = planRestore(source, before);
+  assert.deepEqual(plan.operations.map((operation) => operation.label), ['patch role Helper', 'restore @everyone permissions']);
+  await assert.rejects(async () => {
+    await api.assertRestorePermissions(before, plan);
+    await applyRestorePlan(api, plan);
+  }, /Restore retained-authority preflight failed: restore @everyone permissions grants unowned mask 1024/);
+  assert.ok(calls.every((call) => call.method === 'GET'));
+  assert.equal(api.writes, 0);
+  assert.deepEqual(current, currentBefore);
+});
+
+test('retained-authority preflight accepts a narrowing that keeps authority for the final everyone write', async () => {
+  const source = fixture('0', MANAGE_ROLES);
+  elevateBot(source);
+  addHelper(source, String(MANAGE_ROLES));
+  const current = fixture('1024', MANAGE_ROLES);
+  elevateBot(current);
+  addHelper(current, String(MANAGE_ROLES | SEND_MESSAGES));
+  const { api, calls } = memoryApi(current, [BOT_ROLE, HELPER]);
+  const before = await api.capture();
+  const plan = planRestore(source, before);
+  assert.deepEqual(plan.operations.map((operation) => operation.label), ['patch role Helper', 'restore @everyone permissions']);
+  await api.assertRestorePermissions(before, plan);
+  await applyRestorePlan(api, plan);
+  assert.deepEqual(calls.filter((call) => call.method !== 'GET').map((call) => call.path), [
+    `/guilds/${GUILD}/roles/${HELPER}`,
+    `/guilds/${GUILD}/roles/${GUILD}`,
+  ]);
+  assert.equal(api.writes, 2);
+  assert.equal(snapshotsEqual(source, await api.capture()), true);
+});
+
+test('retained-authority preflight accepts a held-role revocation that is itself the last write', async () => {
+  const source = fixture('0', MANAGE_ROLES);
+  elevateBot(source);
+  addHelper(source, '0');
+  const current = fixture('0', MANAGE_ROLES);
+  elevateBot(current);
+  addHelper(current, String(MANAGE_ROLES));
+  const { api, calls } = memoryApi(current, [BOT_ROLE, HELPER]);
+  const before = await api.capture();
+  const plan = planRestore(source, before);
+  assert.deepEqual(plan.operations.map((operation) => operation.label), ['patch role Helper']);
+  await api.assertRestorePermissions(before, plan);
+  await applyRestorePlan(api, plan);
+  assert.deepEqual(calls.filter((call) => call.method !== 'GET'), [
+    { method: 'PATCH', path: `/guilds/${GUILD}/roles/${HELPER}`, body: { name: 'Helper', color: 0, hoist: false, permissions: '0', mentionable: false } },
+  ]);
+  assert.equal(api.writes, 1);
+  assert.equal(snapshotsEqual(source, await api.capture()), true);
 });
 
 test('everyone write does not replace overwrite hierarchy checks', async () => {
