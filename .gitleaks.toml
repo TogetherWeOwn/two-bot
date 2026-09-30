@@ -81,16 +81,4 @@ regexes = [
   #    variable whose name ends in _ID. A real bot token is base64 with dots in
   #    it and does not match this, so `discord-bot-token` above still fires.
   '''(?i)[A-Z0-9_]*(GUILD|CHANNEL|ROLE|APPLICATION|CLIENT|USER|CATEGORY)_ID['"]?\s*[:=]\s*['"]?[0-9]{17,20}['"]?''',
-
-  # 3. Synthetic PEM fixture in the staging-deploy-broker redaction test
-  #    (TOG-6911 branch, flagged 2026-09-30). In the SOURCE the body between
-  #    the markers is the JS expression ${"X".repeat(N)} — no key material,
-  #    nothing to rotate (ops/staging-deploy-broker/server.test.mjs:525-527,
-  #    read by hand). The stock private-key rule needs >=64 chars between
-  #    BEGIN and END, so its match spills from the shortPem line (525) into
-  #    the overlongPem line (526) — finding spans L525-L526 — and the clean
-  #    first block is a substring of that match. Deliberately narrow: a real
-  #    key body is base64/DER, never a ${"X".repeat(N)} expression. \n is the
-  #    two-char backslash-n in the source, hence \\n in the regex.
-  '''-----BEGIN RSA PRIVATE KEY-----\\n\$\{"X"\.repeat\([0-9]{2,5}\)\}\\n-----END RSA PRIVATE KEY-----''',
 ]
