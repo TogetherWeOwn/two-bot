@@ -103,23 +103,33 @@ function foldLatinMarks(value: string): string {
 
 /** Normalized form of one bad-words entry, shared with the wordlist lint (TOG-10066). */
 export function normalizeBadWord(raw: string): string {
-  return foldLatinMarks(normalize(raw)).replace(/\s+/g, '');
+  return stripStandaloneMarkRuns(foldLatinMarks(normalize(raw))).replace(/\s+/g, '');
+}
+
+// Drop mark runs that decorate nothing: a maximal run is standalone
+// decoration iff the character before the run is not a word character
+// (string start, whitespace, punctuation, format controls, emoji, …). Runs
+// extending a letter/number/underscore are meaningful (dotted-i dot,
+// Indic/Arabic vowel signs) and stay — including marks chained after them,
+// whose eligibility comes from the run's origin, never the preceding mark.
+// Single linear pass, so the matcher below needs no mark-skipping of its own.
+function stripStandaloneMarkRuns(value: string): string {
+  return value.replace(/\p{M}+/gu, (run, offset, whole) =>
+    offset > 0 && /[\p{L}\p{N}_]$/u.test(whole.slice(0, offset)) ? run : '',
+  );
 }
 
 function hasBadWord(content: string, words: string[]): boolean {
+  // Decoration is stripped once, up front: the per-gap pattern below then
+  // stays a plain separator class with no overlapping alternatives or nested
+  // quantifiers, so near-miss input cannot backtrack exponentially.
+  const plain = stripStandaloneMarkRuns(content);
   for (const raw of words) {
     const word = normalizeBadWord(raw);
     if (!word) continue;
     const escaped = [...word]
       .map((char) => char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-      // Marks decorating a separator (space/Cf) or entry punctuation are
-      // standalone decoration and must not split the word. Marks attached to
-      // a preceding letter are never skipped here: folding already removed
-      // Latin-attached stacking, so a surviving letter-attached mark is
-      // meaningful (notably the dotted-i dot in `i` + U+0307, or a non-Latin
-      // vowel sign). The lookbehind admits a mark only after a non-letter,
-      // so a chain can start at punctuation/whitespace but never on a word.
-      .join('(?:[\\s\\p{Cf}]\\p{M}*|(?<=[^\\p{L}\\p{N}_])\\p{M})*');
+      .join('(?:[\\s\\p{Cf}])*');
     // Marks extending a letter stay part of its word. Skip leading marks only
     // after a real boundary (start/punctuation), never after a word character.
     const leading = `(^|[^\\p{L}\\p{N}\\p{M}_])\\p{M}*`;
@@ -130,7 +140,7 @@ function hasBadWord(content: string, words: string[]): boolean {
     const trailing = /[\p{L}\p{N}\p{M}_]$/u.test(word)
       ? '([^\\p{L}\\p{N}\\p{M}_]|$)'
       : '\\p{M}*([^\\p{L}\\p{N}\\p{M}_]|$)';
-    if (new RegExp(`${leading}${escaped}${trailing}`, 'iu').test(content)) return true;
+    if (new RegExp(`${leading}${escaped}${trailing}`, 'iu').test(plain)) return true;
   }
   return false;
 }

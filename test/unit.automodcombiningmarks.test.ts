@@ -136,6 +136,33 @@ test('punctuation-ended entries tolerate trailing standalone marks', () => {
   assert.equal(match('कला', { ...policy, badWords: ['कल'] }), null, 'trailing Devanagari vowel sign');
 });
 
+test('marks chained after a meaningful mark stay meaningful', () => {
+  const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
+  // Decoration eligibility comes from the run's origin, never the preceding
+  // mark: a shadda chained after a fatha (or an anusvara after a vowel sign)
+  // extends the same word, so the longer form must not match the shorter entry.
+  for (const [name, entry, content] of [
+    ['Arabic shadda after fatha', E('\\u0639\\u064e\\u0644\\u064e\\u0645'), E('\\u0639\\u064e\\u0651\\u0644\\u064e\\u0645')],
+    ['Devanagari anusvara after vowel sign', E('\\u0915\\u093f\\u0924'), E('\\u0915\\u093f\\u0902\\u0924')],
+  ] as Array<[string, string, string]>) {
+    const probe = { ...policy, badWords: [entry] };
+    assert.equal(match(content, probe), null, name);
+    assert.equal(match(entry, probe), 'bad_words', `${name}: exact entry still matches`);
+  }
+});
+
+test('separator-plus-mark near-misses match in linear time', () => {
+  const probe = { ...policy, badWords: ['shit'] };
+  const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
+  // 28 space+acute pairs (58 UTF-16 units) took the old overlapping-gap
+  // pattern past a 3 s isolated-process limit; the single-pass strip plus
+  // plain separator gaps keep this near-instant.
+  const content = `s${E(' \\u0301').repeat(28)}hik`;
+  const started = Date.now();
+  assert.equal(match(content, probe), null);
+  assert.ok(Date.now() - started < 1000, 'near-miss stays bounded');
+});
+
 test('marks extending a preceding word do not create a bad-word boundary', () => {
   const probe = { ...policy, badWords: ['shit'] };
   for (const prefix of ['x́', 'i̇', 'ά', 'क़', 'عَ', '1́', '_́']) {
