@@ -116,6 +116,11 @@ export function report(actual: bigint, log = console.log): boolean {
 // and never touches the network.
 const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
 
+if (isMain && process.argv.includes('--help')) {
+  console.log('Usage: node scripts/verify-grant.ts [--selftest]');
+  process.exit(0);
+}
+
 // --- self-test: `node scripts/verify-grant.ts --selftest`, no token needed ---
 if (isMain && process.argv.includes('--selftest')) {
   const cases: [string, bigint, boolean][] = [

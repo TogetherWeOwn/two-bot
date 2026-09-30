@@ -988,6 +988,13 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 
 const isMain = process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isMain) {
+  if (process.argv.includes('--help')) {
+    console.log('Usage: node scripts/staging-anti-nuke-acceptance.ts preflight --snapshot <accepted.json> [--output <evidence.json>]');
+    console.log('       node scripts/staging-anti-nuke-acceptance.ts drive --expect dry_run|contained --snapshot <accepted.json> --output <evidence.json> --manifest <manifest.json> --apply');
+    console.log('       node scripts/staging-anti-nuke-acceptance.ts cleanup --manifest <manifest.json> [--output <cleanup.json>]');
+    console.log('       node scripts/staging-anti-nuke-acceptance.ts verify-join --member-id <snowflake> --since <ISO> --expect-bulk-window true|false --expect-flagged true|false --output <evidence.json>');
+    process.exit(0);
+  }
   main().catch((error: unknown) => {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`staging-anti-nuke-acceptance: ${message}`);

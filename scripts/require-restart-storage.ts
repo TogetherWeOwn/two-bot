@@ -145,6 +145,10 @@ async function main(): Promise<number> {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  if (process.argv.includes('--help')) {
+    console.log('Usage: node scripts/require-restart-storage.ts [--provision | --results <report.ndjson>]');
+    process.exit(0);
+  }
   try { process.exitCode = await main(); }
   catch {
     // Exceptions from tooling/report parsing can include paths or environment

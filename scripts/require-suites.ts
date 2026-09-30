@@ -402,6 +402,10 @@ const invokedDirectly =
   process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (invokedDirectly) {
+  if (process.argv.includes('--help')) {
+    console.log('Usage: node scripts/require-suites.ts [--results <report.ndjson>]');
+    process.exit(0);
+  }
   const at = process.argv.indexOf('--results');
   const existing = at >= 0 ? process.argv[at + 1] : undefined;
 

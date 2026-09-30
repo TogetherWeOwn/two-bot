@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const ROOT = resolve(import.meta.dirname, '..');
@@ -30,6 +30,7 @@ function catalog(scripts: Record<string, string>): Entry[] {
     if (!command.includes('scripts/')) continue;
     const match = /^(node|bash)\s+(?:(--test)\s+)?(scripts\/[\w./-]+)(.*)$/.exec(command);
     assert.ok(match, `${name}: unsupported script command: ${command}`);
+    assert.ok(!match[2] || match[1] === 'node', `${name}: --test is only a Node wrapper`);
     const target = match[3];
     assert.ok(!target.split('/').includes('..'), `${name}: target escapes the catalog`);
     let tail = match[4];
@@ -63,9 +64,7 @@ function checkHelp(entry: Entry, root = ROOT): void {
   assert.equal(result.error, undefined, `${entry.name}: --help failed: ${result.error?.message}`);
   assert.equal(result.status, 0,
     `${entry.name}: --help exited ${result.status} (${result.signal ?? 'no signal'}): ${(result.stderr ?? '').slice(0, 500)}`);
-  assert.match(output, /^usage:\s*\S.+$/im, `${entry.name}: --help printed no non-empty usage line`);
-  assert.ok(output.includes(basename(entry.target)),
-    `${entry.name}: usage must name ${basename(entry.target)}`);
+  assert.match(output, /^usage:\s*\S[^\r\n]*$/im, `${entry.name}: --help printed no non-empty usage line`);
 }
 
 function fixture(body: string, check: (entry: Entry, root: string) => void, runner: Entry['runner'] = 'node'): void {

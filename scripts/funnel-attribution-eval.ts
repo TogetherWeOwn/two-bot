@@ -214,6 +214,10 @@ const invokedDirectly =
   process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (invokedDirectly) {
+  if (process.argv.includes('--help')) {
+    console.log('Usage: node scripts/funnel-attribution-eval.ts [--json]');
+    process.exit(0);
+  }
   for (const a of process.argv.slice(2)) {
     if (a !== '--json') usage();
   }
