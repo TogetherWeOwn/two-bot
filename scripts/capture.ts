@@ -343,7 +343,7 @@ if (!dryRun && !retainSnapshot) {
 
 const label =
   windowFrom === null
-    ? 'first capture - baseline only'
+    ? (newJoins.length ? 'replayed pending joins without a live baseline' : 'first capture - baseline only')
     : `window ${windowFrom} -> ${capturedAt}`;
 
 console.log(`  ${label}`);
