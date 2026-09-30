@@ -76,6 +76,20 @@ test('meaningful non-Latin marks distinguish bad words and their boundaries', ()
   }
 });
 
+test('standalone or punctuation-attached marks cannot hide a bad-word start', () => {
+  const probe = { ...policy, badWords: ['shit'] };
+  for (const prefix of ['́', '́̇⃝', '!́', '😀́', ' ́', 'safe!́']) {
+    assert.equal(match(`${prefix}shit`, probe), 'bad_words', JSON.stringify(prefix));
+  }
+});
+
+test('marks extending a preceding word do not create a bad-word boundary', () => {
+  const probe = { ...policy, badWords: ['shit'] };
+  for (const prefix of ['x́', 'i̇', 'ά', 'क़', 'عَ', '1́', '_́']) {
+    assert.equal(match(`${prefix}shit`, probe), null, JSON.stringify(prefix));
+  }
+});
+
 test('nonempty mark-only content still counts toward repeats', () => {
   // Rendering-invisible selectors are separately excluded by TOG-10048.
   for (const content of ['ा', '́', '⃝']) {

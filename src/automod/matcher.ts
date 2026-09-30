@@ -113,9 +113,9 @@ function hasBadWord(content: string, words: string[]): boolean {
     const escaped = [...word]
       .map((char) => char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
       .join('[\\s\\p{Cf}]*');
-    // Non-Latin marks and the dotted-i dot are part of a word, not gaps or
-    // boundaries: ignoring them could match an unrelated word.
-    if (new RegExp(`(^|[^\\p{L}\\p{N}\\p{M}_])${escaped}([^\\p{L}\\p{N}\\p{M}_]|$)`, 'iu').test(content)) return true;
+    // Marks extending a letter stay part of its word. Skip leading marks only
+    // after a real boundary (start/punctuation), never after a word character.
+    if (new RegExp(`(^|[^\\p{L}\\p{N}\\p{M}_])\\p{M}*${escaped}([^\\p{L}\\p{N}\\p{M}_]|$)`, 'iu').test(content)) return true;
   }
   return false;
 }
