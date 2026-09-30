@@ -212,9 +212,10 @@ export async function handleGameSelect(
   deps: OnboardingDeps,
 ): Promise<void> {
   const { recorder } = deps;
-  const member = interaction.member as GuildMember | null;
+  const interactionMember = interaction.member as GuildMember | null;
   const guild = interaction.guild;
-  if (!member || !guild) return;
+  if (!interactionMember || !guild) return;
+  let member = interactionMember;
 
   // Ephemeral: only the person who clicked sees the result. Keeps the landing
   // channel readable and means the picker is not a broadcast.
@@ -240,11 +241,12 @@ export async function handleGameSelect(
   ).map((p) => p.roleId);
 
   try {
+    // Role mutations return an updated clone before the gateway refreshes the cache.
     if (plan.roleIds.length) {
-      await member.roles.add(plan.roleIds, 'TWO onboarding: member self-selected games');
+      member = await member.roles.add(plan.roleIds, 'TWO onboarding: member self-selected games');
     }
     if (toRemove.length) {
-      await member.roles.remove(toRemove, 'TWO onboarding: member deselected games');
+      member = await member.roles.remove(toRemove, 'TWO onboarding: member deselected games');
     }
   } catch (err) {
     // Almost always role hierarchy: someone moved the bot's role below a game
