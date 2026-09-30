@@ -101,7 +101,7 @@ export class ModerationDiscord implements ModerationDiscordClient {
     let overwrite: EveryoneOverwrite | null = null;
     for (const entry of body.permission_overwrites) {
       if (typeof entry !== 'object' || entry === null || Array.isArray(entry)
-        || typeof entry.id !== 'string' || (entry.type !== 0 && entry.type !== 1)
+        || !isSnowflakeId(entry.id) || (entry.type !== 0 && entry.type !== 1)
         || (entry.id === guildId && entry.type !== EVERYONE_OVERWRITE_TYPE)) {
         throw invalidChannelOverwrites();
       }
@@ -181,6 +181,15 @@ export class ModerationDiscord implements ModerationDiscordClient {
 
 function isDecimalMask(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && !/[^0-9]/.test(value);
+}
+
+/**
+ * Discord snowflake IDs are nonempty ASCII decimal strings. A row carrying a
+ * malformed ID cannot be classified as "not @everyone" — skipping it would
+ * let a garbled everyone row read as verified absence — so it refuses.
+ */
+function isSnowflakeId(value: unknown): value is string {
+  return isDecimalMask(value);
 }
 
 function invalidChannelOverwrites(): ActionError {
