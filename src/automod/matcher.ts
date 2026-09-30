@@ -112,10 +112,23 @@ function hasBadWord(content: string, words: string[]): boolean {
     if (!word) continue;
     const escaped = [...word]
       .map((char) => char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-      .join('[\\s\\p{Cf}]*');
+      // Marks decorating a separator (space/Cf) are standalone decoration and
+      // must not split the word. Marks attached to a preceding letter are
+      // never skipped here: folding already removed Latin-attached stacking,
+      // so a surviving letter-attached mark is meaningful (notably the
+      // dotted-i dot in `i` + U+0307, or a non-Latin vowel sign).
+      .join('(?:[\\s\\p{Cf}]\\p{M}*)*');
     // Marks extending a letter stay part of its word. Skip leading marks only
     // after a real boundary (start/punctuation), never after a word character.
-    if (new RegExp(`(^|[^\\p{L}\\p{N}\\p{M}_])\\p{M}*${escaped}([^\\p{L}\\p{N}\\p{M}_]|$)`, 'iu').test(content)) return true;
+    const leading = `(^|[^\\p{L}\\p{N}\\p{M}_])\\p{M}*`;
+    // A mark after a punctuation-ended entry is standalone decoration (the
+    // entry cannot extend it). After a letter-ended word it may be meaningful
+    // (Devanagari/Arabic vowel signs extend the word), so keep the strict
+    // boundary there.
+    const trailing = /[\p{L}\p{N}\p{M}_]$/u.test(word)
+      ? '([^\\p{L}\\p{N}\\p{M}_]|$)'
+      : '\\p{M}*([^\\p{L}\\p{N}\\p{M}_]|$)';
+    if (new RegExp(`${leading}${escaped}${trailing}`, 'iu').test(content)) return true;
   }
   return false;
 }

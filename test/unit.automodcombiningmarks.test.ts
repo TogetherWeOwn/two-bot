@@ -83,6 +83,40 @@ test('standalone or punctuation-attached marks cannot hide a bad-word start', ()
   }
 });
 
+test('marks decorating separators cannot split a bad word', () => {
+  const probe = { ...policy, badWords: ['shit'] };
+  // Corpus discipline (see the fuzz suite): non-ASCII rows are ASCII literals
+  // decoded through E() so every codepoint stays auditable.
+  const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
+  for (const [name, content] of [
+    ['acute on the space', E('s \\u0301h i t')],
+    ['stacked marks on separators', E('s \\u0301\\u0307h i\\u20dd t')],
+    ['zero-width plus mark between letters', E('s\\u200b\\u0301h i t')],
+  ] as Array<[string, string]>) {
+    assert.equal(match(content, probe), 'bad_words', name);
+  }
+  // Contrast: a mark attached to a letter folds (Latin stacking) or extends
+  // the word (dotted-i dot) — it is never a skippable separator.
+  assert.equal(match(E('s\\u0301hit'), probe), 'bad_words', 'Latin-attached stacking folds');
+  assert.equal(match('SHİT happens', probe), null, 'dotted-I dot stays meaningful');
+});
+
+test('punctuation-ended entries tolerate trailing standalone marks', () => {
+  const probe = { ...policy, badWords: ['shit!'] };
+  const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
+  for (const [name, content] of [
+    ['trailing acute after bang', E('shit!\\u0301 is forbidden')],
+    ['parenthesised trailing mark', E('(shit!\\u0301)')],
+  ] as Array<[string, string]>) {
+    assert.equal(match(content, probe), 'bad_words', name);
+  }
+  // The tolerance skips marks only: a word character after the mark still
+  // bounds, and letter-ended words keep the strict trailing boundary, where a
+  // following mark may be a meaningful vowel sign.
+  assert.equal(match(E('shit!\\u0301x'), probe), null, 'word character after the mark still bounds');
+  assert.equal(match('कला', { ...policy, badWords: ['कल'] }), null, 'trailing Devanagari vowel sign');
+});
+
 test('marks extending a preceding word do not create a bad-word boundary', () => {
   const probe = { ...policy, badWords: ['shit'] };
   for (const prefix of ['x́', 'i̇', 'ά', 'क़', 'عَ', '1́', '_́']) {
