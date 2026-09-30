@@ -1,0 +1,95 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { loadAutomodConfig } from '../src/automod/config.ts';
+import { matchAutomod, MemoryRepeatTracker, normalizeBadWord } from '../src/automod/matcher.ts';
+import type { AutomodMessage, AutomodPolicy } from '../src/automod/types.ts';
+
+// Offline regressions for TOG-10049: exercise the real config pipeline as well
+// as direct policies. No database, Discord client or live guild access.
+const policy = loadAutomodConfig({ TWO_AUTOMOD_ALLOWED_DOMAINS: 'two.gg' }, null).policy;
+
+function message(content: string, overrides: Partial<AutomodMessage> = {}): AutomodMessage {
+  return {
+    guildId: 'test', channelId: 'test', messageId: '1', authorId: 'test',
+    authorIsBot: false, roleIds: [], content, mentionedUserIds: [],
+    attachmentNames: [], observedTimestamp: 0, ...overrides,
+  };
+}
+
+function match(content: string, probe: AutomodPolicy = policy, overrides: Partial<AutomodMessage> = {}) {
+  return matchAutomod(message(content, overrides), probe, new MemoryRepeatTracker());
+}
+
+function repeat(contents: string[]) {
+  const tracker = new MemoryRepeatTracker();
+  return contents.map((content, i) => matchAutomod(
+    message(content, { messageId: String(i), observedTimestamp: i * 1000 }), policy, tracker,
+  ));
+}
+
+test('accent folding cannot turn an external IDN into an allowed host', () => {
+  for (const host of ['twó.gg', 'twó.gg', 'foo.twó.gg']) {
+    assert.notEqual(new URL(`https://${host}/path`).hostname, 'two.gg');
+    assert.equal(match(`https://${host}/path`), 'external_link', host);
+  }
+  assert.equal(match('https://two.gg/path'), null);
+  const idnPolicy = { ...policy, allowedDomains: ['xn--tw-6ja.gg'] };
+  assert.equal(match('https://twó.gg/path', idnPolicy), null, 'actual IDN identity can be allowed');
+});
+
+test('configured dotted-I matches itself and its canonical forms without a letter sentinel', () => {
+  const configured = loadAutomodConfig({ TWO_AUTOMOD_BAD_WORDS: 'İstanbul' }, null).policy;
+  for (const content of ['İstanbul', 'İstanbul', 'i̇stanbul']) {
+    assert.equal(match(content, configured), 'bad_words', content);
+    assert.equal(normalizeBadWord(content), normalizeBadWord(configured.badWords[0]));
+  }
+  assert.equal(match('istanbul', configured), null, 'ASCII i remains distinct');
+  assert.equal(match('KİR', { ...policy, badWords: ['kır'] }), null, 'dotless i is a real letter');
+  assert.equal(match('SHİT happens', { ...policy, badWords: ['shit'] }), null);
+});
+
+test('canonical dotted-I variants share a repeat digest', () => {
+  assert.deepEqual(
+    repeat(['İstanbul', 'İstanbul', 'i̇stanbul']),
+    [null, null, 'repeated_message'],
+  );
+});
+
+test('Latin accent stacking is folded on both sides of the bad-word policy', () => {
+  const configured = loadAutomodConfig({ TWO_AUTOMOD_BAD_WORDS: 'véry bad' }, null).policy;
+  for (const content of ['very bad', 'véry bad', 'verẏbad', 'very b⃝ad', 'vé̇⃝ry bad']) {
+    assert.equal(match(content, configured), 'bad_words', content);
+  }
+  assert.deepEqual(repeat(['repeat me', 'repéat me', 'repeat mé']), [null, null, 'repeated_message']);
+});
+
+test('meaningful non-Latin marks distinguish bad words and their boundaries', () => {
+  const cases: Array<[string, string, string]> = [
+    ['Devanagari vowel sign', 'मूत', 'मत करो'],
+    ['trailing Devanagari vowel sign', 'कल', 'कला'],
+    ['Arabic vowel mark', 'عَلَم', 'علم'],
+  ];
+  for (const [name, word, content] of cases) {
+    const probe = { ...policy, badWords: [word] };
+    assert.equal(match(content, probe), null, name);
+    assert.equal(match(word, probe), 'bad_words', `${name}: exact word`);
+  }
+});
+
+test('nonempty mark-only content still counts toward repeats', () => {
+  // Rendering-invisible selectors are separately excluded by TOG-10048.
+  for (const content of ['ा', '́', '⃝']) {
+    assert.deepEqual(repeat([content, content, content]), [null, null, 'repeated_message'], content);
+  }
+  assert.deepEqual(repeat(['कल', 'कला', 'कल']), [null, null, null]);
+});
+
+test('configured accented attachment extensions retain their identity', () => {
+  for (const extension of ['réf', '.réf', 'ＲÉＦ']) {
+    const configured = loadAutomodConfig({ TWO_AUTOMOD_BLOCKED_ATTACHMENT_EXTENSIONS: extension }, null).policy;
+    for (const filename of ['document.réf', 'document.réf', 'document.RÉF. ']) {
+      assert.equal(match('ordinary message', configured, { attachmentNames: [filename] }), 'attachment_type', filename);
+    }
+    assert.equal(match('ordinary message', configured, { attachmentNames: ['document.ref'] }), null, 'ASCII extension differs');
+  }
+});

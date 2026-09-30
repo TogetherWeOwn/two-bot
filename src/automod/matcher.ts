@@ -54,9 +54,11 @@ export function matchAutomod(
   repeats: RepeatTracker,
 ): AutomodFilter | null {
   const normalized = normalize(message.content);
+  // Accent folding is a text-filter policy, never a URL-host identity transform.
   const linkContent = normalized;
-  if (hasBadWord(normalized, policy.badWords)) return 'bad_words';
-  if (repeats.observe(message, normalized, policy)) return 'repeated_message';
+  const moderationContent = foldLatinMarks(normalized);
+  if (hasBadWord(moderationContent, policy.badWords)) return 'bad_words';
+  if (repeats.observe(message, moderationContent, policy)) return 'repeated_message';
   // Only explicit mentions in message content are supplied here. Discord's
   // implicit reply reference does not count unless the author actually pinged it.
   if (message.mentionedUserIds.length >= policy.mentionLimit) return 'mention_spam';
@@ -66,40 +68,43 @@ export function matchAutomod(
   return null;
 }
 
-// TOG-10049: NFKC leaves combining marks (`\p{M}`) intact, so one accent
-// keystroke (`véry bad`) split bad-words matches and repeat digests.
-// NFKD decomposes the pinned compatibility folds identically (fullwidth,
-// Kelvin K, long s, ﬁ ligature — see TOG-10052), then marks are stripped.
-// Turkish dotted capital İ (U+0130) is sentineled to dotless ı (U+0131)
-// first so the İ≠i no-overblock pin keeps holding.
-const COMBINING_MARKS = /\p{M}/gu;
-
 function normalize(value: string): string {
   return value
-    .replace(/İ/g, 'ı')
-    .normalize('NFKD')
-    .replace(COMBINING_MARKS, '')
+    .normalize('NFKC')
     .replace(INVISIBLE_FORMAT, '')
     .toLowerCase()
     .replace(/\s+/g, ' ')
     .trim();
 }
 
+// Fold accent stacking only on Latin letters. Indic matras, Arabic vowels and
+// standalone marks remain meaningful; NFC restores other decomposed scripts.
+// Dotted i keeps its dot after canonical case folding (no alphabetic sentinel).
+function foldLatinMarks(value: string): string {
+  const dotAbove = String.fromCodePoint(0x0307);
+  return value
+    .normalize('NFKD')
+    .replace(/(\p{Script=Latin})(\p{M}+)/gu, (_cluster, letter: string, marks: string) =>
+      letter === 'i' && marks.includes(dotAbove) ? `${letter}${dotAbove}` : letter,
+    )
+    .normalize('NFC');
+}
+
 /** Normalized form of one bad-words entry, shared with the wordlist lint (TOG-10066). */
 export function normalizeBadWord(raw: string): string {
-  return normalize(raw).replace(/\s+/g, '');
+  return foldLatinMarks(normalize(raw)).replace(/\s+/g, '');
 }
 
 function hasBadWord(content: string, words: string[]): boolean {
   for (const raw of words) {
     const word = normalizeBadWord(raw);
     if (!word) continue;
-    // TOG-10049: tolerate residual combining marks between letters so a
-    // stray accent that survives normalization cannot split the word.
     const escaped = [...word]
       .map((char) => char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-      .join('[\\s\\p{Cf}\\p{M}]*');
-    if (new RegExp(`(^|[^\\p{L}\\p{N}_])${escaped}([^\\p{L}\\p{N}_]|$)`, 'iu').test(content)) return true;
+      .join('[\\s\\p{Cf}]*');
+    // Non-Latin marks and the dotted-i dot are part of a word, not gaps or
+    // boundaries: ignoring them could match an unrelated word.
+    if (new RegExp(`(^|[^\\p{L}\\p{N}\\p{M}_])${escaped}([^\\p{L}\\p{N}\\p{M}_]|$)`, 'iu').test(content)) return true;
   }
   return false;
 }
@@ -123,7 +128,7 @@ function hasExternalLink(content: string, allowedDomains: string[]): boolean {
 }
 
 function hasBlockedAttachment(names: string[], blocked: string[]): boolean {
-  const blockedSet = new Set(blocked.map((value) => value.toLowerCase().replace(/^\./, '')));
+  const blockedSet = new Set(blocked.map((value) => normalize(value).replace(/^\./, '')));
   return names.some((name) => {
     // NFKC folds lookalike separators (e.g. fullwidth dot U+FF0E) to ASCII
     // dots; strip trailing dots/spaces Discord preserves in download names.
