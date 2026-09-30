@@ -11,6 +11,11 @@ export interface CaptureSnapshot extends InviteState {
   updated_at: string;
 }
 
+export interface PendingCaptureJoin {
+  id: string;
+  joinedAt: string;
+}
+
 export interface CaptureFixture {
   since: string | null;
   capturedAt: string;
@@ -20,6 +25,7 @@ export interface CaptureFixture {
   invites?: InviteState[];
   previousRows?: CaptureSnapshot[];
   previousEvents?: FunnelEvent[];
+  previousPending?: PendingCaptureJoin[];
 }
 
 export interface CaptureResult {
@@ -30,6 +36,8 @@ export interface CaptureResult {
   snapshots: InviteState[];
   rows: CaptureSnapshot[];
   windowEnds: string[];
+  pending: PendingCaptureJoin[];
+  pendingWrites: number;
 }
 
 const fixture: CaptureFixture = JSON.parse(process.env.CAPTURE_TEST_FIXTURE!);
@@ -39,6 +47,8 @@ const storedEvents = [...(fixture.previousEvents ?? [])];
 const bots: string[] = [];
 const snapshots: InviteState[] = [];
 const windowEnds: string[] = [];
+let pending = [...(fixture.previousPending ?? [])];
+let pendingWrites = 0;
 let rows: CaptureSnapshot[] = fixture.previousRows ?? (fixture.since === null ? [] : [{
   code: 'fixture', uses: 5, inviterId: null, channelId: null, updated_at: fixture.since,
 }]);
@@ -76,6 +86,32 @@ mock.method(EventStore.prototype, 'markBot', async (guildId: string, id: string)
 export async function openCaptureTestDb() {
   return {
     prepare(sql: string) {
+      if (sql === 'SELECT member_id AS id, joined_at AS "joinedAt" FROM capture_pending_joins WHERE guild_id = ?') {
+        return {
+          async all(guildId: string) {
+            assert.equal(guildId, 'fixture-guild');
+            return pending.map((j) => ({ ...j }));
+          },
+        };
+      }
+      if (sql.startsWith('INSERT INTO capture_pending_joins')) {
+        return {
+          async run(guildId: string, id: string, joinedAt: string) {
+            assert.equal(guildId, 'fixture-guild');
+            pendingWrites++;
+            if (!pending.some((j) => j.id === id && j.joinedAt === joinedAt)) pending.push({ id, joinedAt });
+          },
+        };
+      }
+      if (sql === 'DELETE FROM capture_pending_joins WHERE guild_id = ? AND joined_at <= ?') {
+        return {
+          async run(guildId: string, at: string) {
+            assert.equal(guildId, 'fixture-guild');
+            pendingWrites++;
+            pending = pending.filter((j) => j.joinedAt > at);
+          },
+        };
+      }
       if (sql === 'SELECT code, uses, updated_at FROM invite_snapshots WHERE guild_id = ?' ||
           sql === 'SELECT code, uses FROM invite_snapshots WHERE guild_id = ?') {
         return {
@@ -118,7 +154,7 @@ export async function openCaptureTestDb() {
     },
     async close() {
       console.log(`CAPTURE_FIXTURE_RESULT ${JSON.stringify({
-        calls, events, storedEvents, bots, snapshots, rows, windowEnds,
+        calls, events, storedEvents, bots, snapshots, rows, windowEnds, pending, pendingWrites,
       })}`);
     },
   };

@@ -78,7 +78,7 @@ test('capture retains early counter growth for a deferred join across real track
   const nextAt = '2026-10-01T10:00:00.000Z';
   const next = capture([member('late', lateAt)], {
     previousRows: first.result.rows, previousEvents: first.result.storedEvents,
-    capturedAt: nextAt, rosterReadAt: nextAt, uses: 6,
+    previousPending: first.result.pending, capturedAt: nextAt, rosterReadAt: nextAt, uses: 6,
   }).result;
   assert.equal(next.events.length, 1);
   assert.equal(next.events[0].source, 'invite:fixture');
@@ -109,7 +109,8 @@ test('retaining a window also defers eligible join writes to preserve multi-code
 
   const nextAt = '2026-10-01T10:00:00.000Z';
   const next = capture(roster, {
-    previousRows: first.rows, previousEvents: first.storedEvents, invites,
+    previousRows: first.rows, previousEvents: first.storedEvents,
+    previousPending: first.pending, invites,
     capturedAt: nextAt, rosterReadAt: nextAt,
   }).result;
   assert.deepEqual(next.events.map((event) => event.memberId), ['within', 'late']);
@@ -117,6 +118,40 @@ test('retaining a window also defers eligible join writes to preserve multi-code
   assert.ok(next.events.every((event) => event.metadata?.attribution_exact === false));
   assert.ok(next.rows.every((row) => row.uses === 6 && row.updated_at === nextAt));
 });
+
+for (const departed of ['within', 'late']) {
+  test(`a retained window recovers observed ${departed} after they leave before retry`, () => {
+    const roster = [member('within', capturedAt), member('late', lateAt)];
+    const previousRows = ['a', 'b'].map((code) => ({
+      code, uses: 5, inviterId: null, channelId: null, updated_at: since,
+    }));
+    const invites = previousRows.map((row) => ({ ...row, uses: 6 }));
+    const first = capture(roster, { previousRows, invites }).result;
+    assert.deepEqual(first.events, []);
+    assert.deepEqual(first.rows, previousRows);
+
+    const nextAt = '2026-10-01T10:00:00.000Z';
+    const next = capture(roster.filter((m) => m.user?.id !== departed), {
+      previousRows: first.rows, previousEvents: first.storedEvents,
+      previousPending: first.pending, invites,
+      capturedAt: nextAt, rosterReadAt: nextAt,
+    }).result;
+    assert.deepEqual(next.events.map((event) => event.memberId), ['within', 'late']);
+    assert.deepEqual(next.events.map((event) => event.source), ['invite:a', 'invite:b']);
+    assert.ok(next.events.every((event) => event.metadata?.attribution_exact === false));
+    assert.deepEqual(next.events.map((event) => event.occurredAt), [capturedAt, lateAt]);
+    assert.deepEqual(next.pending, []);
+    assert.ok(next.rows.every((row) => row.uses === 6 && row.updated_at === nextAt));
+
+    const replay = capture(roster, {
+      previousRows: next.rows, previousEvents: next.storedEvents,
+      previousPending: next.pending, invites,
+      capturedAt: '2026-10-02T10:00:00.000Z', rosterReadAt: nextAt,
+    }).result;
+    assert.deepEqual(replay.events, []);
+    assert.equal(replay.storedEvents.length, 2);
+  });
+}
 
 test('a retained window preserves already-recorded first-wins events on replay', () => {
   const roster = [member('within', capturedAt), member('late', lateAt)];
@@ -127,7 +162,7 @@ test('a retained window preserves already-recorded first-wins events on replay',
   const nextAt = '2026-10-01T10:00:00.000Z';
   const next = capture(roster, {
     previousRows: first.rows, previousEvents: first.storedEvents,
-    capturedAt: nextAt, rosterReadAt: nextAt, uses: 7,
+    previousPending: first.pending, capturedAt: nextAt, rosterReadAt: nextAt, uses: 7,
   }).result;
   assert.deepEqual(next.events.map((event) => event.memberId), ['late']);
   assert.equal(next.events[0].source, 'invite:fixture');
@@ -135,6 +170,52 @@ test('a retained window preserves already-recorded first-wins events on replay',
   assert.deepEqual(next.storedEvents[0], previous);
   assert.equal(next.rows[0].uses, 7);
   assert.equal(next.rows[0].updated_at, nextAt);
+});
+
+test('pending observations survive another retained run and dry-run cannot consume them', () => {
+  const first = capture([member('within', capturedAt), member('late', lateAt)], { uses: 7 }).result;
+  assert.equal(first.pending.length, 2);
+  const options = {
+    previousRows: first.rows, previousEvents: first.storedEvents,
+    previousPending: first.pending, uses: 7,
+    capturedAt: '2026-09-30T10:00:00.500Z', rosterReadAt: lateAt,
+  };
+  const retained = capture([member('old', since)], options).result;
+  assert.deepEqual(retained.pending, first.pending);
+  assert.deepEqual(retained.rows, first.rows);
+  assert.deepEqual(retained.events, []);
+
+  const nextAt = '2026-10-01T10:00:00.000Z';
+  const dry = capture([member('old', since)], {
+    ...options, capturedAt: nextAt, rosterReadAt: nextAt,
+  }, true).result;
+  assert.deepEqual(dry.pending, first.pending);
+  assert.deepEqual(dry.rows, first.rows);
+  assert.deepEqual(dry.events, []);
+  assert.equal(dry.pendingWrites, 0);
+
+  const next = capture([member('old', since)], {
+    ...options, previousPending: retained.pending,
+    capturedAt: nextAt, rosterReadAt: nextAt,
+  }).result;
+  assert.deepEqual(next.events.map((event) => event.memberId), ['within', 'late']);
+  assert.ok(next.events.every((event) => event.source === 'invite:fixture'));
+  assert.deepEqual(next.pending, []);
+});
+
+test('pending joins keep distinct arrivals for the same member and dedupe roster overlap', () => {
+  const first = capture([member('returning', capturedAt), member('late', lateAt)], { uses: 8 }).result;
+  const nextAt = '2026-10-01T10:00:00.000Z';
+  const returnedAt = '2026-09-30T11:00:00.000Z';
+  const next = capture([member('returning', returnedAt), member('late', lateAt)], {
+    previousRows: first.rows, previousEvents: first.storedEvents, previousPending: first.pending,
+    capturedAt: nextAt, rosterReadAt: nextAt, uses: 8,
+  }).result;
+  assert.deepEqual(next.events.map((event) => [event.memberId, event.occurredAt]), [
+    ['returning', capturedAt], ['late', lateAt], ['returning', returnedAt],
+  ]);
+  assert.ok(next.events.every((event) => event.metadata?.attribution_exact === true));
+  assert.deepEqual(next.pending, []);
 });
 
 test('counter growth with no deferred members advances the snapshot normally', () => {
@@ -181,6 +262,8 @@ for (const uses of [5, 6]) {
     assert.deepEqual(result.windowEnds, []);
     assert.equal(result.rows[0].uses, 5);
     assert.equal(result.rows[0].updated_at, since);
+    assert.deepEqual(result.pending, []);
+    assert.equal(result.pendingWrites, 0);
   });
 }
 

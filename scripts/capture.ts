@@ -100,6 +100,9 @@ const since = prevRows.reduce<string | null>(
   null,
 );
 const prevUses = new Map(prevRows.map((r) => [r.code, Number(r.uses)]));
+const pendingJoins = await db
+  .prepare(`SELECT member_id AS id, joined_at AS "joinedAt" FROM capture_pending_joins WHERE guild_id = ?`)
+  .all<{ id: string; joinedAt: string }>(guildId);
 
 // --- 2. read the invite counters --------------------------------------------
 
@@ -137,8 +140,10 @@ if (members.length === 0) {
 const guild = await rest.get<{ vanity_url_code?: string | null }>(`/guilds/${guildId}`);
 const hasVanity = !!guild?.vanity_url_code;
 
-const newJoins: { id: string; joinedAt: string }[] = [];
-let deferredJoins = 0;
+const observed = new Map<string, { id: string; joinedAt: string }>();
+for (const j of pendingJoins) {
+  if (since !== null && j.joinedAt > since) observed.set(JSON.stringify([j.id, j.joinedAt]), j);
+}
 let bots = 0;
 for (const m of members) {
   const id = m.user?.id;
@@ -149,14 +154,16 @@ for (const m of members) {
     continue;
   }
   const joinedAt = new Date(m.joined_at).toISOString();
-  if (joinedAt > capturedAt) deferredJoins++;
   // First ever capture has no `since`; the member list is history, not this
   // window, and backfill.ts owns history. Baseline only, emit nothing.
-  // Keep the window (since, capturedAt]: joins seen after the stamp belong to
-  // a later capture, not to an event window ending before they arrived.
-  if (since !== null && joinedAt > since && joinedAt <= capturedAt) newJoins.push({ id, joinedAt });
+  if (since !== null && joinedAt > since) observed.set(JSON.stringify([id, joinedAt]), { id, joinedAt });
 }
-newJoins.sort((a, b) => a.joinedAt.localeCompare(b.joinedAt));
+// Keep the window (since, capturedAt]: observations after the stamp remain
+// pending, even if the member leaves before the next roster read.
+const observedJoins = [...observed.values()].sort((a, b) =>
+  a.joinedAt.localeCompare(b.joinedAt) || a.id.localeCompare(b.id));
+const newJoins = observedJoins.filter((j) => j.joinedAt <= capturedAt);
+const deferredJoins = observedJoins.length - newJoins.length;
 
 // --- 4. attribute ------------------------------------------------------------
 //
@@ -191,10 +198,20 @@ const events: FunnelEvent[] = newJoins.map((j, i) => ({
 
 // A post-stamp join may already be reflected in the invite read. Keep both
 // counters AND their window end until it is eligible, rather than consuming
-// that evidence now. Defer eligible join writes too: splitting this growth over
-// an incomplete roster could lock in worse first-wins attribution for them.
+// that evidence now. Defer attribution too: splitting this growth over an
+// incomplete roster could lock in worse first-wins attribution. Persist the
+// observations separately so departures before retry cannot erase them.
 // First capture still establishes a baseline, and no-growth reads lose no delta.
 const retainSnapshot = since !== null && deferredJoins > 0 && totalGrowth > 0;
+
+if (!dryRun && retainSnapshot) {
+  for (const j of observedJoins) {
+    await db.prepare(
+      `INSERT INTO capture_pending_joins (guild_id, member_id, joined_at)
+       VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
+    ).run(guildId, j.id, j.joinedAt);
+  }
+}
 
 let written = 0;
 if (!dryRun && !retainSnapshot) {
@@ -208,6 +225,11 @@ if (!dryRun && !retainSnapshot) {
   await db
     .prepare(`UPDATE invite_snapshots SET updated_at = ? WHERE guild_id = ?`)
     .run(capturedAt, guildId);
+  // Clear only after recording and snapshot advancement; a crash before this
+  // leaves harmless stale observations, filtered out by the advanced `since`.
+  await db.prepare(
+    `DELETE FROM capture_pending_joins WHERE guild_id = ? AND joined_at <= ?`,
+  ).run(guildId, capturedAt);
 }
 
 // --- 5. report ---------------------------------------------------------------
@@ -224,7 +246,8 @@ console.log(`  members              ${members.length} total (${bots} bots)`);
 console.log(`  new joins in window  ${newJoins.length}`);
 if (retainSnapshot) {
   console.log(`  ${dryRun ? 'would retain' : 'retaining'} previous counters and window: ` +
-    `${deferredJoins} post-stamp join(s) may already be in the invite growth; join writes deferred until next capture.`);
+    `${deferredJoins} post-stamp join(s) may already be in the invite growth; ` +
+    `${observedJoins.length} observation(s) ${dryRun ? 'would be saved' : 'saved'} pending attribution.`);
 }
 if (newJoins.length) {
   // One line per source, not one line per join: the operator wants to see the
