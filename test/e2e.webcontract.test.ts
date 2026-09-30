@@ -547,6 +547,9 @@ describe('web_v1 contract', () => {
           botSchema: t.schema!,
           webSchema: web,
         });
+        const pending = results.find((r) => r.name === `cannot read ${t.schema}.capture_pending_joins`);
+        assert.ok(pending, 'expected a named denial check for pending capture observations');
+        assert.equal(pending.ok, true);
         const failures = results.filter((r) => !r.ok);
         assert.deepEqual(
           failures.map((f) => `${f.name}: ${f.detail}`),

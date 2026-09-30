@@ -68,6 +68,11 @@ describe('backup round trip', () => {
          VALUES (?, ?, ?, ?, ?, ?)`,
       )
       .run(G, 'abc', 12, 'owner', 'c1', '2026-08-09T00:00:00.000Z');
+    for (const at of ['2026-08-09T00:00:01.000Z', '2026-08-10T00:00:01.000Z']) {
+      await harness.db.prepare(
+        `INSERT INTO capture_pending_joins (guild_id, member_id, joined_at) VALUES (?, ?, ?)`,
+      ).run(G, 'pending-member', at);
+    }
     // TOG-1659 High 5: the moderation state must survive backup/restore the
     // same way the funnel does - a lost pending unban is a tempban that
     // became permanent.
@@ -464,6 +469,9 @@ describe('backup round trip', () => {
   test('a dump restores to the same contents', async () => {
     await seed();
     const before = await counts();
+    const pendingSql = `SELECT guild_id, member_id, joined_at FROM capture_pending_joins
+                        ORDER BY guild_id, member_id, joined_at`;
+    const pending = await harness.db.prepare(pendingSql).all();
     const events = await harness.db
       .prepare(`SELECT id, event_type, occurred_at, idempotency_key FROM events ORDER BY id`)
       .all();
@@ -493,6 +501,7 @@ describe('backup round trip', () => {
     const file = join(dir, 'roundtrip.ndjson.gz');
     const manifest = await dump(harness.db, file);
     assert.equal(manifest.tables.find((t) => t.name === 'events')?.count, before.events);
+    assert.equal(manifest.tables.find((t) => t.name === 'capture_pending_joins')?.count, 2);
     assert.equal(manifest.tables.find((t) => t.name === 'operational_audit_log')?.count, 1);
     assert.equal(manifest.tables.find((t) => t.name === 'tickets')?.count, 1);
     assert.equal(manifest.tables.find((t) => t.name === 'ticket_transcripts')?.count, 1);
@@ -533,10 +542,16 @@ describe('backup round trip', () => {
     // Lose everything, exactly as a dead disk would.
     await harness.db.exec(`TRUNCATE ${DUMP_TABLES.join(', ')} RESTART IDENTITY`);
     assert.equal((await counts()).events, 0);
+    // Restore replaces pending observations too; target-only rows must not leak
+    // into a later capture and fabricate a join after recovery.
+    await harness.db.prepare(
+      `INSERT INTO capture_pending_joins (guild_id, member_id, joined_at) VALUES (?, ?, ?)`,
+    ).run(G, 'target-only', '2026-08-11T00:00:01.000Z');
 
     const report = await restore(harness.db, file);
     assert.ok(report.ok, 'restore reported a count mismatch');
     assert.deepEqual(await counts(), before);
+    assert.deepEqual(await harness.db.prepare(pendingSql).all(), pending);
 
     // Same rows, same ids, same order - not merely the same number of rows.
     const after = await harness.db
