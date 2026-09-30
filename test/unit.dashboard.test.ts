@@ -452,6 +452,64 @@ for (const [label, advancedAt] of [
   });
 }
 
+for (const eventType of ['third_message', 'voice_session_start', 'voice_session_end'] as const) {
+  for (const [label, advancedAt] of [
+    ['exactly-now', '2026-09-30T12:00:00.000Z'],
+    ['future', '2026-10-01T12:00:00.000Z'],
+  ] as const) {
+    test(`returning member ${eventType} evidence survives ${label} last activity`, async () => {
+      const now = new Date('2026-09-30T12:00:00.000Z');
+      const old = '2026-01-01T12:00:00.000Z';
+      const recent = '2026-09-29T12:00:00.000Z';
+      await member({
+        member_id: 'returning', joined_at: old, first_message_at: old,
+        first_voice_at: old, last_active_at: recent,
+      });
+      const store = new EventStore(t.db);
+      await store.record({ guildId: GUILD, memberId: 'returning', eventType, occurredAt: recent, source: 'channel:tracked' });
+      const before = await buildDashboard(t.db, { now, anomalies: [] });
+      assert.deepEqual([before.active7d, before.active30d], [1, 1]);
+
+      await store.touchActivity(GUILD, 'returning', advancedAt);
+      const after = await buildDashboard(t.db, { now, anomalies: [] });
+      assert.deepEqual([after.active7d, after.active30d], [1, 1], 'retained recent activity still counts');
+    });
+  }
+}
+
+test('retained activity events respect rolling bounds, human membership and deduplication', async () => {
+  const now = new Date('2026-09-30T12:00:00.000Z');
+  const old = '2026-01-01T12:00:00.000Z';
+  const future = '2026-10-01T12:00:00.000Z';
+  const boundaries = [
+    ['stale', '2026-08-31T11:59:59.999Z'],
+    ['month-start', '2026-08-31T12:00:00.000Z'],
+    ['before-week', '2026-09-23T11:59:59.999Z'],
+    ['week-start', '2026-09-23T12:00:00.000Z'],
+    ['now-minus-ms', '2026-09-30T11:59:59.999Z'],
+    ['exactly-now', now.toISOString()],
+    ['future', future],
+  ] as const;
+  const store = new EventStore(t.db);
+  for (const [id, at] of boundaries) {
+    await member({ member_id: id, joined_at: old, first_message_at: old, first_voice_at: old, last_active_at: future });
+    for (const eventType of ['third_message', 'voice_session_start', 'voice_session_end'] as const) {
+      await store.record({ guildId: GUILD, memberId: id, eventType, occurredAt: at, source: 'channel:tracked' });
+    }
+  }
+  for (const [id, isBot, leftAt] of [['bot', 1, null], ['gone', 0, old]] as const) {
+    await member({ member_id: id, joined_at: old, first_message_at: old, last_active_at: future, left_at: leftAt }, isBot);
+    await store.record({ guildId: GUILD, memberId: id, eventType: 'third_message', occurredAt: '2026-09-29T12:00:00.000Z', source: 'channel:tracked' });
+  }
+  await member({ member_id: 'gate-only', joined_at: old, last_active_at: future });
+  await gateCleared('gate-only', '2026-09-29T12:00:00.000Z');
+  await store.record({ guildId: GUILD, memberId: null, eventType: 'voice_session_start', occurredAt: '2026-09-29T12:00:00.000Z', source: 'channel:tracked' });
+
+  const d = await buildDashboard(t.db, { now, anomalies: [] });
+  assert.equal(d.active7d, 2, '7-day lower bound and now-1ms, each human once');
+  assert.equal(d.active30d, 4, '30-day lower bound through now-1ms');
+});
+
 test('channel events count [now-30d, generatedAt) for snapshot and live-only channels', async () => {
   const now = new Date('2026-09-30T12:00:00.000Z');
   for (const at of [

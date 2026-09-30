@@ -571,11 +571,25 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
   ).length;
   const since7 = iso(now.getTime() - 7 * DAY_MS);
   const since30 = iso(now.getTime() - 30 * DAY_MS);
-  // last_active_at is an all-time maximum. If it is ahead of this window,
-  // retained first-message/voice evidence can still prove earlier activity.
+  // last_active_at is an all-time maximum. Retained message/voice events can
+  // prove earlier activity even for returning members whose firsts are old.
+  const activityEvents = await db
+    .prepare(
+      `SELECT member_id, occurred_at FROM events
+        WHERE event_type IN ('first_message', 'third_message', 'first_voice_session',
+                             'voice_session_start', 'voice_session_end')
+          AND occurred_at >= ? AND occurred_at < ?`,
+    )
+    .all<{ member_id: string | null; occurred_at: string }>(since30, generatedAt);
+  const latestActivity = new Map<string, string>();
+  for (const e of activityEvents) {
+    if (!e.member_id) continue;
+    const previous = latestActivity.get(e.member_id);
+    if (!previous || e.occurred_at > previous) latestActivity.set(e.member_id, e.occurred_at);
+  }
   const activeSince = (m: MemberRow, since: string) =>
-    [m.last_active_at, m.first_message_at, m.first_voice_at].some(
-      (at) => at !== null && at >= since && at < generatedAt,
+    [m.last_active_at, m.first_message_at, m.first_voice_at, latestActivity.get(m.member_id)].some(
+      (at) => at != null && at >= since && at < generatedAt,
     );
   const active7d = stillHere.filter((m) => activeSince(m, since7)).length;
   const active30d = stillHere.filter((m) => activeSince(m, since30)).length;
