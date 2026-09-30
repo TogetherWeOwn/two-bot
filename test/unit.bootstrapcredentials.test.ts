@@ -29,6 +29,9 @@ switch (command) {
     if (!destination.startsWith(resolve(process.env.BOOTSTRAP_ROOT) + sep)) process.exit(98);
     mkdirSync(destination, { recursive: true });
     copyFileSync(join(source, 'src', 'core', 'credentials.ts'), join(destination, 'credentials.ts'));
+    const internal = resolve(args.at(-1), 'src', 'internal');
+    mkdirSync(internal, { recursive: true });
+    copyFileSync(join(source, 'src', 'internal', 'signing.ts'), join(internal, 'signing.ts'));
     break;
   }
   case 'chown': case 'sudo': break;
@@ -219,6 +222,36 @@ describe('bootstrap optional credentials (offline command harness)', () => {
       stoppedAtSecrets(f.run());
       stoppedAtSecrets(f.run());
       assert.equal(readFileSync(f.files.internal, 'utf8'), '');
+    } finally { f.close(); }
+  });
+
+  for (const source of ['env fallback', 'credential'] as const) {
+    for (const spec of [',', 'web:short']) {
+      test(`invalid signing keys ${JSON.stringify(spec)} from ${source} stop before preflight`, () => {
+        const f = fixture();
+        try {
+          writeFileSync(f.files.internal, source === 'credential' ? spec : '');
+          // A valid fallback must not hide an invalid nonempty credential.
+          const fallback = source === 'credential' ? `offline:${'x'.repeat(32)}` : spec;
+          writeFileSync(f.files.env, `TWO_INTERNAL_ACTIONS=1\nTWO_INTERNAL_KEYS=${fallback}\n`);
+          const before = [f.files.internal, f.files.env].map((path) => ({ path, bytes: readFileSync(path) }));
+          for (let attempt = 0; attempt < 2; attempt++) {
+            const result = f.run();
+            stoppedAtSecrets(result);
+            assert.doesNotMatch(result.stdout + result.stderr, /web:short|shorter than 32|TWO_INTERNAL_KEYS:/);
+          }
+          for (const file of before) assert.deepEqual(readFileSync(file.path), file.bytes);
+        } finally { f.close(); }
+      });
+    }
+  }
+
+  test('disabled internal actions do not parse unused invalid signing keys', () => {
+    const f = fixture();
+    try {
+      writeFileSync(f.files.internal, 'web:short');
+      pastSecrets(f.run());
+      assert.equal(readFileSync(f.files.internal, 'utf8'), 'web:short');
     } finally { f.close(); }
   });
 

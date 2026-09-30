@@ -287,9 +287,17 @@ if [ "$new_secrets" -eq 0 ]; then
     --working-directory="$APP_DIR" \
     /usr/bin/node --input-type=module -e '
       import { readSecret } from "./src/core/credentials.ts";
+      import { parseKeys } from "./src/internal/signing.ts";
       if (!readSecret(process.argv[1], ["TWO_DATABASE_URL"])) process.exit(3);
-      if (process.env.TWO_INTERNAL_ACTIONS === "1" &&
-          !readSecret(process.argv[2], ["TWO_INTERNAL_KEYS"])?.trim()) process.exit(3);
+      if (process.env.TWO_INTERNAL_ACTIONS === "1") {
+        try {
+          const keys = parseKeys(readSecret(process.argv[2], ["TWO_INTERNAL_KEYS"]) ?? "");
+          if (keys.length === 0) process.exit(3);
+        } catch {
+          // Parser errors can contain key ids; do not print credential details.
+          process.exit(3);
+        }
+      }
     ' "${DATABASE_URL_FILE##*/}" "${INTERNAL_KEYS_FILE##*/}"; then
     new_secrets=1
   fi
