@@ -141,6 +141,11 @@ jobs:
       - name: Run required checks including owned storage
         run: ./scripts/ci/run-check-job.sh
 
+      # Fixed workload and unchanged budgets, three independent samples.
+      # Every failure is retained; only the disposable service DB is reached.
+      - name: Check event-store benchmark budgets
+        run: bash scripts/ci/run-event-store-bench.sh
+
   # Exercise the website views and least-privilege grants end to end after the
   # required check has proved the full Postgres-backed suite.
   postgres:
