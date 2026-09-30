@@ -9,6 +9,9 @@
  */
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { openTestDb, type TestDb } from './helpers/testDb.ts';
 import { EventStore } from '../src/store/eventStore.ts';
 import { FunnelHandlers } from '../src/core/handlers.ts';
@@ -147,6 +150,101 @@ test('two campaigns on one invite code are told apart by campaign', async () => 
   );
   // Both still credit the same code, because that is what a join will carry.
   assert.ok(rows.every((r) => r.source === `invite:${CODE}`));
+});
+
+const run = promisify(execFile);
+// fileURLToPath, not .pathname: a checkout path containing spaces produces a
+// percent-escaped %20 that execFile/cwd would choke on (ENOENT).
+const REPO = fileURLToPath(new URL('..', import.meta.url));
+const SCRIPT = fileURLToPath(new URL('../scripts/funnel.ts', import.meta.url));
+
+interface FunnelAccuracyJson {
+  schema: number;
+  funnel: { clicks: number; joins: number };
+  campaigns: Array<{ slug: string; clicks: number; joins: number }>;
+  totalEvents: number;
+}
+
+/**
+ * The report exactly as the dashboard stopgap reads it: scripts/funnel.ts
+ * --json in a subprocess pointed at this file's schema (PGOPTIONS) and guild
+ * (DISCORD_GUILD_ID). Same pattern as test/e2e.funnel-json.test.ts, so the
+ * subprocess counts this fixture's rows - and only this fixture's - with the
+ * report's own guild/anomaly predicates, not a restatement of them.
+ */
+async function funnelJson(): Promise<{ code: number; stdout: string; stderr: string }> {
+  try {
+    // process.execPath, not 'node': the suite may run under an absolute Node
+    // executable while PATH lacks node (or selects an older one), which would
+    // fail with ENOENT before the report runs.
+    const result = await run(process.execPath, [SCRIPT, '--json'], {
+      cwd: REPO,
+      env: {
+        ...process.env,
+        TWO_DATABASE_URL: process.env.TWO_TEST_DATABASE_URL!,
+        PGOPTIONS: `-c search_path=${t.schema}`,
+        DISCORD_GUILD_ID: GUILD,
+      },
+    });
+    return { code: 0, stdout: result.stdout, stderr: result.stderr };
+  } catch (error) {
+    const err = error as { code?: number; stdout?: string; stderr?: string };
+    return { code: err.code ?? -1, stdout: err.stdout ?? '', stderr: err.stderr ?? '' };
+  }
+}
+
+// --- campaign tracking accuracy (TOG-7199) -----------------------------------
+//
+// The number this whole feature exists to produce: N campaign clicks through
+// the live redirect become exactly N attributed invite_click events that the
+// funnel/attribution reports read. Ten is the acceptance count - large enough
+// that a dedupe collapse, a dropped write, or an off-by-one cannot hide, small
+// enough to stay sequential and deterministic (burst behaviour is pinned by
+// the abuse-burst test below, not here).
+
+test('ten seeded campaign clicks produce exactly ten attributed events', async () => {
+  await addCampaign('acc-link', CODE, 'Accuracy listing');
+
+  for (let i = 0; i < 10; i++) {
+    const res = await get('/acc-link');
+    assert.equal(res.status, 302, `click ${i} must redirect`);
+    assert.equal(res.headers.get('location'), `https://discord.gg/${CODE}`);
+  }
+
+  const rows = await clicks();
+  assert.equal(rows.length, 10, 'every seeded click must leave exactly one attributed event');
+  assert.ok(rows.every((r) => r.source === `invite:${CODE}`), 'every click credits the invite code');
+  assert.ok(
+    rows.every((r) => JSON.parse(r.metadata ?? '{}').campaign === 'acc-link'),
+    'every click carries the campaign it was posted as',
+  );
+
+  // Nothing else was written: the click is the whole footprint of a visit.
+  const total = await t.db.prepare(`SELECT COUNT(*) AS n FROM events`).get<{ n: string }>();
+  assert.equal(Number(total?.n), 10);
+
+  // The real read path: scripts/funnel.ts --json over this fixture, with the
+  // report's own guild-scoped, anomaly-aware queries (scripts/funnel.ts:84-88,
+  // 245-267). A restated subselect here could pass while the report the
+  // dashboard quotes shows zero - wrong guild being the obvious way - so the
+  // assertions below read the report's own output, not a lookalike of it.
+  const funnel = await funnelJson();
+  assert.equal(funnel.code, 0, `funnel --json must run clean: ${funnel.stdout}${funnel.stderr}`);
+  let report: FunnelAccuracyJson;
+  assert.doesNotThrow(() => {
+    report = JSON.parse(funnel.stdout) as FunnelAccuracyJson;
+  }, 'funnel stdout must be exactly one JSON object');
+  assert.equal(report!.schema, 1, 'the dashboard stopgap pins funnel schema 1');
+  assert.equal(report!.funnel.clicks, 10, 'the report headline must see all ten clicks');
+  assert.equal(report!.funnel.joins, 0, 'clicks with no joins are reach without conversion, not missing rows');
+  const acc = report!.campaigns.find((c) => c.slug === 'acc-link');
+  assert.ok(acc, 'the report must carry the seeded campaign row');
+  assert.deepEqual(
+    { clicks: acc.clicks, joins: acc.joins },
+    { clicks: 10, joins: 0 },
+    'the campaign row must read all ten clicks and no phantom joins',
+  );
+  assert.equal(report!.totalEvents, 10, 'a visit leaves only its click in the event log');
 });
 
 // --- what must NOT be recorded ----------------------------------------------
