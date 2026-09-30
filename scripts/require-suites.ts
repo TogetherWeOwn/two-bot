@@ -185,6 +185,18 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     why: 'the voice-sessions averages CLI itself, not just the helpers underneath it - without this floor a silent skip re-opens the startKnown averaging gap',
   },
   {
+    // TOG-9993. The voice-reconcile sweep run twice end to end through the
+    // real npm entry: byte-identical reports (3 resolved, 4 flagged, 1
+    // complete) and an unchanged events table. Read-only by design, so the
+    // double run is the property; without this floor a future write path or
+    // unstable output would stay green while every re-run drifted. Counted
+    // from the 2 top-level test() blocks; CI's postgres job confirms the
+    // count on the first run after this commit.
+    file: 'test/e2e.voicereconcile-idempotency.test.ts',
+    minTests: 2,
+    why: 'the voice-reconcile idempotency proof itself - without this floor a silent skip re-opens the double-run drift gap',
+  },
+  {
     // TOG-6493. The audit kill switch operated end to end through the real
     // CLI: disengaged status on a fresh schema, halt engages and a second
     // halt changes nothing, seeded pending rows are reported honestly, and
@@ -206,6 +218,19 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     file: 'test/e2e.presencetrend-cli.test.ts',
     minTests: 5,
     why: 'the presence-trend output CLI itself, not just the helpers underneath it - without this floor a silent skip re-opens the unpinned staffing/event-slot numbers gap',
+  },
+  {
+    // TOG-9985. The moderation disable-preflight script executed end to end
+    // through the real script: exit 0 CLEAR on empty state (plain and
+    // --json), exit 1 REFUSED for each partial shape (unban-only,
+    // lockdown-only, both plus a running claim with hand-release SQL) with
+    // --json counts and stranded id lists, and exit 2 could-not-tell for a
+    // missing URL, an unreachable database, a non-postgres URL, and a schema
+    // without the tables. Counted from the 10 top-level test() blocks; CI's
+    // postgres job confirms the count on the first run after this commit.
+    file: 'test/e2e.moderation-disable-preflight.test.ts',
+    minTests: 10,
+    why: 'the moderation-disable-preflight exits themselves, not just the library underneath them - without this floor a silent skip re-opens the wave-through-disable gap',
   },
 ];
 
@@ -376,9 +401,42 @@ if (invokedDirectly) {
   if (existing) {
     resultsPath = existing;
   } else {
-    if (!process.env.TWO_TEST_DATABASE_URL?.trim()) {
-      // Fail before spawning dozens of files that all require the same URL.
+    // Fail before spawning dozens of files that all require the same URL —
+    // and refuse a non-test host before any migration runs (TOG-9656). The
+    // allowlist is inline here, not imported, because
+    // test/unit.restartstorageci.test.ts executes this file from a bare
+    // fixture tree containing only this file plus test-report.ts. Mirrors
+    // scripts/test-db-guard.ts, including the query-string refusal:
+    // node-postgres promotes ?host=/?port= over the hostname, so a query
+    // string bypasses any hostname allowlist.
+    const testDbUrl = process.env.TWO_TEST_DATABASE_URL?.trim() ?? '';
+    const allowedTestDbHosts = new Set(['agent-testdb', '127.0.0.1', 'localhost', '::1', '[::1]', 'postgres']);
+    let testDbHost = '';
+    let testDbHasQuery = false;
+    try {
+      const parsedTestDbUrl = new URL(testDbUrl);
+      testDbHost = parsedTestDbUrl.hostname.toLowerCase().replace(/\.$/, '');
+      testDbHasQuery = parsedTestDbUrl.search !== '';
+    } catch {
+      testDbHost = '';
+    }
+    if (!testDbUrl) {
       console.error('require-suites: TWO_TEST_DATABASE_URL is not set. This suite requires Postgres.');
+      process.exit(1);
+    }
+    if (testDbHasQuery) {
+      console.error(
+        'require-suites: TWO_TEST_DATABASE_URL carries a query string, which node-postgres promotes over ' +
+          'the hostname (?host=/?port= retarget the connection), refusing to run. Pass a bare database URL.',
+      );
+      process.exit(1);
+    }
+    if (!allowedTestDbHosts.has(testDbHost)) {
+      console.error(
+        `require-suites: TWO_TEST_DATABASE_URL host "${testDbHost || '(unparsable)'}" is not an isolated test ` +
+          'database, refusing to run. Tests may only target agent-testdb, 127.0.0.1/localhost, or the CI ' +
+          '"postgres" service container; production and staging hosts are never valid test targets.',
+      );
       process.exit(1);
     }
     resultsPath = join(tmpdir(), `two-bot-results-${process.pid}.ndjson`);

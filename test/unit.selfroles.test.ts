@@ -82,6 +82,53 @@ test('configuration rejects duplicate panels, messages, roles, and unsafe color 
   );
 });
 
+test('configuration rejects reaction panels over Discord\'s 20-reaction cap', () => {
+  const reactionOption = (n: number) => ({
+    key: `opt-${n}`,
+    label: `Option ${n}`,
+    roleId: `7${String(n).padStart(16, '0')}`,
+    permissions: '0',
+    emoji: `${n}️⃣`,
+  });
+  const reactionPanel = (count: number) => JSON.stringify([{
+    ...panel,
+    id: 'reactions',
+    mode: 'reaction',
+    exclusive: false,
+    color: false,
+    options: Array.from({ length: count }, (_, i) => reactionOption(i)),
+  }]);
+  assert.throws(() => loadSelfRolePanels(reactionPanel(21)), /20-reaction limit/);
+  assert.equal(loadSelfRolePanels(reactionPanel(20)).length, 1);
+});
+
+test('configuration rejects button panels whose custom ids exceed Discord\'s 100-char limit', () => {
+  const buttonPanel = (panelId: string, optionKey: string) => JSON.stringify([{
+    ...panel,
+    id: panelId,
+    mode: 'button',
+    exclusive: false,
+    color: false,
+    options: [{ ...panel.options[0], key: optionKey }],
+  }]);
+  // 14-char prefix + 60-char panel id + colon + 25-char option key = exactly 100.
+  assert.equal(loadSelfRolePanels(buttonPanel('p'.repeat(60), 'k'.repeat(25))).length, 1);
+  assert.throws(
+    () => loadSelfRolePanels(buttonPanel('p'.repeat(60), 'k'.repeat(26))),
+    /over Discord's 100-char custom_id limit/,
+  );
+  // Select panels render no button custom ids, so long keys still load there.
+  const selectPanel = JSON.stringify([{
+    ...panel,
+    id: 'p'.repeat(60),
+    mode: 'select',
+    exclusive: false,
+    color: false,
+    options: [{ ...panel.options[0], key: 'k'.repeat(26) }],
+  }]);
+  assert.equal(loadSelfRolePanels(selectPanel).length, 1);
+});
+
 test('configuration rejects role ids reused across panels', () => {
   assert.throws(
     () => loadSelfRolePanels(JSON.stringify([

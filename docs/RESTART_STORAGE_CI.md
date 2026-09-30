@@ -97,7 +97,7 @@ With NODE_ENV unset and root dev dependencies installed:
 npm run typecheck
 node --test test/unit.requiresuites.test.ts test/unit.restartstorageci.test.ts
 npm run test:restart-storage -- --provision
-# With a separate disposable loopback service DB (never a shared/staging URL):
+# With a separate disposable isolated service DB (never a shared/staging URL):
 ./scripts/ci/run-check-job.sh
 ./scripts/ci/run-postgres-job.test.sh
 ```

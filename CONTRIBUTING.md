@@ -4,7 +4,10 @@
 
 Requires **Node 24 or newer** plus a running **Postgres 17+** with a scratch
 database for the suite (e.g. `createdb two_bot_test` — CI provides its own
-throwaway service). No Docker, no build step.
+throwaway service; Paperclip agents use the `agent-testdb` sandbox database,
+one database per card). No Docker, no build step. The suite refuses any test
+host outside `scripts/test-db-guard.ts` (TOG-9656): never point
+`TWO_TEST_DATABASE_URL` at production or staging.
 
 ```bash
 git clone https://github.com/TogetherWeOwn/two-bot.git
@@ -101,6 +104,26 @@ Reference the issue in the body when there is one (`TWO-9`).
 
 A red PR does not merge. If CI is wrong, fix CI in its own PR rather than
 routing around it.
+
+## Releases
+
+Releases are automated with [release-please](https://github.com/googleapis/release-please)
+(`release-please-config.json` + `.release-please-manifest.json`, release-type
+`node`). Merge a conventional commit to `main` and release-please opens or
+updates a release PR; merging that PR writes `CHANGELOG.md`, tags `vX.Y.Z`
+and publishes a GitHub Release. Never tag or release by hand.
+
+`CHANGELOG.md` uses the [Common Changelog](https://common-changelog.org/)
+categories, in its order: **Changed** (`perf`, `revert`), **Added** (`feat`),
+**Fixed** (`fix`). `chore`, `docs`, `test`, `ci`, `build`, `refactor` and `style`
+stay out of the changelog. Each squash-merged PR title becomes one entry, so
+write it for a reader of the changelog: imperative mood, one user-facing change.
+
+Versioning is SemVer, starting at `0.1.0`; `1.0.0` marks the production
+cutover. `feat!` / `BREAKING CHANGE` bumps major (minor while `0.x`).
+
+This repo is in maintenance mode (bug and security fixes only), so releases
+are normally patch bumps off `fix:` commits.
 
 ## Things that will get a PR sent back
 

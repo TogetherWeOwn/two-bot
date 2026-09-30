@@ -1,5 +1,10 @@
 # two-bot
 
+[![Release](https://img.shields.io/github/v/release/TogetherWeOwn/two-bot)](https://github.com/TogetherWeOwn/two-bot/releases)
+
+> **Maintenance mode (2026-09-29, TOG-9788):** bug and security fixes only — new
+> development continues in two-bot-next.
+
 The Discord bot and funnel instrumentation for the TWO gaming community.
 
 Its one job right now: **produce trustworthy numbers about how people find us,
@@ -49,9 +54,14 @@ git clone https://github.com/TogetherWeOwn/two-bot.git
 cd two-bot
 ```
 
-Then point the suite at an isolated Postgres database. This needs a running
-Postgres 17+ with a scratch database of your own (e.g. `createdb two_bot_test`)
-— CI supplies its own throwaway service, the repo does not provision one.
+Then point the suite at an isolated Postgres database. Locally that is a
+running Postgres 17+ with a scratch database of your own
+(e.g. `createdb two_bot_test`); Paperclip agents use the sandbox database
+`agent-testdb` with one database per card
+(e.g. `two_bot_test_togXXXX`, see `AGENTS.md`). CI supplies its own
+throwaway service; the repo provisions none.
+The suite refuses any host outside `scripts/test-db-guard.ts` (TOG-9656):
+never point `TWO_TEST_DATABASE_URL` at production or staging.
 Without it the suite fails fast with `TWO_TEST_DATABASE_URL is required`.
 
 ```bash
