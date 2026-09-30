@@ -151,6 +151,111 @@ test('malformed timestamps and memberless rows are skipped, never paired somewhe
   assert.equal(r.resolved, 0);
 });
 
+// --- timestamp spellings must not change chronology ---------------------------
+
+for (const { label, spellings, kind } of [
+  {
+    label: 'before coverage',
+    spellings: ['2026-08-31T22:30:00.000Z', '2026-09-01T00:30:00+02:00', '2026-08-31T17:30:00-05:00'],
+    kind: 'pre-coverage',
+  },
+  {
+    label: 'at coverage start',
+    spellings: ['2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00Z', '2026-08-31T19:00:00-05:00'],
+    kind: 'log-miss',
+  },
+  {
+    label: 'after coverage start',
+    spellings: ['2026-09-01T00:30:00.000Z', '2026-09-01T02:30:00+02:00', '2026-08-31T19:30:00-05:00'],
+    kind: 'log-miss',
+  },
+]) {
+  test(`coverage classification uses instants for equivalent spellings ${label}`, () => {
+    for (const logFloor of ['2026-09-01T00:00:00.000Z', '2026-09-01T02:00:00+02:00', '2026-08-31T19:00:00-05:00']) {
+      for (const at of spellings) {
+        const r = classifyLeaveGaps([join('m', at)], [], [], { logFloor });
+        assert.equal(r.gaps[0].kind, kind, `${at} against ${logFloor}`);
+        assert.equal(r.gaps[0].lastJoinAt, at);
+        assert.equal(r.gaps[0].fills[0].occurredAt, at);
+        assert.equal(r.gaps[0].fills[0].bound, 'earliest-possible');
+      }
+    }
+  });
+}
+
+for (const { label, spellings, kind } of [
+  {
+    label: 'before raid start',
+    spellings: ['2025-07-05T23:59:59.999Z', '2025-07-06T01:59:59.999+02:00'],
+    kind: 'log-miss',
+  },
+  {
+    label: 'at inclusive raid start',
+    spellings: ['2025-07-06T00:00:00.000Z', '2025-07-05T19:00:00-05:00'],
+    kind: 'raid-residue',
+  },
+  {
+    label: 'inside raid',
+    spellings: ['2025-07-06T23:30:00.000Z', '2025-07-07T01:30:00+02:00'],
+    kind: 'raid-residue',
+  },
+  {
+    label: 'at exclusive raid end',
+    spellings: ['2025-07-07T00:00:00.000Z', '2025-07-06T19:00:00-05:00'],
+    kind: 'log-miss',
+  },
+]) {
+  test(`raid classification uses instants for equivalent spellings ${label}`, () => {
+    for (const at of spellings) {
+      const r = classifyLeaveGaps([join('m', at)], [], [], { anomalies: ANOMALIES });
+      assert.equal(r.gaps[0].kind, kind, at);
+    }
+  });
+}
+
+test('offset joins with reversed string order yield chronological bounded fills and lastJoinAt', () => {
+  const variants = [
+    ['2026-08-31T22:30:00.000Z', '2026-08-31T23:00:00.000Z'],
+    ['2026-09-01T00:30:00+02:00', '2026-08-31T18:00:00-05:00'],
+  ];
+  assert.ok(variants[1][0] > variants[1][1], 'offset spellings reverse instant order');
+  for (const [earlier, later] of variants) {
+    for (const input of [[earlier, later], [later, earlier]]) {
+      const r = classifyLeaveGaps(input.map((at) => join('m', at)), [], []);
+      const gap = r.gaps[0];
+      assert.equal(gap.kind, 'rejoin-gap');
+      assert.equal(gap.joinsSeen, 2);
+      assert.equal(gap.lastJoinAt, later);
+      assert.deepEqual(gap.fills.map((f) => f.occurredAt), [earlier, later]);
+      assert.deepEqual(gap.fills.map((f) => f.bound), ['earliest-possible', 'earliest-possible']);
+      assert.equal(gap.fills[0].note, `provably present at ${earlier}, gone sometime after - and necessarily before the rejoin at ${later}`);
+      assert.ok(gap.detail.includes(`left again after ${later}`));
+    }
+  }
+});
+
+test('gap members sort by last join instant with member id breaking equivalent-spelling ties', () => {
+  const r = classifyLeaveGaps([
+    join('a-later', '2026-08-31T18:00:00-05:00'),
+    join('z-earlier', '2026-09-01T00:30:00+02:00'),
+    join('b-tied', '2026-08-31T22:30:00.000Z'),
+  ], [], []);
+  assert.deepEqual(r.gaps.map((g) => g.memberId), ['b-tied', 'z-earlier', 'a-later']);
+});
+
+test('empty and malformed leave timestamps do not resolve a valid epoch join', () => {
+  const r = classifyLeaveGaps(
+    [join('m', '1970-01-01T00:00:00.000Z'), join('empty', '')],
+    [leave('m', ''), leave('m', 'not-a-time')],
+    [],
+    { logFloor: '1970-01-01T01:00:00+01:00' },
+  );
+  assert.equal(r.skipped, 3);
+  assert.equal(r.resolved, 0);
+  assert.equal(r.gaps.length, 1);
+  assert.equal(r.gaps[0].kind, 'log-miss');
+});
+
 // --- the seeded reviewer fixture ---------------------------------------------
 
 test('seeded gaps cover every path: 4 gaps, 1 present, 1 resolved, 3 skipped', () => {
