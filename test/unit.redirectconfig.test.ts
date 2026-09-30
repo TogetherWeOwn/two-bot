@@ -77,15 +77,42 @@ test('the redirect refuses to start without a guild to record against', () => {
 
 test('redirect config defaults to loopback and reads its overrides', () => {
   const base = loadRedirectConfig({ DISCORD_GUILD_ID: 'g1' } as NodeJS.ProcessEnv);
-  assert.deepEqual(base, { host: '127.0.0.1', port: 8088, guildId: 'g1', fallbackInviteCode: null });
+  assert.deepEqual(base, {
+    host: '127.0.0.1',
+    port: 8088,
+    guildId: 'g1',
+    fallbackInviteCode: null,
+    trustedProxies: ['127.0.0.0/8', '::1/128'],
+  });
 
   const over = loadRedirectConfig({
     DISCORD_GUILD_ID: 'g1',
     TWO_REDIRECT_BIND_HOST: '10.0.0.5',
     TWO_REDIRECT_PORT: '8090',
     TWO_REDIRECT_FALLBACK_CODE: 'fallback',
+    TWO_REDIRECT_TRUSTED_PROXIES: '10.0.0.5, 10.0.1.0/24',
   } as NodeJS.ProcessEnv);
-  assert.deepEqual(over, { host: '10.0.0.5', port: 8090, guildId: 'g1', fallbackInviteCode: 'fallback' });
+  assert.deepEqual(over, {
+    host: '10.0.0.5',
+    port: 8090,
+    guildId: 'g1',
+    fallbackInviteCode: 'fallback',
+    trustedProxies: ['10.0.0.5', '10.0.1.0/24'],
+  });
+});
+
+test('the redirect refuses to start with an invalid TWO_REDIRECT_TRUSTED_PROXIES', () => {
+  for (const proxies of ['example.com', '10.0.0.0/33', '999.1.1.1']) {
+    assert.throws(
+      () =>
+        loadRedirectConfig({
+          DISCORD_GUILD_ID: 'g1',
+          TWO_REDIRECT_TRUSTED_PROXIES: proxies,
+        } as NodeJS.ProcessEnv),
+      /TWO_REDIRECT_TRUSTED_PROXIES/,
+      `trusted proxies "${proxies}" must throw`,
+    );
+  }
 });
 
 test('the redirect refuses to start with an invalid TWO_REDIRECT_PORT', () => {

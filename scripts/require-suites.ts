@@ -220,6 +220,19 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     why: 'the presence-trend output CLI itself, not just the helpers underneath it - without this floor a silent skip re-opens the unpinned staffing/event-slot numbers gap',
   },
   {
+    // TOG-9985. The moderation disable-preflight script executed end to end
+    // through the real script: exit 0 CLEAR on empty state (plain and
+    // --json), exit 1 REFUSED for each partial shape (unban-only,
+    // lockdown-only, both plus a running claim with hand-release SQL) with
+    // --json counts and stranded id lists, and exit 2 could-not-tell for a
+    // missing URL, an unreachable database, a non-postgres URL, and a schema
+    // without the tables. Counted from the 10 top-level test() blocks; CI's
+    // postgres job confirms the count on the first run after this commit.
+    file: 'test/e2e.moderation-disable-preflight.test.ts',
+    minTests: 10,
+    why: 'the moderation-disable-preflight exits themselves, not just the library underneath them - without this floor a silent skip re-opens the wave-through-disable gap',
+  },
+  {
     // TOG-9998. The dedupe-events repair script run end to end through the
     // real script: --dry-run counts without deleting, the real run deletes
     // exactly the copies (keeping the earliest of each cluster) and a second

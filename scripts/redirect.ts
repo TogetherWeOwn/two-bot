@@ -37,6 +37,10 @@ const server = await startRedirectServer({
   campaigns,
   recorder: handlers,
   fallbackInviteCode: cfg.fallbackInviteCode,
+  // TOG-9924: without this the throttle buckets on the proxy's socket IP and
+  // one crawler 429s every real visitor. The allowlist itself stays env-only
+  // (src/core/settingsCatalog.ts) so a dashboard write can never widen it.
+  trustedProxies: cfg.trustedProxies,
 });
 
 const live = await campaigns.list();
