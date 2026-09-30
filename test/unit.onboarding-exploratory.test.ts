@@ -5,6 +5,19 @@ import { STAGING_BOT_APPLICATION_ID, TWO_STAGING_GUILD_ID } from '../src/staging
 
 const SCRIPT = new URL('../scripts/onboarding-exploratory-acceptance.ts', import.meta.url).href;
 const STORE = new URL('../src/store/eventStore.ts', import.meta.url).href;
+const SESSION = new URL('../src/onboarding/session.ts', import.meta.url).href;
+const ORDER_PROBE = 'DEFECT? channelIds follow catalog order as SessionPlan documents';
+
+function assertProbeOutcome(run: { status: number | null; output: string }): void {
+  // Section D can pass once main fixes the defect. Nothing else may fail.
+  const failures = run.output.match(/^FAIL .+$/gm) ?? [];
+  for (const failure of failures) {
+    assert.ok(failure.startsWith(`FAIL ${ORDER_PROBE}  -  `), run.output);
+  }
+  assert.ok(run.output.includes(`ok   ${ORDER_PROBE}`) || failures.length === 1, run.output);
+  assert.equal(run.status, failures.length ? 1 : 0, run.output);
+  assert.match(run.output, new RegExp(`onboarding-exploratory-acceptance: \\d+ passed, ${failures.length} failed, \\d+ N-A\\.`));
+}
 // Identity-shaped fixture only. The child replaces fetch before importing the script.
 const TOKEN = `${Buffer.from(STAGING_BOT_APPLICATION_ID).toString('base64')}.fixture.not-a-secret`;
 
@@ -14,6 +27,7 @@ function runScript(options: {
   token?: string;
   now?: string;
   removeReplayGuard?: boolean;
+  fixCatalogOrder?: boolean;
 } = {}): { status: number | null; output: string } {
   const bootstrap = `
     import { registerHooks } from 'node:module';
@@ -42,6 +56,16 @@ function runScript(options: {
         const guard = 'return below !== null && atIso <= below ? null : rung;';
         if (source.split(guard).length !== 2) throw new Error('replay mutation anchor moved');
         return { ...loaded, source: source.replace(guard, 'return rung;') };
+      } });
+    ` : ''}
+    ${options.fixCatalogOrder ? `
+      registerHooks({ load(url, context, nextLoad) {
+        const loaded = nextLoad(url, context);
+        if (url !== ${JSON.stringify(SESSION)}) return loaded;
+        const source = String(loaded.source);
+        const loop = 'for (const p of picks) {';
+        if (source.split(loop).length !== 2) throw new Error('catalog-order fixture anchor moved');
+        return { ...loaded, source: source.replace(loop, 'for (const p of catalog.filter(p => picks.includes(p))) {') };
       } });
     ` : ''}
     process.argv = [process.execPath, ${JSON.stringify(SCRIPT)}, ${options.staging ? "'--staging'" : ''}];
@@ -80,23 +104,37 @@ test('invalid staging token makes no request even with the accepted guild', () =
 
 test('accepted staging identity exercises all three read-only requests through mocks', () => {
   const run = runScript({ staging: true, token: TOKEN, guildId: TWO_STAGING_GUILD_ID });
-  assert.equal(run.status, 1, run.output); // Section D is an intentional defect probe.
+  assertProbeOutcome(run);
   assert.match(run.output, /ok   staging guild reachable/);
   assert.match(run.output, /ok   staging has a #welcome channel/);
   assert.match(run.output, /MOCK_REQUESTS=3/);
-  assert.equal((run.output.match(/^FAIL /gm) ?? []).length, 1, run.output);
 });
 
 for (const now of ['2026-09-26T12:00:00.000Z', '2030-01-01T00:00:00.000Z']) {
   test(`offline funnel controls its clock even when the ambient clock is ${now}`, () => {
     const run = runScript({ now });
-    assert.equal(run.status, 1, run.output);
+    assertProbeOutcome(run);
     assert.match(run.output, /ok   join -> routed is 10s \(the under-60s claim shape\)/);
     assert.match(run.output, /ok   join -> first_message is 40s/);
     assert.match(run.output, /MOCK_REQUESTS=0/);
-    assert.equal((run.output.match(/^FAIL /gm) ?? []).length, 1, run.output);
   });
 }
+
+test('a corrected catalog-order probe exits zero without breaking the mock assertions', () => {
+  const run = runScript({ fixCatalogOrder: true, staging: true, token: TOKEN, guildId: TWO_STAGING_GUILD_ID });
+  assertProbeOutcome(run);
+  assert.equal(run.status, 0, run.output);
+  assert.ok(run.output.includes(`ok   ${ORDER_PROBE}`), run.output);
+  assert.match(run.output, /MOCK_REQUESTS=3/);
+});
+
+test('probe outcome assertions reject unrelated failures and incorrect exit codes', () => {
+  const run = runScript();
+  assertProbeOutcome(run);
+  assert.throws(() => assertProbeOutcome({ ...run, output: `${run.output}\nFAIL unrelated probe  -  regression\n` }));
+  assert.throws(() => assertProbeOutcome({ ...run, status: run.status === 0 ? 1 : 0 }));
+  assert.throws(() => assertProbeOutcome({ ...run, status: null }));
+});
 
 test('exploratory replay probes fail if the timestamp guard is removed', () => {
   const run = runScript({ removeReplayGuard: true });
