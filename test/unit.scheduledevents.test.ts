@@ -33,6 +33,44 @@ function sequenceRest(responses: Array<{ status: number; body?: unknown; headers
   return { rest, paths };
 }
 
+const VALID_EVENT = {
+  id: 'event-1',
+  name: 'Sunday Squad',
+  scheduled_start_time: '2026-09-06T18:30:00+01:00',
+  status: 1,
+};
+const INVALID_OPTIONALS = [42, true, [], {}];
+
+function malformedSnapshots() {
+  return ['channel_id', 'description'].flatMap((field) =>
+    INVALID_OPTIONALS.flatMap((value) => [0, 1].map((index) => {
+      const events = [VALID_EVENT, { ...VALID_EVENT, id: 'event-2' }];
+      events[index] = { ...events[index]!, [field]: value };
+      return { label: `${field}=${JSON.stringify(value)} at index ${index}`, events };
+    })),
+  );
+}
+
+describe('scheduled events optional validation', () => {
+  for (const { label, events } of malformedSnapshots()) {
+    test(`rejects ${label} before touching storage`, async () => {
+      let storageCalls = 0;
+      const poison = () => {
+        storageCalls++;
+        throw new Error('malformed snapshots must not touch storage');
+      };
+      const db = { prepare: poison, exec: poison, transaction: poison, close: poison } as Db;
+      const { rest } = stubRest(() => events);
+
+      const result = await runScheduledEventsCycle({ db, rest, guildId: GUILD, now: () => OBSERVED_AT });
+      assert.deepEqual(result, {
+        recorded: false, reason: 'invalid_response', observedAt: OBSERVED_AT, eventCount: null,
+      });
+      assert.equal(storageCalls, 0);
+    });
+  }
+});
+
 describe('scheduled events poller', () => {
   let db: Db;
 
@@ -82,6 +120,51 @@ describe('scheduled events poller', () => {
         },
       ],
     );
+  });
+
+  test('absent, null and string optionals retain their normalized representation', async () => {
+    const optionals = [undefined, null, '', 'value'];
+    const events = optionals.flatMap((channelId, i) => optionals.map((description, j) => ({
+      ...VALID_EVENT,
+      id: `event-${i}-${j}`,
+      ...(channelId === undefined ? {} : { channel_id: channelId }),
+      ...(description === undefined ? {} : { description }),
+    })));
+    const { rest } = stubRest(() => events);
+
+    const result = await runScheduledEventsCycle({ db, rest, guildId: GUILD, now: () => OBSERVED_AT });
+    assert.deepEqual(result, { recorded: true, observedAt: OBSERVED_AT, eventCount: 16 });
+    assert.deepEqual(await db.prepare(`SELECT * FROM scheduled_events ORDER BY event_id`).all(),
+      events.map((event) => ({
+        guild_id: GUILD, event_id: event.id, name: event.name,
+        starts_at: '2026-09-06T17:30:00.000Z', channel_id: event.channel_id ?? null,
+        description: event.description ?? null, status: 'scheduled', updated_at: OBSERVED_AT,
+      })));
+  });
+
+  test('malformed optionals preserve every last-good field, timestamp and contract pin', async () => {
+    const seededAt = '2026-09-03T12:00:00.123Z';
+    const { rest: seedRest } = stubRest(() => [
+      { ...VALID_EVENT, channel_id: 'voice-1', description: 'Keep this description.' },
+      { ...VALID_EVENT, id: 'event-2', name: 'Keep this event too.', status: 2 },
+    ]);
+    await runScheduledEventsCycle({ db, rest: seedRest, guildId: GUILD, now: () => seededAt });
+    await db.prepare(`UPDATE web_contract_meta SET guild_id = ? WHERE singleton = TRUE`).run('other-guild');
+    const readRows = () => db.prepare(`SELECT * FROM scheduled_events ORDER BY event_id`).all();
+    const readMeta = () => db.prepare(`SELECT * FROM web_contract_meta`).all();
+    const rowsBefore = await readRows();
+    const metaBefore = await readMeta();
+    assert.equal(rowsBefore.length, 2);
+
+    for (const { label, events } of malformedSnapshots()) {
+      const { rest } = stubRest(() => events);
+      const result = await runScheduledEventsCycle({ db, rest, guildId: GUILD, now: () => OBSERVED_AT });
+      assert.deepEqual(result, {
+        recorded: false, reason: 'invalid_response', observedAt: OBSERVED_AT, eventCount: null,
+      }, label);
+      assert.deepEqual(await readRows(), rowsBefore, label);
+      assert.deepEqual(await readMeta(), metaBefore, label);
+    }
   });
 
   test('a successful empty response deletes the last event', async () => {

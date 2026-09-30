@@ -50,7 +50,9 @@ function normalize(raw: RawScheduledEvent): ScheduledEvent | null {
     typeof raw.id !== 'string' || raw.id.length === 0 ||
     typeof raw.name !== 'string' || raw.name.length === 0 ||
     typeof raw.scheduled_start_time !== 'string' || !Number.isFinite(Date.parse(raw.scheduled_start_time)) ||
-    !status
+    !status ||
+    (raw.channel_id != null && typeof raw.channel_id !== 'string') ||
+    (raw.description != null && typeof raw.description !== 'string')
   ) {
     return null;
   }
