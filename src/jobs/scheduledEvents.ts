@@ -44,7 +44,9 @@ const STATUS = new Map<number, ScheduledEvent['status']>([
   [4, 'cancelled'],
 ]);
 
-function normalize(raw: RawScheduledEvent): ScheduledEvent | null {
+function normalize(value: unknown): ScheduledEvent | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
   const status = typeof raw.status === 'number' ? STATUS.get(raw.status) : undefined;
   if (
     typeof raw.id !== 'string' || raw.id.length === 0 ||
@@ -99,7 +101,7 @@ export async function runScheduledEventsCycle(
   deps: ScheduledEventsDeps,
 ): Promise<ScheduledEventsResult> {
   const observedAt = (deps.now ?? nowIso)();
-  const raw = await deps.rest.get<RawScheduledEvent[]>(
+  const raw = await deps.rest.get<unknown>(
     `/guilds/${deps.guildId}/scheduled-events`,
   );
   if (!Array.isArray(raw)) {
