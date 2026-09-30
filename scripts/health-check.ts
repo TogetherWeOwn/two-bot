@@ -62,7 +62,10 @@ export interface RunHealthCheckOptions {
   databaseUrl: string;
   /** Extra env for the bot child (e.g. PGOPTIONS to pin a test schema). */
   extraEnv?: Record<string, string>;
-  /** Total budget for boot + probes, ms. Default 90_000. */
+  /**
+   * Total startup + retries + probe budget, ms. Default 90_000.
+   * Shutdown has a separate 35s budget, followed by at most 5s of disposal.
+   */
   timeoutMs?: number;
 }
 
@@ -105,21 +108,88 @@ async function releaseHeld(h: HeldPort | null): Promise<void> {
   await h?.release().catch(() => {});
 }
 
-/**
- * Poll until `fn` resolves truthy. Callers signal "not yet" with null; the
- * only way out is a truthy value or the deadline.
- */
-async function waitFor<T>(fn: () => Promise<T | null>, timeoutMs: number): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  let last: unknown = 'not yet observed';
-  while (Date.now() < deadline) {
+// Test seams exercise the real orchestration without a socket, DB or bot.
+export interface HealthCheckRuntime {
+  now: () => number;
+  sleep: typeof sleep;
+  fetch: typeof fetch;
+  spawn: typeof spawn;
+  startMockDiscord: typeof startMockDiscord;
+  holdPort: typeof holdPort;
+  random: () => number;
+}
+
+class DeadlineError extends Error {}
+
+class Deadline {
+  private end: number;
+  private runtime: Pick<HealthCheckRuntime, 'now' | 'sleep'>;
+
+  constructor(end: number, runtime: Pick<HealthCheckRuntime, 'now' | 'sleep'>) {
+    this.end = end;
+    this.runtime = runtime;
+  }
+
+  remaining(): number {
+    return Math.max(0, this.end - this.runtime.now());
+  }
+
+  capped(ms: number): Deadline {
+    return new Deadline(Math.min(this.end, this.runtime.now() + ms), this.runtime);
+  }
+
+  async run<T>(
+    fn: (signal: AbortSignal) => Promise<T>,
+    disposeLate?: (value: T) => Promise<void>,
+  ): Promise<T> {
+    const remaining = this.remaining();
+    if (remaining <= 0) throw new DeadlineError('deadline exhausted');
+    const controller = new AbortController();
+    let expired = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        expired = true;
+        const err = new DeadlineError('deadline exhausted');
+        // Abort fetch AND body consumption, not just the polling loop.
+        // https://nodejs.org/docs/latest-v24.x/api/globals.html#class-abortcontroller
+        controller.abort(err);
+        reject(err);
+      }, remaining);
+    });
+    const work = Promise.resolve().then(() => fn(controller.signal)).then((value) => {
+      if (expired || this.remaining() <= 0) {
+        expired = true;
+        void disposeLate?.(value).catch(() => {});
+        throw new DeadlineError('deadline exhausted');
+      }
+      return value;
+    });
     try {
-      const v = await fn();
+      return await Promise.race([work, timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async pause(ms: number): Promise<void> {
+    await this.run(() => this.runtime.sleep(Math.min(ms, this.remaining())));
+  }
+}
+
+/** Poll within an existing deadline; a phase cap never replenishes its parent. */
+async function waitFor<T>(fn: (signal: AbortSignal) => Promise<T | null>, deadline: Deadline): Promise<T> {
+  let last: unknown = 'not yet observed';
+  while (deadline.remaining() > 0) {
+    try {
+      const v = await deadline.run(fn);
       if (v) return v;
     } catch (err) {
       last = err; // not listening yet
     }
-    await sleep(200);
+    if (deadline.remaining() > 0) {
+      await deadline.pause(200).catch((err) => { last = err; });
+    }
   }
   throw new Error(`timed out; last: ${String(last)}`);
 }
@@ -158,8 +228,26 @@ function parseLine(raw: string): BotLogLine {
  * mock Discord and its own bot child; tears both down before returning, so a
  * test can assert on the report and an operator can read it.
  */
-export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<RunbookHealthReport> {
+export async function runHealthCheck(
+  opts: RunHealthCheckOptions,
+  dependencies: Partial<HealthCheckRuntime> = {},
+): Promise<RunbookHealthReport> {
   const timeoutMs = opts.timeoutMs ?? 90_000;
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new Error('timeoutMs must be a positive finite number');
+  }
+  const runtime: HealthCheckRuntime = {
+    now: () => performance.now(), sleep, fetch, spawn, startMockDiscord, holdPort,
+    random: Math.random, ...dependencies,
+  };
+  const budget = new Deadline(runtime.now() + timeoutMs, runtime);
+  const disposalBudget = () => new Deadline(runtime.now() + 5_000, runtime);
+  const closeLateMock = (m: MockDiscord) => disposalBudget().run(() => m.close());
+  const releaseLatePort = (h: HeldPort) => disposalBudget().run(() => h.release());
+  const detachListeners: Array<() => void> = [];
+  const detachChild = () => {
+    for (const detach of detachListeners.splice(0)) detach();
+  };
   const checks: HealthCheckResult[] = [];
   const pass = (id: string, detail: string) => checks.push({ id, status: 'pass', detail });
   const fail = (id: string, detail: string) => checks.push({ id, status: 'fail', detail });
@@ -227,7 +315,8 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
   const historyBlock = () => (attemptHistory.length ? `\nboot attempts:\n${attemptHistory.join('\n')}` : '');
   // Decorrelate colliding siblings: without jitter two processes that lose
   // the same race retry in lockstep and lose it together again.
-  const backoff = (attempt: number) => sleep(250 * attempt + Math.floor(Math.random() * 500));
+  const backoff = (attempt: number) => budget.pause(250 * attempt + Math.floor(runtime.random() * 500));
+  let attemptNumber = 0;
   let port = 0;
   let url = (p: string) => `http://127.0.0.1:${port}${p}`;
   let logTail = () => '';
@@ -236,30 +325,32 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
   let held: HeldPort | null = null;
   try {
     for (let attempt = 1; attempt <= BOOT_ATTEMPTS && !bootOk; attempt++) {
+      attemptNumber = attempt;
       // Fresh state per attempt so a collided try leaves no checks behind.
       checks.length = 0;
       lines.length = 0;
       pending = '';
       if (bot && bot.exitCode === null) bot.kill('SIGKILL');
+      detachChild();
       bot = null;
       exited = null;
-      await mock?.close().catch(() => {});
+      if (mock) await budget.run(() => mock!.close());
       mock = null;
       // `releaseHeld` (not `held?.release()` inline): `held` is `null`
       // on every loop back edge, so TS narrows it to `null` here and the
       // inline optional chain looks up `release` on `never` (TS2339).
-      await releaseHeld(held);
+      await budget.run(() => releaseHeld(held));
       held = null;
 
       // Decorrelate from a sibling we just collided with: without this two
       // processes that lose the same race retry in lockstep and lose together.
       if (attempt > 1) await backoff(attempt);
-      mock = await startMockDiscord();
+      mock = await budget.run(() => runtime.startMockDiscord(), closeLateMock);
       // Bound by THIS process until our child exists: no bind-release gap for
       // a sibling to slip into. Released right after spawn so the child can
       // bind; the spawn-to-bind window (child boot, ~1s) stays racy, which is
       // what the retry budget and the attempt history below are for.
-      held = await holdPort();
+      held = await budget.run(() => runtime.holdPort(), releaseLatePort);
       port = held.port;
       url = (p: string) => `http://127.0.0.1:${port}${p}`;
       logTail = () => lines.map((l) => l.raw).join('\n');
@@ -267,7 +358,7 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
       // a retry is correct, so it is logged per attempt, not just on failure.
       const tailLines = (n = 8) => lines.map((l) => l.raw).slice(-n).join('\n');
 
-      bot = spawn(process.execPath, ['src/index.ts'], {
+      bot = runtime.spawn(process.execPath, ['src/index.ts'], {
         cwd: ROOT,
         stdio: ['ignore', 'pipe', 'pipe'],
         env: {
@@ -284,7 +375,7 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
           LOG_LEVEL: 'debug',
         },
       });
-      await held.release();
+      await budget.run(() => held!.release());
       held = null;
       child = bot;
       exited = null;
@@ -293,14 +384,15 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
       // current child may write this attempt's `exited` and `lines`.
       const thisChild = child;
       const isCurrent = () => bot === thisChild;
-      thisChild.stdout?.on('data', (d: unknown) => {
-        if (isCurrent()) onData(d);
-      });
-      thisChild.stderr?.on('data', (d: unknown) => {
-        if (isCurrent()) onData(d);
-      });
-      thisChild.on('exit', (code) => {
-        if (isCurrent()) exited = code;
+      const onOutput = (d: unknown) => { if (isCurrent()) onData(d); };
+      const onExit = (code: number | null) => { if (isCurrent()) exited = code; };
+      thisChild.stdout?.on('data', onOutput);
+      thisChild.stderr?.on('data', onOutput);
+      thisChild.on('exit', onExit);
+      detachListeners.push(() => {
+        thisChild.stdout?.off('data', onOutput);
+        thisChild.stderr?.off('data', onOutput);
+        thisChild.off('exit', onExit);
       });
 
       // 1. The process stays up through the whole check window. A boot crash is
@@ -308,7 +400,7 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
       //    An EADDRINUSE crash means a sibling bound our port in the
       //    spawn-to-bind window - retry with a fresh held port, and record
       //    the exit tail so the next red run says EADDRINUSE vs real crash.
-      await sleep(1500);
+      await budget.pause(1500);
       if (exited !== null) {
         const tail = logTail();
         const squat = /EADDRINUSE/.test(tail);
@@ -326,29 +418,30 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
 
       // 2 + 3. Liveness comes up first and does not wait for the gateway - that
       //    ordering is the entire reason index.ts starts health before login.
-      //    The liveness budget is per attempt so retries cannot stack timeouts.
-      const live = await waitFor(async () => {
-        const res = await fetch(url('/healthz'));
-        return res.ok ? res : null;
-      }, Math.min(timeoutMs, 30_000)).catch(() => null);
+      //    Keep the phase cap, but every attempt consumes the SAME total budget.
+      const live = await waitFor(async (signal) => {
+        const res = await runtime.fetch(url('/healthz'), { signal });
+        const body = (await res.text()).trim();
+        return res.ok ? { status: res.status, body } : null;
+      }, budget.capped(30_000)).catch(() => null);
       if (!live) {
         recordAttempt(`attempt ${attempt}/${BOOT_ATTEMPTS} port ${port}: /healthz never answered 200\n${tailLines()}`);
-        if (attempt < BOOT_ATTEMPTS) continue;
+        if (attempt < BOOT_ATTEMPTS && budget.remaining() > 0) continue;
         fail(
           'liveness-200-ok',
-          `GET /healthz never answered 200 after ${BOOT_ATTEMPTS} boot attempts\n${logTail()}${historyBlock()}`,
+          `GET /healthz never answered 200 after ${attempt} boot attempts (remaining budget ${budget.remaining()}ms)\n${logTail()}${historyBlock()}`,
         );
         return failReport();
       }
       {
-        const body = (await live.text()).trim();
+        const body = live.body;
         if (live.status !== 200 || body !== 'ok') {
           // Wrong server on our port (a sibling's mock answers '{}', a stale
           // bot answers 503) - retry with a fresh port, don't fail the run.
           recordAttempt(
             `attempt ${attempt}/${BOOT_ATTEMPTS} port ${port}: /healthz -> ${live.status} ${body.slice(0, 80)}\n${tailLines()}`,
           );
-          if (attempt < BOOT_ATTEMPTS) continue;
+          if (attempt < BOOT_ATTEMPTS && budget.remaining() > 0) continue;
           fail('liveness-200-ok', `GET /healthz -> ${live.status} ${body}${historyBlock()}`);
           return failReport();
         }
@@ -361,10 +454,10 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
             (l) => l.json?.msg === 'health_listening' && l.json?.port === port,
           );
           return found ?? null;
-        }, 15_000).catch(() => null);
+        }, budget.capped(15_000)).catch(() => null);
         if (!ours) {
           recordAttempt(`attempt ${attempt}/${BOOT_ATTEMPTS} port ${port}: 200 ok but no health_listening for our port\n${tailLines()}`);
-          if (attempt < BOOT_ATTEMPTS) continue;
+          if (attempt < BOOT_ATTEMPTS && budget.remaining() > 0) continue;
           fail('liveness-200-ok', `our bot never logged health_listening for port ${port}\n${logTail()}${historyBlock()}`);
           return failReport();
         }
@@ -385,8 +478,9 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
 
     // 4. The gateway session comes up against the mock, exactly as it would
     //    against Discord's own servers and TLS aside.
-    await activeMock.waitForReady(Math.min(timeoutMs, 30_000)).catch((err: unknown) => {
-      fail('gateway-ready', `mock gateway never saw IDENTIFY: ${String(err)}\n${logTail()}`);
+    const gatewayBudget = budget.capped(30_000);
+    await gatewayBudget.run(() => activeMock.waitForReady(gatewayBudget.remaining())).catch((err: unknown) => {
+      fail('gateway-ready', `mock gateway never saw IDENTIFY: ${String(err)}\n${logTail()}${historyBlock()}`);
     });
     if (checks.some((c) => c.id === 'gateway-ready' && c.status === 'fail')) {
       return failReport();
@@ -398,11 +492,12 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
     const readyLine = await waitFor(async () => {
       const found = lines.find((l) => l.json?.msg === 'ready');
       return found ?? null;
-    }, timeoutMs).catch((e: unknown) => {
-      fail('ready-line', `no {"msg":"ready"} line appeared: ${String(e)}\n${logTail()}`);
+    }, budget).catch((e: unknown) => {
+      fail('ready-line', `no {"msg":"ready"} line appeared: ${String(e)}\n${logTail()}${historyBlock()}`);
       return null;
     });
-    if (readyLine?.json) {
+    if (!readyLine) return failReport();
+    if (readyLine.json) {
       const user = readyLine.json.user;
       const guilds = readyLine.json.guilds;
       const readyTs = typeof readyLine.json.ts === 'string' ? Date.parse(readyLine.json.ts) : NaN;
@@ -432,18 +527,17 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
 
     // 7. Readiness carries the real signal: gateway logged in AND the database
     //    answers. This is the check Coolify gates the deploy on.
-    const ready = await waitFor(async () => {
-      const res = await fetch(url('/readyz'));
-      return res.status === 200 ? res : null;
-    }, timeoutMs).catch((e: unknown) => {
-      fail('readiness-200-ok', `GET /readyz never answered 200: ${String(e)}\n${logTail()}`);
+    const ready = await waitFor(async (signal) => {
+      const res = await runtime.fetch(url('/readyz'), { signal });
+      const body = (await res.text()).trim();
+      return res.status === 200 ? { body } : null;
+    }, budget).catch((e: unknown) => {
+      fail('readiness-200-ok', `GET /readyz never answered 200: ${String(e)}\n${logTail()}${historyBlock()}`);
       return null;
     });
-    if (ready) {
-      const body = (await ready.text()).trim();
-      if (body === 'ok') pass('readiness-200-ok', 'GET /readyz -> 200 ok (gateway connected, database answered)');
-      else fail('readiness-200-ok', `GET /readyz -> 200 with unexpected body ${body}`);
-    }
+    if (!ready) return failReport();
+    if (ready.body === 'ok') pass('readiness-200-ok', 'GET /readyz -> 200 ok (gateway connected, database answered)');
+    else fail('readiness-200-ok', `GET /readyz -> 200 with unexpected body ${ready.body}`);
 
     // 8. One JSON object per line, greppable, ready for a log shipper later.
     //    Only lines the child actually wrote are inspected. Node runtime
@@ -470,9 +564,10 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
 
     // 9. SIGTERM is what a container stop sends. The bot must close the port
     //    rather than be killed holding it.
+    const shutdownBudget = new Deadline(runtime.now() + 35_000, runtime);
     const activeChild = child;
     activeChild.kill('SIGTERM');
-    const stopped = await waitFor(async () => (activeChild.exitCode !== null ? true : null), 25_000).catch(
+    const stopped = await waitFor(async () => (activeChild.exitCode !== null ? true : null), shutdownBudget.capped(25_000)).catch(
       () => false,
     );
     if (!stopped) {
@@ -485,7 +580,7 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
       // and the host-only skips with it. Record it as the port-released
       // verdict instead; the skips ride along via failReport.
       try {
-        await assertPortReleased(url('/healthz'));
+        await assertPortReleased(url('/healthz'), shutdownBudget.capped(10_000), runtime.fetch);
         pass('port-released', 'health port refused connections after shutdown');
       } catch (err: unknown) {
         fail('port-released', `health port still answered after shutdown: ${String(err)}`);
@@ -497,30 +592,44 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
     pushSkips();
 
     return { checks, passed: checks.every((c) => c.status !== 'fail') };
+  } catch (err) {
+    if (!(err instanceof DeadlineError)) throw err;
+    recordAttempt(`attempt ${attemptNumber}/${BOOT_ATTEMPTS} port ${port}: boot/probe stopped: ${String(err)}`);
+    fail('boot-probe-budget', `${String(err)}\n${logTail()}${historyBlock()}`);
+    return failReport();
   } finally {
     if (bot && bot.exitCode === null) bot.kill('SIGKILL');
-    await mock?.close().catch(() => {});
-    // A `continue` releases at the top of the next iteration, but an early
-    // return or throw would leak the bound holder and starve the host of one
-    // loopback port per red run. Via `releaseHeld` for the same narrowing
-    // reason as the loop-top call.
-    await releaseHeld(held);
+    detachChild();
+    // Disposal is separate from boot/probes, even when their budget ran out.
+    // Start both releases so a stuck mock close cannot starve a held port.
+    const cleanup = disposalBudget();
+    await Promise.all([
+      cleanup.run(async () => { await mock?.close(); }).catch(() => {}),
+      cleanup.run(() => releaseHeld(held)).catch(() => {}),
+    ]);
   }
 }
 
-async function assertPortReleased(healthUrl: string): Promise<void> {
-  let released = false;
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
+async function assertPortReleased(healthUrl: string, deadline: Deadline, fetchProbe: typeof fetch): Promise<void> {
+  await waitFor(async (signal) => {
+    let res: Response;
     try {
-      await fetch(healthUrl);
-    } catch {
-      released = true;
-      break;
+      res = await fetchProbe(healthUrl, { signal });
+    } catch (err) {
+      // A canceled/hung request is NOT proof of a refused connection.
+      if (signal.aborted) throw err;
+      return true;
     }
-    await sleep(200);
-  }
-  if (!released) throw new Error('health port still answered after shutdown');
+    // Headers received means a server is still listening: a body failure
+    // (truncated HTTP body, bad encoding) must not certify release.
+    try {
+      await res.text();
+    } catch (err) {
+      if (signal.aborted) throw err;
+      return null;
+    }
+    return null;
+  }, deadline);
 }
 
 const invokedDirectly =
