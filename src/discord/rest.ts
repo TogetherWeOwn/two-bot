@@ -213,6 +213,42 @@ export async function fetchAllMembersStrict(
   return scan?.members ?? null;
 }
 
+/**
+ * Page a guild's full member list, stamping each member with the instant its
+ * page finished downloading.
+ *
+ * A multi-page scan is not an atomic snapshot: a member observed on page one
+ * may leave before page two completes. Stamping every member with full-scan
+ * completion would assert presence "now" for someone already gone, reviving
+ * them over a later gateway removal. Per-page evidence keeps each observation
+ * honest about when it was actually read (TOG-10212). Callers that only need
+ * history (backfill) keep the observation-free helpers above.
+ *
+ * Returns null on a failed page, like `fetchAllMembersStrict`.
+ */
+export async function fetchAllMembersObserved(
+  rest: DiscordRest,
+  guildId: string,
+): Promise<Array<{ member: RawMember; observedAt: string }> | null> {
+  const out: Array<{ member: RawMember; observedAt: string }> = [];
+  let after = '0';
+  for (;;) {
+    const batch = await rest.get<RawMember[]>(
+      `/guilds/${guildId}/members?limit=1000&after=${after}`,
+    );
+    if (!batch) return null;
+    // Stamp AFTER the page resolves: this is when we actually saw these
+    // members, not when the scan started or finished.
+    const observedAt = new Date().toISOString();
+    if (batch.length === 0) return out;
+    for (const member of batch) out.push({ member, observedAt });
+    const last = batch[batch.length - 1]?.user?.id;
+    if (!last) return null;
+    if (batch.length < 1000) return out;
+    after = last;
+  }
+}
+
 export interface ScanResult {
   messages: RawMessage[];
   /** Oldest message timestamp we actually reached, or null if the channel was empty. */

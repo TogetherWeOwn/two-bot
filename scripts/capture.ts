@@ -53,7 +53,7 @@ import { openDb } from '../src/store/db.ts';
 import { EventStore } from '../src/store/eventStore.ts';
 import { InviteTracker, inviteGrowth, attributeJoins } from '../src/core/inviteTracker.ts';
 import type { FunnelEvent } from '../src/core/events.ts';
-import { DiscordRest, fetchAllMembers, type RawInvite } from '../src/discord/rest.ts';
+import { DiscordRest, fetchAllMembersObserved, type RawInvite } from '../src/discord/rest.ts';
 
 if (process.argv.includes('--help')) {
   console.log('Usage: node scripts/capture.ts [--dry-run]');
@@ -158,28 +158,28 @@ const totalGrowth = [...growth.values()].reduce((a, b) => a + b, 0);
 
 // --- 3. who is new in this window? ------------------------------------------
 
-const members = await fetchAllMembers(rest, guildId);
-if (members.length === 0) {
+// Per-page observations: a multi-page scan is not an atomic snapshot, so each
+// member carries the instant its own page finished downloading. Stamping every
+// member with scan completion would assert presence "now" for someone on page
+// one who already left before page two finished, reviving them over a later
+// gateway removal. `capturedAt` stays the window watermark from before the
+// reads; presence evidence is "on the roster at this instant", per page.
+const observed = await fetchAllMembersObserved(rest, guildId);
+if (!observed || observed.length === 0) {
   console.error(
     'Read zero members. That is Server Members Intent being OFF - the REST\n' +
       'member list needs it too, not just the gateway. Run scripts/preflight.ts.',
   );
   process.exit(1);
 }
-
-// Roster-observation stamp, taken AFTER the member-list read above (including
-// pagination) completes. `capturedAt` is the window watermark from before the
-// reads; stamping presence with it would predate the roster, so a removal and
-// a rejoin that both land mid-window would lose to the removal. Presence
-// evidence is "on the roster at this instant", so it gets this instant.
-const rosterObservedAt = new Date().toISOString();
+const members = observed.map((o) => o.member);
 
 const guild = await rest.get<{ vanity_url_code?: string | null }>(`/guilds/${guildId}`);
 const hasVanity = !!guild?.vanity_url_code;
 
-const newJoins: { id: string; joinedAt: string }[] = [];
+const newJoins: { id: string; joinedAt: string; observedAt: string }[] = [];
 let bots = 0;
-for (const m of members) {
+for (const { member: m, observedAt } of observed) {
   const id = m.user?.id;
   if (!id || !m.joined_at) continue;
   if (m.user?.bot) {
@@ -190,7 +190,7 @@ for (const m of members) {
   const joinedAt = new Date(m.joined_at).toISOString();
   // First ever capture has no `since`; the member list is history, not this
   // window, and backfill.ts owns history. Baseline only, emit nothing.
-  if (since !== null && joinedAt > since) newJoins.push({ id, joinedAt });
+  if (since !== null && joinedAt > since) newJoins.push({ id, joinedAt, observedAt });
 }
 newJoins.sort((a, b) => a.joinedAt.localeCompare(b.joinedAt));
 
@@ -227,14 +227,15 @@ const events: FunnelEvent[] = newJoins.map((j, i) => ({
 
 let written = 0;
 if (!dryRun) {
-  for (const e of events) {
+  for (let i = 0; i < events.length; i++) {
     // A captured join is live current-member evidence, not a historical log
-    // import: the member is on the roster NOW, so this observation outranks a
-    // delayed removal stamped earlier. Occurrence stays Discord's joined_at;
-    // only presence order uses the roster-observation instant (after the
-    // member-list read, not the window start). Backfill member-list
+    // import: the member was on the roster at its page's observation instant,
+    // so that observation outranks a delayed removal stamped earlier - but
+    // never a removal that landed after the member's own page was read.
+    // Occurrence stays Discord's joined_at; only presence order uses the
+    // per-page roster-observation instant. Backfill member-list
     // joins stay observation-free on purpose - they are history, not presence.
-    const res = await store.record(e, { membershipObservedAt: rosterObservedAt });
+    const res = await store.record(events[i], { membershipObservedAt: newJoins[i].observedAt });
     if (res.inserted) written++;
   }
   // Store the new counters last, so a crash mid-write re-reads the same window
