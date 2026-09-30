@@ -170,10 +170,10 @@ test('invisible chars and hyphenation point no longer defeat invites (TOG-10048)
   }
 });
 
-test('bypass fuzz: bare-domain TLD gaps miss scheme-less links (TOG-10050)', () => {
-  // Every row SHOULD be 'external_link'. Each returns null today, while the
-  // https:// form of the same host IS caught (parity rows below).
-  const bypasses: Array<[string, string]> = [
+test('bare-domain TLD gaps and dot lookalikes no longer bypass links (TOG-10050)', () => {
+  // The IANA snapshot covers shorteners, ccTLDs, generic and punycode TLDs.
+  // Bare-dot folding catches separators with no NFKC fold to ASCII.
+  const caughtBare: Array<[string, string]> = [
     ['shortener bit.ly', 'read bit.ly/abc'],
     ['shortener caps BIT.LY', 'read BIT.LY/ABC'],
     ['germany .de', 'read evil.de/x'],
@@ -189,8 +189,8 @@ test('bypass fuzz: bare-domain TLD gaps miss scheme-less links (TOG-10050)', () 
     ['middle dot U+00B7 as dot (bare)', E('read evil\\u00b7net/x')],
     ['hyphenation point U+2027 as dot (bare)', E('read evil\\u2027net/x')],
   ];
-  for (const [name, content] of bypasses) {
-    assert.equal(match({ content }), null, `${name}: still bypasses (TOG-10050)`);
+  for (const [name, content] of caughtBare) {
+    assert.equal(match({ content }), 'external_link', `${name}: caught (TOG-10050)`);
   }
   // Parity: the explicit-scheme form of representative hosts IS caught.
   const caught: Array<[string, string]> = [
@@ -261,6 +261,6 @@ test('no-bypass pins: whitespace and separator semantics (TOG-10052)', () => {
 test('no-bypass pins: full-stop lookalikes that already fold (TOG-10052)', () => {
   // NFKC folds fullwidth stop to ASCII dot before the bare-domain regex runs.
   assert.equal(match({ content: E('read evil\\uff0enet/x') }), 'external_link', 'fullwidth stop folds');
-  // U+2027 does NOT fold (no NFKC decomposition): pinned as bypass in the
-  // TOG-10048 invite test and the TOG-10050 bare-domain test, not here.
+  // U+2027 has no NFKC decomposition; its explicit bare-dot fold and the
+  // invite literal are covered by the caught regression rows above.
 });
