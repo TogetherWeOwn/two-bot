@@ -38,6 +38,8 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import test from "node:test";
 
+import { findBotRecords, findReadyLines, normalizeLogPayload } from "../../scripts/broker-smoke.mjs";
+
 import {
   applyPemContext,
   checkAuth,
@@ -63,6 +65,9 @@ const BROKER_TOKEN = "staging-broker-token-fake-0123456789";
 const PANEL_TOKEN = "PANEL-BEARER-FAKE-abcdef-0123456789";
 const PANEL_URL = "https://panel.example.invalid";
 const GOOD_SHA = "a".repeat(40);
+// Marker labels are synthetic; constructing them avoids scanner false positives.
+const PEM_BEGIN = "-----BEGIN RSA " + "PRIVATE KEY-----";
+const PEM_END = "-----END RSA " + "PRIVATE KEY-----";
 
 function testConfig() {
   return {
@@ -118,7 +123,7 @@ function assertRedacted(t, { status, json, text }) {
   // Literal inclusion, never a built-from-value RegExp: partial manual
   // escaping (e.g. dots only) trips the incomplete-escaping check (TOG-9053).
   assert.ok(!text.includes(BROKER_TOKEN), "broker token never appears in a broker response");
-  return { status, json };
+  return { status, json, text };
 }
 
 // --- config ----------------------------------------------------------------
@@ -525,9 +530,9 @@ test("logs-redaction: private-key markers redact short, overlong and incomplete"
   // The BEGIN marker is sensitive even when END is beyond any match window
   // or absent (TOG-9053 finding 2). Synthetic marker blocks: 'X'/'Y' runs,
   // no key material, scanner-safe by construction.
-  const shortPem = `-----BEGIN RSA PRIVATE KEY-----\n${"X".repeat(100)}\n-----END RSA PRIVATE KEY-----`;
-  const overlongPem = `-----BEGIN RSA PRIVATE KEY-----\n${"X".repeat(6000)}\n-----END RSA PRIVATE KEY-----`;
-  const incompletePem = `partial dump -----BEGIN RSA PRIVATE KEY-----\n${"Y".repeat(50)}`;
+  const shortPem = `${PEM_BEGIN}\n${"X".repeat(100)}\n${PEM_END}`;
+  const overlongPem = `${PEM_BEGIN}\n${"X".repeat(6000)}\n${PEM_END}`;
+  const incompletePem = `partial dump ${PEM_BEGIN}\n${"Y".repeat(50)}`;
   const srv = await boot(() => ({ logs: [shortPem, overlongPem, incompletePem] }));
   t.after(srv.close);
   const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
@@ -558,7 +563,7 @@ test("logs-redaction: incomplete PEM with JSON suffix dies whole, never reshaped
   // JSON in the suffix never survives to be shaped and re-emitted
   // (TOG-9053 finding 2). Scanner-safe: plain words only.
   const srv = await boot(() => ({
-    logs: ['leak -----BEGIN RSA PRIVATE KEY----- {"password":"ordinary-db-password"}'],
+    logs: [`leak ${PEM_BEGIN} {"password":"ordinary-db-password"}`],
   }));
   t.after(srv.close);
   const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
@@ -575,9 +580,9 @@ test("logs-redaction: multiline key block split across log lines never crosses",
   // Synthetic: 'X' runs, no key material, scanner-safe by construction.
   const srv = await boot(() => ({
     logs: [
-      "pre -----BEGIN RSA PRIVATE KEY-----",
+      `pre ${PEM_BEGIN}`,
       `line ${"X".repeat(60)} line`,
-      `line ${"X".repeat(60)} line -----END RSA PRIVATE KEY----- post`,
+      `line ${"X".repeat(60)} line ${PEM_END} post`,
     ],
   }));
   t.after(srv.close);
@@ -608,7 +613,7 @@ test("logs-redaction unit: shapeEmbeddedText shapes every span in one pass", () 
     `{"a":1} tail {"password":"${SECRET_PLACEHOLDER}"}`,
   );
   const benign = '{ "a" : 1 } then {"b":2}';
-  assert.equal(shapeEmbeddedText(benign, []), benign, "benign records stay byte-identical");
+  assert.equal(shapeEmbeddedText(benign, []), '{"a":1} then {"b":2}', "benign records retain their data after canonicalization");
   assert.equal(shapeEmbeddedText("plain line", []), "plain line");
   // Over-depth spans cross as the placeholder, never raw: the old code
   // discarded a non-object shaped result and fell through to raw text,
@@ -624,9 +629,9 @@ test("logs-redaction unit: shapeEmbeddedText shapes every span in one pass", () 
 
 test("logs-redaction unit: redactPemBlock redacts to end when END is absent", () => {
   assert.equal(redactPemBlock("clean line"), "clean line");
-  assert.equal(redactPemBlock("pre -----BEGIN RSA PRIVATE KEY----- X"), `pre ${SECRET_PLACEHOLDER}`);
+  assert.equal(redactPemBlock(`pre ${PEM_BEGIN} X`), `pre ${SECRET_PLACEHOLDER}`);
   assert.equal(
-    redactPemBlock("a -----BEGIN RSA PRIVATE KEY----- X -----END RSA PRIVATE KEY----- z"),
+    redactPemBlock(`a ${PEM_BEGIN} X ${PEM_END} z`),
     `a ${SECRET_PLACEHOLDER} z`,
   );
 });
@@ -637,14 +642,14 @@ test("logs-redaction unit: applyPemContext carries blocks across entries", () =>
   // pre-marker text; non-string entries inside a region collapse too
   // (structure is expendable, secrecy is not). Never throws (TOG-9053 finding 2).
   assert.deepEqual(applyPemContext(["clean line"]), ["clean line"]);
-  assert.deepEqual(applyPemContext(["a -----BEGIN RSA PRIVATE KEY----- X -----END RSA PRIVATE KEY----- z"]), [
+  assert.deepEqual(applyPemContext([`a ${PEM_BEGIN} X ${PEM_END} z`]), [
     `a ${SECRET_PLACEHOLDER} z`,
   ]);
   assert.deepEqual(
-    applyPemContext(["pre -----BEGIN RSA PRIVATE KEY-----", "body-line", "tail -----END RSA PRIVATE KEY----- post"]),
+    applyPemContext([`pre ${PEM_BEGIN}`, "body-line", `tail ${PEM_END} post`]),
     [`pre ${SECRET_PLACEHOLDER}`, SECRET_PLACEHOLDER, `${SECRET_PLACEHOLDER} post`],
   );
-  assert.deepEqual(applyPemContext(["-----BEGIN RSA PRIVATE KEY-----", { token: "x" }, "-----END RSA PRIVATE KEY-----"]), [
+  assert.deepEqual(applyPemContext([PEM_BEGIN, { token: "x" }, PEM_END]), [
     SECRET_PLACEHOLDER,
     SECRET_PLACEHOLDER,
     SECRET_PLACEHOLDER,
@@ -729,6 +734,102 @@ test("logs-redaction unit: shapeLogs caps output and wraps payload keys", () => 
   assert.deepEqual(wrapped, { logs: [{ message: "a" }] });
   const empty = shapeLogs({ nope: 1 }, []);
   assert.deepEqual(empty, { logs: [] });
+});
+
+// --- TOG-9053: residual boundary cases at 407017d0 ---------------------------
+// Marker labels and plain-word bodies are synthetic, never key material.
+const READY_RECORD = { ts: "2026-09-30T03:01:00.000Z", msg: "ready", user: "FakeBot", guilds: 1 };
+
+const residualLogCases = [
+  {
+    name: "unmatched quote in prose does not hide structured secrets",
+    logs: ['INFO user typed " then {"password":"ordinary-db-password"}'],
+    denied: "ordinary-db-password",
+  },
+  {
+    name: "duplicate keys never preserve an overwritten cleartext value",
+    logs: ['INFO {"password":"ordinary-db-password","password":"[redacted]"}'],
+    denied: "ordinary-db-password",
+  },
+  {
+    name: "prefixed arrays shape JSON-in-string secrets",
+    logs: [`INFO ${JSON.stringify([JSON.stringify({ password: "ordinary-db-password" })])}`],
+    denied: "ordinary-db-password",
+  },
+  {
+    name: "END-only bounded tails redact preceding body entries",
+    logs: ["synthetic-tail-body", PEM_END],
+    denied: "synthetic-tail-body",
+  },
+  {
+    name: "complete block and reopened block in one entry retain context",
+    logs: [`${PEM_BEGIN} synthetic-first-body ${PEM_END} ${PEM_BEGIN}`, "synthetic-reopened-body", PEM_END],
+    denied: "synthetic-reopened-body",
+  },
+  {
+    name: "active block close and reopen in one entry retain context",
+    logs: [PEM_BEGIN, `synthetic-first-body ${PEM_END} ${PEM_BEGIN}`, "synthetic-reopened-body", PEM_END],
+    denied: "synthetic-reopened-body",
+  },
+  {
+    name: "JSON-escaped marker spaces retain cross-entry context",
+    logs: [JSON.stringify({ message: PEM_BEGIN }).replace("RSA ", "RSA\\u0020"), "synthetic-escaped-body", PEM_END],
+    denied: "synthetic-escaped-body",
+  },
+];
+
+for (const fixture of residualLogCases) {
+  test(`logs-redaction residual: ${fixture.name}`, async (t) => {
+    // Raw and object-wrapped entry representations must share the boundary.
+    for (const logs of [fixture.logs, fixture.logs.map((message) => ({ message }))]) {
+      const srv = await boot(() => ({ logs: [...logs, JSON.stringify(READY_RECORD)] }));
+      t.after(srv.close);
+      const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs?lines=2"));
+      assert.equal(out.status, 200);
+      assert.ok(!out.text.includes(fixture.denied), `${fixture.denied} never crosses`);
+      assert.ok(out.text.includes(SECRET_PLACEHOLDER), "redaction is observed, not an empty response");
+      const records = findBotRecords(normalizeLogPayload(out.json));
+      assert.equal(findReadyLines(records).length, 1, "the actual smoke parser still finds the ready record");
+    }
+  });
+}
+
+test("logs-redaction residual: deeply nested objects and embedded spans return 200, not stack overflow", async (t) => {
+  const deepJson = '{"wrap":'.repeat(12000) + '"synthetic-deep-body"' + "}".repeat(12000);
+  const fixtures = [JSON.parse(deepJson), `INFO ${deepJson}`];
+  for (const fixture of fixtures) {
+    const srv = await boot(() => ({ logs: [fixture, JSON.stringify(READY_RECORD)] }));
+    t.after(srv.close);
+    const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+    assert.equal(out.status, 200);
+    assert.ok(!out.text.includes("synthetic-deep-body"), "depth cutoff redacts the leaf");
+    assert.equal(findReadyLines(findBotRecords(normalizeLogPayload(out.json))).length, 1);
+  }
+});
+
+test("logs-redaction residual: over-budget PEM inspection fails closed", () => {
+  const logs = ["x".repeat(512 * 1024), "synthetic-unexamined-body"];
+  assert.deepEqual(applyPemContext(logs), [SECRET_PLACEHOLDER, SECRET_PLACEHOLDER]);
+});
+
+test("logs-redaction residual: multiple PEM spans and unmatched END are all redacted", () => {
+  assert.equal(
+    redactPemBlock(`pre ${PEM_BEGIN} synthetic-first-body ${PEM_END} middle ${PEM_BEGIN} synthetic-second-body ${PEM_END} post`),
+    `pre ${SECRET_PLACEHOLDER} middle ${SECRET_PLACEHOLDER} post`,
+  );
+  assert.equal(redactPemBlock(`synthetic-tail-body ${PEM_END} post`), `${SECRET_PLACEHOLDER} post`);
+});
+
+test("logs-redaction residual: canonicalized benign records preserve smoke timestamps and guilds", () => {
+  const line = `INFO ${JSON.stringify(READY_RECORD, null, 2)} then {"a":1,"a":2}`;
+  const logs = shapeLogs({ logs: [line, { message: JSON.stringify(READY_RECORD, null, 2) }] }, []);
+  const records = findReadyLines(findBotRecords(normalizeLogPayload(logs)));
+  assert.equal(records.length, 2);
+  for (const { record } of records) {
+    assert.equal(record.guilds, 1);
+    assert.equal(record.ts, READY_RECORD.ts);
+  }
+  assert.ok(!JSON.stringify(logs).includes('"a":1'), "duplicate-key original bytes do not cross");
 });
 
 test("logs-bounded unit: parseLogLines clamps to 1..500", () => {

@@ -198,7 +198,7 @@ export function shapeStatus(panelJson) {
 //     an embedded {...} record (e.g. a log prefix like `INFO {...}`) get that
 //     record shaped in place with the same brace-matching the smoke uses, so
 //     prefixed structured secrets redact exactly like whole-string JSON while
-//     benign prefixed records stay byte-identical;
+//     benign prefixed records retain their data in canonical JSON;
 //   * JSON objects keep their STRUCTURE but sensitive keys
 //     (token/secret/password/bearer/authorization/cookie/session/api[_-]key,
 //     webhook path segments, ssh/private-key material) are replaced by the
@@ -284,22 +284,28 @@ export function scrubSecrets(text, secrets) {
  * nested secrets (TOG-9053 finding 2).
  */
 /**
- * Yield the [start, end) spans of {...} records embedded in text — the same
- * brace-matching the smoke uses to find bot records (broker-smoke.mjs
+ * Yield the [start, end) spans of {...} and [...] records embedded in text —
+ * the brace-matching the smoke uses to find bot records (broker-smoke.mjs
  * jsonCandidates), so broker and smoke agree on what counts as a structured
- * record. Ordered outermost-first (siblings in document order): shaping the
- * outermost parseable span first lets the recursive policy redact nested
+ * record. The broker additionally shapes [...] spans (a superset the smoke
+ * ignores): a prefixed array of JSON-in-string values carries the same secret
+ * fields as whole-string JSON and must not cross unshaped (TOG-9053
+ * finding 2). Ordered outermost-first (siblings in document order): shaping
+ * the outermost parseable span first lets the recursive policy redact nested
  * secrets AND outer key names together; innermost-first would stop after the
  * inner span and leave a sensitive outer key name behind as raw text.
  *
  * Quote-aware: a `}` inside a double-quoted JSON string (with backslash
  * escapes) does not close a record — naive brace counting misaligns the span,
  * JSON.parse fails, and the password crosses as "scrubbed raw" (TOG-9053
- * finding 2). Never throws.
+ * finding 2). Quote state belongs to candidates, not prefixes: an unmatched
+ * quote in prose must not suppress records that follow, so an opener with an
+ * empty stack always starts a fresh candidate (a `{`/`[` inside a real JSON
+ * string necessarily has a non-empty stack). Never throws.
  */
 export function extractJsonCandidates(text) {
   const out = [];
-  const stack = [];
+  const stack = []; // { index, closer }
   const s = String(text ?? "");
   let inString = false;
   let escaped = false;
@@ -311,13 +317,14 @@ export function extractJsonCandidates(text) {
       else if (c === '"') inString = false;
       continue;
     }
-    if (c === '"') {
+    // Prose quotes outside a candidate never affect JSON quote state.
+    if (c === '"' && stack.length > 0) {
       inString = true;
       continue;
     }
-    if (c === "{") stack.push(i);
-    else if (c === "}" && stack.length > 0) {
-      const start = stack.pop();
+    if (c === "{" || c === "[") stack.push({ index: i, closer: c === "{" ? "}" : "]" });
+    else if ((c === "}" || c === "]") && stack.length > 0 && stack[stack.length - 1].closer === c) {
+      const { index: start } = stack.pop();
       out.push([start, i + 1]);
     }
   }
@@ -326,14 +333,11 @@ export function extractJsonCandidates(text) {
 }
 
 /**
- * Shape every {...} record embedded in a string in place, in a single pass.
- * Each parseable span is shaped with the same policy as whole-string JSON;
- * only spans where redaction actually fired are replaced (a benign span —
- * even a whitespace-formatted one — shapes to itself semantically and is
- * left byte-identical). Untouched gaps carry no parseable record, so scrubbing
- * them is sufficient. Over-depth spans cross as the placeholder, never raw:
- * the old code discarded a non-object shaped result and fell through to raw
- * text, leaking depth-11 payloads (TOG-9053 finding 2). Never throws.
+ * Shape every {...} or [...] record embedded in a string in one pass.
+ * Every parseable span is canonicalized from the bounded shaped result:
+ * decoded equality cannot prove original bytes safe when duplicate keys exist.
+ * Gaps are scrubbed as text; over-depth spans cross as the placeholder, never
+ * raw. No unbounded decoded value is stringified (TOG-9053). Never throws.
  */
 export function shapeEmbeddedText(value, secrets, depth = 0) {
   const secretList = Array.isArray(secrets) ? secrets : [];
@@ -352,11 +356,11 @@ export function shapeEmbeddedText(value, secrets, depth = 0) {
     }
     if (decoded === null || typeof decoded !== "object") continue;
     const shaped = shapeLogValue(decoded, secretList, depth + 1);
-    if (typeof shaped !== "string") {
-      // Key order is preserved by shaping, so semantic equality means no
-      // redaction fired anywhere in this subtree — leave it untouched.
-      if (JSON.stringify(shaped) === JSON.stringify(decoded)) continue;
-    }
+    // Always emit the bounded shaped value. Comparing with the decoded input
+    // loses duplicate-key evidence (JSON.parse keeps only the last value),
+    // and stringifying the unbounded input can overflow the stack before the
+    // shaping depth guard protects it. Canonicalization is part of the boundary,
+    // not a reason to return the original bytes (TOG-9053).
     const encoded = typeof shaped === "string" ? shaped : JSON.stringify(shaped);
     if (encoded === original) continue;
     out += scrubSecrets(value.slice(pos, start), secretList) + encoded;
@@ -369,71 +373,111 @@ export function shapeEmbeddedText(value, secrets, depth = 0) {
 }
 
 /**
- * PEM markers, matched as text (never constructed from secrets).
- * The generic scrub's PEM rule is BEGIN-to-END-or-end on the text it is
- * given, so it only protects blocks that are WHOLE when scrubbed: a
- * multiline block split across lines, or BEGIN/body/END arriving as separate
- * log entries, orphans the body from its marker. Every entry point below
- * restores that context BEFORE JSON shaping (TOG-9053 finding 2).
+ * PEM context is a batch property: a bounded log tail can start inside a key,
+ * and one entry can close and reopen blocks. Inspect all marker transitions
+ * before shaping or truncation. END without BEGIN redacts the preceding tail;
+ * BEGIN without END redacts the remaining batch (TOG-9053).
  */
 export const PEM_BEGIN_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
 export const PEM_END_RE = /-----END [A-Z ]*PRIVATE KEY-----/;
 
-/**
- * Redact PEM block spans inside one string, BEGIN-to-END-or-end-of-string.
- * An incomplete block (BEGIN with no END) redacts to the end: fail closed.
- * Idempotent — the placeholder carries no markers. Never throws.
- */
-export function redactPemBlock(text) {
-  const s = String(text ?? "");
-  const begin = s.search(PEM_BEGIN_RE);
-  if (begin === -1) return s;
-  const after = s.slice(begin);
-  const end = PEM_END_RE.exec(after);
-  if (!end) return s.slice(0, begin) + SECRET_PLACEHOLDER;
-  return s.slice(0, begin) + SECRET_PLACEHOLDER + after.slice(end.index + end[0].length);
+function pemSpans(text) {
+  const spans = [];
+  const markers = /-----((?:BEGIN|END)) [A-Z ]*PRIVATE KEY-----/g;
+  let start = null;
+  let lastEnd = 0;
+  for (const marker of text.matchAll(markers)) {
+    if (marker[1] === "BEGIN") {
+      if (start === null) start = marker.index;
+    } else {
+      const end = marker.index + marker[0].length;
+      spans.push([start ?? lastEnd, end]);
+      start = null;
+      lastEnd = end;
+    }
+  }
+  if (start !== null) spans.push([start, text.length]);
+  return spans;
 }
 
-/**
- * Carry PEM context across separate log entries. Returns a new items array:
- * entries fully inside a BEGIN-with-no-END-yet region become the placeholder;
- * entries where a block opens and closes are spliced; an entry that opens a
- * block keeps its pre-marker text and flags the region for what follows.
- * Non-string entries carrying markers (or sitting inside a region) collapse
- * to the placeholder — structure is expendable, secrecy is not. Never throws.
- */
-export function applyPemContext(items) {
-  const out = [];
-  let inBlock = false;
-  for (const item of items) {
-    const view = typeof item === "string" ? item : JSON.stringify(item) ?? "";
-    if (!inBlock) {
-      const begin = view.search(PEM_BEGIN_RE);
-      if (begin === -1) {
-        out.push(item);
-        continue;
-      }
-      const after = view.slice(begin);
-      const end = PEM_END_RE.exec(after);
-      if (end) {
-        const redacted = view.slice(0, begin) + SECRET_PLACEHOLDER + after.slice(end.index + end[0].length);
-        out.push(typeof item === "string" ? redacted : SECRET_PLACEHOLDER);
-      } else {
-        out.push(typeof item === "string" ? view.slice(0, begin) + SECRET_PLACEHOLDER : SECRET_PLACEHOLDER);
-        inBlock = true;
-      }
-    } else {
-      const end = PEM_END_RE.exec(view);
-      if (!end) {
-        out.push(SECRET_PLACEHOLDER);
-      } else {
-        const rest = view.slice(end.index + end[0].length);
-        out.push(typeof item === "string" ? SECRET_PLACEHOLDER + rest : SECRET_PLACEHOLDER);
-        inBlock = false;
+function redactSpans(text, spans) {
+  let out = "";
+  let pos = 0;
+  for (const [start, end] of spans) {
+    out += text.slice(pos, start) + SECRET_PLACEHOLDER;
+    pos = end;
+  }
+  return out + text.slice(pos);
+}
+
+export function redactPemBlock(text) {
+  const s = String(text ?? "");
+  return redactSpans(s, pemSpans(s));
+}
+
+// Conservatively recognize JSON-escaped marker text, including multiple
+// string-encoding layers, without parsing away duplicate-key evidence. These
+// escapes are used only in the inspection view, never returned as log text.
+function pemTextView(text) {
+  let view = text;
+  for (let depth = 0; depth <= 10; depth += 1) {
+    const decoded = view.replace(/\\(?:u[0-9a-fA-F]{4}|["\\/bfnrt])/g, (escape) => JSON.parse(`"${escape}"`));
+    if (decoded === view) return view;
+    view = decoded;
+  }
+  return view;
+}
+
+// Iterative inspection avoids JSON.stringify on arbitrary panel objects: even
+// a 12,000-level wrapper must reach the shaping depth guard, not HTTP 500.
+// Bound nodes and text independently; uncertain/over-budget inspection causes
+// the entire batch to redact rather than passing unexamined material through.
+function pemItemView(item, budget) {
+  const pending = [item];
+  const parts = [];
+  while (pending.length > 0) {
+    if (--budget.nodes < 0) return null;
+    const value = pending.pop();
+    if (typeof value === "string") {
+      budget.chars -= value.length + 1;
+      if (budget.chars < 0) return null;
+      parts.push(pemTextView(value));
+    } else if (value !== null && typeof value === "object") {
+      const entries = Object.entries(value);
+      if (entries.length > budget.nodes) return null;
+      for (let i = entries.length - 1; i >= 0; i -= 1) {
+        const [key, child] = entries[i];
+        pending.push(child, key);
       }
     }
   }
-  return out;
+  return parts.join("\n");
+}
+
+/** Carry marker context across raw, escaped and structured log entries. */
+export function applyPemContext(items) {
+  const budget = { nodes: MAX_PANEL_BYTES, chars: MAX_PANEL_BYTES };
+  const views = [];
+  for (const item of items) {
+    const view = pemItemView(item, budget);
+    if (view === null) return items.map(() => SECRET_PLACEHOLDER);
+    views.push(view);
+  }
+  const spans = pemSpans(views.join("\n"));
+  let offset = 0;
+  return items.map((item, i) => {
+    const view = views[i];
+    const start = offset;
+    offset += view.length + 1;
+    const local = spans
+      .filter(([from, to]) => from <= start + view.length && to > start)
+      .map(([from, to]) => [Math.max(0, from - start), Math.min(view.length, to - start)]);
+    if (local.length === 0) return item;
+    // Changed offsets or object structure cannot be spliced safely: collapse
+    // the entry, never reinterpret an inspection view as the original payload.
+    if (typeof item !== "string" || view !== item) return SECRET_PLACEHOLDER;
+    return redactSpans(item, local);
+  });
 }
 
 export function shapeLogValue(value, secrets, depth = 0) {
@@ -454,9 +498,9 @@ export function shapeLogValue(value, secrets, depth = 0) {
     // path below, which shapes EVERY span, not just the first (shaping only
     // the first differing span left sibling records raw, and a
     // whitespace-formatted benign span compared unequal and hid the secrets
-    // behind it — TOG-9053 finding 2). Spans compare SEMANTICALLY (key order
-    // is preserved by shaping), so benign records — however formatted — stay
-    // byte-identical while secret spans redact together. Over-depth spans
+    // behind it — TOG-9053 finding 2). Every span now re-encodes from its
+    // bounded shaped value, including duplicate-key input; smoke-critical
+    // fields survive but original whitespace need not. Over-depth spans
     // cross as the placeholder, never raw: discarding a non-object shaped
     // result fell through to raw text, leaking depth-11 payloads.
     // (Depth is already bounded above, so decoding here cannot recurse past

@@ -1,0 +1,9 @@
+# TOG-9053: four reviewed private-key false positives in historical synthetic
+# redaction tests. Each match contains only marker labels, X/Y.repeat(...) source,
+# or plain-word fixture text; none contains key material. Exact commit/file/rule/
+# line fingerprints only: future private-key findings (including in this test
+# file) still fail. Current fixtures construct markers instead of embedding blocks.
+8afbcc916a567b9a459efc77e41e2ac93feddb3d:ops/staging-deploy-broker/server.test.mjs:private-key:525
+407017d0481dc806c164121503a770c0d8391f2a:ops/staging-deploy-broker/server.test.mjs:private-key:561
+407017d0481dc806c164121503a770c0d8391f2a:ops/staging-deploy-broker/server.test.mjs:private-key:627
+407017d0481dc806c164121503a770c0d8391f2a:ops/staging-deploy-broker/server.test.mjs:private-key:640
