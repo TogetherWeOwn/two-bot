@@ -72,10 +72,41 @@ test('bare dot lookalikes are detected without changing URL accent identity', ()
   for (const code of [0x3002, 0xff61, 0x00b7, 0x2027, 0xff0e]) {
     const dot = String.fromCodePoint(code);
     assert.equal(match(`read evil${dot}de/x`), 'external_link', `U+${dot.codePointAt(0)?.toString(16)}`);
-    assert.equal(match(`read two${dot}gg/rules`), null);
+    // IDNA maps actual Unicode full stops to dots, but not middle dots or
+    // hyphenation points. Discovery must never widen the allowed host identity.
+    const expected = [0x00b7, 0x2027].includes(code) ? 'external_link' : null;
+    assert.equal(match(`read two${dot}gg/rules`), expected);
   }
   assert.equal(match('read café.de/x', ['cafe.de']), 'external_link');
   assert.equal(match('read https://café.de/x', ['cafe.de']), 'external_link');
+});
+
+test('dot-lookalike detection never authorizes a different IDNA hostname', () => {
+  const host = 'l·l.cat';
+  const canonical = new URL(`https://${host}`).hostname;
+  assert.equal(canonical, 'xn--ll-0ea.cat');
+  for (const prefix of ['', 'https://', 'www.']) {
+    assert.equal(match(`${prefix}${host}/path`, ['l.cat']), 'external_link', prefix);
+    assert.equal(match(`${prefix}${host}/path`, [canonical]), null, prefix);
+    assert.equal(match(`${prefix}sub.${host}/path`, ['l.cat']), 'external_link', prefix);
+    assert.equal(match(`${prefix}sub.${host}/path`, [canonical]), null, prefix);
+  }
+});
+
+test('allowed explicit URLs are not rescanned for bare links in paths, queries or fragments', () => {
+  for (const prefix of ['https://', 'http://', 'www.']) {
+    for (const suffix of ['/download?file=report.zip', '/download#report.zip', '/assets/report.zip']) {
+      const link = `${prefix}two.gg${suffix}`;
+      assert.equal(match(`read ${link}`), null, link);
+      assert.equal(match(`read <${link}>`), null, link);
+      assert.equal(match(`read ${link} then evil.de/x`), 'external_link');
+      assert.equal(match(`evil.de/x then ${link}`), 'external_link');
+    }
+  }
+  assert.equal(match('https://two.gg/?file=report.zip https://evil.de/x'), 'external_link');
+  assert.equal(match('https://two.gg/?file=report.zip <evil.zip>'), 'external_link');
+  assert.equal(match('https://two.gg/?file=report.zip\nbit.ly/abc'), 'external_link');
+  assert.equal(match('https://[broken]/?file=report.zip'), 'external_link');
 });
 
 test('bare matching still excludes email, source paths, common filenames and numeric versions', () => {

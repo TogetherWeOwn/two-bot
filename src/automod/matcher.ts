@@ -128,29 +128,37 @@ function foldBareDots(value: string): string {
   );
 }
 
+function linkHostname(candidate: string): string {
+  const cleaned = candidate.replace(TRAILING_URL_PUNCTUATION, '');
+  const parsed = /^https?:\/\//iu.test(cleaned) ? cleaned : `https://${cleaned}`;
+  return new URL(parsed).hostname.toLowerCase().replace(/^www\./, '');
+}
+
 function hasExternalLink(content: string, allowedDomains: string[]): boolean {
-  // Keep pass identity explicit: folding often leaves the content unchanged.
-  // Only bare-domain matching folds dot lookalikes; URL parsing retains its
-  // own hostname semantics (including IDNA) for explicit links.
-  for (const [pattern, text] of [
-    [EXPLICIT_URL_PATTERN, content],
-    [BARE_DOMAIN_PATTERN, foldBareDots(content)],
-  ] as const) {
-    for (const match of text.matchAll(pattern)) {
-      const candidate = match[0].replace(TRAILING_URL_PUNCTUATION, '');
-      try {
-        const parsed = /^https?:\/\//iu.test(candidate) ? candidate : `https://${candidate}`;
-        const host = new URL(parsed).hostname.toLowerCase().replace(/^www\./, '');
-        const domainLabels = host.split('.').slice(0, -1);
-        if (pattern === BARE_DOMAIN_PATTERN) {
-          if (!domainLabels.some((label) => !COMMON_FILENAME_STEMS.has(label))) continue;
-          const tld = host.split('.').pop() ?? '';
-          if (!BARE_TLDS.has(tld)) continue;
-        }
-        if (!allowedDomains.some((allowed) => host === allowed || host.endsWith(`.${allowed}`))) return true;
-      } catch {
-        return true;
-      }
+  const isAllowed = (host: string) => allowedDomains.some((allowed) => host === allowed || host.endsWith(`.${allowed}`));
+  for (const match of content.matchAll(EXPLICIT_URL_PATTERN)) {
+    try {
+      if (!isAllowed(linkHostname(match[0]))) return true;
+    } catch {
+      return true;
+    }
+  }
+  // Explicit links have already been judged by host. Do not interpret their
+  // path/query/fragment as another link, or concatenate surrounding bare text.
+  const bareContent = content.replace(EXPLICIT_URL_PATTERN, ' ');
+  for (const match of foldBareDots(bareContent).matchAll(BARE_DOMAIN_PATTERN)) {
+    try {
+      const detectedHost = linkHostname(match[0]);
+      const domainLabels = detectedHost.split('.').slice(0, -1);
+      if (!domainLabels.some((label) => !COMMON_FILENAME_STEMS.has(label))) continue;
+      if (!BARE_TLDS.has(detectedHost.split('.').pop() ?? '')) continue;
+      // Dot folding only discovers candidates. Authorize the original IDNA
+      // identity: U+00B7 may be part of a real label, not a subdomain separator.
+      // Every folded separator is one UTF-16 unit, so these offsets are stable.
+      const original = bareContent.slice(match.index, match.index + match[0].length);
+      if (!isAllowed(linkHostname(original))) return true;
+    } catch {
+      return true;
     }
   }
   return false;
