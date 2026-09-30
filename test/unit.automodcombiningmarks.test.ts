@@ -259,6 +259,46 @@ test('dotted-i chains keep one dot across gap splits', () => {
   assert.equal(match('istanbul', splitCfg), null, 'ASCII stays distinct under split config');
 });
 
+test('internal chain joins compose with a separate marked suffix', () => {
+  const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
+  const cases = [
+    [E('\\u0639\\u064e\\u0644\\u064e\\u0651\\u0645\\u064e'), E('\\u0639\\u064e\\u0644\\u0651 \\u064e\\u0645\\u064e')],
+    [E('\\u03b1\\u0323\\u0301\\u03bb\\u03c6\\u03ac'), E('\\u03ac \\u0323\\u03bb\\u03c6\\u03ac')],
+  ];
+  for (const [entry, split] of cases) {
+    for (const configuredEntry of [entry, split]) {
+      const configured = loadAutomodConfig({ TWO_AUTOMOD_BAD_WORDS: configuredEntry }, null).policy;
+      for (const suffix of [' \\u0323ok', ' \\u0301ok', ' \\u0338ok', ' \\u0323']) {
+        for (const prefix of ['', E('\\u03b9 '), E('!') + E('\\u0338').repeat(200)]) {
+          assert.equal(match(prefix + split + E(suffix), configured), 'bad_words', JSON.stringify([prefix, split, suffix]));
+        }
+      }
+      for (const suffix of ['\\u0323ok', '\\u0301ok', '\\u0338ok']) {
+        assert.equal(match(split + E(suffix), configured), null, 'attached continuation remains distinct');
+      }
+      assert.equal(match('x' + split + E(' \\u0323ok'), configured), null, 'attached prefix still bounds');
+      assert.equal(match('x' + E('\\u0338').repeat(200) + split + E(' \\u0323ok'), configured), null, 'long attached marks do not create a start');
+    }
+  }
+  // The final chain itself can need a join before a later gap ends the word.
+  const entry = E('\\u03b1\\u0323\\u0301');
+  const split = E('\\u03b1\\u0301 \\u0323');
+  assert.equal(match(split + E(' \\u0338ok'), { ...policy, badWords: [entry] }), 'bad_words');
+  assert.equal(match(split + E('\\u0338ok'), { ...policy, badWords: [entry] }), null);
+});
+
+test('boundary mark tolerances never consume a Greek iota letter', () => {
+  const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
+  for (const letter of ['\\u03b9', '\\u0399', '\\u1f30', '\\u1f31']) {
+    assert.equal(match(E(letter) + 'shit', { ...policy, badWords: ['shit'] }), null, letter);
+    assert.equal(match('c++' + E(letter), { ...policy, badWords: ['c++'] }), null, letter);
+  }
+  assert.equal(match(E('\\u03b9 shit'), { ...policy, badWords: ['shit'] }), 'bad_words');
+  assert.equal(match(E('\\u0345shit'), { ...policy, badWords: ['shit'] }), 'bad_words');
+  assert.equal(match(E('c++\\u0345'), { ...policy, badWords: ['c++'] }), 'bad_words');
+  assert.equal(match(E('c++\\u0301'), { ...policy, badWords: ['c++'] }), 'bad_words');
+});
+
 test('repeated separator-plus-mark runs stay linear', () => {
   const probe = { ...policy, badWords: ['shit'] };
   const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
@@ -268,6 +308,19 @@ test('repeated separator-plus-mark runs stay linear', () => {
   const started = Date.now();
   assert.equal(match(content, probe), null);
   assert.ok(Date.now() - started < 1000, '2000-pair near-miss stays bounded');
+});
+
+test('local chain endings stay bounded on mark-heavy near misses', () => {
+  const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
+  const probe = { ...policy, badWords: [E('\\u03b1\\u0323\\u0301\\u03bb\\u03c6\\u03ac')] };
+  for (const content of [
+    E('\\u03b1\\u0301') + E(' \\u0323').repeat(2000) + E('\\u03bb\\u03c6\\u03ac \\u0323ok'),
+    E('\\u03b1\\u0301 \\u0323x ').repeat(2000),
+  ]) {
+    const started = Date.now();
+    assert.equal(match(content, probe), null);
+    assert.ok(Date.now() - started < 1000, 'long chains and many local endings stay bounded');
+  }
 });
 
 test('required marks survive across allowed gaps', () => {

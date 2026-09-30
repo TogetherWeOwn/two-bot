@@ -144,9 +144,15 @@ export function normalizeBadWord(raw: string): string {
 // so a reverse-order multi-link chain (`عّ ُ َل`) meets the same form as the
 // attached entry (`عَُّل`). The real input separators survive after the
 // flushed chain as word boundaries (`İ ́shit` still reads as two tokens).
-// With joinChains=false, retain the original gaps too: canonicalizing a split
-// chain must not erase a complete token immediately before a real separator.
-function stripStandaloneMarkRuns(value: string, joinChains = true): string {
+// Each original chain gap is also a possible word ending. Record the joined
+// prefix at that gap, not an all-separated second reading of the message:
+// internal chains may need joining while the final gap ends the candidate.
+interface MarkEndings {
+  maxLength: number;
+  values: Array<{ offset: number; marks: string }>;
+}
+
+function stripStandaloneMarkRuns(value: string, endings?: MarkEndings): string {
   const dotAbove = String.fromCodePoint(0x0307);
   // NFD first: a precomposed initial must expose its marks before scanning.
   value = value.normalize('NFD');
@@ -185,13 +191,21 @@ function stripStandaloneMarkRuns(value: string, joinChains = true): string {
       // with the attached run as one sequence; the retained gaps are emitted
       // after, so separators survive while the whole chain meets one form.
       // The scan only moves forward.
-      const links: string[] = [];
-      const gaps: string[] = [];
-      while (joinChains) {
+      let chain = folded.text;
+      let hasGap = false;
+      let lastEnding = '';
+      while (true) {
         let g = i;
         while (g < value.length && isGap(at(g))) g += at(g).length;
         if (g > i && g < value.length && isMark(at(g))) {
-          gaps.push(value.slice(i, g));
+          // A candidate ending here needs all preceding links, but none of
+          // the next token's marks. Longer prefixes cannot fit any entry;
+          // bound normalization/storage by entry length, not message length.
+          if (endings && chain.length <= endings.maxLength && (!hasGap || chain !== lastEnding)) {
+            endings.values.push({ offset: out.length, marks: chain.normalize('NFD') });
+            lastEnding = chain;
+          }
+          hasGap = true;
           let next = '';
           while (g < value.length && isMark(at(g))) {
             const c = at(g);
@@ -200,24 +214,22 @@ function stripStandaloneMarkRuns(value: string, joinChains = true): string {
           }
           const link = foldRun(origin, next, chainHasDot);
           chainHasDot = link.hasDot;
-          links.push(link.text);
+          chain += link.text;
           i = g;
         } else break;
       }
-      if (links.length === 0) {
-        out += folded.text;
-      } else {
-        out += (folded.text + links.join('')).normalize('NFD');
-        out += gaps.join('');
-      }
+      out += chain.normalize('NFD');
+      if (hasGap && !out.endsWith(' ')) out += ' ';
       continue;
     }
     // Gaps are separators — emit them (the word pattern tolerates gaps
     // between entry characters). The carried origin survives the gap so a
     // following mark run is judged by its base, exactly as before. A new
     // base character starts a new chain.
-    out += ch;
-    if (!isGap(ch)) {
+    if (isGap(ch)) {
+      if (!out.endsWith(' ')) out += ' ';
+    } else {
+      out += ch;
       origin = ch;
       chainHasDot = false;
     }
@@ -233,15 +245,28 @@ function hasBadWord(content: string, words: string[]): boolean {
   // trailing NFD decomposes precomposed letters AND reorders runs a
   // permitted gap split apart (reverse-order chains), matching the entry
   // normalization in `normalizeBadWord`.
-  const plain = stripStandaloneMarkRuns(content).normalize('NFD');
-  // A real gap can also end the previous token, not just split a mark chain.
-  // Match that reading without relocating its suffix marks across the gap.
-  // Neither view drops meaningful marks inside a token; shorter whole-word
-  // entries still cannot consume a longer marked word.
-  const separated = stripStandaloneMarkRuns(content, false).normalize('NFD');
-  for (const raw of words) {
-    const word = normalizeBadWord(raw);
-    if (!word) continue;
+  const entries = words.map(normalizeBadWord).filter(Boolean);
+  if (entries.length === 0) return false;
+  const maxLength = entries.reduce((max, word) => Math.max(max, word.length), 0);
+  const endings: MarkEndings = { maxLength, values: [] };
+  const plain = stripStandaloneMarkRuns(content, endings);
+  // Keep only a candidate-sized suffix for each local ending. Gaps in plain
+  // are collapsed, so a word of W UTF-16 units spans at most 2W units. Carry
+  // the real start eligibility into truncated windows: cutting a long run of
+  // attached marks must not invent a boundary, nor lose a genuine one.
+  const canStart = new Uint8Array(plain.length + 1);
+  canStart[0] = 1;
+  let offset = 0;
+  for (const ch of plain) {
+    canStart[offset + ch.length] = /\p{M}/u.test(ch) ? canStart[offset] : Number(!/[\p{L}\p{N}_]/u.test(ch));
+    offset += ch.length;
+  }
+  const localEnds = endings.values.map(({ offset, marks }) => {
+    let start = Math.max(0, offset - 2 * maxLength);
+    if (start > 0 && /[\uDC00-\uDFFF]/u.test(plain[start] ?? '') && /[\uD800-\uDBFF]/u.test(plain[start - 1])) start--;
+    return (canStart[start] ? ' ' : 'x') + plain.slice(start, offset) + marks;
+  });
+  for (const word of entries) {
     // One atom per entry character. The category lookahead is case-SENSITIVE
     // (`(?-i:...)`, supported by V8): without it, the NFD-exposed combining
     // iota-subscript (U+0345, the only mark in all of Unicode that
@@ -264,16 +289,20 @@ function hasBadWord(content: string, words: string[]): boolean {
     // after a real boundary (start/punctuation), never after a word character.
     // An overlay before a separate word cannot veto its start. It remains
     // required inside an entry and is not tolerated after an entry's operator.
-    const leading = `(^|[^\\p{L}\\p{N}\\p{M}_])\\p{M}*`;
+    // Scope boundary categories too: under iu, \p{M} also consumes real iota.
+    const leading = `(?-i:(^|[^\\p{L}\\p{N}\\p{M}_])\\p{M}*)`;
     // A mark after a punctuation-ended entry is standalone decoration (the
     // entry cannot extend it). After a letter-ended word it may be meaningful
     // (Devanagari/Arabic vowel signs extend the word), so keep the strict
     // boundary there.
-    const trailing = /[\p{L}\p{N}\p{M}_]$/u.test(word)
-      ? '([^\\p{L}\\p{N}\\p{M}_]|$)'
-      : '(?:(?![\\u0334-\\u0338])\\p{M})*([^\\p{L}\\p{N}\\p{M}_]|$)';
+    const decoration = /[\p{L}\p{N}\p{M}_]$/u.test(word)
+      ? ''
+      : '(?-i:(?:(?![\\u0334-\\u0338])\\p{M})*)';
+    const trailing = `${decoration}(?-i:([^\\p{L}\\p{N}\\p{M}_]|$))`;
     const pattern = new RegExp(`${leading}${escaped}${trailing}`, 'iu');
-    if (pattern.test(plain) || (separated !== plain && pattern.test(separated))) return true;
+    if (pattern.test(plain)) return true;
+    const atOriginalGap = new RegExp(`${leading}${escaped}${decoration}$`, 'iu');
+    if (localEnds.some((end) => atOriginalGap.test(end))) return true;
   }
   return false;
 }
