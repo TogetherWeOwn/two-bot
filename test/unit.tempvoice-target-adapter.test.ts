@@ -39,35 +39,46 @@ function fixture(surface: Surface, action: Action, target: Target) {
   const resolvedTarget = target.type === 'role'
     ? { id: target.id, name: 'Selected role' }
     : { id: target.id, user: { id: target.id, username: 'Selected member' } };
-  const interaction = {
+  // Surface-specific mocks: a real slash interaction has no select `values` /
+  // `roles` collection, and a real select interaction has no slash
+  // `commandName` / `options`. Exposing the opposite surface's fields lets a
+  // broken adapter read the wrong path and still pass, so each mock carries
+  // only its own surface's fields here.
+  const surfaceShape = surface === 'slash'
+    ? {
+      commandName: 'voice',
+      options: {
+        getSubcommand: (required: boolean) => {
+          assert.equal(required, true);
+          return action;
+        },
+        getMentionable: (name: string, required: boolean) => {
+          assert.equal(name, 'target');
+          assert.equal(required, true);
+          return resolvedTarget;
+        },
+        getRole: (name: string) => {
+          assert.equal(name, 'target');
+          return target.type === 'role' ? resolvedTarget : null;
+        },
+      },
+    }
+    : {
+      customId: `tempvoice:select:${action}`,
+      values: [target.id, 'unselected-target'],
+      // A member selection can coexist with an unrelated role in the collection;
+      // classification must test membership of the selected ID, not role count.
+      roles: new Map<string, { id: string }>([
+        ['unselected-role', { id: 'unselected-role' }],
+        ...(target.type === 'role' ? [[target.id, resolvedTarget] as const] : []),
+      ]),
+    };
+  const interaction: Record<string, any> = {
     guildId: GUILD,
     guild: { voiceStates: { cache: voiceStates } },
     channelId: PANEL_CHANNEL,
     user: { id: ACTOR },
-    commandName: 'voice',
-    customId: `tempvoice:select:${action}`,
-    values: [target.id, 'unselected-target'],
-    // A member selection can coexist with an unrelated role in the collection;
-    // classification must test membership of the selected ID, not role count.
-    roles: new Map<string, { id: string }>([
-      ['unselected-role', { id: 'unselected-role' }],
-      ...(target.type === 'role' ? [[target.id, resolvedTarget] as const] : []),
-    ]),
-    options: {
-      getSubcommand: (required: boolean) => {
-        assert.equal(required, true);
-        return action;
-      },
-      getMentionable: (name: string, required: boolean) => {
-        assert.equal(name, 'target');
-        assert.equal(required, true);
-        return resolvedTarget;
-      },
-      getRole: (name: string) => {
-        assert.equal(name, 'target');
-        return target.type === 'role' ? resolvedTarget : null;
-      },
-    },
+    ...surfaceShape,
     deferred: false,
     replied: false,
     inGuild: () => true,
@@ -174,8 +185,8 @@ for (const surface of ['slash', 'select'] as const) {
       if (ignored === 'other guild') f.interaction.guildId = 'other-guild';
       if (ignored === 'outside guild') f.interaction.inGuild = () => false;
       if (ignored === 'unrelated interaction') {
-        f.interaction.commandName = 'unrelated';
-        f.interaction.customId = 'unrelated:select:permit';
+        if (surface === 'slash') f.interaction.commandName = 'unrelated';
+        else f.interaction.customId = 'unrelated:select:permit';
       }
       f.deferral.resolve();
       f.outcome.resolve({ status: 'ok', message: 'must not be used' });
