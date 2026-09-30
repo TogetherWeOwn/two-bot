@@ -4,6 +4,9 @@ import { buildDashboard, countBySource, labelSource } from '../src/analytics/das
 import type { Db } from '../src/store/driver.ts';
 
 const NOW = new Date('2026-03-02T12:00:00.000Z');
+// Joins land strictly inside the current window: TOG-10225 bounds windows by
+// generation time, so a join stamped exactly at `now` reads as the future.
+const AT = new Date(NOW.getTime() - 1).toISOString();
 const SOURCES = [
   { source: 'ambiguous', label: 'Ambiguous invite', unattributed: true },
   { source: 'ambiguous:a+b', label: 'Ambiguous invite', unattributed: true },
@@ -24,7 +27,7 @@ for (const { source, label, unattributed } of SOURCES) {
 function fakeDb(sources: string[]): Db {
   const members = sources.map((source, i) => ({
     member_id: String(i),
-    joined_at: NOW.toISOString(),
+    joined_at: AT,
     join_source: source,
     gate_cleared_at: null,
     first_message_at: null,
