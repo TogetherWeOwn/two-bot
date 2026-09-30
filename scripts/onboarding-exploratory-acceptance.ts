@@ -116,8 +116,14 @@ function skip(name: string, why: string): void {
   console.log(`N-A  ${name}  -  ${why}`);
 }
 
+const USAGE = 'Usage: node scripts/onboarding-exploratory-acceptance.ts [--staging] [--help|-h]';
+if (process.argv.includes('--help') || process.argv.includes('-h')) {
+  console.log(USAGE);
+  process.exit(0);
+}
+
 function usage(): never {
-  console.error('Usage: node scripts/onboarding-exploratory-acceptance.ts [--staging]');
+  console.error(USAGE);
   process.exit(2);
 }
 
@@ -357,15 +363,18 @@ function openOfflineDb(): Db {
     });
     check('re-recorded prompted dedupes (no funnel inflation)', promptedAgain.inserted === false, 'second onboarding_prompted inserted');
 
-    // 3. legacy pick: roles granted, routed with hub fallback visible as degraded.
-    const plan = planSelection(['shooters'], seeNothing);
-    check('dark pick routes to the hub, flagged degraded', plan.channelIds.join(',') === GAME_HUB_CHANNEL_ID && plan.degradedCount === 1, JSON.stringify(plan));
+    // 3. legacy pick: withhold invisible rooms; route only to a visible hub.
+    const darkPlan = planSelection(['shooters'], seeNothing);
+    check('invisible legacy fallback is withheld, not routed', darkPlan.channelIds.length === 0 && darkPlan.degradedCount === 0, JSON.stringify(darkPlan));
+    const seeHub = (channelId: string) => channelId === GAME_HUB_CHANNEL_ID;
+    const plan = planSelection(['shooters'], seeHub);
+    check('dark pick routes to the visible hub, flagged degraded', plan.channelIds.join(',') === GAME_HUB_CHANNEL_ID && plan.degradedCount === 1, JSON.stringify(plan));
     mock.timers.setTime(T0 + 9_000);
     await recorder.selected(G, M, plan);
     mock.timers.setTime(T0 + 10_000);
     await recorder.routed(G, M, plan);
     // Member changes their mind: routed repeats by design, reach still counts one.
-    const plan2 = planSelection(['horror'], seeNothing);
+    const plan2 = planSelection(['horror'], seeHub);
     mock.timers.setTime(T0 + 19_000);
     await recorder.selected(G, M, plan2);
     mock.timers.setTime(T0 + 20_000);
