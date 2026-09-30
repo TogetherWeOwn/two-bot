@@ -1009,6 +1009,130 @@ test('concurrent exclusive selections serialize and recompute from forced member
   assert.ok(fetchArgs.every((args) => JSON.stringify(args) === JSON.stringify({ user: C, force: true })));
 });
 
+test('registered button replay preserves committed roles and audit after acknowledgement failure', async (t) => {
+  const store = new SelfRoleStore(harness.db);
+  const claimAudit = store.claimAudit.bind(store);
+  const claims = t.mock.method(store, 'claimAudit', claimAudit);
+  const finishAuditAndSetPanelOption = store.finishAuditAndSetPanelOption.bind(store);
+  const commits = t.mock.method(store, 'finishAuditAndSetPanelOption', finishAuditAndSetPanelOption);
+  const finishAudit = store.finishAudit.bind(store);
+  const otherFinishes = t.mock.method(store, 'finishAudit', finishAudit);
+  const listeners = new Map<string, (...args: never[]) => Promise<void>>();
+  registerSelfRoles({
+    on: (event: string, listener: (...args: never[]) => Promise<void>) => listeners.set(event, listener),
+  } as never, { panels: [panel], store });
+
+  const roleState = new Set<string>();
+  const mutations: Array<{ operation: string; roleId: string; reason: string }> = [];
+  const fetchArgs: unknown[] = [];
+  const roles = new Map(panel.options.map((option) => [
+    option.roleId,
+    { id: option.roleId, managed: false, editable: true, color: 1, permissions: { bitfield: 0n } },
+  ]));
+  const member = {
+    id: C,
+    guild: {
+      id: A,
+      members: {
+        me: { permissions: { has: () => true } },
+        fetch: async (args: unknown) => {
+          fetchArgs.push(args);
+          return { ...member, roles: { ...member.roles, cache: new Map([...roleState].map((id) => [id, { id }])) } };
+        },
+      },
+      roles: { fetch: async () => roles },
+      channels: { fetch: async () => new Map() },
+    },
+    roles: {
+      cache: new Map(),
+      add: async (roleId: string, reason: string) => {
+        mutations.push({ operation: 'add', roleId, reason });
+        roleState.add(roleId);
+      },
+      remove: async (roleId: string, reason: string) => {
+        mutations.push({ operation: 'remove', roleId, reason });
+        roleState.delete(roleId);
+      },
+    },
+  };
+  const eventId = '444444444444444444';
+  const committedState = async () => ({
+    roleIds: [...roleState],
+    audits: await harness.db.prepare('SELECT * FROM self_role_audit WHERE event_id = ?')
+      .all<Record<string, unknown>>(eventId),
+    panel: await harness.db.prepare(
+      `SELECT latest_event_id, latest_event_order, latest_option_key, target_committed
+         FROM self_role_panel_claims WHERE guild_id = ? AND member_id = ? AND panel_id = ?`,
+    ).get<Record<string, unknown>>(A, C, panel.id),
+  });
+  const replies: Array<{ content: string; state: Awaited<ReturnType<typeof committedState>> }> = [];
+  let deferrals = 0;
+  let freshReplies = 0;
+  const interaction = {
+    id: eventId,
+    customId: selfRoleCustomId(panel.id, 'red'),
+    user: { id: C },
+    member,
+    guild: member.guild,
+    guildId: A,
+    channelId: panel.channelId,
+    message: { id: panel.messageId },
+    deferred: false,
+    replied: false,
+    isButton: () => true,
+    isStringSelectMenu: () => false,
+    deferReply: async () => { deferrals++; interaction.deferred = true; },
+    editReply: async ({ content }: { content: string }) => {
+      // Observe the real transaction before failing both the acknowledgement and fallback.
+      replies.push({ content, state: await committedState() });
+      throw new Error('fixture acknowledgement unavailable');
+    },
+    reply: async () => { freshReplies++; throw new Error('fixture acknowledgement unavailable'); },
+  };
+  const dispatch = listeners.get(Events.InteractionCreate)!;
+
+  await assert.doesNotReject(() => dispatch(interaction as never));
+  const committed = await committedState();
+  assert.equal(committed.audits.length, 1);
+  const audit = committed.audits[0]!;
+  assert.equal(audit.outcome, 'assigned');
+  assert.equal(audit.code, null);
+  assert.equal(audit.reason, null);
+  assert.equal(audit.desired_role_ids, JSON.stringify([A]));
+  assert.equal(audit.pre_mutation_role_ids, '[]');
+  assert.equal(audit.added_role_ids, JSON.stringify([A]));
+  assert.equal(audit.attempted_added_role_ids, JSON.stringify([A]));
+  for (const field of [
+    'removed_role_ids', 'attempted_removed_role_ids',
+    'compensated_added_role_ids', 'compensated_removed_role_ids',
+    'unresolved_added_role_ids', 'unresolved_removed_role_ids',
+  ]) assert.equal(audit[field], '[]', field);
+  assert.equal(audit.processing_expires_at, null);
+  assert.deepEqual(committed.roleIds, [A]);
+  assert.equal(committed.panel?.latest_event_id, eventId);
+  assert.equal(committed.panel?.latest_option_key, 'red');
+  assert.equal(committed.panel?.target_committed, true);
+
+  // Forced fetch now sees the added role: replay would toggle it off without final-audit dedupe.
+  await assert.doesNotReject(() => dispatch(interaction as never));
+
+  assert.deepEqual(await committedState(), committed);
+  assert.deepEqual(mutations, [{ operation: 'add', roleId: A, reason: `TWO self-role panel ${panel.id}` }]);
+  assert.equal(commits.mock.callCount(), 1);
+  assert.equal(otherFinishes.mock.callCount(), 0);
+  assert.equal(claims.mock.callCount(), 2);
+  assert.equal(await claims.mock.calls[1]!.result, null);
+  assert.equal(deferrals, 2);
+  assert.equal(freshReplies, 0);
+  assert.equal(fetchArgs.length, 2);
+  assert.ok(fetchArgs.every((args) => JSON.stringify(args) === JSON.stringify({ user: C, force: true })));
+  assert.deepEqual(replies.map(({ content }) => content), [
+    'Role added.', 'The role action failed. Please try again.',
+    'This role request was already handled.', 'The role action failed. Please try again.',
+  ]);
+  for (const reply of replies) assert.deepEqual(reply.state, committed, reply.content);
+});
+
 test('recovered button converges to persisted desired roles after the first add succeeded', async () => {
   let now = new Date('2026-09-09T00:00:00.000Z');
   const store = new SelfRoleStore(harness.db, { now: () => now, leaseMs: 1_000 });
