@@ -102,6 +102,43 @@ test('a chronological rejoin clears leave and inactivity but preserves milestone
   assert.equal(row?.first_message_at, '2026-08-01T12:00:00.000Z');
 });
 
+test('prior-spell inactivity converges across rejoin/leave arrival orders', async () => {
+  // TOG-10212 P2-2: Aug 1 join, Aug 2 inactivity flag, then the same Aug 3
+  // rejoin and Aug 4 leave in either completion order. Both must converge to
+  // Aug 3 attribution, Aug 4 departed, and a cleared flag - the genuine Aug 3
+  // rejoin starts a newer membership spell, independent of which row wins
+  // presence. Base diverged here (leave-then-rejoin retained Aug 2).
+  const store = new EventStore(harness.db);
+  for (const order of [[journey[2]!, journey[3]!], [journey[3]!, journey[2]!]]) {
+    await harness.reset();
+    await store.record(journey[0]!);
+    await store.record(event('member_inactive', '2026-08-02T00:00:00.000Z'));
+    for (const e of order) assert.equal((await store.record(e)).inserted, true);
+    assert.deepEqual(await projection(), {
+      joined_at: REJOIN, join_source: 'invite:latest',
+      left_at: LAST_LEAVE, inactive_flagged_at: null,
+    }, `order ${order.map((e) => `${e.eventType}@${e.occurredAt}`).join(', ')}`);
+  }
+});
+
+test('a replayed observation of a known join never clears a later flag', async () => {
+  // The companion invariant of the convergence above: clearing keys on the
+  // latest actual join OCCURRENCE, so a duplicate observation stamped later
+  // cannot smuggle a reset past a flag the spell genuinely earned after it.
+  const store = new EventStore(harness.db);
+  const first = await store.record(journey[0]!, { membershipObservedAt: JOIN });
+  await store.record(event('member_inactive', '2026-08-02T00:00:00.000Z'));
+  const replay = await store.record({ ...journey[0]!, source: 'unknown', metadata: undefined }, {
+    membershipObservedAt: '2026-08-04T00:00:00.000Z',
+  });
+  assert.deepEqual(replay, { inserted: false, eventId: first.eventId });
+  assert.deepEqual(await projection(), {
+    joined_at: JOIN, join_source: 'invite:first',
+    left_at: null, inactive_flagged_at: '2026-08-02T00:00:00.000Z',
+  });
+  assert.equal(await store.countByType('member_join', G), 1);
+});
+
 test('concurrent membership writes keep the latest join and leave paired', async () => {
   const store = new EventStore(harness.db);
   for (const size of [3, 4]) {

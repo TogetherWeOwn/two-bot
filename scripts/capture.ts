@@ -78,7 +78,30 @@ if (!databaseUrl) {
  */
 const capturedAt = new Date().toISOString();
 
-const rest = new DiscordRest({ token });
+/**
+ * Test seam: point the invite/member reads at a loopback stub. Loopback-only,
+ * so a live bot token can never be sent to an arbitrary host. Production never
+ * sets this. Used by test/e2e.capture.test.ts for the offline REST regression.
+ */
+function apiBase(): string | undefined {
+  const raw = process.env.DISCORD_API_BASE?.trim();
+  if (!raw) return undefined;
+  let host: string;
+  try {
+    host = new URL(raw).hostname;
+  } catch {
+    console.error(`DISCORD_API_BASE is not a URL: ${raw}`);
+    process.exit(2);
+  }
+  if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') {
+    console.error(`DISCORD_API_BASE is a test seam and only accepts loopback. Got host ${host}.`);
+    process.exit(2);
+  }
+  return raw;
+}
+
+const api = apiBase();
+const rest = new DiscordRest(api ? { token, base: api, minIntervalMs: 0 } : { token });
 const db = await openDb(databaseUrl);
 const store = new EventStore(db);
 const tracker = new InviteTracker(db);
@@ -188,7 +211,12 @@ const events: FunnelEvent[] = newJoins.map((j, i) => ({
 let written = 0;
 if (!dryRun) {
   for (const e of events) {
-    const res = await store.record(e);
+    // A captured join is live current-member evidence, not a historical log
+    // import: the member is on the roster NOW, so this observation outranks a
+    // delayed removal stamped earlier. Occurrence stays Discord's joined_at;
+    // only presence order uses the capture instant. Backfill member-list
+    // joins stay observation-free on purpose - they are history, not presence.
+    const res = await store.record(e, { membershipObservedAt: capturedAt });
     if (res.inserted) written++;
   }
   // Store the new counters last, so a crash mid-write re-reads the same window
