@@ -172,6 +172,73 @@ test('restore patches a renamed channel in place instead of duplicating it, and 
   assert.ok(!plan.operations.some((operation) => operation.label === 'restore channel positions'));
 });
 
+for (const resource of ['role', 'category', 'emoji'] as const) {
+  for (const namesake of [false, true]) {
+    test(`restore patches a renamed ${resource} by stable id${namesake ? ' before its namesake' : ''}`, async () => {
+      const source = acceptedSnapshot();
+      const current = acceptedSnapshot();
+      const sourceResource = resource === 'role' ? source.roles.find((role) => role.name === 'Moderator')!
+        : resource === 'category' ? source.channels.find((channel) => channel.type === 4)!
+        : source.emojis[0]!;
+      const currentResource = resource === 'role' ? current.roles.find((role) => role.id === sourceResource.id)!
+        : resource === 'category' ? current.channels.find((channel) => channel.id === sourceResource.id)!
+        : current.emojis.find((emoji) => emoji.id === sourceResource.id)!;
+      currentResource.name = 'renamed';
+      const extraId = id(999);
+      if (namesake) {
+        if (resource === 'role') current.roles.push({ ...source.roles.find((role) => role.id === sourceResource.id)!, id: extraId });
+        else if (resource === 'category') current.channels.push({ ...source.channels.find((channel) => channel.id === sourceResource.id)!, id: extraId });
+        else current.emojis.push({ ...source.emojis[0]!, id: extraId });
+      }
+      const before = structuredClone(current);
+      const plan = planRestore(source, current);
+      const key = resource === 'role' ? 'roles' : resource === 'category' ? 'channels' : 'emojis';
+      assert.equal(plan.knownIds[key][sourceResource.id], sourceResource.id);
+      const path = resource === 'category' ? `/channels/${sourceResource.id}` : `/guilds/${GUILD}/${key}/${sourceResource.id}`;
+      const calls: Array<{ method: string; path: string; body: unknown }> = [];
+      const api = {
+        async write(method: string, actualPath: string, body: unknown) {
+          calls.push({ method, path: actualPath, body });
+          assert.equal(method, 'PATCH');
+          assert.equal(actualPath, path);
+          Object.assign(currentResource, body);
+          return {};
+        },
+      } as GuildConfigDiscordApi;
+
+      const ids = await applyRestorePlan(api, plan);
+      assert.equal(ids[key][sourceResource.id], sourceResource.id);
+      assert.equal(calls.length, 1);
+      assert.equal(currentResource.name, sourceResource.name);
+      const remapped = remapSnapshotIds(source, ids);
+      if (namesake) {
+        if (resource === 'role') remapped.roles.push(before.roles.find((role) => role.id === extraId)!);
+        else if (resource === 'category') remapped.channels.push(before.channels.find((channel) => channel.id === extraId)!);
+        else remapped.emojis.push(before.emojis.find((emoji) => emoji.id === extraId)!);
+      }
+      assert.equal(configHash(canonicalSnapshot(current)), configHash(canonicalSnapshot(remapped)));
+      assert.equal(snapshotsEqual(remapped, current), true);
+      assert.equal(planRestore(source, current).counts.operations, 0);
+    });
+  }
+}
+
+test('restore still matches by name and remaps references when the snapshot ids are absent', () => {
+  const source = acceptedSnapshot();
+  const moderator = source.roles.find((role) => role.name === 'Moderator')!;
+  const category = source.channels.find((channel) => channel.type === 4)!;
+  category.permission_overwrites = [{ id: moderator.id, type: 0, allow: '1', deny: '0' }];
+  source.emojis[0]!.roles = [moderator.id];
+  const ids = { roles: { [moderator.id]: id(901) }, channels: { [category.id]: id(902) }, emojis: { [source.emojis[0]!.id]: id(903) } };
+  const current = remapSnapshotIds(source, ids);
+  const plan = planRestore(source, current);
+  assert.equal(plan.counts.operations, 0);
+  assert.equal(plan.knownIds.roles[moderator.id], id(901));
+  assert.equal(plan.knownIds.channels[category.id], id(902));
+  assert.equal(plan.knownIds.emojis[source.emojis[0]!.id], id(903));
+  assert.equal(snapshotsEqual(remapSnapshotIds(source, plan.knownIds), current), true);
+});
+
 test('restore applies roles, categories, channels and overwrites in dependency order with returned ids', async () => {
   const source = acceptedSnapshot();
   const current = acceptedSnapshot();
@@ -274,9 +341,11 @@ test('restore sends emoji image data and refuses a non-restorable snapshot emoji
     },
   } as GuildConfigDiscordApi;
 
-  await applyRestorePlan(api, planRestore(source, current));
+  const ids = await applyRestorePlan(api, planRestore(source, current));
   assert.equal(calls.at(-1)!.path, `/guilds/${GUILD}/emojis`);
   assert.equal((calls.at(-1)!.body as { image: string }).image, 'data:image/png;base64,dHdv');
+  assert.equal(ids.emojis[source.emojis[0]!.id], id(904));
+  assert.equal(remapSnapshotIds(source, ids).emojis[0]!.id, id(904));
 
   delete source.emojis[0]!.image;
   assert.throws(() => planRestore(source, current), /has no restorable image data URI/);
@@ -319,6 +388,10 @@ test('in-memory apply/restore round-trip: snapshot→mutate→restore→equal on
   current.guild.description = 'drifted';
   const owner = current.roles.find((role) => role.name === 'Owner')!;
   const moderator = current.roles.find((role) => role.name === 'Moderator')!;
+  moderator.name = 'Moderator-renamed';
+  current.channels.find((channel) => channel.type === 4)!.name = 'Category-renamed';
+  current.emojis[0]!.name = 'two-renamed';
+  source.emojis[0]!.roles = [moderator.id];
   owner.color = 0;
   [owner.position, moderator.position] = [moderator.position, owner.position];
   const general = current.channels.find((channel) => channel.name === 'general')!;
@@ -359,6 +432,11 @@ test('in-memory apply/restore round-trip: snapshot→mutate→restore→equal on
       }
       if (method === 'PATCH' && path === `/guilds/${GUILD}`) {
         Object.assign(current.guild, body);
+        return {};
+      }
+      const emojiMatch = new RegExp(`/guilds/${GUILD}/emojis/(\\d+)$`).exec(path);
+      if (method === 'PATCH' && emojiMatch) {
+        Object.assign(current.emojis.find((emoji) => emoji.id === emojiMatch[1])!, body);
         return {};
       }
       throw new Error(`unexpected write ${method} ${path}`);

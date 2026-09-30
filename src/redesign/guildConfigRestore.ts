@@ -154,11 +154,12 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
   const snapshotRolesById = new Map(snapshot.roles.map((role) => [role.id, role]));
   const overwriteRoleIds = new Set<string>();
 
-  const currentRolesByName = new Map(current.roles.filter((role) => !role.managed).map((role) => [role.name, role]));
+  const currentRolesById = new Map(current.roles.filter((role) => !role.managed).map((role) => [role.id, role]));
+  const currentRolesByName = new Map([...currentRolesById.values()].map((role) => [role.name, role]));
   const sourceRoles = snapshot.roles.filter((item) => !item.managed && item.id !== snapshot.guildId).sort((a, b) => a.position - b.position);
   let rolePositionsDiffer = false;
   for (const role of sourceRoles) {
-    const actual = currentRolesByName.get(role.name);
+    const actual = currentRolesById.get(role.id) ?? currentRolesByName.get(role.name);
     if (!actual) {
       roleOperations.push({
         label: `create role ${role.name}`,
@@ -188,14 +189,19 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
     roleWrites++;
   }
 
-  const currentCategories = new Map(current.channels.filter((channel) => channel.type === 4).map((channel) => [channel.name, channel]));
+  const currentCategoriesById = new Map(current.channels.filter((channel) => channel.type === 4).map((channel) => [channel.id, channel]));
+  const currentCategories = new Map([...currentCategoriesById.values()].map((channel) => [channel.name, channel]));
   let channelPositionsDiffer = false;
   const sourceChannelPositions: RestoreValue[] = [];
   for (const category of snapshot.channels.filter((channel) => channel.type === 4).sort((a, b) => a.position - b.position)) {
-    const actual = currentCategories.get(category.name);
+    const actual = currentCategoriesById.get(category.id) ?? currentCategories.get(category.name);
     if (actual) {
       channelIds.set(category.id, actual.id);
       channelPositionsDiffer ||= category.position !== actual.position;
+      if (category.name !== actual.name) {
+        categoryOperations.push({ label: `patch category ${category.name}`, method: 'PATCH', path: `/channels/${actual.id}`, body: { name: category.name } });
+        channelWrites++;
+      }
     } else {
       categoryOperations.push({
         label: `create category ${category.name}`,
@@ -323,12 +329,13 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
     settingsWrites++;
   }
 
+  const currentEmojisById = new Map(current.emojis.map((emoji) => [emoji.id, emoji]));
   const currentEmojis = new Map(current.emojis.filter((emoji) => emoji.name).map((emoji) => [emoji.name!, emoji]));
   for (const emoji of snapshot.emojis.filter((item) => !item.managed && item.name)) {
     const roles = emoji.roles.map((roleId) => reference('role', roleId));
     const knownRoles = emoji.roles.map((roleId) => roleIds.get(roleId) ?? roleId);
     const hasCreatedRoleReference = emoji.roles.some((roleId) => !roleIds.has(roleId));
-    const actual = currentEmojis.get(emoji.name!);
+    const actual = currentEmojisById.get(emoji.id) ?? currentEmojis.get(emoji.name!);
     if (!actual) {
       emojiOperations.push({
         label: `create emoji ${emoji.name}`,
