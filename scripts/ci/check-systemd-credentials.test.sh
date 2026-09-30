@@ -76,10 +76,57 @@ printf '  ok  baseline green\n'
 # ---------------------------------------------------------------------------
 # 1. R1: a secret baked into an Environment= literal is refused.
 # ---------------------------------------------------------------------------
+expect_r1_literal() {
+  local case_name="$1" literal="$2" var="${3:-DISCORD_TOKEN}"
+  reset_fixture
+  printf '%s\n' "$literal" >> "$FIXTURE/deploy/two-redirect.service"
+  expect_fail_saying "$case_name" "R1: two-redirect.service sets $var as an Environment= literal."
+  if grep -q 'synthetic' "$WORK/out"; then
+    printf '%s: annotation leaked the literal value\n' "$case_name" >&2
+    exit 1
+  fi
+}
+
+expect_r1_literal "R1 hardcoded secret" 'Environment=DISCORD_TOKEN=synthetic'
+expect_r1_literal "R1 double-quoted assignment" 'Environment="DISCORD_TOKEN=synthetic"'
+expect_r1_literal "R1 single-quoted assignment" "Environment='DISCORD_TOKEN=synthetic'"
+expect_r1_literal "R1 second quoted assignment" 'Environment="LOG_LEVEL=info" "DISCORD_TOKEN=synthetic"'
+expect_r1_literal "R1 second unquoted assignment" 'Environment=LOG_LEVEL=info DISCORD_TOKEN=synthetic'
+expect_r1_literal "R1 mixed quoted assignments" "Environment='LOG_LEVEL=info' 'DISCORD_TOKEN=synthetic' OTHER=ok"
+expect_r1_literal "R1 indented directive" $' \tEnvironment=DISCORD_TOKEN=synthetic'
+expect_r1_literal "R1 whitespace around equals" $' \tEnvironment \t= \t"DISCORD_TOKEN=synthetic"'
+expect_r1_literal "R1 quoted value with spaces and equals" 'Environment="DISCORD_TOKEN=synthetic value=example"'
+expect_r1_literal "R1 continued directive" $'Environment=\\\n  "DISCORD_TOKEN=synthetic"'
+expect_r1_literal "R1 continued assignment list" $'Environment="LOG_LEVEL=info" \\\n  "DISCORD_TOKEN=synthetic"'
+expect_r1_literal "R1 continuation skips comments" $'Environment=LOG_LEVEL=info \\\n  # ignored comment\\\n  ; ignored comment\n  "DISCORD_TOKEN=synthetic"'
+expect_r1_literal "R1 continued quoted value" $'Environment="DISCORD_TOKEN=synthetic\\\n  continued"'
+expect_r1_literal "R1 escaped quote before secret" 'Environment="LABEL=escaped \" quote" "DISCORD_TOKEN=synthetic"'
+expect_r1_literal "R1 escaped key character" 'Environment="DISCORD\x5fTOKEN=synthetic"'
+expect_r1_literal "R1 different secret key" 'Environment="LOG_LEVEL=info" "TWO_BACKUP_S3_SECRET_ACCESS_KEY=synthetic"' TWO_BACKUP_S3_SECRET_ACCESS_KEY
+
+# These are not secret assignments: match keys, not substrings of values.
 reset_fixture
-printf 'Environment=DISCORD_TOKEN=live-value-that-must-never-be-here\n' \
-  >> "$FIXTURE/deploy/two-redirect.service"
-expect_fail_saying "R1 hardcoded secret" "R1:"
+cat >> "$FIXTURE/deploy/two-redirect.service" <<'EOF'
+EnvironmentFile=/etc/two-bot/DISCORD_TOKEN=synthetic.env
+  EnvironmentFile = /etc/two-bot/DISCORD_TOKEN=synthetic.env
+# Environment="DISCORD_TOKEN=synthetic"
+  ; Environment='DISCORD_TOKEN=synthetic'
+Environment=LOG_LEVEL=info
+Environment="LABEL=DISCORD_TOKEN=synthetic" 'OTHER=prefix DISCORD_TOKEN=synthetic'
+Environment=PREFIX_DISCORD_TOKEN=synthetic DISCORD_TOKEN_SUFFIX=synthetic
+Environment="LABEL=escaped \" DISCORD_TOKEN=synthetic" "LOG_LEVEL=info"
+Environment="LABEL=escaped \\" "LOG_LEVEL=info"
+Environment=LABEL=DISCORD_TOKEN=synthetic
+Environment=LOG_LEVEL=info \
+  # Environment="DISCORD_TOKEN=synthetic"
+  "LABEL=DISCORD_TOKEN=synthetic"
+Environment=
+EOF
+if ! output="$(run_guard)"; then
+  printf 'R1 allowed syntax: guard refused non-secret assignments.\n%s\n' "$output" >&2
+  exit 1
+fi
+printf '  ok  R1 allowed syntax and secret-name substrings\n'
 
 # ---------------------------------------------------------------------------
 # 2. R2: a wired credential nothing reads is refused (typo or leftover).
