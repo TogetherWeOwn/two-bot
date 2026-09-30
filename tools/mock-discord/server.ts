@@ -76,6 +76,36 @@ export interface IdentifyCapability {
   presenceStatus: string | null;
 }
 
+export interface MockVoiceState {
+  memberId: string;
+  channelId: string;
+  isBot?: boolean;
+}
+
+function voicePayload(guildId: string, memberId: string, channelId: string | null, isBot = false) {
+  return {
+    guild_id: guildId,
+    channel_id: channelId,
+    user_id: memberId,
+    member: {
+      user: userPayload(memberId, 'member', isBot),
+      roles: [],
+      joined_at: new Date(0).toISOString(),
+      deaf: false,
+      mute: false,
+      flags: 0,
+    },
+    session_id: `mock-voice-${memberId}`,
+    deaf: false,
+    mute: false,
+    self_deaf: false,
+    self_mute: false,
+    self_video: false,
+    suppress: false,
+    request_to_speak_timestamp: null,
+  };
+}
+
 export interface MockDiscord {
   port: number;
   apiBase: string;
@@ -91,7 +121,12 @@ export interface MockDiscord {
   dispatch(type: string, data: unknown): void;
   memberJoin(memberId: string, username: string): void;
   message(memberId: string, channelId?: string): void;
-  voiceJoin(memberId: string, channelId?: string): void;
+  voiceJoin(memberId: string, channelId?: string, isBot?: boolean): void;
+  voiceLeave(memberId: string, isBot?: boolean): void;
+  /** Replace the next GUILD_CREATE snapshot without emitting live voice frames. */
+  setVoiceStates(states: MockVoiceState[]): void;
+  /** Real recovery handshake: opcode 7 -> Resume, or opcode 9 false -> Identify. */
+  reconnect(mode: 'resume' | 'fresh', timeoutMs?: number): Promise<void>;
   close(): Promise<void>;
 
   // --- onboarding (TWO-7) ---------------------------------------------------
@@ -392,7 +427,7 @@ function channelsPayload(lighting: Lighting, GUILD_ID: string) {
   ];
 }
 
-function guildPayload(lighting: Lighting, GUILD_ID: string) {
+function guildPayload(lighting: Lighting, GUILD_ID: string, voiceStates: MockVoiceState[] = []) {
   return {
     id: GUILD_ID,
     name: 'TWO Dev',
@@ -441,9 +476,12 @@ function guildPayload(lighting: Lighting, GUILD_ID: string) {
         flags: 0,
         pending: false,
       },
+      ...voiceStates.filter((state) => state.memberId !== BOT_ID).map((state) =>
+        voicePayload(GUILD_ID, state.memberId, state.channelId, state.isBot).member),
     ],
     presences: [],
-    voice_states: [],
+    voice_states: voiceStates.map((state) =>
+      voicePayload(GUILD_ID, state.memberId, state.channelId, state.isBot)),
     stage_instances: [],
     guild_scheduled_events: [],
     soundboard_sounds: [],
@@ -475,7 +513,7 @@ function userPayload(id: string, username: string, bot = false) {
 }
 
 export async function startMockDiscord(
-  opts: { lighting?: Lighting; guildId?: string; stagingVerify?: boolean } = {},
+  opts: { lighting?: Lighting; guildId?: string; stagingVerify?: boolean; voiceStates?: MockVoiceState[] } = {},
 ): Promise<MockDiscord> {
   // Instance-local: fixtures can exercise staging exclusions without changing
   // the production catalog, or another concurrently running mock's identity.
@@ -649,6 +687,8 @@ export async function startMockDiscord(
 
   let seq = 0;
   let socket: WebSocket | null = null;
+  let voiceStates = (opts.voiceStates ?? []).map((state) => ({ ...state }));
+  let recovery: { mode: 'resume' | 'fresh'; finish: (err?: Error) => void } | null = null;
   let readyResolve: (() => void) | null = null;
   const readyPromise = new Promise<void>((res) => {
     readyResolve = res;
@@ -834,6 +874,14 @@ export async function startMockDiscord(
         return;
       }
 
+      if (msg.op === 6) {
+        // RESUME -> RESUMED. Keep only the opcode census, never its token.
+        send(ws, { op: 0, s: ++seq, t: 'RESUMED', d: {} });
+        if (recovery?.mode === 'resume') recovery.finish();
+        else recovery?.finish(new Error('mock gateway: expected Identify, received Resume'));
+        return;
+      }
+
       if (msg.op === 2) {
         // Record the capability this connection asked for, and only that. The
         // token and the rest of the frame are never read into the fixture.
@@ -859,8 +907,10 @@ export async function startMockDiscord(
           },
         });
         setTimeout(() => {
-          send(ws, { op: 0, s: ++seq, t: 'GUILD_CREATE', d: guildPayload(lighting, GUILD_ID) });
+          send(ws, { op: 0, s: ++seq, t: 'GUILD_CREATE', d: guildPayload(lighting, GUILD_ID, voiceStates) });
           readyResolve?.();
+          if (recovery?.mode === 'fresh') recovery.finish();
+          else recovery?.finish(new Error('mock gateway: expected Resume, received Identify'));
         }, 30);
       }
     });
@@ -887,6 +937,28 @@ export async function startMockDiscord(
         ),
       ]),
     dispatch,
+    setVoiceStates(states) {
+      voiceStates = states.map((state) => ({ ...state }));
+    },
+    reconnect(mode, timeoutMs = 15_000) {
+      if (!socket || socket.readyState !== socket.OPEN) {
+        return Promise.reject(new Error('mock gateway: no open client connection'));
+      }
+      if (recovery) return Promise.reject(new Error('mock gateway: recovery already pending'));
+      return new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => recovery?.finish(new Error('mock gateway: recovery timed out')), timeoutMs);
+        recovery = {
+          mode,
+          finish(err) {
+            clearTimeout(timer);
+            recovery = null;
+            if (err) reject(err);
+            else resolve();
+          },
+        };
+        send(socket!, { op: mode === 'resume' ? 7 : 9, d: mode === 'resume' ? null : false, s: null, t: null });
+      });
+    },
     memberJoin(memberId, username) {
       dispatch('GUILD_MEMBER_ADD', {
         guild_id: GUILD_ID,
@@ -922,28 +994,11 @@ export async function startMockDiscord(
         type: 0,
       });
     },
-    voiceJoin(memberId, channelId = VOICE_CHANNEL) {
-      dispatch('VOICE_STATE_UPDATE', {
-        guild_id: GUILD_ID,
-        channel_id: channelId,
-        user_id: memberId,
-        member: {
-          user: userPayload(memberId, 'member'),
-          roles: [],
-          joined_at: new Date().toISOString(),
-          deaf: false,
-          mute: false,
-          flags: 0,
-        },
-        session_id: 'mock-voice',
-        deaf: false,
-        mute: false,
-        self_deaf: false,
-        self_mute: false,
-        self_video: false,
-        suppress: false,
-        request_to_speak_timestamp: null,
-      });
+    voiceJoin(memberId, channelId = VOICE_CHANNEL, isBot = false) {
+      dispatch('VOICE_STATE_UPDATE', voicePayload(GUILD_ID, memberId, channelId, isBot));
+    },
+    voiceLeave(memberId, isBot = false) {
+      dispatch('VOICE_STATE_UPDATE', voicePayload(GUILD_ID, memberId, null, isBot));
     },
     captured,
     gatewayOpcodes,
@@ -1105,6 +1160,7 @@ export async function startMockDiscord(
     },
 
     async close() {
+      recovery?.finish(new Error('mock gateway: closed during recovery'));
       for (const c of wss.clients) c.terminate();
       await new Promise<void>((res) => wss.close(() => res()));
       // discord.js's REST client holds keep-alive sockets open. Without this,
