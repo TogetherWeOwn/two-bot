@@ -105,6 +105,38 @@ const since = prevRows.reduce<string | null>(
   null,
 );
 const prevUses = new Map(prevRows.map((r) => [r.code, Number(r.uses)]));
+const pendingJoins = await db
+  .prepare(`SELECT member_id AS id, joined_at AS "joinedAt" FROM capture_pending_joins WHERE guild_id = ?`)
+  .all<{ id: string; joinedAt: string }>(guildId);
+
+// Capture-owned processing evidence. `invite_snapshots.updated_at` is written
+// by three independent writers (live bot on ready, backfill, this tracker's
+// own diffAndStore), none of which drains pending joins — so it cannot prove
+// the saved observations were recorded. The retained table below holds the
+// invite read the retaining run already observed; reconciliation needs the
+// baseline, the retained read, and the fresh read together. Missing-table
+// reads mean a pre-0043 database with no retained rows, not a failure.
+interface RetainedGrowthRow {
+  code: string; uses: number; inviterId: string | null; channelId: string | null; observedAt: string;
+}
+const retainedGrowth: RetainedGrowthRow[] = [];
+try {
+  retainedGrowth.push(...await db
+    .prepare(`SELECT code, uses, inviter_id AS "inviterId", channel_id AS "channelId", observed_at AS "observedAt" FROM capture_retained_growth WHERE guild_id = ?`)
+    .all<RetainedGrowthRow>(guildId));
+} catch (err) {
+  if (!(err instanceof Error) || !/capture_retained_growth/.test(err.message)) throw err;
+}
+// A previous run may have retained its window (pending joins plus the invite
+// growth it already observed) and then lost its baseline: another snapshot
+// writer advances invite_snapshots.updated_at, or the snapshot rows were never
+// there. A null baseline falls back to the oldest retained read, which is the
+// window those joins were actually observed in.
+const oldestRetainedAt = retainedGrowth.reduce<string | null>(
+  (min, r) => (min === null || r.observedAt < min ? r.observedAt : min),
+  null,
+);
+const effectiveSince = since ?? oldestRetainedAt;
 
 // --- 2. read the invite counters --------------------------------------------
 
@@ -125,6 +157,18 @@ const current = rawInvites.map((i) => ({
 }));
 
 const growth = inviteGrowth(prevUses, current);
+// Reconcile with the retained read: per-code growth is the max of the
+// baseline-derived delta and the already-observed retained delta, taking the
+// larger surviving sample per code. When both see the same code the deltas
+// match and nothing double-counts; when a code vanished before retry, the
+// retained delta survives and attribution cannot collapse to a false exact
+// single-code distribution.
+for (const r of retainedGrowth) {
+  const base = prevUses.get(r.code);
+  const retainedDelta = base === undefined ? r.uses : r.uses - base;
+  const seen = growth.get(r.code) ?? 0;
+  if (retainedDelta > seen) growth.set(r.code, retainedDelta);
+}
 const grew = [...growth.keys()].sort();
 const totalGrowth = [...growth.values()].reduce((a, b) => a + b, 0);
 
@@ -142,7 +186,20 @@ if (members.length === 0) {
 const guild = await rest.get<{ vanity_url_code?: string | null }>(`/guilds/${guildId}`);
 const hasVanity = !!guild?.vanity_url_code;
 
-const newJoins: { id: string; joinedAt: string }[] = [];
+const observed = new Map<string, { id: string; joinedAt: string }>();
+// Pending rows are replayed by identity, never by the shared watermark. The
+// snapshot timestamp is written by three independent writers (live bot on
+// ready, backfill, this tracker's own diffAndStore), none of which drains
+// pending joins — so a row at or before the live baseline is NOT proof it was
+// recorded, and gating replay on `since` silently discards saved unrecorded
+// joins after an unrelated watermark advance. Replaying everything is safe:
+// store.record() is first-wins on (member, joined_at), so an already-recorded
+// row re-emits without duplicating storage, and the handled-only clear below
+// removes exactly the rows this run proved recorded. Anything still pending
+// stays for the next run.
+for (const j of pendingJoins) {
+  observed.set(JSON.stringify([j.id, j.joinedAt]), j);
+}
 let bots = 0;
 for (const m of members) {
   const id = m.user?.id;
@@ -155,9 +212,17 @@ for (const m of members) {
   const joinedAt = new Date(m.joined_at).toISOString();
   // First ever capture has no `since`; the member list is history, not this
   // window, and backfill.ts owns history. Baseline only, emit nothing.
-  if (since !== null && joinedAt > since) newJoins.push({ id, joinedAt });
+  // A retained window with no live baseline still replays its own window.
+  if (effectiveSince !== null && joinedAt > effectiveSince) {
+    observed.set(JSON.stringify([id, joinedAt]), { id, joinedAt });
+  }
 }
-newJoins.sort((a, b) => a.joinedAt.localeCompare(b.joinedAt));
+// Keep the window (since, capturedAt]: observations after the stamp remain
+// pending, even if the member leaves before the next roster read.
+const observedJoins = [...observed.values()].sort((a, b) =>
+  a.joinedAt.localeCompare(b.joinedAt) || a.id.localeCompare(b.id));
+const newJoins = observedJoins.filter((j) => j.joinedAt <= capturedAt);
+const deferredJoins = observedJoins.length - newJoins.length;
 
 // --- 4. attribute ------------------------------------------------------------
 //
@@ -174,6 +239,11 @@ newJoins.sort((a, b) => a.joinedAt.localeCompare(b.joinedAt));
 
 const attributions = attributeJoins(growth, newJoins.length, hasVanity);
 
+// The attribution window is the window the joins were actually observed in:
+// normally the live baseline, but a retained replay after a lost baseline
+// attributes the retained window rather than an unknowable one.
+const windowFrom = effectiveSince;
+
 const events: FunnelEvent[] = newJoins.map((j, i) => ({
   memberId: j.id,
   guildId,
@@ -186,15 +256,59 @@ const events: FunnelEvent[] = newJoins.map((j, i) => ({
     // still right but this member's own code is a placement, not an
     // observation - so per-member rates on that row are soft.
     attribution_exact: attributions[i].exact,
-    window: { from: since, to: capturedAt },
+    window: { from: windowFrom, to: capturedAt },
   },
 }));
 
+// A post-stamp join may already be reflected in the invite read. Keep both
+// counters AND their window end until it is eligible, rather than consuming
+// that evidence now. Defer attribution too: splitting this growth over an
+// incomplete roster could lock in worse first-wins attribution. Persist the
+// observations separately so departures before retry cannot erase them.
+// The observed invite read is persisted alongside the observations, so a
+// deleted/expired/reset code cannot erase already-seen growth before retry.
+// First capture still establishes a baseline, and no-growth reads lose no delta.
+const retainSnapshot = effectiveSince !== null && deferredJoins > 0 && totalGrowth > 0;
+
+// Even without growth, a deferred observation must survive departure before
+// retry. The handled-only clear below removes eligible rows, not post-stamp ones.
+if (!dryRun && deferredJoins > 0) {
+  for (const j of observedJoins) {
+    await db.prepare(
+      `INSERT INTO capture_pending_joins (guild_id, member_id, joined_at)
+       VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
+    ).run(guildId, j.id, j.joinedAt);
+  }
+}
+if (!dryRun && retainSnapshot) {
+  try {
+    for (const inv of current) {
+      await db.prepare(
+        `INSERT INTO capture_retained_growth (guild_id, code, uses, inviter_id, channel_id, observed_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT (guild_id, code) DO UPDATE SET
+           uses = excluded.uses, inviter_id = excluded.inviter_id,
+           channel_id = excluded.channel_id, observed_at = excluded.observed_at`,
+      ).run(guildId, inv.code, inv.uses, inv.inviterId, inv.channelId, capturedAt);
+    }
+  } catch (err) {
+    // Pre-0043 database: no retained-growth table. The pending observations
+    // above are still saved; only the growth-reconciliation evidence is lost,
+    // which is exactly the pre-0043 behaviour.
+    if (!(err instanceof Error) || !/capture_retained_growth/.test(err.message)) throw err;
+  }
+}
+
 let written = 0;
-if (!dryRun) {
+if (!dryRun && !retainSnapshot) {
+  const handledKeys = new Set<string>();
   for (const e of events) {
     const res = await store.record(e);
     if (res.inserted) written++;
+    // First-wins idempotency means an already-recorded join is handled too:
+    // its event exists, so the saved observation must not linger for a later
+    // run to re-emit or to be dropped by an unrelated snapshot advance.
+    handledKeys.add(JSON.stringify([e.memberId, e.occurredAt]));
   }
   // Store the new counters last, so a crash mid-write re-reads the same window
   // next run instead of losing it.
@@ -202,20 +316,51 @@ if (!dryRun) {
   await db
     .prepare(`UPDATE invite_snapshots SET updated_at = ? WHERE guild_id = ?`)
     .run(capturedAt, guildId);
+  // Clear only observations proven recorded (this run wrote or found their
+  // events). The shared snapshot watermark may have advanced independently
+  // (live bot on ready, backfill) without consuming anything, so a
+  // timestamp-based clear would silently discard saved unrecorded joins.
+  // Anything still pending stays for the next run to replay by identity.
+  if (handledKeys.size > 0) {
+    const pairs = [...handledKeys].map((k) => JSON.parse(k) as [string, string]);
+    const conds = pairs.map(() => `(member_id = ? AND joined_at = ?)`).join(' OR ');
+    const params: string[] = [];
+    for (const [id, at] of pairs) params.push(id, at);
+    await db.prepare(
+      `DELETE FROM capture_pending_joins WHERE guild_id = ? AND (${conds})`,
+    ).run(guildId, ...params);
+  }
+  // The window this run just recorded supersedes any retained read: drop it so
+  // a later retain starts from fresh evidence rather than stale counters.
+  // A retained window whose baseline met a zero-growth live read is also done:
+  // the growth it waited on never materialized in the fresh counters.
+  // Missing-table failures are pre-0043 databases with nothing to clear.
+  if (retainedGrowth.length > 0 && (newJoins.length > 0 || totalGrowth === 0)) {
+    try {
+      await db.prepare(`DELETE FROM capture_retained_growth WHERE guild_id = ?`).run(guildId);
+    } catch (err) {
+      if (!(err instanceof Error) || !/capture_retained_growth/.test(err.message)) throw err;
+    }
+  }
 }
 
 // --- 5. report ---------------------------------------------------------------
 
 const label =
-  since === null
-    ? 'first capture - baseline only'
-    : `window ${since} -> ${capturedAt}`;
+  windowFrom === null
+    ? (newJoins.length ? 'replayed pending joins without a live baseline' : 'first capture - baseline only')
+    : `window ${windowFrom} -> ${capturedAt}`;
 
 console.log(`  ${label}`);
 console.log(`  invites              ${current.length} readable, ${grew.length} moved` +
   (grew.length ? ` (${grew.map((c) => `${c} +${growth.get(c)}`).join(', ')})` : ''));
 console.log(`  members              ${members.length} total (${bots} bots)`);
 console.log(`  new joins in window  ${newJoins.length}`);
+if (retainSnapshot) {
+  console.log(`  ${dryRun ? 'would retain' : 'retaining'} previous counters and window: ` +
+    `${deferredJoins} post-stamp join(s) may already be in the invite growth; ` +
+    `${observedJoins.length} observation(s) ${dryRun ? 'would be saved' : 'saved'} pending attribution.`);
+}
 if (newJoins.length) {
   // One line per source, not one line per join: the operator wants to see the
   // split the campaign will be read off.
@@ -238,7 +383,7 @@ if (newJoins.length) {
  * printing every time: the usual cause is somebody who joined and left again
  * inside the window, which is exactly the blind spot this script cannot fix.
  */
-if (since !== null && totalGrowth !== newJoins.length) {
+if (windowFrom !== null && totalGrowth !== newJoins.length && !retainSnapshot) {
   console.log(
     `\n  note: invite counters moved ${totalGrowth}, member list gained ${newJoins.length}.` +
       `\n        Likely a join+leave inside the window, or a join through the vanity URL.` +
