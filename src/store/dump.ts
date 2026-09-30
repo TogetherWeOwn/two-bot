@@ -343,6 +343,19 @@ export async function dump(db: Db, outPath: string): Promise<DumpManifest> {
           .get<{ n: number }>();
         sequences[name] = Number(seq?.n ?? 0);
       }
+      // The reader refuses marks that are not non-negative safe integers
+      // (validateManifest), so publishing one would hand pg-backup an archive
+      // nothing can read back - and pg-backup rotates good recovery history
+      // for a successful dump. Refuse here, before the manifest line is
+      // written and long before the atomic rename publishes anything: the
+      // existing catch removes the temp file and the destination is untouched.
+      for (const [name, mark] of Object.entries(sequences)) {
+        if (!Number.isSafeInteger(mark) || mark < 0) {
+          throw new Error(
+            `sequence ${name} has a high-water mark the dump format cannot represent: ${String(mark)}`,
+          );
+        }
+      }
       const applied = await tx
         .prepare(`SELECT id FROM schema_migrations ORDER BY id`)
         .all<{ id: string }>();
