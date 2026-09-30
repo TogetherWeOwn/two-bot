@@ -19,6 +19,11 @@ import { hostname } from 'node:os';
 import { openDb } from '../src/store/db.ts';
 import { OperationalAuditStore } from '../src/audit/store.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/audit-switch.ts [--halt [--by <who>] | --resume | --status]');
+  process.exit(0);
+}
+
 const args = process.argv.slice(2);
 const halt = args.includes('--halt');
 const resume = args.includes('--resume');

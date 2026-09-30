@@ -38,8 +38,7 @@ const rawArgs = process.argv.slice(2);
 if (rawArgs.includes('--help') || rawArgs.includes('-h')) {
   console.log(`voice-reconcile: list voice sessions with only one half seen (TOG-8289).
 
-Usage:
-  node scripts/voice-reconcile.ts [days] [--seed]
+Usage: node scripts/voice-reconcile.ts [days] [--seed]
 
   no args      full-history sweep, read-only (SELECT only, never writes)
   days         last N days only, e.g. 30 (see the windowing caveat above)

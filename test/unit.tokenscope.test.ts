@@ -19,13 +19,9 @@ import { STAGING_INVITE_PERMISSIONS, stagingInviteUrl } from '../src/staging/spe
 const root = join(import.meta.dirname, '..');
 
 test('every workflow keeps its least-privilege permissions block', () => {
-  // TOG-5054 finding F6: ci.yml still has NO `permissions:` block (repo-default
-  // token for a read-only workflow). The pin to `contents: read` is tracked in
-  // [TOG-5257](/TOG/issues/TOG-5257) and blocked on a principal with the
-  // `workflows` permission; this test asserts the four workflows that already
-  // carry the pin. Re-extend this loop to include 'ci.yml' when TOG-5257
-  // lands - dropping any block re-broadens that workflow's token silently.
-  for (const file of ['secret-scan.yml', 'main-guard.yml', 'plan-watch.yml', 'codeowners.yml']) {
+  // TOG-5054 finding F6, pinned by TOG-5257: ci.yml carries `contents: read`.
+  // Dropping any block re-broadens that workflow's token silently.
+  for (const file of ['ci.yml', 'secret-scan.yml', 'main-guard.yml', 'plan-watch.yml', 'codeowners.yml']) {
     const body = readFileSync(join(root, '.github/workflows', file), 'utf8');
     assert.match(body, /^permissions:/m, `${file} must keep its permissions block`);
   }

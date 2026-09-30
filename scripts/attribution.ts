@@ -39,6 +39,11 @@ import { ANOMALIES, excludeClause, windowBounds } from '../src/analytics/anomali
 import { collapseCrossSourceDuplicates } from '../src/backfill/dedupe.ts';
 import { rollUp, rate, type JoinRecord, type AttributionRow } from '../src/analytics/attribution.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/attribution.ts [days|all] [--csv]');
+  process.exit(0);
+}
+
 const argv = process.argv.slice(2);
 const csv = argv.includes('--csv');
 const windowArg = argv.find((a) => !a.startsWith('--')) ?? '90';
@@ -207,13 +212,16 @@ const alwaysShow = codes.map((c) => `invite:${c.code}`);
 // moving last_active_at forward with no bot running. Voice has no such path. So
 // if the newest voice signal is far behind the newest signal of any kind, the
 // gap is missing voice capture rather than a quiet server. Comparing the two
-// avoids the false alarm from reading voice alone, where a stale date only
-// means "nobody entered voice for the first time lately".
+// avoids the false alarm from reading voice alone on a quiet server. Repeat
+// session starts and ends measure ongoing capture; first-ever events also
+// cover older history, but alone only tell us when someone first entered
+// voice. Ends count because a leave proves presence even when the start row
+// is missing (bot-down unknown-start sessions still advance activity).
 const VOICE_LAG_DAYS = 30;
 const lastVoiceAt =
   (
     await db
-      .prepare(`SELECT MAX(occurred_at) AS t FROM events WHERE event_type='first_voice_session' AND guild_id = ?`)
+      .prepare(`SELECT MAX(occurred_at) AS t FROM events WHERE event_type IN ('first_voice_session', 'voice_session_start', 'voice_session_end') AND guild_id = ?`)
       .get<{ t: string | null }>(guildId)
   )?.t ?? null;
 const lastAnyActivityAt =

@@ -22,6 +22,11 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { stripUsers } from './audit-scrub.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/audit-collect.ts');
+  process.exit(0);
+}
+
 const TOKEN = process.env.DISCORD_TOKEN ?? process.env.DISCORD_BOT_TOKEN;
 const GUILD = process.env.DISCORD_GUILD_ID;
 if (!TOKEN || !GUILD) {

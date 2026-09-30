@@ -22,6 +22,11 @@ import {
   type Overwrite,
 } from '../src/discord/channelAccess.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/preflight.ts');
+  process.exit(0);
+}
+
 const API = 'https://discord.com/api/v10';
 
 // Same lookup order as src/core/config.ts: the systemd credential first, then
