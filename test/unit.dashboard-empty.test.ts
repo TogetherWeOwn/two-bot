@@ -127,24 +127,24 @@ describe('dashboard empty-state (fresh database)', () => {
     const html = renderHtml(d);
     const notice = html.match(/<div class="notice" role="status">([\s\S]*?)<\/div>/)?.[1];
     assert.ok(notice, 'the empty page has an accessible guidance banner');
-    const text = (markup: string) => markup.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+    const compactMarkup = (markup: string) => markup.replace(/\s+/g, ' ').trim();
     assert.equal(
-      text(notice),
-      'Fresh database — no community data recorded yet. ' +
+      compactMarkup(notice),
+      '<strong>Fresh database — no community data recorded yet.</strong> ' +
         'Zeros mean no activity has been recorded; dashes mean a metric is not available yet. ' +
         'They do not mean the server is empty. Keep the bot running to collect activity, ' +
-        'or run npm run backfill to import member history. Run ' +
-        'npm run audit:collect for a channel snapshot, then ' +
-        'npm run dashboard to refresh this page.',
+        'or run <code>npm run backfill</code> to import member history. Run ' +
+        '<code>npm run audit:collect</code> for a channel snapshot, then ' +
+        '<code>npm run dashboard</code> to refresh this page.',
     );
     assert.deepEqual(
-      [...html.matchAll(/<p class="empty" role="status">([\s\S]*?)<\/p>/g)].map((m) => text(m[1])),
+      [...html.matchAll(/<p class="empty" role="status">([\s\S]*?)<\/p>/g)].map((m) => compactMarkup(m[1])),
       [
         'No joins on record yet. Keep the bot running to record new joins, or run ' +
-          'npm run backfill to import join history. Then run npm run dashboard to refresh this section.',
+          '<code>npm run backfill</code> to import join history. Then run <code>npm run dashboard</code> to refresh this section.',
         'No cohorts to show — no member joins are recorded for this 4-week window.',
-        'No channel activity data yet. Run npm run audit:collect to collect a server snapshot, ' +
-          'then npm run dashboard to refresh this section.',
+        'No channel activity data yet. Run <code>npm run audit:collect</code> to collect a server snapshot, ' +
+          'then <code>npm run dashboard</code> to refresh this section.',
       ],
     );
     assert.ok(html.includes('not measured yet — check the rules gate with npm run backfill'));
