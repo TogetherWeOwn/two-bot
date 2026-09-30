@@ -9,7 +9,7 @@
  * Precedence (first match wins):
  *   1. `NO_COLOR` set to any non-empty value -> plain. Presence is the whole
  *      signal (https://no-color.org); even `NO_COLOR=0` disables.
- *   2. `FORCE_COLOR` set to a non-empty value other than `0`/`false` -> styled.
+ *   2. Non-empty `FORCE_COLOR`: `0`/`false` -> plain; other values -> styled.
  *   3. `TERM=dumb` -> plain (a dumb terminal cannot use cursor styling either).
  *   4. Otherwise styled only when stdout is a TTY. Piped or redirected output
  *      (CI logs, `| cat`, `> file`) is always plain.
@@ -28,7 +28,7 @@ export function colorEnabled(probe: ColorProbe = {}): boolean {
   const noColor = env.NO_COLOR;
   if (noColor !== undefined && noColor !== '') return false;
   const force = (env.FORCE_COLOR ?? '').trim().toLowerCase();
-  if (force !== '' && force !== '0' && force !== 'false') return true;
+  if (force !== '') return force !== '0' && force !== 'false';
   if ((env.TERM ?? '').trim().toLowerCase() === 'dumb') return false;
   return probe.isTTY ?? process.stdout?.isTTY ?? false;
 }

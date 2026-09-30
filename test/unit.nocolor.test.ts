@@ -30,8 +30,26 @@ describe('colorEnabled precedence', () => {
   test('a pipe is plain unless FORCE_COLOR overrides', () => {
     assert.equal(colorEnabled({ env: {}, isTTY: false }), false);
     assert.equal(colorEnabled({ env: { FORCE_COLOR: '1' }, isTTY: false }), true);
-    assert.equal(colorEnabled({ env: { FORCE_COLOR: '0' }, isTTY: true }), true, 'FORCE_COLOR=0 reads as unset');
-    assert.equal(colorEnabled({ env: { FORCE_COLOR: 'false' }, isTTY: true }), true, 'FORCE_COLOR=false reads as unset');
+    assert.equal(colorEnabled({ env: { FORCE_COLOR: '0' }, isTTY: true }), false, 'FORCE_COLOR=0 disables');
+    assert.equal(colorEnabled({ env: { FORCE_COLOR: 'false' }, isTTY: true }), false, 'FORCE_COLOR=false disables');
+  });
+
+  for (const force of ['0', 'false', ' 0 ', ' FALSE ']) {
+    test(`FORCE_COLOR=${JSON.stringify(force)} disables the gate and paint on TTYs and pipes`, () => {
+      for (const isTTY of [true, false]) {
+        const probe = { env: { FORCE_COLOR: force, TERM: 'xterm-256color' }, isTTY };
+        assert.equal(colorEnabled(probe), false);
+        assert.equal(paint('FAIL', 'red', probe), 'FAIL');
+        assert.equal(paint('ok', ['bold', 'green'], probe), 'ok');
+        assert.ok(!hasAnsi(paint('UNKNOWN', 'yellow', probe)));
+      }
+    });
+  }
+
+  test('empty FORCE_COLOR falls through; a positive override takes precedence over TERM', () => {
+    assert.equal(colorEnabled({ env: { FORCE_COLOR: '' }, isTTY: true }), true);
+    assert.equal(colorEnabled({ env: { FORCE_COLOR: ' ' }, isTTY: false }), false);
+    assert.equal(colorEnabled({ env: { FORCE_COLOR: '1', TERM: 'dumb' }, isTTY: false }), true);
   });
 
   test('dumb terminals stay plain; TTYs get styling', () => {
