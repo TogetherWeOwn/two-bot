@@ -17,11 +17,11 @@
  *   A. session picker contract: exactly the two accepted options, in order,
  *      with the accepted destinations and no role anywhere in the plan.
  *   B. session behavior: idempotent re-selection, stale keys reported never
- *      routed, invisible destinations withheld not linked.
- *   C. legacy picker defect (child card): planSelection does not dedupe
- *      repeated keys - roleIds and degradedCount double-count, unknownKeys
- *      repeat. Session's planSession dedupes; legacy does not.
- *   D. session doc defect (child card): SessionPlan.channelIds is documented
+ *      routed (valid picks still route), invisible destinations withheld not linked.
+ *   C. legacy picker regression (TOG-7438): repeated keys must not double-count
+ *      roleIds, degradedCount or unknownKeys. The original defect probes remain
+ *      even after the deduplication fix.
+ *   D. session doc defect (TOG-7439): SessionPlan.channelIds is documented
  *      "in catalog order" but follows input order.
  *   E. anchor event: DST-safe wall-clock recurrence (the 1 Nov 2026
  *      changeover), near/live voices, goodbye copy never pings.
@@ -30,9 +30,9 @@
  *      once-per-member while routed repeats; redelivered same-ms messages do
  *      not advance the ladder.
  *   G. welcome packs: week-5 Series window correct (EDT); week-6 Series
- *      window defect (child card): the 1 Nov run is EST (UTC-5) so 20:00 is
- *      01:00Z, but the kit prints 00:00Z-01:00Z. Both hardcoded <t:> stamps
- *      verified correct against zonedEpochMs.
+ *      regression (TOG-7440): the 1 Nov run is EST (UTC-5) so 20:00 must be
+ *      01:00Z, not 00:00Z. Both hardcoded <t:> stamps verified correct
+ *      against zonedEpochMs.
  *
  * --staging runs an additional READ-ONLY live probe (guild identity, landing
  * and goodbye channel resolvability). It needs DISCORD_STAGING_BOT_TOKEN and
@@ -200,11 +200,16 @@ console.log('== B. session behavior ==');
   const stale = planSession(['survival-games'], seeEverything);
   check('stale keys reported, never routed', stale.channelIds.length === 0 && stale.unknownKeys.join(',') === 'survival-games', JSON.stringify(stale));
   check('stale ack offers a retry, not silence', /stale/i.test(sessionAckText(stale)) && /nothing was changed/i.test(sessionAckText(stale)), sessionAckText(stale));
+  // TOG-8768: stale choices are skipped; valid choices in the same submission still route.
   const mixed = planSession(['survival', 'find-players'], seeEverything);
+  const mixedAck = sessionAckText(mixed);
   check(
-    'any stale key invalidates the whole submission (no partial route)',
-    mixed.channelIds.length === 0 && !new RegExp(LOOKING_TO_PLAY_CHANNEL_ID).test(sessionAckText(mixed)),
-    'a stale key alongside a valid one still routed somewhere',
+    'mixed submission reports the stale key and still links the valid destination',
+    mixed.unknownKeys.join(',') === 'survival' &&
+      mixed.channelIds.join(',') === LOOKING_TO_PLAY_CHANNEL_ID &&
+      mixedAck.includes(`<#${LOOKING_TO_PLAY_CHANNEL_ID}>`) &&
+      /stale/i.test(mixedAck) && !/nothing was changed/i.test(mixedAck),
+    JSON.stringify({ plan: mixed, ack: mixedAck }),
   );
 }
 {
