@@ -55,8 +55,9 @@ export const BASELINE = {
 };
 
 // Durable CI calibration, not a relaxed agent-testdb limit. Median of three
-// samples (1.674, 1.666, 1.654 ms/event), with identical src/, migrations and
-// lockfile to PR base b0a26a5e. Node 24.21 / stock Postgres 17.11, settings on.
+// samples (1.674, 1.666, 1.654 ms/event) at CI merge 08cbb8be: identical src/,
+// migrations and lockfile to green main 2d05db02 (run 36656673228).
+// Node 24.21 / stock Postgres 17.11, settings on.
 // Evidence: https://github.com/TogetherWeOwn/two-bot/actions/runs/36656843442/job/109702952854
 // Keep the original fast profile; uncalibrated environments fail closed.
 export const CI_BASELINE = {
