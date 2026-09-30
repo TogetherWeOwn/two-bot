@@ -27,6 +27,11 @@ import { dump } from '../src/store/dump.ts';
 import { buildUploadArgv } from '../src/store/uploadCmd.ts';
 import { parseKeep, toPrune } from '../src/store/backupRetention.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/pg-backup.ts');
+  process.exit(0);
+}
+
 const url = process.env.TWO_DATABASE_URL?.trim();
 if (!url || !isPostgresSpec(url)) {
   console.error('backup: TWO_DATABASE_URL must be set to a Postgres URL.');

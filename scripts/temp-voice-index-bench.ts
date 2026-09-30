@@ -34,6 +34,11 @@
 import { openDb } from '../src/store/db.ts';
 import { TempVoiceStore } from '../src/tempVoice/store.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/temp-voice-index-bench.ts [guilds]');
+  process.exit(0);
+}
+
 const spec = process.env.TWO_DATABASE_URL?.trim() ?? process.env.DATABASE_URL?.trim() ?? '';
 if (!spec) {
   console.error('temp-voice-index-bench: set TWO_DATABASE_URL (or DATABASE_URL) to an isolated database, never production.');

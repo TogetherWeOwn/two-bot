@@ -52,6 +52,11 @@ import {
   type Observations,
 } from '../src/growth/gate.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/gate-check.ts [--json]');
+  process.exit(0);
+}
+
 const json = process.argv.slice(2).includes('--json');
 
 /** The approved vanity entry point, not a preview URL. */

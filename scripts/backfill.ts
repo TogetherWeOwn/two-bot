@@ -50,6 +50,11 @@ import {
   parseVoiceMessage,
 } from '../src/backfill/parse.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/backfill.ts [--dry-run] [--max-pages=<count>]');
+  process.exit(0);
+}
+
 // --- args ------------------------------------------------------------------
 
 const argv = process.argv.slice(2);

@@ -2,6 +2,11 @@ import { writeFile } from 'node:fs/promises';
 import { checkStagingToken, stagingGuildId } from '../src/staging/spec.ts';
 import { AutomodExportError, validateAutomodRules } from '../src/automod/rulesExport.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/automod-export.ts [output.json]');
+  process.exit(0);
+}
+
 const token = process.env.DISCORD_STAGING_BOT_TOKEN;
 if (!token) throw new Error('DISCORD_STAGING_BOT_TOKEN is required.');
 const tokenCheck = checkStagingToken(token);

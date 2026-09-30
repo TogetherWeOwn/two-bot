@@ -66,8 +66,8 @@ import {
   parseArgs as smokeParseArgs,
 } from "./smoke-staging-deploy.mjs";
 
-if (process.argv.includes('--help')) {
-  console.log('Usage: node scripts/deploy-target-selftest.mjs');
+if (process.argv.includes("--help")) {
+  console.log("Usage: node scripts/deploy-target-selftest.mjs");
   process.exit(0);
 }
 
