@@ -100,15 +100,69 @@ code_consumers() {
     | sort -u || true
 }
 
+# Environment= quotes whole assignments, not shell-style fragments. Join
+# continued lines before splitting words; only emit matched names, never values.
+# Syntax: https://www.freedesktop.org/software/systemd/man/systemd.syntax.html
+literal_secrets_in_unit() {
+  python3 - "$1" "$SECRET_ENV" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+secrets = set(sys.argv[2].split())
+words = re.compile(r"""(?<!\S)(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|((?:\\.|[^\s\\])+))(?=\s|$)""")
+escapes = re.compile(r"\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|[0-7]{3}|[abfnrtvs\\\"'])")
+simple_escapes = dict(zip("abfnrtvs\\\"'", "\a\b\f\n\r\t\v \\\"'"))
+
+
+def unescape(match):
+    escape = match[1]
+    if escape in simple_escapes:
+        return simple_escapes[escape]
+    codepoint = int(escape[1:], 16) if escape[0] in "xuU" else int(escape, 8)
+    return chr(codepoint) if 0 < codepoint <= 0x10ffff else match[0]
+
+
+def logical_lines(text):
+    pending = ""
+    for line in text.split("\n"):
+        if line.lstrip().startswith(("#", ";")):
+            continue
+        pending += line
+        # An escaped backslash at EOL is literal, not a continuation.
+        trailing = len(pending) - len(pending.rstrip("\\"))
+        if trailing % 2:
+            pending = pending[:-1] + " "
+            continue
+        yield pending
+        pending = ""
+    if pending:
+        yield pending
+
+
+found = set()
+for line in logical_lines(Path(sys.argv[1]).read_text(encoding="utf-8-sig")):
+    directive = re.match(r"\s*Environment\s*=\s*(.*)$", line)
+    if not directive:
+        continue
+    for word in words.finditer(directive[1]):
+        value = next(group for group in word.groups() if group is not None)
+        assignment = escapes.sub(unescape, value)
+        key, equals, _ = assignment.partition("=")
+        if equals and key in secrets:
+            found.add(key)
+print("\n".join(sorted(found)))
+PY
+}
+
 # --- R1: no hardcoded secret in Environment= literals ----------------------
 
 for unit in "$DEPLOY"/*.service; do
   [ -e "$unit" ] || continue
   name="$(basename "$unit")"
-  for var in $SECRET_ENV; do
-    if grep -Eq "^Environment=${var}=" "$unit"; then
-      annotate "deploy/$name" "R1: $name sets $var as an Environment= literal. Secrets travel as LoadCredential files or EnvironmentFile entries, never baked into the unit (docs/SECRETS.md rule 3)."
-    fi
+  literal_secrets="$(literal_secrets_in_unit "$unit")"
+  for var in $literal_secrets; do
+    annotate "deploy/$name" "R1: $name sets $var as an Environment= literal. Secrets travel as LoadCredential files or EnvironmentFile entries, never baked into the unit (docs/SECRETS.md rule 3)."
   done
 done
 
