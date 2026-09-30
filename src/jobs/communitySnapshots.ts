@@ -359,6 +359,10 @@ export async function runRankSnapshotCycle(deps: CommunitySnapshotDeps): Promise
 }
 
 export interface CommunitySnapshotHandle {
+  /**
+   * Discard pending cycles; does not cancel or drain already-active I/O.
+   * Active cycles can still race datastore shutdown.
+   */
   stop(): void;
 }
 
@@ -370,10 +374,16 @@ export function startCommunitySnapshots(
   // At each 10-minute boundary both timers are due. Queue them so an older,
   // slower read can never finish after a newer one and overwrite its timestamp.
   let queue: Promise<unknown> = Promise.resolve();
+  let stopped = false;
   const enqueue = (name: 'community_counter' | 'rank_snapshot', cycle: () => Promise<unknown>) => {
-    queue = queue.then(cycle).catch((err: unknown) => {
-      log.error(`${name}_failed`, { err: String(err) });
-    });
+    if (stopped) return;
+    queue = queue
+      .then(() => {
+        if (!stopped) return cycle();
+      })
+      .catch((err: unknown) => {
+        log.error(`${name}_failed`, { err: String(err) });
+      });
   };
   const counterTick = () => enqueue('community_counter', () => runLiveCounterCycle(deps));
   const rankTick = () => enqueue('rank_snapshot', () => runRankSnapshotCycle(deps));
@@ -392,6 +402,7 @@ export function startCommunitySnapshots(
 
   return {
     stop() {
+      stopped = true;
       clearInterval(counterTimer);
       clearInterval(rankTimer);
     },

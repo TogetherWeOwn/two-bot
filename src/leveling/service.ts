@@ -18,7 +18,7 @@ export interface LevelProfile {
   messageXp: number;
   voiceXp: number;
   importedXp: number;
-  rank: number;
+  rank: number | null;
   memberCount: number;
   nextLevelXp: number;
 }
@@ -248,14 +248,14 @@ export class LevelingService {
         memberId,
       );
     const xp = Number(row?.xp ?? 0);
-    const ranked = await this.db
+    const ranked = row ? await this.db
       .prepare(
         `SELECT COUNT(*) AS rank
            FROM member_levels
           WHERE guild_id = ?
             AND (xp > ? OR (xp = ? AND member_id < ?))`,
       )
-      .get<{ rank: number }>(guildId, xp, xp, memberId);
+      .get<{ rank: number }>(guildId, xp, xp, memberId) : undefined;
     const total = await this.db
       .prepare(`SELECT COUNT(*) AS count FROM member_levels WHERE guild_id = ?`)
       .get<{ count: number }>(guildId);
@@ -268,7 +268,7 @@ export class LevelingService {
       messageXp: Number(row?.message_xp ?? 0),
       voiceXp: Number(row?.voice_xp ?? 0),
       importedXp: Number(row?.imported_xp ?? 0),
-      rank: Number(ranked?.rank ?? 0) + 1,
+      rank: row ? Number(ranked?.rank ?? 0) + 1 : null,
       memberCount: Number(total?.count ?? 0),
       nextLevelXp: totalXpForLevel(level + 1),
     };
