@@ -216,7 +216,7 @@ export interface ChannelSnapshot {
 export interface BuildOptions {
   /** Defaults to now. Injected so tests are not time-dependent. */
   now?: Date;
-  /** How many weeks of history to chart. */
+  /** Positive integer chart depth. Headlines always cover this week and last week. */
   weeks?: number;
   /** Output of scripts/audit-collect.ts, if we have one. */
   channelSnapshot?: ChannelSnapshot | null;
@@ -237,8 +237,15 @@ export function weekStart(iso: string | Date): string {
   return m.toISOString().slice(0, 10);
 }
 
+export function validateWeekCount(count: number): void {
+  if (!Number.isInteger(count) || count <= 0) {
+    throw new RangeError('weeks must be a positive integer');
+  }
+}
+
 /** The `count` week-start dates ending with the week containing `now`. */
 export function recentWeeks(now: Date, count: number): string[] {
+  validateWeekCount(count);
   const out: string[] = [];
   const cursor = new Date(`${weekStart(now)}T00:00:00.000Z`);
   for (let i = 0; i < count; i++) {
@@ -412,6 +419,9 @@ export function channelState(row: {
 export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<DashboardData> {
   const now = opts.now ?? new Date();
   const weekCount = opts.weeks ?? 12;
+  const wanted = recentWeeks(now, weekCount);
+  // Chart depth must not remove the previous week from the headline comparison.
+  const headlineWeeks = weekCount === 1 ? recentWeeks(now, 2) : wanted;
   const anomalies = opts.anomalies ?? ANOMALIES;
   const snapshot = opts.channelSnapshot ?? null;
 
@@ -487,26 +497,26 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
   const humanJoins = joinEvents.filter((e) => e.member_id && humanIds.has(e.member_id));
 
   // -- weekly joins / leaves ------------------------------------------------
-  const wanted = recentWeeks(now, weekCount);
   const wantedSet = new Set(wanted);
+  const headlineSet = new Set(headlineWeeks);
   const perWeek = new Map<string, { joins: string[]; setAside: number; leaves: number }>();
-  for (const w of wanted) perWeek.set(w, { joins: [], setAside: 0, leaves: 0 });
+  for (const w of headlineWeeks) perWeek.set(w, { joins: [], setAside: 0, leaves: 0 });
 
   for (const e of humanJoins) {
     const w = weekStart(e.occurred_at);
-    if (!wantedSet.has(w)) continue;
+    if (!headlineSet.has(w)) continue;
     const bucket = perWeek.get(w)!;
     if (isExcluded(e.occurred_at, 'member_join', anomalies)) bucket.setAside++;
     else bucket.joins.push(e.source);
   }
   for (const e of leaveEvents) {
     const w = weekStart(e.occurred_at);
-    if (!wantedSet.has(w)) continue;
+    if (!headlineSet.has(w)) continue;
     if (isExcluded(e.occurred_at, 'member_leave', anomalies)) continue;
     perWeek.get(w)!.leaves++;
   }
 
-  const weeks: WeekRow[] = wanted.map((weekStartDate) => {
+  const headlineRows: WeekRow[] = headlineWeeks.map((weekStartDate) => {
     const b = perWeek.get(weekStartDate)!;
     return {
       weekStart: weekStartDate,
@@ -518,13 +528,14 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
     };
   });
 
-  const thisWeekRow = weeks[weeks.length - 1];
-  const lastWeekRow = weeks[weeks.length - 2];
-  const slim = (r: WeekRow | undefined) => ({
-    start: r?.weekStart ?? weekStart(now),
-    joins: r?.joins ?? 0,
-    leaves: r?.leaves ?? 0,
-    net: r?.net ?? 0,
+  const weeks = headlineRows.slice(-weekCount);
+  const thisWeekRow = headlineRows[headlineRows.length - 1];
+  const lastWeekRow = headlineRows[headlineRows.length - 2];
+  const slim = (r: WeekRow) => ({
+    start: r.weekStart,
+    joins: r.joins,
+    leaves: r.leaves,
+    net: r.net,
   });
 
   // -- cohorts --------------------------------------------------------------

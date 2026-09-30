@@ -15,6 +15,11 @@ npm run dashboard -- --json    # the same numbers as JSON, for piping somewhere
 npm run dashboard -- --weeks 26
 ```
 
+`--weeks` is a positive integer (default: 12) controlling the chart and cohort
+history depth. Even with `--weeks 1`, the headline comparison still covers this
+week and the previous Monday's week. Invalid or missing counts fail before a
+database connection is opened.
+
 It reads the bot's own Postgres database (`TWO_DATABASE_URL`). There is no
 separate analytics store, no nightly sync, and
 therefore nothing that can drift out of agreement with the bot.
