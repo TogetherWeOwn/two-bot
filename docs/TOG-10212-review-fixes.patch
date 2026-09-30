@@ -1,0 +1,505 @@
+diff --git a/scripts/capture.ts b/scripts/capture.ts
+index 84be58b6..c1913438 100644
+--- a/scripts/capture.ts
++++ b/scripts/capture.ts
+@@ -158,12 +158,11 @@ const totalGrowth = [...growth.values()].reduce((a, b) => a + b, 0);
+ 
+ // --- 3. who is new in this window? ------------------------------------------
+ 
+-// Per-page observations: a multi-page scan is not an atomic snapshot, so each
+-// member carries the instant its own page finished downloading. Stamping every
+-// member with scan completion would assert presence "now" for someone on page
+-// one who already left before page two finished, reviving them over a later
+-// gateway removal. `capturedAt` stays the window watermark from before the
+-// reads; presence evidence is "on the roster at this instant", per page.
++// Per-page request bounds: scan/body completion does not prove presence at
++// completion. A member may leave while a page streams. The conservative
++// request-start bound keeps that departure; a newer joined_at in the response
++// still proves a genuine rejoin during the request. `capturedAt` is only the
++// invite-window watermark, not membership observation evidence.
+ const observed = await fetchAllMembersObserved(rest, guildId);
+ if (!observed || observed.length === 0) {
+   console.error(
+@@ -190,7 +189,9 @@ for (const { member: m, observedAt } of observed) {
+   const joinedAt = new Date(m.joined_at).toISOString();
+   // First ever capture has no `since`; the member list is history, not this
+   // window, and backfill.ts owns history. Baseline only, emit nothing.
+-  if (since !== null && joinedAt > since) newJoins.push({ id, joinedAt, observedAt });
++  if (since !== null && joinedAt > since) {
++    newJoins.push({ id, joinedAt, observedAt: joinedAt > observedAt ? joinedAt : observedAt });
++  }
+ }
+ newJoins.sort((a, b) => a.joinedAt.localeCompare(b.joinedAt));
+ 
+@@ -228,13 +229,10 @@ const events: FunnelEvent[] = newJoins.map((j, i) => ({
+ let written = 0;
+ if (!dryRun) {
+   for (let i = 0; i < events.length; i++) {
+-    // A captured join is live current-member evidence, not a historical log
+-    // import: the member was on the roster at its page's observation instant,
+-    // so that observation outranks a delayed removal stamped earlier - but
+-    // never a removal that landed after the member's own page was read.
+-    // Occurrence stays Discord's joined_at; only presence order uses the
+-    // per-page roster-observation instant. Backfill member-list
+-    // joins stay observation-free on purpose - they are history, not presence.
++    // Request-start evidence beats older removals, never departures while the
++    // response streams. If joined_at is newer than the request, it proves a
++    // new spell after that bound and must not be ordered before its own join.
++    // Occurrence remains Discord's joined_at. Backfill joins stay historical.
+     const res = await store.record(events[i], { membershipObservedAt: newJoins[i].observedAt });
+     if (res.inserted) written++;
+   }
+diff --git a/src/discord/rest.ts b/src/discord/rest.ts
+index c6532dcb..9e430ff6 100644
+--- a/src/discord/rest.ts
++++ b/src/discord/rest.ts
+@@ -47,8 +47,14 @@ export class DiscordRest {
+    * Retries 429 and 5xx.
+    */
+   async get<T>(path: string, attempt = 0): Promise<T | null> {
++    return (await this.getObserved<T>(path, attempt))?.data ?? null;
++  }
++
++  /** Request-start evidence, not body completion; retries stamp their own request. */
++  async getObserved<T>(path: string, attempt = 0): Promise<{ data: T; observedAt: string } | null> {
+     await this.pace();
+     this.requests++;
++    const observedAt = new Date().toISOString();
+     let res: Response;
+     try {
+       res = await this.fetchImpl(`${this.base}${path}`, {
+@@ -57,14 +63,14 @@ export class DiscordRest {
+     } catch (err) {
+       if (attempt >= 4) throw err;
+       await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
+-      return this.get<T>(path, attempt + 1);
++      return this.getObserved<T>(path, attempt + 1);
+     }
+ 
+     if (res.status === 429) {
+       const retryAfter = Number(res.headers.get('retry-after') ?? '1');
+       log.debug('rate_limited', { path, retryAfter });
+       await new Promise((r) => setTimeout(r, retryAfter * 1000 + 250));
+-      return this.get<T>(path, attempt);
++      return this.getObserved<T>(path, attempt);
+     }
+     if (res.status === 403 || res.status === 404) {
+       log.debug('rest_inaccessible', { path, status: res.status });
+@@ -73,13 +79,13 @@ export class DiscordRest {
+     if (res.status >= 500) {
+       if (attempt >= 4) return null;
+       await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
+-      return this.get<T>(path, attempt + 1);
++      return this.getObserved<T>(path, attempt + 1);
+     }
+     if (!res.ok) {
+       log.error('rest_failed', { path, status: res.status });
+       return null;
+     }
+-    return (await res.json()) as T;
++    return { data: (await res.json()) as T, observedAt };
+   }
+ }
+ 
+@@ -214,15 +220,15 @@ export async function fetchAllMembersStrict(
+ }
+ 
+ /**
+- * Page a guild's full member list, stamping each member with the instant its
+- * page finished downloading.
++ * Page a guild's full member list, carrying each page's request-start evidence.
+  *
+- * A multi-page scan is not an atomic snapshot: a member observed on page one
+- * may leave before page two completes. Stamping every member with full-scan
+- * completion would assert presence "now" for someone already gone, reviving
+- * them over a later gateway removal. Per-page evidence keeps each observation
+- * honest about when it was actually read (TOG-10212). Callers that only need
+- * history (backfill) keep the observation-free helpers above.
++ * Neither a paginated scan nor one streamed response is an atomic snapshot.
++ * A member can leave after the server builds the page but before the body
++ * finishes downloading. Request-start is a conservative bound that cannot
++ * outrank a gateway departure during the request (TOG-10212). A returned
++ * joined_at later than that bound proves a genuinely newer membership spell;
++ * capture uses that occurrence rather than backdating the new join. Callers
++ * that only need history keep the observation-free helpers above.
+  *
+  * Returns null on a failed page, like `fetchAllMembersStrict`.
+  */
+@@ -233,13 +239,11 @@ export async function fetchAllMembersObserved(
+   const out: Array<{ member: RawMember; observedAt: string }> = [];
+   let after = '0';
+   for (;;) {
+-    const batch = await rest.get<RawMember[]>(
++    const page = await rest.getObserved<RawMember[]>(
+       `/guilds/${guildId}/members?limit=1000&after=${after}`,
+     );
+-    if (!batch) return null;
+-    // Stamp AFTER the page resolves: this is when we actually saw these
+-    // members, not when the scan started or finished.
+-    const observedAt = new Date().toISOString();
++    if (!page) return null;
++    const { data: batch, observedAt } = page;
+     if (batch.length === 0) return out;
+     for (const member of batch) out.push({ member, observedAt });
+     const last = batch[batch.length - 1]?.user?.id;
+diff --git a/src/store/eventStore.ts b/src/store/eventStore.ts
+index 6a3941e4..7fe97ab4 100644
+--- a/src/store/eventStore.ts
++++ b/src/store/eventStore.ts
+@@ -123,11 +123,14 @@ export class EventStore {
+           // observation overwrite a newer commit. So the UPDATE is a
+           // compare-and-swap on the exact metadata string just read - a
+           // concurrent commit makes it match zero rows instead of clobbering -
+-          // with a bounded re-read retry so a genuinely newer observation
+-          // still converges on the max. No FOR UPDATE, no casts, no CTEs, no
+-          // UPDATE..FROM: the offline probes run this same code behind the
+-          // narrow Db surface.
+-          for (let attempt = 0; attempt < 5; attempt++) {
++          // with bounded optimistic retries. On exhaustion, a portable no-op
++          // UPDATE locks the event row before the final read, so contention
++          // cannot silently discard an observation. No FOR UPDATE, casts, or
++          // CTEs: the offline SQLite probes run behind the same Db surface.
++          for (let attempt = 0; attempt <= 5; attempt++) {
++            if (attempt === 5) {
++              await tx.prepare(`UPDATE events SET id = id WHERE id = ?`).run(existing.id);
++            }
+             const cur = await tx
+               .prepare(`SELECT metadata FROM events WHERE id = ?`)
+               .get<{ metadata: string | null }>(existing.id);
+@@ -149,6 +152,7 @@ export class EventStore {
+                 AND COALESCE(metadata, '') = COALESCE(?, '')`,
+             ).run(next, existing.id, cur?.metadata ?? null);
+             if (swapped.changes > 0) break;
++            if (attempt === 5) throw new Error('Membership observation update failed while holding its event lock');
+             // Someone committed between our read and write; re-read and
+             // converge on the max rather than clobbering it.
+           }
+diff --git a/test/e2e.capture.test.ts b/test/e2e.capture.test.ts
+index 68143ef3..b23b4e0c 100644
+--- a/test/e2e.capture.test.ts
++++ b/test/e2e.capture.test.ts
+@@ -203,9 +203,9 @@ test('a captured current member reopens presence after a delayed removal', { tim
+  *
+  * Race: capture window opens at 10:00, a removal lands at 10:01, the member
+  * rejoins at 10:01:30, and the roster is actually read at 10:02. The captured
+- * join must carry the roster-observation instant (10:02), not the window
+- * watermark (10:00) - otherwise the store selects the earlier removal despite
+- * the roster proving a later rejoin. The child's wall clock is pinned at 10:00
++ * join must not be ordered at the request/window start (10:00): the returned
++ * joined_at itself proves a later spell (10:01:30), after the removal. Body
++ * completion alone is not presence evidence. The child's clock is pinned at 10:00
+  * and advanced to 10:02 by the stub at the actual roster read, so the race is
+  * deterministic. Mirrors the reviewer's child-clock proof.
+  */
+@@ -292,7 +292,7 @@ test('a rejoin during REST capture keeps roster-observation time, not window sta
+     const meta = JSON.parse(captured!.metadata) as {
+       membershipObservedAt?: string; window?: { from?: string; to?: string };
+     };
+-    assert.equal(meta.membershipObservedAt, ROSTER_READ, 'presence carries the roster observation, not the window start');
++    assert.equal(meta.membershipObservedAt, MID_REJOIN, 'the returned join proves a newer spell than request start');
+     assert.equal(meta.window?.to, WINDOW_START, 'the window watermark still labels the window start');
+   } finally {
+     await new Promise<void>((resolve) => timed.close(() => resolve()));
+@@ -308,7 +308,7 @@ test('a rejoin during REST capture keeps roster-observation time, not window sta
+  * Race: capture window opens at 10:00, page one observes the target at
+  * 10:00:30, the target leaves at 10:01 while the scan is still paging, and
+  * page two completes at 10:02. The captured join must carry its own page's
+- * observation (10:00:30), not scan completion (10:02) - otherwise the store
++ * request bound (10:00), not scan completion (10:02) - otherwise the store
+  * orders the stale page-one sighting after the real 10:01 removal and
+  * wrongly clears it. A full 1000-row first page forces the second request;
+  * the stub commits the actual leave before returning page two, so the race
+@@ -419,9 +419,136 @@ test('a leave after its roster page keeps the member departed after scan complet
+       `SELECT metadata FROM events WHERE guild_id = ? AND member_id = ? AND event_type = ? AND occurred_at = ?`,
+     ).get<{ metadata: string }>(GUILD, MEMBER, 'member_join', REJOIN);
+     const meta = JSON.parse(captured!.metadata) as { membershipObservedAt?: string };
+-    assert.equal(meta.membershipObservedAt, PAGE_ONE, 'presence carries the page observation, not scan completion');
++    assert.equal(meta.membershipObservedAt, WINDOW_START, 'presence carries its page request bound, not scan completion');
+   } finally {
+     await new Promise<void>((resolve) => paged.close(() => resolve()));
+     rmSync(clock, { force: true });
+   }
+ });
++
++/**
++ * TOG-10212 P2 regression (reviewer CHANGES at c81e6c87): a leave committed
++ * while its roster page is still streaming must not be cleared by that page.
++ *
++ * Race with ONE page request: headers and the first byte arrive at 10:00:30
++ * (the server's snapshot instant), a real gateway leave commits at 10:01
++ * while the body is in flight, and the remainder arrives at 10:02. Stamping
++ * body completion (10:02) asserts presence "now" for someone already gone and
++ * clears the legitimate departure. The stub streams the JSON in two chunks -
++ * headers plus the first half, a pause so the capture child observes
++ * response-start, then the actual leave write, then the rest - so the race is
++ * deterministic. Mirrors the reviewer's single-request proof; the
++ * window-start stamp is only a control, not a proposed rollback.
++ *
++ * REVIEWER: revert the request-start bound in `DiscordRest.getObserved` to a
++ * post-`res.json()` stamp. The projection assert below fails with left_at
++ * cleared to null - exactly the reported P2.
++ */
++test('a leave committed while its roster page streams keeps the member departed', { timeout: 120_000 }, async () => {
++  const WINDOW_START = '2026-09-30T10:00:00.000Z';
++  const HEADERS = '2026-09-30T10:00:30.000Z';
++  const LEFT = '2026-09-30T10:01:00.000Z';
++  const FINISHED = '2026-09-30T10:02:00.000Z';
++  const store = new EventStore(harness.db);
++  await store.record({
++    guildId: GUILD, memberId: MEMBER, eventType: 'member_join',
++    occurredAt: FIRST_JOIN, source: 'invite:first',
++  });
++  await harness.db
++    .prepare(`INSERT INTO invite_snapshots (guild_id, code, uses, updated_at) VALUES (?, ?, ?, ?)`)
++    .run(GUILD, 'stream-invite', 1, FIRST_JOIN);
++
++  const clock = join(tmpdir(), `two-bot-capture-stream-clock-${process.pid}.txt`);
++  writeFileSync(clock, String(Date.parse(WINDOW_START)));
++  const seen: string[] = [];
++  let stubError: unknown;
++  const rosterBody = JSON.stringify([{ user: { id: MEMBER, bot: false }, joined_at: REJOIN }]);
++  const split = Math.floor(rosterBody.length / 2);
++  const streaming = createServer(async (req, res) => {
++    try {
++      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
++      seen.push(`${url.pathname}${url.search}`);
++      const send = (body: unknown) => {
++        const json = JSON.stringify(body);
++        res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(json) });
++        res.end(json);
++      };
++      if (req.method === 'GET' && url.pathname === `/api/v10/guilds/${GUILD}/invites`) {
++        return send([{ code: 'stream-invite', uses: 2 }]);
++      }
++      if (req.method === 'GET' && url.pathname === `/api/v10/guilds/${GUILD}/members`) {
++        // The server's snapshot starts streaming NOW; the leave lands mid-body.
++        writeFileSync(clock, String(Date.parse(HEADERS)));
++        res.writeHead(200, { 'content-type': 'application/json' });
++        res.write(rosterBody.slice(0, split));
++        // Hold the body open so the capture child observes response-start
++        // (headers) while the clock still reads HEADERS.
++        await new Promise((r) => setTimeout(r, 500));
++        // The actual gateway write commits while the page is in flight.
++        await store.record(
++          { guildId: GUILD, memberId: MEMBER, eventType: 'member_leave', occurredAt: LEFT, source: 'gateway' },
++          { membershipObservedAt: LEFT },
++        );
++        writeFileSync(clock, String(Date.parse(FINISHED)));
++        res.write(rosterBody.slice(split));
++        res.end();
++        return;
++      }
++      return send({ vanity_url_code: null });
++    } catch (error) {
++      stubError = error;
++      res.writeHead(500).end();
++    }
++  });
++  await new Promise<void>((resolve) => streaming.listen(0, '127.0.0.1', resolve));
++  try {
++    const port = (streaming.address() as { port: number }).port;
++    const url = new URL(TEST_PG_URL);
++    url.searchParams.set('options', `-c search_path=${harness.schema}`);
++    const pin = fileURLToPath(new URL('./helpers/pinned-clock.mjs', import.meta.url));
++    let code = 0;
++    let stdout = '';
++    let stderr = '';
++    try {
++      const result = await run(process.execPath, ['--import', pin, SCRIPT], {
++        cwd: REPO,
++        env: {
++          ...process.env,
++          TWO_DATABASE_URL: url.toString(),
++          DISCORD_TOKEN: TOKEN,
++          DISCORD_GUILD_ID: GUILD,
++          DISCORD_API_BASE: `http://127.0.0.1:${port}/api/v10`,
++          TWO_TEST_CLOCK_FILE: clock,
++        },
++        timeout: 60_000,
++      });
++      stdout = result.stdout;
++      stderr = result.stderr;
++    } catch (error) {
++      const err = error as { code?: number; stdout?: string; stderr?: string };
++      code = err.code ?? -1;
++      stdout = err.stdout ?? '';
++      stderr = err.stderr ?? '';
++    }
++    assert.equal(code, 0, `capture failed:\n${stdout}\n${stderr}`);
++    assert.equal(stubError, undefined);
++    assert.equal(
++      seen.filter((p) => p.includes('/members?')).length, 1,
++      `expected one roster request: ${JSON.stringify(seen)}`,
++    );
++
++    const projection = await harness.db.prepare(
++      `SELECT joined_at, join_source, left_at FROM members WHERE guild_id = ? AND member_id = ?`,
++    ).get<{ joined_at: string; join_source: string; left_at: string | null }>(GUILD, MEMBER);
++    assert.deepEqual(projection, { joined_at: REJOIN, join_source: 'invite:stream-invite', left_at: LEFT });
++
++    const captured = await harness.db.prepare(
++      `SELECT metadata FROM events WHERE guild_id = ? AND member_id = ? AND event_type = ? AND occurred_at = ?`,
++    ).get<{ metadata: string }>(GUILD, MEMBER, 'member_join', REJOIN);
++    const meta = JSON.parse(captured!.metadata) as { membershipObservedAt?: string };
++    assert.equal(meta.membershipObservedAt, WINDOW_START, 'presence carries request start, not body completion');
++  } finally {
++    await new Promise<void>((resolve) => streaming.close(() => resolve()));
++    rmSync(clock, { force: true });
++  }
++});
+diff --git a/test/unit.membership-replay.test.ts b/test/unit.membership-replay.test.ts
+index 16b57ab8..9b1f0a92 100644
+--- a/test/unit.membership-replay.test.ts
++++ b/test/unit.membership-replay.test.ts
+@@ -203,6 +203,81 @@ test('an older concurrent duplicate completing after a newer one keeps the newes
+   assert.deepEqual(await projection(), { joined_at: FIRST, join_source: 'invite:original', left_at: null });
+ });
+ 
++/**
++ * TOG-10212 P2 regression (reviewer CHANGES at c81e6c87): five colliding
++ * duplicates exhausting the bounded CAS must still converge on the newest
++ * observation. A writer carrying .000050Z loses five compare-and-swaps to
++ * delayed older observations .000001Z-.000005Z committed by a second pooled
++ * connection between its read and its write. Silently acknowledging then
++ * leaves .000005Z stored, so a .000010Z leave wrongly wins presence. The
++ * exhausted writer must serialize to the maximum, not ack lost evidence.
++ * Mirrors the reviewer's five-collision proof; the no-interference control
++ * (same writer, no collisions) passes on both sides.
++ */
++test('five colliding duplicates exhausting CAS still converge on the newest observation', async () => {
++  const store = new EventStore(harness.db);
++  const join = {
++    guildId: G, memberId: M, eventType: 'member_join' as const,
++    occurredAt: FIRST, source: 'invite:original', metadata: { inviterId: 'i' },
++  };
++  const leave = {
++    guildId: G, memberId: M, eventType: 'member_leave' as const,
++    occurredAt: '2026-09-30T00:45:00.000Z', source: 'gateway', metadata: undefined,
++  };
++  const obs = (n: number) => `2026-09-30T01:00:00.${String(n).padStart(6, '0')}Z`;
++  const seed = await store.record(join, { membershipObservedAt: obs(0) });
++  await store.record(leave, { membershipObservedAt: obs(10) });
++
++  // No-interference control: the same newest observation installs cleanly
++  // with nobody racing it, on a member nobody else touches.
++  const controlMember = `${M}-cas-control`;
++  const controlJoin = { ...join, memberId: controlMember };
++  await store.record(controlJoin, { membershipObservedAt: obs(0) });
++  await store.record(controlJoin, { membershipObservedAt: obs(50) });
++  const controlRow = await harness.db.prepare(
++    `SELECT metadata FROM events WHERE guild_id = ? AND member_id = ? AND event_type = ?`,
++  ).get<{ metadata: string }>(G, controlMember, 'member_join');
++  assert.equal(JSON.parse(controlRow!.metadata).membershipObservedAt, obs(50));
++
++  // Main case: every optimistic CAS loses to a just-committed older duplicate.
++  const peer = new EventStore(harness.db);
++  let collisions = 0;
++  const wrap = (db: Db): Db => ({
++    prepare: (sql) => {
++      const stmt = db.prepare(sql);
++      return {
++        get: (...args) => stmt.get(...args),
++        all: (...args) => stmt.all(...args),
++        async run(...args): Promise<RunResult> {
++          // Only the optimistic compare-and-swap carries COALESCE; the
++          // serialized fallback below must run uninterrupted.
++          if (/UPDATE events SET metadata/.test(sql) && sql.includes('COALESCE') && collisions < 5) {
++            collisions++;
++            await peer.record(join, { membershipObservedAt: obs(collisions) });
++          }
++          return stmt.run(...args);
++        },
++      };
++    },
++    exec: (sql) => db.exec(sql),
++    transaction: (fn) => db.transaction((tx) => fn(wrap(tx))),
++    close: () => db.close(),
++  });
++  const colliding = new EventStore(wrap(harness.db));
++  const res = await colliding.record(join, { membershipObservedAt: obs(50) });
++  assert.equal(collisions, 5, 'expected five lost CAS races');
++  assert.deepEqual(res, { inserted: false, eventId: seed.eventId });
++  const row = await harness.db.prepare(
++    `SELECT metadata FROM events WHERE guild_id = ? AND member_id = ? AND event_type = ?`,
++  ).get<{ metadata: string }>(G, M, 'member_join');
++  assert.equal(
++    JSON.parse(row!.metadata).membershipObservedAt,
++    obs(50),
++    'exhaustion must not lose the newest evidence',
++  );
++  assert.deepEqual(await projection(), { joined_at: FIRST, join_source: 'invite:original', left_at: null });
++});
++
+ for (const delayed of ['leave', 'join'] as const) {
+   test(`adapter captures membership dispatch order before a delayed ${delayed} finishes`, async () => {
+     mock.timers.enable({ apis: ['Date'], now: Date.parse(RESUMED) });
+diff --git a/test/unit.membership-rest-observation.test.ts b/test/unit.membership-rest-observation.test.ts
+new file mode 100644
+index 00000000..dc097394
+--- /dev/null
++++ b/test/unit.membership-rest-observation.test.ts
+@@ -0,0 +1,64 @@
++import { test, mock } from 'node:test';
++import assert from 'node:assert/strict';
++import { DiscordRest, fetchAllMembersObserved } from '../src/discord/rest.ts';
++
++const START = '2026-09-30T10:00:00.000Z';
++const LATER = '2026-09-30T10:01:00.000Z';
++const FINISHED = '2026-09-30T10:02:00.000Z';
++
++test('roster evidence uses request start even when headers and body arrive later', async () => {
++  mock.timers.enable({ apis: ['Date'], now: Date.parse(START) });
++  try {
++    const rest = new DiscordRest({
++      token: 'fixture', minIntervalMs: 0,
++      fetchImpl: async () => {
++        mock.timers.setTime(Date.parse(LATER));
++        class DelayedResponse extends Response {
++          override readonly json = async () => {
++            mock.timers.setTime(Date.parse(FINISHED));
++            return [{ user: { id: 'member' }, joined_at: START }];
++          };
++        }
++        return new DelayedResponse();
++      },
++    });
++    assert.deepEqual(await fetchAllMembersObserved(rest, 'guild'), [
++      { member: { user: { id: 'member' }, joined_at: START }, observedAt: START },
++    ]);
++  } finally { mock.timers.reset(); }
++});
++
++test('a retried roster read carries the successful request bound, not the failed attempt', async () => {
++  mock.timers.enable({ apis: ['Date'], now: Date.parse(START) });
++  try {
++    let calls = 0;
++    const rest = new DiscordRest({
++      token: 'fixture', minIntervalMs: 0,
++      fetchImpl: async () => {
++        calls++;
++        if (calls === 1) {
++          mock.timers.setTime(Date.parse(LATER));
++          return new Response(null, { status: 503 });
++        }
++        mock.timers.setTime(Date.parse(FINISHED));
++        return Response.json([{ user: { id: 'member' }, joined_at: START }]);
++      },
++    });
++    assert.deepEqual(await fetchAllMembersObserved(rest, 'guild'), [
++      { member: { user: { id: 'member' }, joined_at: START }, observedAt: LATER },
++    ]);
++    assert.equal(calls, 2);
++    assert.equal(rest.requests, 2);
++  } finally { mock.timers.reset(); }
++});
++
++test('observed roster reads refuse a failed page and ordinary GET retains its data contract', async () => {
++  const rest = new DiscordRest({
++    token: 'fixture', minIntervalMs: 0,
++    fetchImpl: async (url) => String(url).includes('/members?')
++      ? new Response(null, { status: 403 })
++      : Response.json({ value: 1 }),
++  });
++  assert.equal(await fetchAllMembersObserved(rest, 'guild'), null);
++  assert.deepEqual(await rest.get('/other'), { value: 1 });
++});
