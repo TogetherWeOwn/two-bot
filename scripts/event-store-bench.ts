@@ -1,7 +1,12 @@
 /**
  * Event-store write-path benchmark + funnel-query index audit (TOG-5709).
  *
- *   TWO_DATABASE_URL=postgres://two:two@127.0.0.1:5432/two_test node scripts/event-store-bench.ts [members]
+ *   TWO_TEST_DATABASE_URL=postgres://agent_test@agent-testdb:5432/agent_test node scripts/event-store-bench.ts [members] [--check]
+ *
+ * --check pins the baseline workload (2000 members / 8667 events), prints
+ * PASS/FAIL for every budget, and exits 1 on regression. CI runs it against
+ * its Postgres service container. Use only agent-testdb or CI service
+ * containers; the ambient TWO_DATABASE_URL is deliberately never read.
  *
  * Seeds N members with a realistic event mix through `EventStore.record` -
  * the only write path into the funnel log - then times the reads the funnel
@@ -11,7 +16,7 @@
  * ISOLATION. Everything happens inside one schema named
  * `bench_<pid>_<timestamp>` that this script creates, migrates, and drops on
  * the way out. It never touches `public` or any other schema - but point it
- * at a throwaway database anyway (CI's `two_test`, a local cluster), never
+ * at agent-testdb or CI's `two_test` service container, never
  * production. Needs CREATE/DROP SCHEMA on the database.
  *
  * WHAT IT PROVES. Re-run before touching any index on `events` or `members`:
@@ -20,107 +25,204 @@
  * distinct-members 18.6ms -> 2.8ms with idx_events_type_member, everything
  * else unchanged. See migrations/0038_events_type_member.sql.
  */
+import { pathToFileURL } from 'node:url';
 import { openDb } from '../src/store/db.ts';
 import { EventStore } from '../src/store/eventStore.ts';
 import { MESSAGE_RUNGS, type EventType } from '../src/core/events.ts';
 
-const spec = process.env.TWO_DATABASE_URL?.trim();
-if (!spec) {
-  console.error('event-store-bench: TWO_DATABASE_URL is not set. Point it at an isolated database, never production.');
-  process.exit(2);
+// Recorded 2026-09-30 on Node 24.21 / Postgres 17.11 / agent-testdb: median of three complete
+// runs (write 0.247, 0.262, 0.246 ms/event), each read a median of seven warm
+// samples. Refresh only with measured evidence, not to turn a regression green. Write budget is
+// 3x baseline; reads have a 10ms floor for shared-runner scheduling noise.
+export const BASELINE = {
+  members: 2000,
+  events: 8667,
+  writeMsPerEvent: 0.247,
+  reads: {
+    'funnel count (type+time)': 0.061,
+    'joiners DISTINCT (windowed)': 0.079,
+    'stage DISTINCT (unwindowed)': 0.158,
+    'member rung lookup': 0.049,
+    'hasEvent probe': 0.069,
+    'write series (recorded_at scan)': 0.892,
+  },
+};
+
+export interface BenchMetrics {
+  members: number;
+  events: number;
+  writeMs: number;
+  reads: Array<{ label: string; ms: number }>;
 }
-const N = Math.max(1, Number(process.argv[2] ?? 2000) || 2000);
-if (!Number.isInteger(N) || N > 500_000) {
-  console.error('event-store-bench: members must be an integer 1..500000.');
-  process.exit(2);
+
+export function checkBudgets(metrics: BenchMetrics) {
+  const checks = [
+    { label: 'members', actual: metrics.members, baseline: BASELINE.members, limit: BASELINE.members, exact: true },
+    { label: 'events', actual: metrics.events, baseline: BASELINE.events, limit: BASELINE.events, exact: true },
+    { label: 'write ms/event', actual: metrics.writeMs / metrics.events, baseline: BASELINE.writeMsPerEvent, limit: BASELINE.writeMsPerEvent * 3, exact: false },
+    ...Object.entries(BASELINE.reads).map(([label, baseline]) => ({
+      label, actual: metrics.reads.find((r) => r.label === label)?.ms ?? NaN,
+      baseline, limit: Math.max(10, baseline * 3), exact: false,
+    })),
+  ];
+  return checks.map((c) => ({
+    ...c,
+    pass: Number.isFinite(c.actual) && c.actual >= 0 && (c.exact ? c.actual === c.limit : c.actual <= c.limit),
+  }));
 }
 
-const schema = `bench_${process.pid}_${Date.now().toString(36)}`;
-const GUILD = 'bench-guild';
-const db = await openDb(spec, { schema, applicationName: 'two-bot:bench' });
-const store = new EventStore(db);
+export function reportBudgets(metrics: BenchMetrics, log: (line: string) => void = console.log): number {
+  const checks = checkBudgets(metrics);
+  log('  baseline 2026-09-30 / Node 24 / agent-testdb; reads = median of 7 warm runs:');
+  for (const c of checks) {
+    log(`    ${c.pass ? 'PASS' : 'FAIL'} ${c.label.padEnd(31)} actual=${c.actual.toFixed(3)} baseline=${c.baseline.toFixed(3)} limit=${c.limit.toFixed(3)}`);
+  }
+  const failures = checks.filter((c) => !c.pass);
+  log(`  threshold result: ${failures.length ? 'FAIL' : 'PASS'} (${failures.length} budget violations)`);
+  return failures.length ? 1 : 0;
+}
 
-try {
-  const base = Date.parse('2023-01-01T00:00:00.000Z');
-  const iso = (ms: number) => new Date(ms).toISOString();
+export function parseArgs(args: string[]) {
+  const check = args.includes('--check');
+  const positional = args.filter((a) => a !== '--check');
+  if (positional.length > 1 || args.filter((a) => a === '--check').length > 1) {
+    throw new Error('usage: event-store-bench.ts [members] [--check]');
+  }
+  const members = Number(positional[0] ?? BASELINE.members);
+  if (!Number.isInteger(members) || members < 1 || members > 500_000) {
+    throw new Error('members must be an integer 1..500000.');
+  }
+  if (check && members !== BASELINE.members) {
+    throw new Error(`--check requires the baseline workload: ${BASELINE.members} members.`);
+  }
+  return { members, check };
+}
 
-  // --- write path: one realistic member lifecycle per member ----------------
-  const t0 = Date.now();
-  let events = 0;
-  for (let i = 0; i < N; i++) {
-    const m = `m${i}`;
-    const j = base + i * 3600_000; // hourly joins: a multi-year log, like the real one
-    const batch: Array<{ type: EventType; at: number; source: string }> = [
-      { type: 'member_join', at: j, source: 'invite:x' },
-      { type: 'gate_cleared', at: j + 60_000, source: 'live' },
-      { type: 'first_message', at: j + 3600_000, source: 'channel:c1' },
-    ];
-    if (i % 2 === 0) {
-      batch.push({ type: 'second_message', at: j + 3700_000, source: 'channel:c1' });
-      batch.push({ type: 'third_message', at: j + 3800_000, source: 'channel:c1' });
+async function main() {
+  let options: ReturnType<typeof parseArgs>;
+  try {
+    options = parseArgs(process.argv.slice(2));
+  } catch (err) {
+    console.error(`event-store-bench: ${(err as Error).message}`);
+    process.exitCode = 2;
+    return;
+  }
+  const spec = process.env.TWO_TEST_DATABASE_URL?.trim();
+  if (!spec) {
+    console.error('event-store-bench: TWO_TEST_DATABASE_URL is not set. Use agent-testdb or a CI service container, never production/staging.');
+    process.exitCode = 2;
+    return;
+  }
+  const N = options.members;
+  const schema = `bench_${process.pid}_${Date.now().toString(36)}`;
+  const GUILD = 'bench-guild';
+  const db = await openDb(spec, { schema, applicationName: 'two-bot:bench' });
+  const store = new EventStore(db);
+
+  try {
+    const base = Date.parse('2023-01-01T00:00:00.000Z');
+    const iso = (ms: number) => new Date(ms).toISOString();
+
+    // --- write path: one realistic member lifecycle per member ----------------
+    // https://nodejs.org/docs/latest-v24.x/api/perf_hooks.html#performancenow
+    const t0 = performance.now();
+    let events = 0;
+    for (let i = 0; i < N; i++) {
+      const m = `m${i}`;
+      const j = base + i * 3600_000; // hourly joins: a multi-year log, like the real one
+      const batch: Array<{ type: EventType; at: number; source: string }> = [
+        { type: 'member_join', at: j, source: 'invite:x' },
+        { type: 'gate_cleared', at: j + 60_000, source: 'live' },
+        { type: 'first_message', at: j + 3600_000, source: 'channel:c1' },
+      ];
+      if (i % 2 === 0) {
+        batch.push({ type: 'second_message', at: j + 3700_000, source: 'channel:c1' });
+        batch.push({ type: 'third_message', at: j + 3800_000, source: 'channel:c1' });
+      }
+      if (i % 3 === 0) batch.push({ type: 'first_voice_session', at: j + 7200_000, source: 'voice:v1' });
+      for (const e of batch) {
+        await store.record({ guildId: GUILD, memberId: m, eventType: e.type, occurredAt: iso(e.at), source: e.source });
+        events++;
+      }
     }
-    if (i % 3 === 0) batch.push({ type: 'first_voice_session', at: j + 7200_000, source: 'voice:v1' });
-    for (const e of batch) {
-      await store.record({ guildId: GUILD, memberId: m, eventType: e.type, occurredAt: iso(e.at), source: e.source });
-      events++;
+    const writeMs = performance.now() - t0;
+    // Production autovacuum would have statistics and an all-visible heap by
+    // the time anyone reads; a bulk seed has neither, so do both explicitly
+    // for honest plans (without VACUUM every index-only scan pays heap
+    // fetches and the planner prices it as a sort instead).
+    await db.exec('VACUUM (ANALYZE) events');
+    await db.exec('VACUUM (ANALYZE) members');
+
+    // --- read path: the queries the funnel actually issues --------------------
+    const since = iso(base + (N - 168) * 3600_000); // last 7 days of seeded joins
+    const timed = async (label: string, sql: string, ...params: unknown[]) => {
+      const statement = db.prepare(sql);
+      await statement.all(...params); // warm cache; measure seven runs, not one scheduling pause
+      const samples: number[] = [];
+      let rowCount = 0;
+      for (let i = 0; i < 7; i++) {
+        const a = performance.now();
+        const rows = await statement.all(...params);
+        samples.push(performance.now() - a);
+        rowCount = rows.length;
+      }
+      samples.sort((a, b) => a - b);
+      return { label, ms: samples[3], rows: rowCount };
+    };
+    const reads = [
+      await timed('funnel count (type+time)', `SELECT COUNT(*) AS n FROM events WHERE event_type = ? AND occurred_at >= ?`, 'member_join' as EventType, since),
+      await timed('joiners DISTINCT (windowed)', `SELECT COUNT(DISTINCT member_id) AS n FROM events WHERE event_type = ? AND occurred_at >= ?`, 'member_join' as EventType, since),
+      await timed('stage DISTINCT (unwindowed)', `SELECT COUNT(DISTINCT member_id) AS n FROM events WHERE event_type = ? AND member_id IS NOT NULL`, 'first_message' as EventType),
+      await timed('member rung lookup', `SELECT event_type, occurred_at FROM events WHERE guild_id = ? AND member_id = ? AND event_type IN (?, ?, ?)`, GUILD, 'm7', ...MESSAGE_RUNGS),
+      await timed('hasEvent probe', `SELECT 1 AS x FROM events WHERE guild_id = ? AND member_id = ? AND event_type = ? LIMIT 1`, GUILD, 'm9', 'first_voice_session' as EventType),
+      await timed('write series (recorded_at scan)', `SELECT recorded_at AS at FROM events WHERE occurred_at >= ? ORDER BY recorded_at`, since),
+    ];
+
+    // --- plan shapes: which index (if any) each read rides --------------------
+    const explain = async (sql: string) =>
+      (await db.prepare(`EXPLAIN ${sql}`).all<Record<string, string>>())
+        .map((r) => r['QUERY PLAN'])
+        .filter((l) => /Scan|Sort|Aggregate/.test(l))
+        .slice(0, 3)
+        .join(' > ');
+    const plans: Record<string, string> = {
+      'stage DISTINCT (unwindowed)': await explain(`SELECT COUNT(DISTINCT member_id) FROM events WHERE event_type = 'first_message' AND member_id IS NOT NULL`),
+      'member rung lookup': await explain(`SELECT event_type, occurred_at FROM events WHERE guild_id = '${GUILD}' AND member_id = 'm7' AND event_type IN ('first_message','second_message','third_message')`),
+      'write series (recorded_at scan)': await explain(`SELECT recorded_at FROM events WHERE occurred_at >= '${since}' ORDER BY recorded_at`),
+    };
+
+    const indexSizes = await db
+      .prepare(
+        `SELECT indexrelname AS indexname, pg_size_pretty(pg_relation_size(indexrelid)) AS size
+           FROM pg_stat_user_indexes WHERE schemaname = current_schema() AND relname = 'events'
+           ORDER BY 1`,
+      )
+      .all<{ indexname: string; size: string }>();
+
+    // --- report ----------------------------------------------------------------
+    console.log(`\nevent-store bench - ${N} members, ${events} events, schema ${schema}\n`);
+    console.log(`  write path  ${String(events).padStart(7)} events in ${(writeMs / 1000).toFixed(1)}s  ${(events / (writeMs / 1000)).toFixed(0)} events/s  ${(writeMs / events).toFixed(2)} ms/event`);
+    console.log(`  reads:`);
+    for (const r of reads) console.log(`    ${r.label.padEnd(31)} ${r.ms.toFixed(3).padStart(8)}ms  (${r.rows} rows)`);
+    console.log(`  plans:`);
+    for (const [k, v] of Object.entries(plans)) console.log(`    ${k.padEnd(31)} ${v}`);
+    console.log(`  events indexes:`);
+    for (const i of indexSizes) console.log(`    ${i.indexname.padEnd(28)} ${i.size}`);
+    if (options.check) {
+      process.exitCode = reportBudgets({ members: N, events, writeMs, reads });
+    } else {
+      console.log(`  exploratory run; use --check with ${BASELINE.members} members for baseline PASS/FAIL.`);
+    }
+    console.log('');
+  } finally {
+    try {
+      await db.exec(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
+    } finally {
+      await db.close();
     }
   }
-  const writeMs = Date.now() - t0;
-  // Production autovacuum would have statistics and an all-visible heap by
-  // the time anyone reads; a bulk seed has neither, so do both explicitly
-  // for honest plans (without VACUUM every index-only scan pays heap
-  // fetches and the planner prices it as a sort instead).
-  await db.exec('VACUUM (ANALYZE) events');
-  await db.exec('VACUUM (ANALYZE) members');
-
-  // --- read path: the queries the funnel actually issues --------------------
-  const since = iso(base + (N - 168) * 3600_000); // last 7 days of seeded joins
-  const timed = async (label: string, sql: string, ...params: unknown[]) => {
-    const a = Date.now();
-    const rows = await db.prepare(sql).all(...params);
-    return { label, ms: Date.now() - a, rows: rows.length };
-  };
-  const reads = [
-    await timed('funnel count (type+time)', `SELECT COUNT(*) AS n FROM events WHERE event_type = ? AND occurred_at >= ?`, 'member_join' as EventType, since),
-    await timed('joiners DISTINCT (windowed)', `SELECT COUNT(DISTINCT member_id) AS n FROM events WHERE event_type = ? AND occurred_at >= ?`, 'member_join' as EventType, since),
-    await timed('stage DISTINCT (unwindowed)', `SELECT COUNT(DISTINCT member_id) AS n FROM events WHERE event_type = ? AND member_id IS NOT NULL`, 'first_message' as EventType),
-    await timed('member rung lookup', `SELECT event_type, occurred_at FROM events WHERE guild_id = ? AND member_id = ? AND event_type IN (?, ?, ?)`, GUILD, 'm7', ...MESSAGE_RUNGS),
-    await timed('hasEvent probe', `SELECT 1 AS x FROM events WHERE guild_id = ? AND member_id = ? AND event_type = ? LIMIT 1`, GUILD, 'm9', 'first_voice_session' as EventType),
-    await timed('write series (recorded_at scan)', `SELECT recorded_at AS at FROM events WHERE occurred_at >= ? ORDER BY recorded_at`, since),
-  ];
-
-  // --- plan shapes: which index (if any) each read rides --------------------
-  const explain = async (sql: string) =>
-    (await db.prepare(`EXPLAIN ${sql}`).all<Record<string, string>>())
-      .map((r) => r['QUERY PLAN'])
-      .filter((l) => /Scan|Sort|Aggregate/.test(l))
-      .slice(0, 3)
-      .join(' > ');
-  const plans: Record<string, string> = {
-    'stage DISTINCT (unwindowed)': await explain(`SELECT COUNT(DISTINCT member_id) FROM events WHERE event_type = 'first_message' AND member_id IS NOT NULL`),
-    'member rung lookup': await explain(`SELECT event_type, occurred_at FROM events WHERE guild_id = '${GUILD}' AND member_id = 'm7' AND event_type IN ('first_message','second_message','third_message')`),
-    'write series (recorded_at scan)': await explain(`SELECT recorded_at FROM events WHERE occurred_at >= '${since}' ORDER BY recorded_at`),
-  };
-
-  const indexSizes = await db
-    .prepare(
-      `SELECT indexrelname AS indexname, pg_size_pretty(pg_relation_size(indexrelid)) AS size
-         FROM pg_stat_user_indexes WHERE schemaname = current_schema() AND relname = 'events'
-         ORDER BY 1`,
-    )
-    .all<{ indexname: string; size: string }>();
-
-  // --- report ----------------------------------------------------------------
-  console.log(`\nevent-store bench - ${N} members, ${events} events, schema ${schema}\n`);
-  console.log(`  write path  ${String(events).padStart(7)} events in ${(writeMs / 1000).toFixed(1)}s  ${(events / (writeMs / 1000)).toFixed(0)} events/s  ${(writeMs / events).toFixed(2)} ms/event`);
-  console.log(`  reads:`);
-  for (const r of reads) console.log(`    ${r.label.padEnd(31)} ${String(r.ms).padStart(6)}ms  (${r.rows} rows)`);
-  console.log(`  plans:`);
-  for (const [k, v] of Object.entries(plans)) console.log(`    ${k.padEnd(31)} ${v}`);
-  console.log(`  events indexes:`);
-  for (const i of indexSizes) console.log(`    ${i.indexname.padEnd(28)} ${i.size}`);
-  console.log('');
-} finally {
-  await db.exec(`DROP SCHEMA IF EXISTS ${schema} CASCADE`);
-  await db.close();
 }
+
+// pathToFileURL keeps direct invocation working on all Node 24 releases.
+// https://nodejs.org/docs/latest-v24.x/api/url.html#urlpathtofileurlpath-options
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();

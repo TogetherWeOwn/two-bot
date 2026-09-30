@@ -135,6 +135,10 @@ jobs:
       - name: Run required checks including owned storage
         run: ./scripts/ci/run-check-job.sh
 
+      # Fixed workload and checked-in budgets; only the disposable service DB.
+      - name: Check event-store benchmark budgets
+        run: node scripts/event-store-bench.ts --check
+
   # Exercise the website views and least-privilege grants end to end after the
   # required check has proved the full Postgres-backed suite.
   postgres:
