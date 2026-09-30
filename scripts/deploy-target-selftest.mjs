@@ -470,6 +470,49 @@ test("smoke regression: invalid numeric timestamps never establish freshness", (
   }
 });
 
+test("smoke review-8f2dac86: terminal bot ts outranks wrapper-style timestamp fields", async (t) => {
+  const old = "2026-09-30T18:01:00.000Z";
+  for (const ts of [old, Date.parse(old)]) {
+    const record = { ...SMOKE_READY, ts, timestamp: SMOKE_TS };
+    const records = findReadyLines(await smokeRecordsFromPanel(t, [
+      JSON.stringify(record),
+      { message: JSON.stringify(record), timestamp: SMOKE_TS },
+      { timestamp: SMOKE_TS, data: record },
+    ]));
+    assert.equal(records.length, 3);
+    for (const found of records) assert.equal(found.tsMs, Date.parse(old));
+    assert.equal(records.filter(({ tsMs }) => tsMs >= Date.parse(old) + 1000).length, 0, "old ready lines cannot prove a newer deploy");
+  }
+});
+
+test("smoke review-8f2dac86: envelope messages cannot shadow nested bot records", async (t) => {
+  const ready = { ...SMOKE_READY, ts: SMOKE_TS };
+  const items = [
+    { msg: "container_output", data: ready },
+    { msg: "container_output", data: [ready] },
+    { msg: "container_output", message: `INFO ${JSON.stringify(ready)}` },
+    { msg: "container_output", output: { msg: "stdout", data: ready } },
+  ];
+  const records = findReadyLines(await smokeRecordsFromPanel(t, items));
+  assert.equal(records.length, items.length);
+  for (const found of records) assert.equal(found.tsMs, Date.parse(SMOKE_TS));
+});
+
+test("smoke review-8f2dac86: complete inner records survive broker-capped outer wrappers", async (t) => {
+  const ready = { ...SMOKE_READY, ts: SMOKE_TS, user: 'Fake}Bot\\"' };
+  const items = [10, 5000].map((length) => `INFO ${JSON.stringify({ data: ready, padding: "x".repeat(length) })}`);
+  const records = findReadyLines(await smokeRecordsFromPanel(t, items));
+  assert.equal(records.length, items.length);
+  for (const found of records) {
+    assert.deepEqual(found.record, ready);
+    assert.equal(found.tsMs, Date.parse(SMOKE_TS));
+  }
+  const incomplete = `INFO {"data":${JSON.stringify(ready)},"padding":"unfinished`;
+  assert.deepEqual(jsonCandidates(incomplete), [JSON.stringify(ready)]);
+  const quoted = JSON.stringify({ padding: JSON.stringify(ready) }).slice(0, -1);
+  assert.deepEqual(jsonCandidates(quoted), [], "escaped string contents are not independent JSON records");
+});
+
 // --- deploy.yml wiring (the TOG-913 shape) -----------------------------------
 
 test("workflow-uses-guard: deploy.yml calls the broker deploy scripts", () => {

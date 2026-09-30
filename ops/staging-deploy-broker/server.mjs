@@ -266,30 +266,42 @@ const SENSITIVE_KEY_RES = [
   /\bauth\b/i,
 ];
 
-/** Replace known credentials as whole strings, without interpreting delimiters. */
-function scrubKnownSecrets(text, secrets) {
-  let out = String(text ?? "");
+/** Match every accepted host credential against ORIGINAL bytes, including overlaps. */
+function knownSecretSpans(text, secrets) {
+  const spans = [];
   if (Array.isArray(secrets)) {
     for (const secret of secrets) {
-      if (typeof secret !== "string" || secret.length < 4) continue;
-      let at = out.indexOf(secret);
+      if (typeof secret !== "string" || secret === "") continue;
+      let at = text.indexOf(secret);
       while (at !== -1) {
-        out = out.slice(0, at) + SECRET_PLACEHOLDER + out.slice(at + secret.length);
-        at = out.indexOf(secret, at + SECRET_PLACEHOLDER.length);
+        spans.push([at, at + secret.length]);
+        at = text.indexOf(secret, at + 1);
       }
     }
   }
-  return out;
+  return spans;
 }
 
-/** Scrub known host credentials and generic secret shapes from one string. */
+function mergeSpans(spans) {
+  const merged = [];
+  spans.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  for (const [start, end] of spans) {
+    const previous = merged[merged.length - 1];
+    if (previous && start <= previous[1]) previous[1] = Math.max(previous[1], end);
+    else merged.push([start, end]);
+  }
+  return merged;
+}
+
+/** Scrub all credential spans together; one replacement must not hide another. */
 export function scrubSecrets(text, secrets) {
-  let out = scrubKnownSecrets(text, secrets);
+  const original = String(text ?? "");
+  const spans = knownSecretSpans(original, secrets);
   for (const re of GENERIC_SECRET_RES) {
     re.lastIndex = 0;
-    out = out.replace(re, SECRET_PLACEHOLDER);
+    for (const match of original.matchAll(re)) spans.push([match.index, match.index + match[0].length]);
   }
-  return out;
+  return redactSpans(original, mergeSpans(spans));
 }
 
 /**
@@ -366,11 +378,18 @@ export function extractJsonCandidates(text) {
  */
 export function shapeEmbeddedText(value, secrets, depth = 0) {
   const secretList = Array.isArray(secrets) ? secrets : [];
-  // Host tokens can contain JSON delimiters. Scrub the complete credential
-  // BEFORE scanning/slicing: splitting at a brace, bracket or quote inside it
-  // would leave a prefix that no longer matches the known secret.
-  value = scrubKnownSecrets(value, secretList);
-  const { spans, incompleteAt } = scanJsonCandidates(value);
+  // Hide credential delimiters from the scanner WITHOUT changing source bytes
+  // or offsets. Decoding must still see original keys to classify sensitivity:
+  // replacing a token-shaped password key first would erase that classification.
+  value = String(value ?? "");
+  let scanView = "";
+  let offset = 0;
+  for (const [start, end] of mergeSpans(knownSecretSpans(value, secretList))) {
+    scanView += value.slice(offset, start) + "x".repeat(end - start);
+    offset = end;
+  }
+  scanView += value.slice(offset);
+  const { spans, incompleteAt } = scanJsonCandidates(scanView);
   // An unfinished JSON-like prefix can own quote state and hide every later
   // record. Fail closed from its opener; only the balanced prefix is shaped.
   // That prefix has no unfinished candidate, so this adds at most one scan.
@@ -793,9 +812,9 @@ export function createHandler(config, panel = panelRequest) {
         // IDs are untrusted panel output too: a syntactically valid ID can
         // contain a host credential. Reject it whole before storing, logging
         // (including its prefix), or returning anything to the caller.
-        if (!DEPLOYMENT_UUID_RE.test(deploymentUuid) || hostSecrets().some(
-          (secret) => typeof secret === "string" && secret !== "" && deploymentUuid.includes(secret),
-        )) throw httpError(502, "bad_gateway");
+        if (!DEPLOYMENT_UUID_RE.test(deploymentUuid) || scrubSecrets(deploymentUuid, hostSecrets()) !== deploymentUuid) {
+          throw httpError(502, "bad_gateway");
+        }
         issuedDeployments.add(deploymentUuid);
         process.stdout.write(`BROKER: deploy queued for staging app ${config.appUuid.slice(0, 8)} sha ${shortSha} (deployment ${deploymentUuid.slice(0, 12)}).\n`);
         send(res, 200, { deployment_uuid: deploymentUuid });

@@ -978,6 +978,12 @@ for (const fixture of [
   { name: "panel credential inside the ID", id: `dep-${PANEL_TOKEN}-suffix`, config: testConfig() },
   { name: "broker credential as the ID", id: BROKER_TOKEN, config: testConfig() },
   { name: "short panel credential inside the ID", id: "dep-fake-run-suffix", config: { ...testConfig(), panelToken: "run" } },
+  ...[
+    "gh" + "p_" + "A".repeat(24),
+    "xox" + "b-" + "a".repeat(20),
+    "sk-" + "live-" + "a".repeat(20),
+    "AK" + "IA" + "A".repeat(16),
+  ].map((id, index) => ({ name: `generic credential shape ${index}`, id, config: testConfig() })),
 ]) {
   test(`review-67fe0f14 deploy: rejects ${fixture.name} before emission or storage`, async (t) => {
     const srv = await boot(({ method }) => method === "POST"
@@ -1123,6 +1129,75 @@ for (const panelToken of [
     assert.equal(findReadyLines(findBotRecords(normalizeLogPayload(out.json))).length, 1);
   });
 }
+
+// --- PR291 findings 1-4 at 8f2dac86 ------------------------------------------
+
+for (const panelToken of ["password-fixture-panel-credential", "pass", "s"]) {
+  test(`review-8f2dac86 logs: raw sensitive keys survive scan masking (${panelToken.length} chars)`, async (t) => {
+    const config = parseConfig({
+      STAGING_BROKER_TOKEN: BROKER_TOKEN, COOLIFY_URL: PANEL_URL, COOLIFY_TOKEN: panelToken,
+    });
+    const key = panelToken.startsWith("password") ? panelToken : panelToken + "_secret";
+    const object = { password: "ordinary-db-value", [key]: "another-db-value" };
+    const srv = await boot(() => ({ logs: [
+      object,
+      JSON.stringify(object),
+      `INFO ${JSON.stringify(object)}`,
+      { message: `INFO ${JSON.stringify(object)}` },
+      `INFO ${JSON.stringify([object])}`,
+    ] }), config);
+    t.after(srv.close);
+    const out = await req(srv.base, "/v1/staging/logs");
+    assert.equal(out.status, 200);
+    assert.ok(!out.text.includes("ordinary-db-value"));
+    assert.ok(!out.text.includes("another-db-value"));
+    assert.ok(out.json.logs.every(({ message }) => message.includes(SECRET_PLACEHOLDER)));
+  });
+}
+
+for (const panelToken of ["r", "ru", "run"]) {
+  test(`review-8f2dac86 logs: every accepted short panel credential redacts (${panelToken.length} chars)`, async (t) => {
+    const config = parseConfig({
+      STAGING_BROKER_TOKEN: BROKER_TOKEN, COOLIFY_URL: PANEL_URL, COOLIFY_TOKEN: panelToken,
+    });
+    const srv = await boot(() => ({ logs: [
+      `value=${panelToken}`,
+      { value: panelToken },
+      `INFO ${JSON.stringify({ value: panelToken })}`,
+    ] }), config);
+    t.after(srv.close);
+    const out = await req(srv.base, "/v1/staging/logs");
+    assert.equal(out.status, 200);
+    assert.deepEqual(out.json.logs.map(({ message }) => message), [
+      `value=${SECRET_PLACEHOLDER}`,
+      JSON.stringify({ value: SECRET_PLACEHOLDER }),
+      `INFO ${JSON.stringify({ value: SECRET_PLACEHOLDER })}`,
+    ]);
+  });
+}
+
+test("review-8f2dac86 logs: configured credentials redact as unions of original spans", async (t) => {
+  const config = { ...testConfig(), panelToken: "shared-fake-panel-credential", brokerToken: "prefix-shared-fake-panel-credential-suffix" };
+  const srv = await boot(() => ({ logs: [
+    config.brokerToken,
+    { value: config.brokerToken },
+    `INFO ${JSON.stringify({ value: config.brokerToken })}`,
+  ] }), config);
+  t.after(srv.close);
+  const out = await req(srv.base, "/v1/staging/logs", { token: config.brokerToken });
+  assert.equal(out.status, 200);
+  assert.deepEqual(out.json.logs.map(({ message }) => message), [
+    SECRET_PLACEHOLDER,
+    JSON.stringify({ value: SECRET_PLACEHOLDER }),
+    `INFO ${JSON.stringify({ value: SECRET_PLACEHOLDER })}`,
+  ]);
+  for (const secrets of [["abcde", "defgh"], ["defgh", "abcde"]]) {
+    assert.equal(scrubSecrets("abcdefgh abcdefgh", secrets), `${SECRET_PLACEHOLDER} ${SECRET_PLACEHOLDER}`);
+  }
+  assert.equal(scrubSecrets("aaaaa", ["aaa"]), SECRET_PLACEHOLDER, "self-overlapping matches merge");
+  const generic = "gh" + "p_" + "A".repeat(24);
+  assert.equal(scrubSecrets(generic, ["AAAA"]), SECRET_PLACEHOLDER, "known-secret matches cannot break a generic match");
+});
 
 test("logs-bounded unit: parseLogLines clamps to 1..500", () => {
   assert.equal(parseLogLines(new URLSearchParams("")), 200);

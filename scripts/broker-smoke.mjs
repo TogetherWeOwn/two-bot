@@ -131,31 +131,31 @@ export function normalizeLogPayload(payload) {
   return [];
 }
 
-/** Yield outer JSON objects, ignoring delimiters inside escaped strings. */
+/** Yield outermost COMPLETE objects; a capped wrapper may still contain one. */
 export function jsonCandidates(text) {
-  const out = [];
-  let start = -1;
-  let depth = 0;
+  const spans = [];
+  const stack = [];
   let quoted = false;
   let escaped = false;
   for (let i = 0; i < text.length; i++) {
     const char = text[i];
-    if (depth === 0) {
-      if (char === "{") {
-        start = i;
-        depth = 1;
-        quoted = false;
-        escaped = false;
-      }
-      continue;
-    }
     if (quoted) {
       if (escaped) escaped = false;
       else if (char === "\\") escaped = true;
       else if (char === '"') quoted = false;
-    } else if (char === '"') quoted = true;
-    else if (char === "{") depth++;
-    else if (char === "}" && --depth === 0) out.push(text.slice(start, i + 1));
+    } else if (char === '"' && stack.length > 0) quoted = true;
+    else if (char === "{") stack.push(i);
+    else if (char === "}" && stack.length > 0) spans.push([stack.pop(), i + 1]);
+  }
+  // Prefer a complete parent so traversal retains its timestamp. Only use a
+  // completed child on its own when its parent was truncated by the broker.
+  spans.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  const out = [];
+  let end = 0;
+  for (const [start, stop] of spans) {
+    if (start < end) continue;
+    out.push(text.slice(start, stop));
+    end = stop;
   }
   return out;
 }
@@ -182,21 +182,27 @@ function findBotRecord(text, fallbackMs = NaN, depth = 0, budget = { nodes: 1000
 function visitBotRecord(record, fallbackMs, depth, budget) {
   if (depth > 10 || --budget.nodes < 0 || record === null || typeof record !== "object") return null;
   const ownMs = timestampMs(usableTimestamp(record));
-  const tsMs = Number.isFinite(ownMs) ? ownMs : fallbackMs;
-  if (typeof record.msg === "string") return { record, tsMs };
-  if (depth >= 10) return null;
-  for (const key of TEXT_KEYS) {
-    if (typeof record[key] !== "string") continue;
-    const nested = findBotRecord(record[key], tsMs, depth + 1, budget);
-    if (nested !== null) return nested;
+  const wrapperMs = Number.isFinite(ownMs) ? ownMs : fallbackMs;
+  if (depth < 10) {
+    // Container envelopes can have their own msg. A nested bot record must
+    // not be hidden by that transport label (e.g. msg: container_output).
+    for (const key of TEXT_KEYS) {
+      if (typeof record[key] !== "string") continue;
+      const nested = findBotRecord(record[key], wrapperMs, depth + 1, budget);
+      if (nested !== null) return nested;
+    }
+    for (const value of Object.values(record)) {
+      if (value === null || typeof value !== "object") continue;
+      const nested = visitBotRecord(value, wrapperMs, depth + 1, budget);
+      if (nested !== null) return nested;
+      if (budget.nodes <= 0) break;
+    }
   }
-  for (const value of Object.values(record)) {
-    if (value === null || typeof value !== "object") continue;
-    const nested = visitBotRecord(value, tsMs, depth + 1, budget);
-    if (nested !== null) return nested;
-    if (budget.nodes <= 0) break;
-  }
-  return null;
+  if (typeof record.msg !== "string") return null;
+  // Terminal bot ts is authoritative even if the record also carries newer
+  // transport metadata. Replaying an old ready event must not make it fresh.
+  const botMs = timestampMs(record.ts);
+  return { record, tsMs: Number.isFinite(botMs) ? botMs : wrapperMs };
 }
 
 /**
