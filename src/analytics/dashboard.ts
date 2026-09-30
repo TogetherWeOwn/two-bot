@@ -576,12 +576,14 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
   ).length;
   const since7 = iso(now.getTime() - 7 * DAY_MS);
   const since30 = iso(now.getTime() - 30 * DAY_MS);
-  const active7d = stillHere.filter(
-    (m) => m.last_active_at && m.last_active_at >= since7 && m.last_active_at < generatedAt,
-  ).length;
-  const active30d = stillHere.filter(
-    (m) => m.last_active_at && m.last_active_at >= since30 && m.last_active_at < generatedAt,
-  ).length;
+  // last_active_at is an all-time maximum. If it is ahead of this window,
+  // retained first-message/voice evidence can still prove earlier activity.
+  const activeSince = (m: MemberRow, since: string) =>
+    [m.last_active_at, m.first_message_at, m.first_voice_at].some(
+      (at) => at !== null && at >= since && at < generatedAt,
+    );
+  const active7d = stillHere.filter((m) => activeSince(m, since7)).length;
+  const active30d = stillHere.filter((m) => activeSince(m, since30)).length;
   const joinedNeverSpoke = stillHere.filter(
     (m) => m.joined_at && !m.first_message_at && !m.first_voice_at,
   ).length;
