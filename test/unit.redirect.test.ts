@@ -174,7 +174,10 @@ interface FunnelAccuracyJson {
  */
 async function funnelJson(): Promise<{ code: number; stdout: string; stderr: string }> {
   try {
-    const result = await run('node', [SCRIPT, '--json'], {
+    // process.execPath, not 'node': the suite may run under an absolute Node
+    // executable while PATH lacks node (or selects an older one), which would
+    // fail with ENOENT before the report runs.
+    const result = await run(process.execPath, [SCRIPT, '--json'], {
       cwd: REPO,
       env: {
         ...process.env,
