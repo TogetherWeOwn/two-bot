@@ -10,6 +10,7 @@ import type {
 
 const MAX_TITLE_CHARS = 100;
 const MAX_LFG_ROLES = 20;
+export const LFG_LEAVE_ACTION = '__leave__';
 const MAX_FEED_BODY_CHARS = 2000;
 // A worker that crashes between the claim insert and markDelivered/release
 // must not wedge the item forever: a later poll reclaims `pending` claims
@@ -424,7 +425,7 @@ export class AnnouncementsService {
                 label: `${role.label} (${signups.filter((s) => s.roleKey === role.roleKey).length}/${role.slots})`.slice(0, 100),
                 value: role.roleKey,
               })),
-              { label: 'Leave this group', value: '__leave__' },
+              { label: 'Leave this group', value: LFG_LEAVE_ACTION },
             ],
           }],
         }]
@@ -453,6 +454,7 @@ function normalizeRoles(roles: LfgRoleInput[]): LfgRoleInput[] {
     const key = role.key.trim().toLowerCase();
     const label = role.label.trim();
     if (!/^[a-z0-9_-]{1,32}$/.test(key)) throw new Error(`Invalid LFG role key "${role.key}".`);
+    if (key === LFG_LEAVE_ACTION) throw new Error(`LFG role key "${key}" is reserved for leaving the group.`);
     if (!label || label.length > 80) throw new Error('LFG role labels must be 1-80 characters.');
     if (!Number.isInteger(role.slots) || role.slots < 1 || role.slots > 99) {
       throw new Error('LFG role slots must be integers from 1-99.');

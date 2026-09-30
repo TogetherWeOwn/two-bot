@@ -8,7 +8,7 @@ import {
 } from 'discord.js';
 import { XMLParser } from 'fast-xml-parser';
 import type { FeedItem, FeedReader, AnnouncementDiscord } from './service.ts';
-import { parseRoleSpec, AnnouncementsService } from './service.ts';
+import { parseRoleSpec, AnnouncementsService, LFG_LEAVE_ACTION } from './service.ts';
 import type { FeedRelayRow, RsvpStatus } from './store.ts';
 import { PublicFeedFetcher } from './feedHttp.ts';
 import { log } from '../core/log.ts';
@@ -245,7 +245,7 @@ export function registerAnnouncementCommands(client: Client, options: {
       if (interaction.isStringSelectMenu() && interaction.customId.startsWith(LFG_PREFIX)) {
         const id = interaction.customId.slice(LFG_PREFIX.length);
         const role = interaction.values[0];
-        const outcome = role === '__leave__'
+        const outcome = role === LFG_LEAVE_ACTION
           ? (await options.service.leaveLfg(options.guildId, id, interaction.user.id) ? 'left' : 'were not signed up')
           : await options.service.signupLfg({ guildId: options.guildId, id, roleKey: role ?? '', userId: interaction.user.id });
         await interaction.reply({ content: `LFG ${outcome}.`, ephemeral: true });
