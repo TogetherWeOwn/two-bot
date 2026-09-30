@@ -81,13 +81,13 @@ function testConfig() {
 }
 
 /** Boot the real handler with a stub panel. Returns { base, calls, close }. */
-async function boot(stub) {
+async function boot(stub, config = testConfig()) {
   const calls = [];
   const panel = async (args) => {
     calls.push(args);
     return stub(args);
   };
-  const server = createServer(createHandler(testConfig(), panel));
+  const server = createServer(createHandler(config, panel));
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address();
   return {
@@ -967,6 +967,162 @@ test("exact-head smoke: wrapper decoding retains fallback timestamps and has a d
   for (let i = 0; i < 12; i += 1) deep = JSON.stringify({ message: deep });
   assert.deepEqual(findBotRecords(normalizeLogPayload(deep)), [], "over-depth wrappers are not unboundedly decoded");
 });
+
+// --- PR291 findings 1-3 at 67fe0f14 ------------------------------------------
+// Synthetic credentials only; every regression drives the real HTTP handler
+// against a stub panel. The deployment tests also observe stdout and subsequent
+// status reads, so rejection must precede logging AND issued-ID storage.
+
+for (const fixture of [
+  { name: "panel credential as the ID", id: PANEL_TOKEN, config: testConfig() },
+  { name: "panel credential inside the ID", id: `dep-${PANEL_TOKEN}-suffix`, config: testConfig() },
+  { name: "broker credential as the ID", id: BROKER_TOKEN, config: testConfig() },
+  { name: "short panel credential inside the ID", id: "dep-fake-run-suffix", config: { ...testConfig(), panelToken: "run" } },
+]) {
+  test(`review-67fe0f14 deploy: rejects ${fixture.name} before emission or storage`, async (t) => {
+    const srv = await boot(({ method }) => method === "POST"
+      ? { deployments: [{ deployment_uuid: fixture.id }] }
+      : { status: "finished" }, fixture.config);
+    t.after(srv.close);
+    const writes = [];
+    const originalWrite = process.stdout.write;
+    const stdout = t.mock.method(process.stdout, "write", (chunk, ...args) => {
+      // Preserve test-runner output/IPC; observe only the broker's own line.
+      if (!String(chunk).startsWith("BROKER:")) return originalWrite.call(process.stdout, chunk, ...args);
+      writes.push(String(chunk));
+      return true;
+    });
+    let queued;
+    try {
+      queued = await req(srv.base, "/v1/staging/deploy", {
+        method: "POST", body: { repo: PINNED_REPO, sha: GOOD_SHA },
+      });
+    } finally {
+      stdout.mock.restore();
+    }
+    assert.equal(queued.status, 502, "credential-bearing IDs fail closed with a static error");
+    assert.deepEqual(queued.json, { error: "bad_gateway" });
+    assert.ok(!queued.text.includes(fixture.id.slice(0, 12)), "no ID prefix crosses the response");
+    assert.deepEqual(writes, [], "no queued-deployment line or credential prefix is logged");
+    const polled = await req(srv.base, `/v1/staging/deployments/${fixture.id}`);
+    assert.equal(polled.status, 404, "rejected ID was never stored as issued");
+    assert.deepEqual(polled.json, { error: "unknown_deployment" });
+    assert.equal(srv.calls.length, 1, "rejected ID cannot trigger a panel status read");
+  });
+}
+
+test("review-67fe0f14 deploy: ordinary IDs still queue, log and permit scoped polling", async (t) => {
+  const id = "dep-fake-safe-1";
+  const srv = await boot(({ method }) => method === "POST"
+    ? { deployments: [{ deployment_uuid: id }] }
+    : { status: "finished" });
+  t.after(srv.close);
+  const writes = [];
+  const originalWrite = process.stdout.write;
+  const stdout = t.mock.method(process.stdout, "write", (chunk, ...args) => {
+    if (!String(chunk).startsWith("BROKER:")) return originalWrite.call(process.stdout, chunk, ...args);
+    writes.push(String(chunk));
+    return true;
+  });
+  let queued;
+  try {
+    queued = await req(srv.base, "/v1/staging/deploy", {
+      method: "POST", body: { repo: PINNED_REPO, sha: GOOD_SHA },
+    });
+  } finally {
+    stdout.mock.restore();
+  }
+  assert.equal(queued.status, 200);
+  assert.deepEqual(queued.json, { deployment_uuid: id });
+  assert.equal(writes.length, 1, "ordinary queued-deployment log survives");
+  assert.ok(writes[0].includes(id.slice(0, 12)));
+  const polled = await req(srv.base, `/v1/staging/deployments/${id}`);
+  assert.equal(polled.status, 200);
+  assert.deepEqual(polled.json, { status: "finished" });
+  assert.equal(srv.calls.length, 2);
+});
+
+// RFC 3986 userinfo permits every sub-delimiter, including the apostrophe.
+// Exercise each in both username and password, through decoded objects,
+// JSON-in-strings, prefixed JSON, and raw/wrapped prose (no sensitive key).
+for (const delimiter of "!$&'()*+,;=") {
+  test(`review-67fe0f14 logs: URI userinfo sub-delimiter ${JSON.stringify(delimiter)} never crosses`, async (t) => {
+    const url = `postgresql://bo${delimiter}t:pa${delimiter}ssword@dbhost.invalid/db`;
+    assert.ok(new URL(url).password !== "", "fixture contains valid URI userinfo");
+    const structured = { TWO_DATABASE_URL: url };
+    const raw = `connected ${url} end`;
+    const safeUrl = "postgresql://dbhost.invalid/db";
+    const srv = await boot(() => ({ logs: [
+      structured,
+      JSON.stringify(structured),
+      `INFO ${JSON.stringify(structured)}`,
+      { message: `INFO ${JSON.stringify(structured)}` },
+      raw,
+      { message: raw },
+      safeUrl,
+      JSON.stringify(READY_RECORD),
+    ] }));
+    t.after(srv.close);
+    const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+    assert.equal(out.status, 200);
+    const messages = out.json.logs.map(({ message }) => message);
+    assert.deepEqual(messages.slice(0, 6), [
+      JSON.stringify({ TWO_DATABASE_URL: SECRET_PLACEHOLDER }),
+      JSON.stringify({ TWO_DATABASE_URL: SECRET_PLACEHOLDER }),
+      `INFO ${JSON.stringify({ TWO_DATABASE_URL: SECRET_PLACEHOLDER })}`,
+      JSON.stringify({ message: `INFO ${JSON.stringify({ TWO_DATABASE_URL: SECRET_PLACEHOLDER })}` }),
+      `connected ${SECRET_PLACEHOLDER} end`,
+      JSON.stringify({ message: `connected ${SECRET_PLACEHOLDER} end` }),
+    ], "userinfo is removed whole in every representation, never just a password prefix");
+    assert.equal(messages[6], safeUrl, "credential-free URL is preserved");
+    assert.equal(findReadyLines(findBotRecords(normalizeLogPayload(out.json))).length, 1);
+  });
+}
+
+for (const panelToken of [
+  "panel-prefix{rest-of-fake-credential",
+  "panel-prefix[rest-of-fake-credential",
+  "panel-prefix{rest}of-fake-credential",
+  "panel-prefix[rest]of-fake-credential",
+  'panel-prefix{"rest-of-fake-credential',
+  'panel-prefix["rest-of-fake-credential',
+  'panel-prefix"{rest-of-fake-credential',
+  "panel-prefix'{rest-of-fake-credential",
+]) {
+  test(`review-67fe0f14 logs: delimiter-bearing known credential ${JSON.stringify(panelToken)} redacts whole`, async (t) => {
+    const config = parseConfig({
+      STAGING_BROKER_TOKEN: BROKER_TOKEN, COOLIFY_URL: PANEL_URL, COOLIFY_TOKEN: panelToken,
+    });
+    assert.equal(config.panelToken, panelToken, "synthetic delimiter-bearing host token is accepted");
+    assert.equal(scrubSecrets(panelToken, [panelToken]), SECRET_PLACEHOLDER, "whole-token scrub control");
+    const raw = `pre ${panelToken} post`;
+    const structured = { connection: panelToken };
+    const srv = await boot(() => ({ logs: [
+      panelToken,
+      raw,
+      { message: raw },
+      structured,
+      JSON.stringify(structured),
+      `INFO ${JSON.stringify(structured)}`,
+      { message: `INFO ${JSON.stringify(structured)}` },
+      JSON.stringify(READY_RECORD),
+    ] }), config);
+    t.after(srv.close);
+    const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+    assert.equal(out.status, 200);
+    assert.ok(!out.text.includes("panel-prefix"), "known credential prefix must never cross after a scan splits it");
+    assert.deepEqual(out.json.logs.slice(0, 7).map(({ message }) => message), [
+      SECRET_PLACEHOLDER,
+      `pre ${SECRET_PLACEHOLDER} post`,
+      JSON.stringify({ message: `pre ${SECRET_PLACEHOLDER} post` }),
+      JSON.stringify({ connection: SECRET_PLACEHOLDER }),
+      JSON.stringify({ connection: SECRET_PLACEHOLDER }),
+      `INFO ${JSON.stringify({ connection: SECRET_PLACEHOLDER })}`,
+      JSON.stringify({ message: `INFO ${JSON.stringify({ connection: SECRET_PLACEHOLDER })}` }),
+    ], "complete known credentials redact before any JSON delimiter can divide them");
+    assert.equal(findReadyLines(findBotRecords(normalizeLogPayload(out.json))).length, 1);
+  });
+}
 
 test("logs-bounded unit: parseLogLines clamps to 1..500", () => {
   assert.equal(parseLogLines(new URLSearchParams("")), 200);

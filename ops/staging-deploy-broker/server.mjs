@@ -242,7 +242,9 @@ const GENERIC_SECRET_RES = [
   // URI userinfo is a credential regardless of scheme or property name (e.g.
   // TWO_DATABASE_URL). Redact the whole URL, including percent-encoded values;
   // credential-free URLs retain their text. This also covers raw log prose.
-  /\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s/?#"'<>]+@[^\s"'<>]*/g,
+  // Apostrophes are valid userinfo sub-delimiters (RFC 3986), not a boundary
+  // before the @. After userinfo, quotes can still delimit surrounding prose.
+  /\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s/?#"<>]+@[^\s"'<>]*/g,
 ];
 
 // Object keys whose VALUE is sensitive regardless of shape (matched
@@ -264,8 +266,8 @@ const SENSITIVE_KEY_RES = [
   /\bauth\b/i,
 ];
 
-/** Scrub known host credentials and generic secret shapes from one string. */
-export function scrubSecrets(text, secrets) {
+/** Replace known credentials as whole strings, without interpreting delimiters. */
+function scrubKnownSecrets(text, secrets) {
   let out = String(text ?? "");
   if (Array.isArray(secrets)) {
     for (const secret of secrets) {
@@ -277,6 +279,12 @@ export function scrubSecrets(text, secrets) {
       }
     }
   }
+  return out;
+}
+
+/** Scrub known host credentials and generic secret shapes from one string. */
+export function scrubSecrets(text, secrets) {
+  let out = scrubKnownSecrets(text, secrets);
   for (const re of GENERIC_SECRET_RES) {
     re.lastIndex = 0;
     out = out.replace(re, SECRET_PLACEHOLDER);
@@ -358,6 +366,10 @@ export function extractJsonCandidates(text) {
  */
 export function shapeEmbeddedText(value, secrets, depth = 0) {
   const secretList = Array.isArray(secrets) ? secrets : [];
+  // Host tokens can contain JSON delimiters. Scrub the complete credential
+  // BEFORE scanning/slicing: splitting at a brace, bracket or quote inside it
+  // would leave a prefix that no longer matches the known secret.
+  value = scrubKnownSecrets(value, secretList);
   const { spans, incompleteAt } = scanJsonCandidates(value);
   // An unfinished JSON-like prefix can own quote state and hide every later
   // record. Fail closed from its opener; only the balanced prefix is shaped.
@@ -778,7 +790,12 @@ export function createHandler(config, panel = panelRequest) {
         });
         const list = Array.isArray(panelJson?.deployments) ? panelJson.deployments : [];
         const deploymentUuid = String(list[0]?.deployment_uuid ?? "");
-        if (!DEPLOYMENT_UUID_RE.test(deploymentUuid)) throw httpError(502, "bad_gateway");
+        // IDs are untrusted panel output too: a syntactically valid ID can
+        // contain a host credential. Reject it whole before storing, logging
+        // (including its prefix), or returning anything to the caller.
+        if (!DEPLOYMENT_UUID_RE.test(deploymentUuid) || hostSecrets().some(
+          (secret) => typeof secret === "string" && secret !== "" && deploymentUuid.includes(secret),
+        )) throw httpError(502, "bad_gateway");
         issuedDeployments.add(deploymentUuid);
         process.stdout.write(`BROKER: deploy queued for staging app ${config.appUuid.slice(0, 8)} sha ${shortSha} (deployment ${deploymentUuid.slice(0, 12)}).\n`);
         send(res, 200, { deployment_uuid: deploymentUuid });

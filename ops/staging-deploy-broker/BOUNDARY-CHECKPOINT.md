@@ -94,6 +94,57 @@ Validation of the follow-up tree:
   imports. No install-packet, workflow, credential or target changes accompany
   this follow-up, and no live deploy or host command was run.
 
+## Follow-up review of `67fe0f14`
+
+The [next independent review](https://github.com/TogetherWeOwn/two-bot/pull/291#issuecomment-5918166925)
+confirmed the prior four corrections but returned **CHANGES** for six new cases:
+a credential used as a deployment ID, apostrophe-bearing URI passwords,
+delimiter-induced known-credential prefix leaks, braces in quoted ready-record
+fields, discarded wrapper timestamps, and numeric epoch parsing. Required jobs
+were green on that head; no approval, merge or installation followed.
+
+The smoke correction uses quote/escape-aware outer-object scanning and bounded
+object/text-wrapper traversal. Timestamp context follows the nearest usable
+wrapper into the actual bot record; numeric timestamps remain epoch milliseconds
+rather than being stringified for `Date.parse`. Invalid/out-of-range timestamps
+cannot establish freshness. Server redaction of ambiguous username text remains
+intentional; a closing brace in `Fake}Bot` survives the handler and parser intact.
+
+Five new smoke regressions were added before changing the parser. Four failed
+against the preceding implementation (quoted braces, wrapper timestamps, nearest
+usable fallback, numeric epochs); the invalid-numeric control already passed.
+After correction, deploy/client contracts pass **37/37**. Tests cover raw and
+wrapped real-handler responses, escaped quotes/backslashes, nested timestamps,
+and advancing numeric timestamps, with a synthetic panel stub only.
+
+The server correction rejects known host-credential-bearing deployment IDs before
+issued-ID storage, stdout logging or response emission. URI userinfo scrubbing now
+includes apostrophes and all other RFC 3986 sub-delimiters. Complete known secrets
+are scrubbed before JSON scanning/slicing, so delimiters inside a credential cannot
+strand a visible prefix.
+
+Twenty-four broker regressions/controls exercise these boundaries through the real
+HTTP handler with a synthetic panel. Against the unchanged `67fe0f14` server, the
+expanded broker suite returned **68 passes / 13 failures**; the corrected server
+passes **81/81**. Tests cover rejection before logging/storage, ordinary-ID success,
+eleven URI sub-delimiters through six representations, and eight delimiter-bearing
+known-token shapes. The installed server still has only standard-library imports.
+
+Validation of the combined correction:
+
+- The independent review's seven original handler probes, with assertions updated
+  to require secure/correct outcomes, all pass; its prior-four-case controls also
+  pass. The fake credential ID returns HTTP 502 with a static error, both leak
+  payloads redact, and raw/wrapped ready records retain usable timestamps.
+- `node --test ops/staging-deploy-broker/server.test.mjs scripts/deploy-target-selftest.mjs test/unit.tokenleak.test.ts test/unit.restartstorageci.test.ts` — **132/132**
+  (81 broker, 37 deploy/client, 14 tokenleak/CI contracts).
+- `npm run typecheck`, `npm run check:script-targets`, `git diff --check` and
+  `bash -n ops/staging-deploy-broker/install.sh` pass.
+- These checks use synthetic credentials and loopback panel stubs only. No live
+  panel, staging/production database, host installation or deployment was used.
+  The database-backed full suite was not run. Fresh required CI, including its
+  secret scanner, and independent exact-head approval remain mandatory.
+
 ## Remaining gates and limits
 
 This patch closes enumerated reproductions; it is not a proof that arbitrary
