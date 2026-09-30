@@ -85,10 +85,17 @@ test('no recorded voice events still warns even with an old member milestone', (
   checkCounts(data, text);
 });
 
+test('old first-ever voice plus a fresh session end suppresses the outage banner', () => {
+  const data = fixture([event('first_voice_session', OLD), event('voice_session_start', OLD), event('voice_session_end', NOW)]);
+  const text = attribution(data);
+  assert.ok(!text.includes(WARNING), text);
+  checkCounts(data, text);
+});
+
 test('fresh foreign-guild voice cannot hide the target guild capture gap', () => {
   const data = fixture([event('first_voice_session', OLD), event('voice_session_start', OLD)]);
   const baseline = attribution(data);
-  data.events.push(event('voice_session_start', NOW, OTHER), event('first_voice_session', NOW, OTHER));
+  data.events.push(event('voice_session_start', NOW, OTHER), event('voice_session_end', NOW, OTHER), event('first_voice_session', NOW, OTHER));
   const text = attribution(data);
   assert.ok(text.includes(WARNING), text);
   assert.equal(text, baseline);
