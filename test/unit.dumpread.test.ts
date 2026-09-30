@@ -19,7 +19,8 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { gzipSync } from 'node:zlib';
-import { inspect, DUMP_TABLES, DUMP_VERSION } from '../src/store/dump.ts';
+import { inspect, restore, DUMP_TABLES, DUMP_VERSION } from '../src/store/dump.ts';
+import type { Db, RunResult, Statement } from '../src/store/driver.ts';
 
 const dir = mkdtempSync(join(tmpdir(), 'two-dumpread-'));
 process.on('exit', () => rmSync(dir, { recursive: true, force: true }));
@@ -46,6 +47,7 @@ function manifest(tables: { name: string; columns: string[]; count: number }[] =
     createdAt: '2026-08-25T00:00:00.000Z',
     tables,
     eventsSequence: 1,
+    sequences: { events: 1 },
     schemaMigrations: ['001'],
   };
 }
@@ -59,6 +61,117 @@ function goodDump(): unknown[] {
   ];
 }
 
+/**
+ * A Db that records every call without doing anything. The restore path must
+ * refuse a malformed dump before its transaction begins, so a passing refusal
+ * leaves every counter at zero.
+ */
+function recordingDb() {
+  const calls = { transaction: 0, exec: 0, prepare: 0, run: 0 };
+  const statement: Statement = {
+    get: async <T>(): Promise<T | undefined> => undefined,
+    all: async <T>(): Promise<T[]> => [] as T[],
+    run: async (): Promise<RunResult> => {
+      calls.run++;
+      throw new Error('recordingDb: refused dump must never reach a write');
+    },
+  };
+  const db: Db = {
+    prepare: (_sql: string) => {
+      calls.prepare++;
+      return statement;
+    },
+    exec: async () => {
+      calls.exec++;
+    },
+    transaction: async <T>(fn: (tx: Db) => Promise<T>): Promise<T> => {
+      calls.transaction++;
+      return fn(db);
+    },
+    close: async () => {},
+  };
+  return { db, calls };
+}
+
+/** Every malformed dump a restore attempt must refuse without touching the Db. */
+function malformedDumps(): { name: string; objs: unknown[]; match: RegExp }[] {
+  const cases: { name: string; objs: unknown[]; match: RegExp }[] = [];
+  const good = () => goodDump() as Record<string, unknown>[];
+
+  for (const data of [null, ['id', 1], 'not-an-object', 42, true]) {
+    const objs = good();
+    objs[1] = { kind: 'row', table: 'events', data };
+    cases.push({
+      name: `row.data of ${JSON.stringify(data)}`,
+      objs,
+      match: /data payload that is not an object/,
+    });
+  }
+  {
+    const objs = good();
+    delete objs[1].data;
+    cases.push({ name: 'row with data omitted', objs, match: /data payload that is not an object/ });
+  }
+  {
+    const objs = good();
+    objs.splice(1, 0, { kind: 'checkpoint', at: 1 });
+    cases.push({ name: 'unknown record kind', objs, match: /unknown record kind/ });
+  }
+  for (const rows of [undefined, null, '1', 1.5, Number.NaN, Number.POSITIVE_INFINITY, -1]) {
+    const objs = good();
+    if (rows === undefined) delete (objs[objs.length - 1] as { rows?: unknown }).rows;
+    else (objs[objs.length - 1] as { rows: unknown }).rows = rows;
+    cases.push({
+      name: `end.rows of ${String(rows)}`,
+      objs,
+      match: /invalid row count/,
+    });
+  }
+  for (const line of [42, 'str', null, [1]]) {
+    const objs = good();
+    (objs as unknown[]).splice(1, 0, line);
+    cases.push({
+      name: `non-object line ${JSON.stringify(line)}`,
+      objs,
+      match: /not an object/,
+    });
+  }
+  const noManifestField = (
+    name: string,
+    mutate: (m: Record<string, unknown>) => void,
+    match: RegExp,
+  ) => {
+    const objs = good();
+    mutate(objs[0] as Record<string, unknown>);
+    cases.push({ name, objs, match });
+  };
+  noManifestField('manifest with schemaMigrations omitted', (m) => void delete m.schemaMigrations, /schemaMigrations/);
+  noManifestField(
+    'manifest with schemaMigrations of non-strings',
+    (m) => void (m.schemaMigrations = [1, 2]),
+    /schemaMigrations/,
+  );
+  noManifestField('manifest with createdAt omitted', (m) => void delete m.createdAt, /createdAt/);
+  noManifestField('manifest with eventsSequence omitted', (m) => void delete m.eventsSequence, /eventsSequence/);
+  noManifestField(
+    'manifest with negative eventsSequence',
+    (m) => void (m.eventsSequence = -1),
+    /eventsSequence/,
+  );
+  noManifestField('manifest with sequences omitted', (m) => void delete m.sequences, /sequences/);
+  noManifestField(
+    'manifest with a foreign sequence table',
+    (m) => void (m.sequences = { website_users: 3 }),
+    /not a table this backup format owns/,
+  );
+  noManifestField(
+    'manifest with a negative sequence mark',
+    (m) => void (m.sequences = { events: -2 }),
+    /high-water mark/,
+  );
+  return cases;
+}
+
 describe('inspect: files it accepts', () => {
   test('a well-formed dump reads back with its rows', async () => {
     const got = await inspect(writeDump(goodDump()));
@@ -70,6 +183,38 @@ describe('inspect: files it accepts', () => {
   test('an empty but complete dump is fine', async () => {
     const got = await inspect(writeDump([manifest(), { kind: 'end', rows: 0 }]));
     assert.equal(got.rows, 0);
+  });
+
+  test('JSON values inside a legitimate row object are data, not a shape error', async () => {
+    // Nested objects and arrays are ordinary column values (json/jsonb); the
+    // shape gate applies to the row payload itself, not what it contains.
+    const objs = goodDump();
+    (objs[1] as { data: unknown }).data = {
+      id: 1,
+      guild_id: 'g',
+      nested: { list: [1, 2], deep: { ok: true } },
+    };
+    const got = await inspect(writeDump(objs));
+    assert.equal(got.rows, 1);
+  });
+});
+
+describe('inspect: non-table record shapes it refuses', () => {
+  for (const { name, objs, match } of malformedDumps()) {
+    test(name, async () => {
+      // Refused by the reader, before any database is involved.
+      await assert.rejects(() => inspect(writeDump(objs)), match, `expected ${name} to be refused`);
+      // And refused by restore without opening a transaction: the force path
+      // must never commit first and report the shape error after.
+      const { db, calls } = recordingDb();
+      await assert.rejects(() => restore(db, writeDump(objs)), match);
+      assert.deepEqual(calls, { transaction: 0, exec: 0, prepare: 0, run: 0 });
+    });
+  }
+
+  test('schemaMigrations survives the round trip for the restore report', async () => {
+    const got = await inspect(writeDump(goodDump()));
+    assert.deepEqual(got.manifest.schemaMigrations, ['001']);
   });
 });
 

@@ -37,20 +37,40 @@ import { openDb, isPostgresSpec } from '../src/store/db.ts';
 import { restore, inspect, DUMP_TABLES } from '../src/store/dump.ts';
 import { migrate } from '../src/store/migrate.ts';
 
-if (process.argv.includes('--help')) {
-  console.log('Usage: node scripts/pg-restore.ts <backup.ndjson.gz> (--force | --dry-run)');
-  process.exit(0);
+const usage = 'node scripts/pg-restore.ts <backup.ndjson.gz> (--force | --dry-run)';
+function usageError(message: string): never {
+  console.error(`restore: ${message}`);
+  console.error(`restore: usage: ${usage}`);
+  process.exit(1);
 }
 
 const argv = process.argv.slice(2);
-const flags = new Set(argv.filter((a) => a.startsWith('--')));
-const file = argv.find((a) => !a.startsWith('--'));
-const dryRun = flags.has('--dry-run');
-
-if (!file) {
-  console.error('restore: usage: node scripts/pg-restore.ts <backup.ndjson.gz> --force');
-  process.exit(1);
+const flags = new Set<string>();
+const files: string[] = [];
+// Validate the whole command before inspecting a file or opening a target:
+// a typo beside --force must never silently select a destructive restore.
+for (const arg of argv) {
+  if (arg.startsWith('-')) {
+    if (!['--force', '--dry-run', '--help'].includes(arg)) {
+      usageError(`unknown option: ${arg}`);
+    }
+    if (flags.has(arg)) usageError(`duplicate option: ${arg}`);
+    flags.add(arg);
+  } else {
+    files.push(arg);
+  }
 }
+if (flags.has('--help')) {
+  if (argv.length !== 1) usageError('--help must be used alone.');
+  console.log(`Usage: ${usage}`);
+  process.exit(0);
+}
+if (files.length !== 1 || !files[0]) usageError('expected exactly one backup operand.');
+if (flags.has('--force') && flags.has('--dry-run')) {
+  usageError('cannot combine --force and --dry-run.');
+}
+const file = files[0];
+const dryRun = flags.has('--dry-run');
 if (!existsSync(file)) {
   console.error(`restore: no such file: ${file}`);
   process.exit(1);
@@ -138,6 +158,18 @@ if (dryRun) {
   console.log(`\nrestore: ${contents.rows} rows read and verified. Nothing was written.`);
   console.log('DRY RUN VERIFIED');
   process.exit(0);
+}
+
+// Validate the backup before opening or migrating the target (TOG-10566): a
+// wrong-version or truncated archive must be refused before openDb/migrate
+// can change target schema. restore() re-reads the file before its own
+// destructive transaction; this check only orders the CLI's side effects.
+try {
+  await inspect(file);
+} catch (err) {
+  console.error(`restore: ${String(err)}`);
+  console.error('RESTORE FAILED - the backup is invalid; the target was not opened or migrated.');
+  process.exit(1);
 }
 
 const db = await openDb(url!, { skipMigrations: true, applicationName: 'two-bot-restore' });
