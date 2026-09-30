@@ -8,14 +8,14 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { gzipSync, gunzipSync } from 'node:zlib';
 
 const cli = fileURLToPath(new URL('../scripts/pg-backup.ts', import.meta.url));
 const hooks = fileURLToPath(new URL('./fixtures/backup-empty-event-hooks.mjs', import.meta.url));
 
 function fixture() {
-  const root = mkdtempSync(join(process.env.PAPERCLIP_RUN_SCRATCH_DIR || tmpdir(), 'backup-empty-'));
+  const root = mkdtempSync(join(process.env.PAPERCLIP_RUN_SCRATCH_DIR || tmpdir(), 'backup empty-'));
   const dest = join(root, 'backups');
   mkdirSync(dest);
   const prior = join(dest, 'two-funnel-20000101T000000Z.ndjson.gz');
@@ -49,7 +49,9 @@ function fixture() {
       TWO_DATABASE_URL: 'postgres://agent_test@agent-testdb/two_bot_test_tog10240',
       TWO_BACKUP_DIR: dest,
       TWO_BACKUP_KEEP: '1',
-      TWO_BACKUP_UPLOAD_CMD: `${process.execPath} ${uploader}`,
+      // The production command splits on whitespace; pass the recorder URL via env.
+      TWO_BACKUP_UPLOAD_CMD: `${process.execPath} -e import(process.env.BACKUP_TEST_UPLOADER)`,
+      BACKUP_TEST_UPLOADER: pathToFileURL(uploader).href,
       BACKUP_TEST_EVENT_COUNT: String(count),
       BACKUP_TEST_TRACE: trace,
       BACKUP_TEST_RECEIPT: receipt,
