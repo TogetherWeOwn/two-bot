@@ -30,11 +30,12 @@ concurrency:
 jobs:
   release-please:
     name: release-please
+    # Execute the trusted normalizer only from reviewed main, even on dispatch.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
-      prs_created: ${{ steps.release.outputs.prs_created }}
-      pr: ${{ steps.release.outputs.pr }}
+      pr: ${{ steps.normalize.outputs.result }}
     steps:
       - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
@@ -42,10 +43,28 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
+      # A nonzero manifest seed invents a prior tag even when none was published.
+      # Repair on every run, even when generation is a no-op after a failed write.
+      # Dispatch only after repair; manual edits are overwritten next generation.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Normalize first-release links
+        id: normalize
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          PR_JSON: ${{ steps.release.outputs.pr }}
+        with:
+          script: |
+            const normalize = require('./scripts/ci/normalize-release.cjs');
+            const pr = process.env.PR_JSON ? JSON.parse(process.env.PR_JSON) : undefined;
+            return await normalize({github, repo: context.repo, pr});
+
   dispatch-checks:
     name: dispatch-checks
     needs: release-please
-    if: needs.release-please.outputs.prs_created == 'true'
+    if: needs.release-please.outputs.pr != '' && needs.release-please.outputs.pr != 'null'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

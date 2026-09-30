@@ -32,6 +32,11 @@
  * It changes nothing, messages nobody, and stores nothing: display names are
  * never fetched and only snowflakes are ever printed. See docs/PRIVACY.md.
  */
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/gate-report.ts [--months <count>]');
+  process.exit(0);
+}
+
 const API = process.env.DISCORD_API_BASE ?? 'https://discord.com/api/v10';
 const TOKEN = process.env.DISCORD_BOT_TOKEN ?? process.env.DISCORD_TOKEN;
 const GUILD = process.env.DISCORD_GUILD_ID;

@@ -32,6 +32,7 @@ import {
   InviteTracker,
 } from '../src/core/inviteTracker.ts';
 import type { InviteState } from '../src/core/inviteTracker.ts';
+import { paint } from '../src/analytics/cliColor.ts';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const GOLDEN_FIXTURE_PATH = join(ROOT, 'test/fixtures/funnel-attribution-golden.json');
@@ -214,6 +215,10 @@ const invokedDirectly =
   process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (invokedDirectly) {
+  if (process.argv.includes('--help')) {
+    console.log('Usage: node scripts/funnel-attribution-eval.ts [--json]');
+    process.exit(0);
+  }
   for (const a of process.argv.slice(2)) {
     if (a !== '--json') usage();
   }
@@ -231,15 +236,23 @@ if (invokedDirectly) {
   if (asJson) {
     console.log(JSON.stringify({ fixture: 'test/fixtures/funnel-attribution-golden.json', ...summary }, null, 2));
   } else {
+    // Status tokens go through the NO_COLOR gate (TOG-8698): styled on a
+    // color TTY, plain under NO_COLOR or a pipe. Spacing sits outside the
+    // paint call, so stripped output is byte-identical to plain text.
     for (const r of summary.results) {
-      console.log(r.ok ? `ok   ${r.id} (${r.expectCategory})` : `FAIL ${r.id} (${r.expectCategory})  -  ${r.detail}`);
+      console.log(
+        r.ok
+          ? `${paint('ok', 'green')}   ${r.id} (${r.expectCategory})`
+          : `${paint('FAIL', 'red')} ${r.id} (${r.expectCategory})  -  ${r.detail}`,
+      );
     }
     console.log('');
     const split = CATEGORIES.map((cat) => {
       const b = summary.byCategory[cat];
       return `${cat}: ${b.passed}/${b.total}`;
     }).join('  ');
-    console.log(`funnel-attribution-eval: ${summary.passed}/${summary.results.length} golden cases passed`);
+    const passedLine = `funnel-attribution-eval: ${summary.passed}/${summary.results.length} golden cases passed`;
+    console.log(summary.failed > 0 ? paint(passedLine, 'red') : paint(passedLine, 'green'));
     console.log(`  fixture split  ${split}`);
     if (summary.failed > 0) {
       console.log('  Ambiguous-vs-unknown buckets disagree with the code - see FAIL lines above.');

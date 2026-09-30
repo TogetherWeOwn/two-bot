@@ -131,14 +131,16 @@ export async function recordReading(
   db: Db,
   guildId: string,
   reading: PresenceReading,
+  botFloorScanTruncated = false,
 ): Promise<void> {
   await db
     .prepare(
-      `INSERT INTO presence_probe (guild_id, observed_at, approximate_presence_count, bot_floor)
-       VALUES (?, ?, ?, ?)
+      `INSERT INTO presence_probe
+         (guild_id, observed_at, approximate_presence_count, bot_floor, bot_floor_scan_truncated)
+       VALUES (?, ?, ?, ?, ?)
        ON CONFLICT (guild_id, observed_at) DO NOTHING`,
     )
-    .run(guildId, reading.observedAt, reading.presence, reading.botFloor);
+    .run(guildId, reading.observedAt, reading.presence, reading.botFloor, botFloorScanTruncated);
 }
 
 /**
@@ -181,6 +183,17 @@ export async function lastBotFloorAt(db: Db, guildId: string): Promise<string | 
     .prepare(
       `SELECT MAX(observed_at) AS at FROM presence_probe
         WHERE guild_id = ? AND bot_floor IS NOT NULL`,
+    )
+    .get<{ at: string | null }>(guildId);
+  return row?.at ?? null;
+}
+
+/** Successful and truncated scans both consume the daily roster budget. */
+async function lastBotFloorScanAt(db: Db, guildId: string): Promise<string | null> {
+  const row = await db
+    .prepare(
+      `SELECT MAX(observed_at) AS at FROM presence_probe
+        WHERE guild_id = ? AND (bot_floor IS NOT NULL OR bot_floor_scan_truncated)`,
     )
     .get<{ at: string | null }>(guildId);
   return row?.at ?? null;
@@ -229,9 +242,11 @@ export async function runProbeCycle(deps: ProbeCycleDeps): Promise<ProbeCycleRes
     return { recorded: false, presence: null, botFloor: null, observedAt };
   }
 
-  // Rescan the floor only when the newest one we hold has aged out.
+  // A truncated roster is not a floor, but retrying it hourly costs the same
+  // full scan again. Persist its cadence with the reading, never a partial floor.
   let botFloor: number | null = null;
-  const lastAt = await lastBotFloorAt(deps.db, deps.guildId);
+  let botFloorScanTruncated = false;
+  const lastAt = await lastBotFloorScanAt(deps.db, deps.guildId);
   const stale = lastAt === null || new Date(observedAt).getTime() - new Date(lastAt).getTime() >= maxAge;
   if (stale) {
     const scan = await countBotFloor(deps.rest, deps.guildId, { maxPages: deps.botFloorMaxPages });
@@ -243,6 +258,7 @@ export async function runProbeCycle(deps: ProbeCycleDeps): Promise<ProbeCycleRes
       // Truncation is already logged with its ceiling at the scan site;
       // a plain read failure is logged here.
       if (scan.failure.reason === 'truncated') {
+        botFloorScanTruncated = true;
         log.error('presence_probe_bot_floor_truncated_kept_presence', {
           guildId: deps.guildId,
           maxPages: deps.botFloorMaxPages,
@@ -253,7 +269,7 @@ export async function runProbeCycle(deps: ProbeCycleDeps): Promise<ProbeCycleRes
     }
   }
 
-  await recordReading(deps.db, deps.guildId, { observedAt, presence, botFloor });
+  await recordReading(deps.db, deps.guildId, { observedAt, presence, botFloor }, botFloorScanTruncated);
 
   // Aggregates only. There is no member id in this log line and there must
   // never be one - docs/PRIVACY.md.

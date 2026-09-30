@@ -29,6 +29,13 @@
 
 set -euo pipefail
 
+for arg in "$@"; do
+  if [[ "$arg" == "--help" ]]; then
+    printf '%s\n' 'Usage: bash scripts/ci/check-src-console.sh [--root <directory>]'
+    exit 0
+  fi
+done
+
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 while [[ $# -gt 0 ]]; do
   case "$1" in

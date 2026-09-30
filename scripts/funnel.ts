@@ -35,6 +35,11 @@ import {
 import { formatFunnelText } from '../src/analytics/cliFormat.ts';
 import { buildFunnelReport } from '../src/analytics/funnelReport.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/funnel.ts [days] [--json]');
+  process.exit(0);
+}
+
 const rawArgs = process.argv.slice(2);
 const asJson = rawArgs.includes('--json');
 const daysRaw = rawArgs.find((a) => !a.startsWith('-')) ?? '7';

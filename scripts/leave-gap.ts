@@ -42,8 +42,7 @@ const rawArgs = process.argv.slice(2);
 if (rawArgs.includes('--help') || rawArgs.includes('-h')) {
   console.log(`leave-gap: members with a join, no leave row, and gone from the roster (TOG-8305).
 
-Usage:
-  node scripts/leave-gap.ts [days] [--floor=ISO] [--seed]
+Usage: node scripts/leave-gap.ts [days] [--floor=ISO] [--seed]
 
   no args      full-history sweep, read-only (SELECT + roster GET only, never writes)
   days         last N days only, e.g. 30 (see the windowing caveat below)

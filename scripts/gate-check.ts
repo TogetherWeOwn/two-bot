@@ -37,6 +37,7 @@
  * Exit: 0 green, 1 red. Red is a normal weekly outcome, not a malfunction.
  */
 import { openDb } from '../src/store/db.ts';
+import { paint } from '../src/analytics/cliColor.ts';
 import {
   observeApprovedPublicSite,
   observeTrackedJoinPath,
@@ -51,6 +52,11 @@ import {
   type Criterion,
   type Observations,
 } from '../src/growth/gate.ts';
+
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/gate-check.ts [--json]');
+  process.exit(0);
+}
 
 const json = process.argv.slice(2).includes('--json');
 
@@ -233,7 +239,14 @@ if (json) {
   process.exit(EXIT_CODE[v]);
 }
 
-const LABEL: Record<Criterion['status'], string> = { ok: 'ok     ', fail: 'FAIL   ', unknown: 'UNKNOWN' };
+// Status tokens go through the NO_COLOR gate (TOG-8698): styled on a color
+// TTY, plain under NO_COLOR or a pipe. Padding sits outside the paint call,
+// so stripped output is byte-identical to plain text.
+const LABEL: Record<Criterion['status'], string> = {
+  ok: `${paint('ok', 'green')}     `,
+  fail: `${paint('FAIL', 'red')}   `,
+  unknown: paint('UNKNOWN', 'yellow'),
+};
 
 function print(c: Criterion): void {
   console.log(`  ${LABEL[c.status]}  ${c.title}`);

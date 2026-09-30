@@ -15,6 +15,13 @@ const GUARD = './scripts/ci/refuse-fork-pr.sh';
 const BASE_REF = '${{ github.event.pull_request.base.sha || github.sha }}';
 const HEAD_REPO = '${{ github.event.pull_request.head.repo.full_name }}';
 const HEAD_REF = '${{ github.event.pull_request.head.sha || github.sha }}';
+// Reviewed action migrations must land in the trusted base before a candidate
+// changes versions. Only these exact identities alias the existing gate shape.
+const ACTION_ALIASES = new Map([
+  ['actions/checkout@v7', 'actions/checkout@v5'],
+  ['actions/setup-node@v7', 'actions/setup-node@v4'],
+]);
+const canonicalAction = (uses) => ACTION_ALIASES.get(uses) ?? uses;
 const TAIL = [
   { uses: 'actions/setup-node@v4', with: { 'node-version': '24' } },
   { run: 'npm ci --ignore-scripts --prefix scripts/ci' },
@@ -52,7 +59,7 @@ function events(on) {
 
 function checkout(step, ref) {
   return map(step) && keysWithin(step, ['name', 'uses', 'with']) &&
-    step.uses === 'actions/checkout@v5' && map(step.with) &&
+    canonicalAction(step.uses) === 'actions/checkout@v5' && map(step.with) &&
     keysWithin(step.with, ['ref', 'persist-credentials']) &&
     step.with.ref === ref && step.with['persist-credentials'] === false;
 }
@@ -70,7 +77,7 @@ function gateProblems(gate) {
   // Land these policy files independently before introducing the workflow.
   // A candidate-selected bootstrap SHA is not a trust anchor, even if immutable.
   // Once the policy is on main, the base checkout is the only policy source.
-  if (steps[1]?.uses === 'actions/checkout@v5') errors.push('bootstrap checkouts are forbidden; land policy on the base first');
+  if (canonicalAction(steps[1]?.uses) === 'actions/checkout@v5') errors.push('bootstrap checkouts are forbidden; land policy on the base first');
   const guard = steps[1];
   if (!map(guard) || !keysWithin(guard, ['name', 'env', 'run']) || typeof guard.run !== 'string' || guard.run.trim() !== GUARD ||
       !map(guard.env) || !keysWithin(guard.env, ['PR_HEAD_REPO']) || guard.env.PR_HEAD_REPO !== HEAD_REPO) {
@@ -87,6 +94,7 @@ function gateProblems(gate) {
       continue;
     }
     const { name, ...actual } = step;
+    if (typeof actual.uses === 'string') actual.uses = canonicalAction(actual.uses);
     if (typeof actual.run === 'string') actual.run = actual.run.trim();
     if (!isDeepStrictEqual(actual, expected)) {
       errors.push(`fork-gate step ${index + 3}: must use the trusted candidate-coverage step with default success() and no overrides`);

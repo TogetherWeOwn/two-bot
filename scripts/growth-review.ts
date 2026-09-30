@@ -58,6 +58,11 @@ import {
   type RegisteredChannel,
 } from '../src/growth/portfolio.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/growth-review.ts [--weeks <count>] [--json] [--force]');
+  process.exit(0);
+}
+
 const argv = process.argv.slice(2);
 const json = argv.includes('--json');
 const force = argv.includes('--force');

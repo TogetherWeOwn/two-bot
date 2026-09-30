@@ -98,6 +98,11 @@ function arg(name: string): string | null {
   return value;
 }
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/onboarding-web-slice-acceptance.ts [--two-web <path>]');
+  process.exit(0);
+}
+
 for (const a of process.argv.slice(2)) {
   if (a !== '--two-web' && a !== (arg('--two-web') ?? '\0') && a.startsWith('--')) usage();
 }

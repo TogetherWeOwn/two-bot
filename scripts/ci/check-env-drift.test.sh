@@ -15,6 +15,13 @@
 
 set -euo pipefail
 
+for arg in "$@"; do
+  if [[ "$arg" == "--help" ]]; then
+    printf '%s\n' 'Usage: bash scripts/ci/check-env-drift.test.sh'
+    exit 0
+  fi
+done
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT="$ROOT/scripts/ci/check-env-drift.sh"
 WORK="$(mktemp -d)"
@@ -114,5 +121,25 @@ if ! run_guard > /dev/null; then
   exit 1
 fi
 printf '  ok  commented literal ignored\n'
+
+# A large token set must not turn an early match into a SIGPIPE failure under
+# pipefail. Use a minimal tree so the match is first and exceeds pipe capacity.
+rm -rf "$FIXTURE"
+mkdir -p "$FIXTURE"/{src,scripts,deploy,test}
+printf 'TWO_CONSUMED_KEY=\n' > "$FIXTURE/.env.example"
+{
+  printf 'TWO_CONSUMED_KEY\n'
+  for ((i=0; i<30000; i++)); do
+    printf 'ZZ_FILLER_TOKEN_%05d\n' "$i"
+  done
+} > "$FIXTURE/src/tokens.ts"
+if ! output="$(run_guard)"; then
+  printf 'large token set: guard refused a consumed key\n%s\n' "$output" >&2
+  exit 1
+fi
+printf '  ok  R2 early match in large token set\n'
+printf 'TWO_ORPHANED_KEY=\n' >> "$FIXTURE/.env.example"
+expect_fail_saying "R2 orphan in large token set" \
+  "R2: .env.example defines TWO_ORPHANED_KEY"
 
 printf 'check-env-drift self-test: all cases pass\n'

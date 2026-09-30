@@ -54,6 +54,7 @@ function die(code: number, msg: string): never {
 }
 
 if (flag('help')) {
+  console.log('Usage: node scripts/rules-gate-timeout.ts [--guild <id>] [--audit <file>] [--now <ISO>] [--execute --expect <count>]');
   console.log(readFileSync(new URL(import.meta.url), 'utf8').split('*/')[0]!.replace(/^\/\*\*| \* ?/gm, ''));
   process.exit(0);
 }
