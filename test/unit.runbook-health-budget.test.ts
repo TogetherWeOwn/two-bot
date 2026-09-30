@@ -301,6 +301,25 @@ test('stalled holder release still kills child and closes mock after total deadl
   f.clean();
 });
 
+test('collision backoff is clipped and cannot start another child after expiry', async (t) => {
+  const f = fixture(t, { crashFirst: true });
+  const report = await finish(t, f.run(1_600));
+  assert.equal(Date.now(), 1_600);
+  failure(report, 'boot-probe-budget');
+  assert.equal(f.children.length, 1);
+  assert.match(report.checks.find((c) => c.status === 'fail')!.detail, /EADDRINUSE/);
+  f.clean();
+});
+
+test('initial boot observation sleep is clipped to the shared deadline', async (t) => {
+  const f = fixture(t);
+  const report = await finish(t, f.run(500));
+  assert.equal(Date.now(), 500);
+  failure(report, 'boot-probe-budget');
+  assert.equal(f.children.length, 1);
+  f.clean();
+});
+
 test('invalid total budget is refused before any startup', async (t) => {
   const f = fixture(t);
   for (const timeout of [0, -1, Infinity, NaN]) {
