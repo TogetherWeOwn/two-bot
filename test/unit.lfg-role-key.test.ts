@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Events, type Client, type Interaction, type InteractionReplyOptions } from 'discord.js';
+import { Events, type Client, type Interaction, type InteractionDeferReplyOptions, type InteractionEditReplyOptions } from 'discord.js';
 import { registerAnnouncementCommands } from '../src/announcements/discord.ts';
 import { AnnouncementsService, parseRoleSpec, type AnnouncementDiscord } from '../src/announcements/service.ts';
 import type { AnnouncementsStore, LfgPostRow, LfgRoleRow, LfgSignupRow } from '../src/announcements/store.ts';
@@ -103,18 +103,34 @@ test('normal role values remain distinct from the working leave action in the re
     },
   } as unknown as Client;
   registerAnnouncementCommands(client, { guildId: GUILD, service, store: store as unknown as AnnouncementsStore });
-  const replies: InteractionReplyOptions[] = [];
+  const replies: InteractionEditReplyOptions[] = [];
+  const deferrals: InteractionDeferReplyOptions[] = [];
   async function select(value: string) {
     assert.ok(handler);
-    await handler({
+    const interaction = {
       inGuild: () => true,
       guildId: GUILD,
       isStringSelectMenu: () => true,
+      isRepliable: () => true,
       customId: menu!.custom_id,
       values: [value],
       user: { id: USER },
-      async reply(reply: InteractionReplyOptions) { replies.push(reply); },
-    } as unknown as Interaction);
+      replied: false,
+      deferred: false,
+      async deferReply(options: InteractionDeferReplyOptions) {
+        assert.equal(this.deferred, false);
+        assert.equal(this.replied, false);
+        deferrals.push(options);
+        this.deferred = true;
+      },
+      async editReply(reply: InteractionEditReplyOptions) {
+        assert.equal(this.deferred, true);
+        replies.push(reply);
+        this.replied = true;
+      },
+      async reply() { assert.fail('LFG select must complete its deferred reply'); },
+    };
+    await handler(interaction as unknown as Interaction);
   }
   for (const option of menu.options.slice(0, -1)) {
     await select(option.value);
@@ -127,10 +143,11 @@ test('normal role values remain distinct from the working leave action in the re
   assert.deepEqual(leaveCalls, [{ id: created.id, userId: USER }]);
   assert.deepEqual(signupCalls, ['tank', 'leave', '__leave___'], 'leave must never dispatch signup');
   assert.equal(edits.length, 4, 'three signup refreshes and one leave refresh');
+  assert.deepEqual(deferrals, Array.from({ length: 4 }, () => ({ ephemeral: true })));
   assert.deepEqual(replies, [
-    { content: 'LFG joined.', ephemeral: true },
-    { content: 'LFG joined.', ephemeral: true },
-    { content: 'LFG joined.', ephemeral: true },
-    { content: 'LFG left.', ephemeral: true },
+    { content: 'LFG joined.' },
+    { content: 'LFG joined.' },
+    { content: 'LFG joined.' },
+    { content: 'LFG left.' },
   ]);
 });
