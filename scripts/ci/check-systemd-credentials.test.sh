@@ -106,6 +106,9 @@ expect_r1_literal "R1 different secret key" 'Environment="LOG_LEVEL=info" "TWO_B
 expect_r1_literal "R1 quoted key fragment" "Environment='DISCORD_TOKEN'=synthetic"
 expect_r1_literal "R1 double-quoted key fragment" 'Environment="DISCORD_TOKEN"=synthetic'
 expect_r1_literal "R1 quoted value fragment" 'Environment=DISCORD_TOKEN="synthetic value"'
+# U+00A0 is not systemd comment indentation: an NBSP-indented "#" line is
+# joined, not skipped, so the continued secret assignment is refused.
+expect_r1_literal "R1 NBSP-indented continuation is not a comment" $'Environment="LABEL=prefix\\\n\xc2\xa0#" DISCORD_TOKEN=synthetic'
 
 # These are not secret assignments: match keys, not substrings of values.
 reset_fixture

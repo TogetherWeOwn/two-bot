@@ -169,7 +169,10 @@ def split_words(text):
 def logical_lines(text):
     pending = ""
     for line in text.split("\n"):
-        if line.lstrip().startswith(("#", ";")):
+        # systemd skips only ASCII WHITESPACE before a comment marker
+        # (src/basic/string-util.h, src/shared/conf-parser.c), so an
+        # NBSP-indented "#" line is retained and joined, not a comment.
+        if line.lstrip(" \t\r\n").startswith(("#", ";")):
             continue
         pending += line
         # An escaped backslash at EOL is literal, not a continuation.
