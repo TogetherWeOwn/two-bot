@@ -80,6 +80,11 @@ if (!databaseUrl) {
  * instant and the fetch below would otherwise fall in the crack between two
  * windows; this way it simply lands in the next one. Double-counting is not a
  * risk - member_join is keyed on (guild, member, joined_at).
+ *
+ * This is the WINDOW watermark only (snapshot updated_at, window label). It is
+ * NOT presence evidence: stamping a captured join with it would predate the
+ * roster read below, so a removal and rejoin that both land mid-window would
+ * lose to the removal. Presence gets its own stamp after the roster read.
  */
 const capturedAt = new Date().toISOString();
 
@@ -162,6 +167,13 @@ if (members.length === 0) {
   process.exit(1);
 }
 
+// Roster-observation stamp, taken AFTER the member-list read above (including
+// pagination) completes. `capturedAt` is the window watermark from before the
+// reads; stamping presence with it would predate the roster, so a removal and
+// a rejoin that both land mid-window would lose to the removal. Presence
+// evidence is "on the roster at this instant", so it gets this instant.
+const rosterObservedAt = new Date().toISOString();
+
 const guild = await rest.get<{ vanity_url_code?: string | null }>(`/guilds/${guildId}`);
 const hasVanity = !!guild?.vanity_url_code;
 
@@ -219,9 +231,10 @@ if (!dryRun) {
     // A captured join is live current-member evidence, not a historical log
     // import: the member is on the roster NOW, so this observation outranks a
     // delayed removal stamped earlier. Occurrence stays Discord's joined_at;
-    // only presence order uses the capture instant. Backfill member-list
+    // only presence order uses the roster-observation instant (after the
+    // member-list read, not the window start). Backfill member-list
     // joins stay observation-free on purpose - they are history, not presence.
-    const res = await store.record(e, { membershipObservedAt: capturedAt });
+    const res = await store.record(e, { membershipObservedAt: rosterObservedAt });
     if (res.inserted) written++;
   }
   // Store the new counters last, so a crash mid-write re-reads the same window

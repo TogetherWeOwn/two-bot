@@ -31,6 +31,9 @@ import { before, after, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { createServer, type Server } from 'node:http';
+import { rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { openTestDb, TEST_PG_URL, type TestDb } from './helpers/testDb.ts';
@@ -192,4 +195,107 @@ test('a captured current member reopens presence after a delayed removal', { tim
     { event_type: 'member_join', occurred_at: REJOIN, source: 'invite:rest-invite' },
     { event_type: 'member_leave', occurred_at: DELAYED_LEAVE, source: 'gateway' },
   ]);
+});
+
+/**
+ * TOG-10212 P2 regression (reviewer CHANGES at c0673dc1): a rejoin during a
+ * REST capture stays present even when the window started earlier.
+ *
+ * Race: capture window opens at 10:00, a removal lands at 10:01, the member
+ * rejoins at 10:01:30, and the roster is actually read at 10:02. The captured
+ * join must carry the roster-observation instant (10:02), not the window
+ * watermark (10:00) - otherwise the store selects the earlier removal despite
+ * the roster proving a later rejoin. The child's wall clock is pinned at 10:00
+ * and advanced to 10:02 by the stub at the actual roster read, so the race is
+ * deterministic. Mirrors the reviewer's child-clock proof.
+ */
+test('a rejoin during REST capture keeps roster-observation time, not window start', { timeout: 120_000 }, async () => {
+  const WINDOW_START = '2026-09-30T10:00:00.000Z';
+  const MID_LEAVE = '2026-09-30T10:01:00.000Z';
+  const MID_REJOIN = '2026-09-30T10:01:30.000Z';
+  const ROSTER_READ = '2026-09-30T10:02:00.000Z';
+  const store = new EventStore(harness.db);
+  await store.record({
+    guildId: GUILD, memberId: MEMBER, eventType: 'member_join',
+    occurredAt: FIRST_JOIN, source: 'invite:first',
+  });
+  await store.record(
+    { guildId: GUILD, memberId: MEMBER, eventType: 'member_leave', occurredAt: MID_LEAVE, source: 'gateway' },
+    { membershipObservedAt: MID_LEAVE },
+  );
+  await harness.db
+    .prepare(`INSERT INTO invite_snapshots (guild_id, code, uses, updated_at) VALUES (?, ?, ?, ?)`)
+    .run(GUILD, 'mid-invite', 1, FIRST_JOIN);
+
+  const clock = join(tmpdir(), `two-bot-capture-clock-${process.pid}.txt`);
+  writeFileSync(clock, String(Date.parse(WINDOW_START)));
+  const seen: string[] = [];
+  const timed = createServer((req, res) => {
+    const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    seen.push(url.pathname);
+    const send = (body: unknown) => {
+      const json = JSON.stringify(body);
+      res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(json) });
+      res.end(json);
+    };
+    if (req.method === 'GET' && url.pathname === `/api/v10/guilds/${GUILD}/invites`) {
+      return send([{ code: 'mid-invite', uses: 2 }]);
+    }
+    if (req.method === 'GET' && url.pathname === `/api/v10/guilds/${GUILD}/members`) {
+      // The roster is observed NOW, mid-window: advance the child clock.
+      writeFileSync(clock, String(Date.parse(ROSTER_READ)));
+      return send([{ user: { id: MEMBER, bot: false }, joined_at: MID_REJOIN }]);
+    }
+    return send({ vanity_url_code: null });
+  });
+  await new Promise<void>((resolve) => timed.listen(0, '127.0.0.1', resolve));
+  try {
+    const port = (timed.address() as { port: number }).port;
+    const url = new URL(TEST_PG_URL);
+    url.searchParams.set('options', `-c search_path=${harness.schema}`);
+    const pin = fileURLToPath(new URL('./helpers/pinned-clock.mjs', import.meta.url));
+    let code = 0;
+    let stdout = '';
+    let stderr = '';
+    try {
+      const result = await run(process.execPath, ['--import', pin, SCRIPT], {
+        cwd: REPO,
+        env: {
+          ...process.env,
+          TWO_DATABASE_URL: url.toString(),
+          DISCORD_TOKEN: TOKEN,
+          DISCORD_GUILD_ID: GUILD,
+          DISCORD_API_BASE: `http://127.0.0.1:${port}/api/v10`,
+          TWO_TEST_CLOCK_FILE: clock,
+        },
+        timeout: 60_000,
+      });
+      stdout = result.stdout;
+      stderr = result.stderr;
+    } catch (error) {
+      const err = error as { code?: number; stdout?: string; stderr?: string };
+      code = err.code ?? -1;
+      stdout = err.stdout ?? '';
+      stderr = err.stderr ?? '';
+    }
+    assert.equal(code, 0, `capture failed:\n${stdout}\n${stderr}`);
+    assert.ok(seen.includes(`/api/v10/guilds/${GUILD}/members`), `no roster read: ${JSON.stringify(seen)}`);
+
+    const projection = await harness.db.prepare(
+      `SELECT joined_at, join_source, left_at FROM members WHERE guild_id = ? AND member_id = ?`,
+    ).get<{ joined_at: string; join_source: string; left_at: string | null }>(GUILD, MEMBER);
+    assert.deepEqual(projection, { joined_at: MID_REJOIN, join_source: 'invite:mid-invite', left_at: null });
+
+    const captured = await harness.db.prepare(
+      `SELECT metadata FROM events WHERE guild_id = ? AND member_id = ? AND event_type = ? AND occurred_at = ?`,
+    ).get<{ metadata: string }>(GUILD, MEMBER, 'member_join', MID_REJOIN);
+    const meta = JSON.parse(captured!.metadata) as {
+      membershipObservedAt?: string; window?: { from?: string; to?: string };
+    };
+    assert.equal(meta.membershipObservedAt, ROSTER_READ, 'presence carries the roster observation, not the window start');
+    assert.equal(meta.window?.to, WINDOW_START, 'the window watermark still labels the window start');
+  } finally {
+    await new Promise<void>((resolve) => timed.close(() => resolve()));
+    rmSync(clock, { force: true });
+  }
 });

@@ -116,35 +116,41 @@ export class EventStore {
           .get<{ id: number }>(key);
         if (existing && observedAt !== undefined) {
           // A live redelivery reconfirms presence, not attribution or occurrence.
-          // Portable read-modify-write: the Postgres jsonb one-statement form
-          // breaks the offline SQLite probes (near "FOR"/"::" syntax error),
-          // so parse in JS. Concurrent redeliveries carry increasing
-          // observations, so last-writer-wins still converges on the newest.
-          const cur = await tx
-            .prepare(`SELECT metadata FROM events WHERE id = ?`)
-            .get<{ metadata: string | null }>(existing.id);
-          let stored: string | null = null;
-          if (cur?.metadata) {
-            try {
-              const parsed = JSON.parse(cur.metadata) as { membershipObservedAt?: unknown };
-              if (typeof parsed.membershipObservedAt === 'string') stored = parsed.membershipObservedAt;
-            } catch {
-              stored = null;
-            }
-          }
-          if (stored === null || compareIso(stored, observedAt) < 0) {
+          //
+          // Atomic maximum, portably: the previous single-statement jsonb
+          // conditional broke the offline SQLite probes (near "FOR"/"::"
+          // syntax errors), and a plain read-modify-write lets a paused older
+          // observation overwrite a newer commit. So the UPDATE is a
+          // compare-and-swap on the exact metadata string just read - a
+          // concurrent commit makes it match zero rows instead of clobbering -
+          // with a bounded re-read retry so a genuinely newer observation
+          // still converges on the max. No FOR UPDATE, no casts, no CTEs, no
+          // UPDATE..FROM: the offline probes run this same code behind the
+          // narrow Db surface.
+          for (let attempt = 0; attempt < 5; attempt++) {
+            const cur = await tx
+              .prepare(`SELECT metadata FROM events WHERE id = ?`)
+              .get<{ metadata: string | null }>(existing.id);
+            let stored: string | null = null;
             let base: Record<string, unknown> = {};
             if (cur?.metadata) {
               try {
                 base = JSON.parse(cur.metadata) as Record<string, unknown>;
+                if (typeof base.membershipObservedAt === 'string') stored = base.membershipObservedAt;
               } catch {
                 base = {};
+                stored = null;
               }
             }
-            await tx.prepare(`UPDATE events SET metadata = ? WHERE id = ?`).run(
-              JSON.stringify({ ...base, membershipObservedAt: observedAt }),
-              existing.id,
-            );
+            if (stored !== null && compareIso(stored, observedAt) >= 0) break;
+            const next = JSON.stringify({ ...base, membershipObservedAt: observedAt });
+            const swapped = await tx.prepare(
+              `UPDATE events SET metadata = ? WHERE id = ?
+                AND COALESCE(metadata, '') = COALESCE(?, '')`,
+            ).run(next, existing.id, cur?.metadata ?? null);
+            if (swapped.changes > 0) break;
+            // Someone committed between our read and write; re-read and
+            // converge on the max rather than clobbering it.
           }
           await this.project(tx, e);
         }

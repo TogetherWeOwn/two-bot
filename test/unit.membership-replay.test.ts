@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { Events, type Client } from 'discord.js';
 import { EventStore } from '../src/store/eventStore.ts';
+import type { Db, RunResult } from '../src/store/driver.ts';
 import { FunnelHandlers } from '../src/core/handlers.ts';
 import type { InviteTracker } from '../src/core/inviteTracker.ts';
 import { registerHandlers } from '../src/discord/client.ts';
@@ -146,6 +147,60 @@ test('concurrent live writes and stale duplicates preserve the newest observatio
     inviterId: 'inviter', membershipObservedAt: '2026-09-30T01:00:00.000002Z',
   });
   assert.equal(JSON.parse(rows[1].metadata).membershipObservedAt, '2026-09-30T01:00:00.000003Z');
+});
+
+/**
+ * TOG-10212 P1 regression (reviewer CHANGES at c0673dc1): two concurrently
+ * advancing duplicates completing newest-first. The older writer pauses after
+ * its read but before its metadata UPDATE; the newer observation commits
+ * first. The stale write must lose (compare-and-swap on the exact metadata
+ * string just read matches zero rows) while the newer commit survives and
+ * presence follows it. Mirrors the reviewer's delayedUpdate proof.
+ */
+test('an older concurrent duplicate completing after a newer one keeps the newest observation', async () => {
+  const store = new EventStore(harness.db);
+  const join = {
+    guildId: G, memberId: M, eventType: 'member_join' as const,
+    occurredAt: FIRST, source: 'invite:original', metadata: { inviterId: 'i' },
+  };
+  const obs = (n: number) => `2026-09-30T01:00:00.00000${n}Z`;
+  await store.record(join, { membershipObservedAt: obs(0) });
+  await store.record(
+    { ...join, eventType: 'member_leave', occurredAt: '2026-09-30T01:00:00.000Z', source: 'gateway', metadata: undefined },
+    { membershipObservedAt: obs(2) },
+  );
+  const reached = deferred();
+  const release = deferred();
+  const wrap = (db: Db): Db => ({
+    prepare: (sql) => {
+      const stmt = db.prepare(sql);
+      return {
+        get: (...args) => stmt.get(...args),
+        all: (...args) => stmt.all(...args),
+        async run(...args): Promise<RunResult> {
+          if (/UPDATE events SET metadata/.test(sql)) {
+            reached.resolve();
+            await release.promise;
+          }
+          return stmt.run(...args);
+        },
+      };
+    },
+    exec: (sql) => db.exec(sql),
+    transaction: (fn) => db.transaction((tx) => fn(wrap(tx))),
+    close: () => db.close(),
+  });
+  const staleStore = new EventStore(wrap(harness.db));
+  const older = staleStore.record(join, { membershipObservedAt: obs(1) });
+  await reached.promise;
+  await store.record(join, { membershipObservedAt: obs(3) });
+  release.resolve();
+  await older;
+  const row = await harness.db.prepare(
+    `SELECT metadata FROM events WHERE guild_id = ? AND member_id = ? AND event_type = ?`,
+  ).get<{ metadata: string }>(G, M, 'member_join');
+  assert.equal(JSON.parse(row!.metadata).membershipObservedAt, obs(3));
+  assert.deepEqual(await projection(), { joined_at: FIRST, join_source: 'invite:original', left_at: null });
 });
 
 for (const delayed of ['leave', 'join'] as const) {
