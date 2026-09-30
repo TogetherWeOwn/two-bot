@@ -827,6 +827,51 @@ describe('empty grace', () => {
 });
 
 describe('per-channel sweep failures', () => {
+  for (const outcome of ['deleted', 'missing'] as const) {
+    test(`audit failure after ${outcome} cleanup does not undercount or starve later channels`, async (t) => {
+      const svc = service();
+      const channelIds: string[] = [];
+      for (const userId of [OWNER, OTHER]) {
+        const created = await join(svc, userId);
+        assert.equal(created.status, 'created');
+        const channelId = created.status === 'created' ? created.channelId : '';
+        gateway.channels.get(channelId)!.members = [];
+        await svc.onVoiceStateChange({ guildId: GUILD, userId, fromChannelId: channelId, toChannelId: null });
+        channelIds.push(channelId);
+        clock++;
+      }
+      const [failedAuditId, healthyId] = channelIds;
+      if (outcome === 'missing') {
+        const original = gateway.deleteChannel.bind(gateway);
+        t.mock.method(gateway, 'deleteChannel', async (channelId: string, reason: string) => {
+          if (channelId === failedAuditId) gateway.channels.delete(channelId);
+          return original(channelId, reason);
+        });
+      }
+      const error = new Error('audit unavailable');
+      const audit = store.audit.bind(store);
+      t.mock.method(store, 'audit', async (...args: Parameters<TempVoiceStore['audit']>) => {
+        if (args[0].channelId === failedAuditId && args[0].action === 'delete') throw error;
+        return audit(...args);
+      });
+      const errors = t.mock.method(log, 'error', () => {});
+      clock += 120_000;
+
+      const report = await svc.sweep(GUILD);
+      for (const channelId of channelIds) {
+        assert.equal(gateway.channels.has(channelId), false);
+        assert.equal(await store.getByChannel(GUILD, channelId), null);
+      }
+      assert.equal(await store.countForGuild(GUILD), 0);
+      assert.deepEqual(gateway.deleteCalls.map((call) => call.channelId), [failedAuditId, healthyId]);
+      assert.deepEqual(report, { adopted: 0, deleted: 2, rowsDropped: 0, reservationsDropped: 0 });
+      assert.deepEqual(errors.mock.calls.map((call) => call.arguments), [
+        ['temp_voice_delete_audit_failed', { guildId: GUILD, channelId: failedAuditId, outcome, err: String(error) }],
+      ]);
+      assert.equal((await svc.sweep(GUILD)).deleted, 0, 'completed cleanup is not retried or double-counted');
+    });
+  }
+
   for (const failure of ['deleteChannel', 'occupantsOf'] as const) {
     test(`${failure} failure retains provenance and does not starve later channels`, async (t) => {
       const svc = service();
