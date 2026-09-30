@@ -654,22 +654,23 @@ describe('web_v1 contract', () => {
       ['e1', 'e2', 'e3'],
       'the 91st day, the cancelled and the completed stay out',
     );
-    const next = await db.prepare(`SELECT * FROM ${web}.next_event`).get();
+    const nextRows = await db.prepare(`SELECT * FROM ${web}.next_event`).all();
+    assert.equal(nextRows.length, 1, 'next_event yields exactly one row; dropping LIMIT 1 must red here');
     assert.deepEqual(
-      [next?.event_id, next?.name, next?.channel_id, next?.description],
-      [upcoming[0].event_id, upcoming[0].name, upcoming[0].channel_id, upcoming[0].description],
+      nextRows[0],
+      upcoming[0],
       'next_event is the first upcoming row, whole row, not just the id',
     );
-    assert.equal(next?.channel_id, 'chan1');
-    assert.equal(next?.description, 'Bring dice');
+    assert.equal(nextRows[0]?.channel_id, 'chan1');
+    assert.equal(nextRows[0]?.description, 'Bring dice');
   });
 
   test('funnel_daily counts every column on its own day, and no row for an empty day', async () => {
-    // TOG-8307: the existing pin covers joins/leaves/net on two days. The
-    // first_voice_sessions column, a same-day leave pair, and the empty-day
-    // no-row rule have no pin - a drift that drops a column or emits zero
-    // rows must red here.
-    for (const id of ['111', '222', '333']) {
+    // TOG-8307: every count column is its own event type, so the per-column
+    // totals differ on purpose - counting one type as another (messages as
+    // voice sessions, joins as leaves) changes two asserted numbers, not zero.
+    // A drift that drops a column or emits zero rows must red here.
+    for (const id of ['111', '222', '333', '444']) {
       await db
         .prepare(`INSERT INTO members (guild_id, member_id, joined_at, is_bot) VALUES (?, ?, ?, ?)`)
         .run(GUILD, id, '2026-08-01T10:00:00.000Z', 0);
@@ -680,18 +681,26 @@ describe('web_v1 contract', () => {
     );
     await insert.run('member_join', '111', GUILD, '2026-08-01T10:00:00.000Z', 'invite:aB3xY9', 'c1');
     await insert.run('member_join', '222', GUILD, '2026-08-01T11:00:00.000Z', 'invite:aB3xY9', 'c2');
-    await insert.run('member_leave', '222', GUILD, '2026-08-01T12:00:00.000Z', 'unknown', 'c3');
-    await insert.run('first_message', '111', GUILD, '2026-08-01T13:00:00.000Z', 'channel:1', 'c4');
-    await insert.run('first_voice_session', '111', GUILD, '2026-08-01T14:00:00.000Z', 'channel:2', 'c5');
-    await insert.run('member_join', '333', GUILD, '2026-08-03T10:00:00.000Z', 'vanity', 'c6');
+    await insert.run('member_join', '333', GUILD, '2026-08-01T11:30:00.000Z', 'vanity', 'c3');
+    await insert.run('member_leave', '222', GUILD, '2026-08-01T12:00:00.000Z', 'unknown', 'c4');
+    await insert.run('first_message', '111', GUILD, '2026-08-01T13:00:00.000Z', 'channel:1', 'c5');
+    await insert.run('first_voice_session', '111', GUILD, '2026-08-01T14:00:00.000Z', 'channel:2', 'c6');
+    await insert.run('first_voice_session', '333', GUILD, '2026-08-01T15:00:00.000Z', 'channel:2', 'c7');
+    await insert.run('member_join', '444', GUILD, '2026-08-03T10:00:00.000Z', 'vanity', 'c8');
+    await insert.run('first_message', '444', GUILD, '2026-08-03T11:00:00.000Z', 'channel:1', 'c9');
+    await insert.run('first_message', '333', GUILD, '2026-08-03T12:00:00.000Z', 'channel:1', 'c10');
+    await insert.run('first_voice_session', '444', GUILD, '2026-08-03T13:00:00.000Z', 'channel:2', 'c11');
 
     const rows = await db.prepare(`SELECT * FROM ${web}.funnel_daily ORDER BY day`).all();
     assert.deepEqual(rows.map((r) => r.day), ['2026-08-01', '2026-08-03'], 'a day with no activity produces no row');
     assert.deepEqual(
       [rows[0].joins, rows[0].leaves, rows[0].first_messages, rows[0].first_voice_sessions, rows[0].net_change].map(Number),
-      [2, 1, 1, 1, 1],
+      [3, 1, 1, 2, 2],
     );
-    assert.equal(Number(rows[1].net_change), 1);
+    assert.deepEqual(
+      [rows[1].joins, rows[1].leaves, rows[1].first_messages, rows[1].first_voice_sessions, rows[1].net_change].map(Number),
+      [1, 0, 2, 1, 1],
+    );
   });
 
   test('funnel_by_source counts joins only, and every source on file appears', async () => {

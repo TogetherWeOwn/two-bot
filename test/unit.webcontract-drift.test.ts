@@ -283,10 +283,34 @@ test('the milestone whitelist is exactly three, named against the event list', (
   for (const t of ['member_join', 'member_leave', 'rank_changed']) {
     assert.match(view, new RegExp(`'${t}'`), `${t} must stay whitelisted`);
   }
+  // The IN list IS the whitelist, so pin it exactly: adding an existing type
+  // (e.g. third_message) to the IN clause must red here, not just fail to
+  // match an exclusion list.
+  const milestoneStart = view.indexOf('VIEW web_v1.member_milestones AS');
+  assert.ok(milestoneStart >= 0, 'the milestone view must exist in web_v1.sql');
+  const milestoneView = view.slice(milestoneStart, view.indexOf(';', milestoneStart));
+  const inList = milestoneView.match(/e\.event_type IN \(([^)]*)\)/);
+  assert.ok(inList, 'the milestone view must carry an explicit IN whitelist');
+  const listed = [...(inList[1] ?? '').matchAll(/'([a-z_]+)'/g)].map((m) => m[1]).sort();
+  assert.deepEqual(
+    listed,
+    ['member_join', 'member_leave', 'rank_changed'],
+    'the milestone whitelist is exactly these three; a fourth type must red here',
+  );
+  // Every other known event type must stay out of the milestone view entirely -
+  // derived from EVENT_TYPES itself, so a newly added type is covered too.
   const src = read(join('src', 'core', 'events.ts'));
-  const nonMilestones = ['invite_click', 'second_message', 'voice_session_start', 'gate_cleared', 'onboarding_prompted'];
-  for (const t of nonMilestones) {
+  const eventTypesBlock = src.match(/EVENT_TYPES = \[([\s\S]*?)\]/);
+  assert.ok(eventTypesBlock, 'EVENT_TYPES must stay a literal list in events.ts');
+  const allTypes = [...(eventTypesBlock[1] ?? '').matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+  assert.ok(allTypes.length > 3, 'EVENT_TYPES must hold more than the three milestones');
+  for (const t of allTypes) {
+    if (listed.includes(t)) continue;
     assert.match(src, new RegExp(`'${t}'`), `${t} is a real event type`);
-    assert.doesNotMatch(view, new RegExp(`WHEN '${t}'|IN \\([^)]*'${t}'`), `${t} must not reach the milestone view`);
+    assert.doesNotMatch(
+      milestoneView,
+      new RegExp(`WHEN '${t}'|IN \\([^)]*'${t}'`),
+      `${t} must not reach the milestone view`,
+    );
   }
 });
