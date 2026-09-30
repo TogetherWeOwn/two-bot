@@ -37,8 +37,8 @@
  */
 import { openDb } from '../src/store/db.ts';
 import { TempVoiceStore } from '../src/tempVoice/store.ts';
-import { assertTestDatabaseHost } from './test-db-guard.ts';
 import { PER_GUILD, SEED_BASE, seedTempVoiceBenchmark } from './temp-voice-index-bench-seed.ts';
+import { assertTestDatabaseHost } from './test-db-guard.ts';
 
 const spec = process.env.TWO_DATABASE_URL?.trim() ?? '';
 if (!spec) {
