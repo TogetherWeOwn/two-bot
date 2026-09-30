@@ -39,6 +39,7 @@ import { createServer } from "node:http";
 import test from "node:test";
 
 import {
+  applyPemContext,
   checkAuth,
   createHandler,
   extractJsonCandidates,
@@ -46,8 +47,10 @@ import {
   parseLogLines,
   PINNED_REPO,
   PINNED_STAGING_APP_UUID,
+  redactPemBlock,
   scrubSecrets,
   SECRET_PLACEHOLDER,
+  shapeEmbeddedText,
   shapeLogs,
   shapeLogItem,
   shapeLogValue,
@@ -534,6 +537,118 @@ test("logs-redaction: private-key markers redact short, overlong and incomplete"
   assert.ok(!text.includes("Y".repeat(20)), "no incomplete key-block body crosses");
   assert.ok(!text.includes("BEGIN RSA PRIVATE KEY"), "key marker labels never cross");
   assert.equal(out.json.logs.length, 3, "all three marker lines still return a (redacted) message");
+});
+
+test("logs-redaction: quoted-brace JSON secrets redact through the handler", async (t) => {
+  // The exact shape naive brace counting misaligned: a `}` inside a quoted
+  // value ended the span early, JSON.parse failed, and the password crossed
+  // as "scrubbed raw" (TOG-9053 finding 2). Scanner-safe: plain words only.
+  const srv = await boot(() => ({ logs: ['INFO {"note":"a}b","password":"ordinary-db-password"}'] }));
+  t.after(srv.close);
+  const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+  assert.equal(out.status, 200);
+  const text = JSON.stringify(out.json);
+  assert.ok(!text.includes("ordinary-db-password"), "quoted-brace password must not cross");
+  assert.match(text, /a\}b/, "benign quoted-brace content survives");
+});
+
+test("logs-redaction: incomplete PEM with JSON suffix dies whole, never reshaped", async (t) => {
+  // PEM redacts FIRST, before JSON parsing: an incomplete block whose END
+  // marker is beyond this string still dies to end-of-string, so embedded
+  // JSON in the suffix never survives to be shaped and re-emitted
+  // (TOG-9053 finding 2). Scanner-safe: plain words only.
+  const srv = await boot(() => ({
+    logs: ['leak -----BEGIN RSA PRIVATE KEY----- {"password":"ordinary-db-password"}'],
+  }));
+  t.after(srv.close);
+  const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+  assert.equal(out.status, 200);
+  const text = JSON.stringify(out.json);
+  assert.ok(!text.includes("ordinary-db-password"), "JSON in an incomplete PEM suffix must not resurface");
+  assert.ok(!text.includes("BEGIN RSA PRIVATE KEY"), "key marker labels never cross");
+});
+
+test("logs-redaction: multiline key block split across log lines never crosses", async (t) => {
+  // The generic scrub's PEM rule only protects blocks that are WHOLE when
+  // scrubbed; shaping lines in isolation orphaned the body from its marker.
+  // PEM context runs BEFORE per-line shaping (TOG-9053 finding 2).
+  // Synthetic: 'X' runs, no key material, scanner-safe by construction.
+  const srv = await boot(() => ({
+    logs: [
+      "pre -----BEGIN RSA PRIVATE KEY-----",
+      `line ${"X".repeat(60)} line`,
+      `line ${"X".repeat(60)} line -----END RSA PRIVATE KEY----- post`,
+    ],
+  }));
+  t.after(srv.close);
+  const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+  assert.equal(out.status, 200);
+  const text = JSON.stringify(out.json);
+  assert.ok(!text.includes("X".repeat(20)), "no split key-block body crosses");
+  assert.ok(!text.includes("BEGIN RSA PRIVATE KEY"), "key marker labels never cross");
+  assert.equal(out.json.logs.length, 3, "all three lines still return a (redacted) message");
+});
+
+test("logs-redaction unit: extractJsonCandidates is quote-aware", () => {
+  // A `}` inside a double-quoted JSON value (with backslash escapes) does not
+  // close a record — naive brace counting misaligned the span, JSON.parse
+  // failed, and the password crossed as "scrubbed raw" (TOG-9053 finding 2).
+  assert.deepEqual(extractJsonCandidates('{"note":"a}b","k":1}'), [[0, 20]]);
+  assert.deepEqual(extractJsonCandidates('{"note":"a\\"b}c","k":1}'), [[0, 23]]);
+  assert.deepEqual(extractJsonCandidates("a}b{c}"), [[3, 6]]);
+});
+
+test("logs-redaction unit: shapeEmbeddedText shapes every span in one pass", () => {
+  // Shaping only the first differing span left secret siblings raw; the
+  // string-vs-string equality check let a whitespace-formatted benign span
+  // hide the secrets behind it. Sibling spans now shape together in document
+  // order while benign records stay byte-identical (TOG-9053 finding 2).
+  assert.equal(
+    shapeEmbeddedText('{"a":1} tail {"password":"ordinary-db-password"}', []),
+    `{"a":1} tail {"password":"${SECRET_PLACEHOLDER}"}`,
+  );
+  const benign = '{ "a" : 1 } then {"b":2}';
+  assert.equal(shapeEmbeddedText(benign, []), benign, "benign records stay byte-identical");
+  assert.equal(shapeEmbeddedText("plain line", []), "plain line");
+  // Over-depth spans cross as the placeholder, never raw: the old code
+  // discarded a non-object shaped result and fell through to raw text,
+  // leaking depth-11 payloads (TOG-9053 finding 2).
+  assert.equal(shapeEmbeddedText('{"a":1}', [], 10), SECRET_PLACEHOLDER);
+  // Gap text carries no parseable record, so it is scrubbed, not shaped: a
+  // token-shape leak next to a benign record still dies.
+  assert.equal(
+    shapeEmbeddedText(`leak ${FAKE_BOT_TOKEN_TEXT} {"a":1}`, []),
+    `leak ${SECRET_PLACEHOLDER} {"a":1}`,
+  );
+});
+
+test("logs-redaction unit: redactPemBlock redacts to end when END is absent", () => {
+  assert.equal(redactPemBlock("clean line"), "clean line");
+  assert.equal(redactPemBlock("pre -----BEGIN RSA PRIVATE KEY----- X"), `pre ${SECRET_PLACEHOLDER}`);
+  assert.equal(
+    redactPemBlock("a -----BEGIN RSA PRIVATE KEY----- X -----END RSA PRIVATE KEY----- z"),
+    `a ${SECRET_PLACEHOLDER} z`,
+  );
+});
+
+test("logs-redaction unit: applyPemContext carries blocks across entries", () => {
+  // BEGIN/body/END arriving as separate log entries: lines fully inside the
+  // region collapse to the placeholder; an entry that opens a block keeps its
+  // pre-marker text; non-string entries inside a region collapse too
+  // (structure is expendable, secrecy is not). Never throws (TOG-9053 finding 2).
+  assert.deepEqual(applyPemContext(["clean line"]), ["clean line"]);
+  assert.deepEqual(applyPemContext(["a -----BEGIN RSA PRIVATE KEY----- X -----END RSA PRIVATE KEY----- z"]), [
+    `a ${SECRET_PLACEHOLDER} z`,
+  ]);
+  assert.deepEqual(
+    applyPemContext(["pre -----BEGIN RSA PRIVATE KEY-----", "body-line", "tail -----END RSA PRIVATE KEY----- post"]),
+    [`pre ${SECRET_PLACEHOLDER}`, SECRET_PLACEHOLDER, `${SECRET_PLACEHOLDER} post`],
+  );
+  assert.deepEqual(applyPemContext(["-----BEGIN RSA PRIVATE KEY-----", { token: "x" }, "-----END RSA PRIVATE KEY-----"]), [
+    SECRET_PLACEHOLDER,
+    SECRET_PLACEHOLDER,
+    SECRET_PLACEHOLDER,
+  ]);
 });
 
 test("logs-redaction unit: extractJsonCandidates matches the smoke brace policy", () => {
