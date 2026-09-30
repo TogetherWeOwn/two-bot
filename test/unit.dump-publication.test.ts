@@ -1,6 +1,6 @@
 import { describe, test, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import fs, { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync, mkdirSync } from 'node:fs';
+import fs, { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync, mkdirSync } from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -150,6 +150,52 @@ describe('dump publication (offline)', () => {
       } finally {
         mocked?.mock.restore();
         syncBuiltinESMExports();
+        rmSync(f.dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  for (const replacePrior of [false, true]) {
+    test(`temporary and final output stay private under umask 022 (${replacePrior ? 'existing' : 'new'} destination)`, async () => {
+      const f = fixture();
+      const previousUmask = process.umask(0o022);
+      const create = fs.createWriteStream;
+      let mocked: ReturnType<typeof mock.method> | undefined;
+      try {
+        await dump(snapshot(), f.prior);
+        chmodSync(f.prior, 0o600);
+        const outPath = replacePrior ? f.prior : f.next;
+        let outputOpened: Promise<void> | undefined;
+        let tempPath: Parameters<typeof fs.createWriteStream>[0] | undefined;
+        mocked = mock.method(fs, 'createWriteStream', (
+          path: Parameters<typeof fs.createWriteStream>[0],
+          options: Parameters<typeof fs.createWriteStream>[1],
+        ) => {
+          tempPath = path;
+          const output = create(path, options);
+          outputOpened = new Promise<void>((resolve, reject) => {
+            output.once('open', () => resolve());
+            output.once('error', reject);
+          });
+          return output;
+        });
+        syncBuiltinESMExports();
+        const db = snapshot();
+        const exec = db.exec;
+        db.exec = async (sql) => {
+          await outputOpened;
+          assert.ok(tempPath);
+          assert.equal(statSync(tempPath).mode & 0o777, 0o600, 'in-flight backup must be owner-readable only');
+          assert.equal(statSync(f.prior).mode & 0o777, 0o600, 'existing archive must stay private');
+          await exec(sql);
+        };
+        await dump(db, outPath);
+        assert.equal(statSync(outPath).mode & 0o777, 0o600, 'publication must not widen archive permissions');
+        assert.equal((await inspect(outPath)).rows, events.length);
+      } finally {
+        mocked?.mock.restore();
+        syncBuiltinESMExports();
+        process.umask(previousUmask);
         rmSync(f.dir, { recursive: true, force: true });
       }
     });

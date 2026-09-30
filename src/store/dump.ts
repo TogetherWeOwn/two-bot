@@ -299,7 +299,7 @@ export async function dump(db: Db, outPath: string): Promise<DumpManifest> {
   // even an abandoned partial file out of restore-drill and retention selectors.
   const tempPath = `${outPath}.${randomUUID()}.tmp`;
   const gz = createGzip({ level: 9 });
-  const written = pipeline(gz, createWriteStream(tempPath, { flags: 'wx' }));
+  const written = pipeline(gz, createWriteStream(tempPath, { flags: 'wx', mode: 0o600 }));
   // The output can fail while a database read is pending. Observe it immediately;
   // awaiting the original promise below still propagates the stream failure.
   void written.catch(() => {});
