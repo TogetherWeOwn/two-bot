@@ -183,13 +183,19 @@ function isDecimalMask(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0 && !/[^0-9]/.test(value);
 }
 
+const MAX_UINT64 = (1n << 64n) - 1n;
+
 /**
- * Discord snowflake IDs are nonempty ASCII decimal strings. A row carrying a
- * malformed ID cannot be classified as "not @everyone" — skipping it would
- * let a garbled everyone row read as verified absence — so it refuses.
+ * Discord snowflake IDs are canonical uint64 ASCII decimal strings: no
+ * leading zeros, within uint64 range. Mask syntax is deliberately looser
+ * ("0", "0000" remain valid masks), but a row carrying a non-canonical ID
+ * cannot be classified as "not @everyone" — skipping it would let a garbled
+ * everyone row (zero-prefixed guild ID, out-of-range ID) read as verified
+ * absence — so it refuses.
  */
 function isSnowflakeId(value: unknown): value is string {
-  return isDecimalMask(value);
+  if (typeof value !== 'string' || !/^[1-9][0-9]*$/.test(value)) return false;
+  return BigInt(value) <= MAX_UINT64;
 }
 
 function invalidChannelOverwrites(): ActionError {

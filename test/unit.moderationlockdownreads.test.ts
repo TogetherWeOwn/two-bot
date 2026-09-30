@@ -117,6 +117,17 @@ const invalidBodies: Array<[string, string]> = [
     { id: GUILD, type: 0, allow: '0', deny: '0' },
     { id: 'not-a-snowflake', type: 0, allow: '0', deny: '0' },
   ] })],
+  ['zero overwrite id', JSON.stringify({ permission_overwrites: [{ id: '0', type: 1, allow: '1024', deny: '8192' }] })],
+  ['zero-prefixed overwrite id', JSON.stringify({ permission_overwrites: [{ id: `0${OTHER_ROLE}`, type: 1, allow: '1024', deny: '8192' }] })],
+  ['above-uint64 overwrite id', JSON.stringify({ permission_overwrites: [{ id: '18446744073709551616', type: 1, allow: '1024', deny: '8192' }] })],
+  ['zero-prefixed id before everyone row', JSON.stringify({ permission_overwrites: [
+    { id: `0${OTHER_ROLE}`, type: 0, allow: '0', deny: '0' },
+    { id: GUILD, type: 0, allow: '0', deny: '0' },
+  ] })],
+  ['above-uint64 id after everyone row', JSON.stringify({ permission_overwrites: [
+    { id: GUILD, type: 0, allow: '0', deny: '0' },
+    { id: '18446744073709551616', type: 0, allow: '0', deny: '0' },
+  ] })],
 ];
 
 for (const [name, body] of invalidBodies) {
