@@ -92,9 +92,8 @@ function match(patch: Partial<AutomodMessage>, words: string[] = policy.badWords
   return matchAutomod(message(patch), probe, new MemoryRepeatTracker());
 }
 
-test('bypass fuzz: invisible format chars split bad-words (TOG-10048)', () => {
-  // Every row SHOULD be 'bad_words'; each returns null today.
-  const bypasses: Array<[string, string]> = [
+test('invisible format chars no longer split bad-words (TOG-10048)', () => {
+  const caught: Array<[string, string]> = [
     ['soft hyphen U+00AD', E('very\\u00adbad')],
     ['left-to-right mark U+200E', E('very\\u200ebad')],
     ['right-to-left mark U+200F', E('very\\u200fbad')],
@@ -104,8 +103,8 @@ test('bypass fuzz: invisible format chars split bad-words (TOG-10048)', () => {
     ['invisible separator U+2063', E('very\\u2063bad')],
     ['mongolian vowel separator U+180E', E('very\\u180ebad')],
   ];
-  for (const [name, content] of bypasses) {
-    assert.equal(match({ content }), null, `${name}: still bypasses (TOG-10048)`);
+  for (const [name, content] of caught) {
+    assert.equal(match({ content }), 'bad_words', `${name}: caught (TOG-10048)`);
   }
   // VS16 U+FE0F is category Mn, so the TOG-10049 mark-strip catches it as a
   // side effect — pinned as caught, not bypass.
@@ -135,9 +134,10 @@ test('combining marks no longer split bad-words or repeat counts (TOG-10049)', (
   assert.deepEqual(outcomes, [null, null, 'repeated_message'], 'mark variants share one digest (TOG-10049)');
 });
 
-test('bypass fuzz: invisible format chars split repeat counts (TOG-10048)', () => {
+test('invisible format chars no longer split repeat counts (TOG-10048)', () => {
   const tracker = new MemoryRepeatTracker();
-  const texts = ['repeat me', E('repeat\\u200bme'), E('repeat\\u200cme')];
+  // Insert invisibles without removing a visible space: whitespace is meaningful.
+  const texts = ['repeat me', E('re\\u200bpeat me'), E('repeat me\\u200c')];
   const outcomes = texts.map((content, i) =>
     matchAutomod(
       message({ messageId: `zw-${i}`, content, observedTimestamp: BASE_TIME + i * 1000 }),
@@ -145,7 +145,7 @@ test('bypass fuzz: invisible format chars split repeat counts (TOG-10048)', () =
       tracker,
     ),
   );
-  assert.deepEqual(outcomes, [null, null, null], 'zero-width variants split the digest (TOG-10048)');
+  assert.deepEqual(outcomes, [null, null, 'repeated_message'], 'zero-width variants share one digest (TOG-10048)');
 });
 
 test('bypass fuzz: homoglyph substitution defeats bad-words (TOG-10066)', () => {
@@ -160,19 +160,14 @@ test('bypass fuzz: homoglyph substitution defeats bad-words (TOG-10066)', () => 
   }
 });
 
-test('bypass fuzz: invisible chars defeat the invite literal (TOG-10048)', () => {
-  assert.equal(
-    match({ content: E('join discord\\u180e.gg/example') }),
-    null,
-    'MVS in the invite host bypasses invite AND external (TOG-10048)',
-  );
-  // U+2027 has NO NFKC decomposition (stays U+2027), so the ASCII-dot INVITE
-  // literal misses it — same literal fix as TOG-10048 (dot-class, not Cf).
-  assert.equal(
-    match({ content: E('join discord\\u2027gg/example') }),
-    null,
-    'one-dot-leader in the invite host bypasses (TOG-10048 literal)',
-  );
+test('invisible chars and hyphenation point no longer defeat invites (TOG-10048)', () => {
+  for (const content of [
+    E('join discord\\u180e.gg/example'),
+    E('join discord\\u180egg/example'),
+    E('join discord\\u2027gg/example'),
+  ]) {
+    assert.equal(match({ content }), 'invite_link', 'invite evasion caught (TOG-10048)');
+  }
 });
 
 test('bypass fuzz: bare-domain TLD gaps miss scheme-less links (TOG-10050)', () => {
@@ -255,9 +250,8 @@ test('no-bypass pins: case folding semantics (TOG-10052)', () => {
 test('no-bypass pins: whitespace and separator semantics (TOG-10052)', () => {
   // NEL U+0085 is not matched by JS \s: the words stay glued. Pinned.
   assert.equal(match({ content: E('very\\u0085bad') }, ['very bad']), null, 'NEL is not \\s in JS');
-  // MVS U+180E is not whitespace since Unicode 6.3: normalize keeps it.
-  // (Its INVITE-dot use is a TOG-10048 bypass; the whitespace call is correct.)
-  assert.equal(match({ content: E('very\\u180ebad') }, ['very bad']), null, 'MVS is not whitespace');
+  // MVS is Cf, not whitespace: strip it as an invisible evasion (TOG-10048).
+  assert.equal(match({ content: E('very\\u180ebad') }, ['very bad']), 'bad_words', 'MVS is stripped');
   // Hyphens and digits are word characters per the boundary guard — correct.
   for (const content of ['very-bad', E('very\\u2011bad'), 'very2bad news']) {
     assert.equal(match({ content }, ['very bad']), null, `${JSON.stringify(content)} is a word-boundary miss`);

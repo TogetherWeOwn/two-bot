@@ -1,13 +1,16 @@
 import { createHmac, randomBytes } from 'node:crypto';
 import type { AutomodFilter, AutomodMessage, AutomodPolicy } from './types.ts';
 
-const INVITE = /(?:https?:\/\/)?(?:www\.)?(?:discord\.gg|discord(?:app)?\.com\/invite)\/[-\w]+/iu;
+// Catch hyphenation-point dots and invisible separators stripped to discordgg.
+const INVITE = /(?:https?:\/\/)?(?:www\.)?(?:discord[.\u2027]?gg|discord(?:app)?\.com\/invite)\/[-\w]+/iu;
 const EXPLICIT_URL_PATTERN = /(?:https?:\/\/|www\.)[^\s<]+/giu;
 const BARE_DOMAIN_PATTERN =
   /(?<![\p{L}\p{N}@._/\\-])(?:[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,61}[\p{L}\p{N}])?\.)+(?:app|ca|co|com|dev|gg|io|me|net|org|tv|uk|us|xyz)(?:\/[^\s<]*)?/giu;
 const COMMON_FILENAME_STEMS = new Set(['changelog', 'config', 'license', 'package', 'readme', 'tsconfig']);
 const TRAILING_URL_PUNCTUATION = /[>),.!?:;]+$/u;
-const ZERO_WIDTH = /[​-‍⁠﻿]/gu;
+// Format controls (including SHY/MVS/bidi) and variation selectors must not
+// split words, invite hosts or repeat digests. Selectors are Mn, not Cf.
+const INVISIBLE_FORMAT = /[\p{Cf}\ufe00-\ufe0f\u{E0100}-\u{E01EF}]/gu;
 
 export interface RepeatTracker {
   observe(message: AutomodMessage, normalizedContent: string, policy: AutomodPolicy): boolean;
@@ -51,7 +54,7 @@ export function matchAutomod(
   repeats: RepeatTracker,
 ): AutomodFilter | null {
   const normalized = normalize(message.content);
-  const linkContent = normalized.replace(ZERO_WIDTH, '');
+  const linkContent = normalized;
   if (hasBadWord(normalized, policy.badWords)) return 'bad_words';
   if (repeats.observe(message, normalized, policy)) return 'repeated_message';
   // Only explicit mentions in message content are supplied here. Discord's
@@ -76,6 +79,7 @@ function normalize(value: string): string {
     .replace(/İ/g, 'ı')
     .normalize('NFKD')
     .replace(COMBINING_MARKS, '')
+    .replace(INVISIBLE_FORMAT, '')
     .toLowerCase()
     .replace(/\s+/g, ' ')
     .trim();
@@ -83,7 +87,7 @@ function normalize(value: string): string {
 
 /** Normalized form of one bad-words entry, shared with the wordlist lint (TOG-10066). */
 export function normalizeBadWord(raw: string): string {
-  return normalize(raw).replace(ZERO_WIDTH, '').replace(/\s+/g, '');
+  return normalize(raw).replace(/\s+/g, '');
 }
 
 function hasBadWord(content: string, words: string[]): boolean {
@@ -94,7 +98,7 @@ function hasBadWord(content: string, words: string[]): boolean {
     // stray accent that survives normalization cannot split the word.
     const escaped = [...word]
       .map((char) => char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-      .join('[\\s\\u200B-\\u200D\\u2060\\uFEFF\\p{M}]*');
+      .join('[\\s\\p{Cf}\\p{M}]*');
     if (new RegExp(`(^|[^\\p{L}\\p{N}_])${escaped}([^\\p{L}\\p{N}_]|$)`, 'iu').test(content)) return true;
   }
   return false;
