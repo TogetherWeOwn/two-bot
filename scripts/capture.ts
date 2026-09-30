@@ -204,7 +204,9 @@ const events: FunnelEvent[] = newJoins.map((j, i) => ({
 // First capture still establishes a baseline, and no-growth reads lose no delta.
 const retainSnapshot = since !== null && deferredJoins > 0 && totalGrowth > 0;
 
-if (!dryRun && retainSnapshot) {
+// Even without growth, a deferred observation must survive departure before
+// retry. The normal advance below clears eligible rows, not post-stamp ones.
+if (!dryRun && deferredJoins > 0) {
   for (const j of observedJoins) {
     await db.prepare(
       `INSERT INTO capture_pending_joins (guild_id, member_id, joined_at)
