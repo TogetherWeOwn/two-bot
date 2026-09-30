@@ -74,13 +74,15 @@ unit_keys() {
 
 # --- R1: every service literal is documented ---------------------------------
 
+# Consume the full input: grep -q can close the pipe early and make printf
+# fail with SIGPIPE under pipefail, falsely reporting a documented/consumed key.
 documented="$(example_keys)"
 for unit in "$DEPLOY"/*.service; do
   [ -e "$unit" ] || continue
   name="$(basename "$unit")"
   keys="$(unit_keys "$unit")"
   for key in $keys; do
-    if ! printf '%s\n' "$documented" | grep -qxF "$key"; then
+    if ! printf '%s\n' "$documented" | grep -xF "$key" > /dev/null; then
       annotate "deploy/$name" "R1: $name sets Environment=$key=... but $key is not defined in .env.example. Document it there (active or \`# \`-commented) or remove the literal; a rename in either file must fail here naming both files."
     fi
   done
@@ -95,7 +97,7 @@ done
 tokens="$(grep -rhoE --exclude-dir=node_modules --exclude-dir=.git --exclude='check-env-drift*' '[A-Z_][A-Z0-9_]*' \
   "$ROOT/src" "$ROOT/scripts" "$ROOT/deploy" "$ROOT/test" 2>/dev/null | sort -u || true)"
 for key in $documented; do
-  if ! printf '%s\n' "$tokens" | grep -qxF "$key"; then
+  if ! printf '%s\n' "$tokens" | grep -xF "$key" > /dev/null; then
     annotate ".env.example" "R2: .env.example defines $key but nothing under src/, scripts/, deploy/ or test/ references it. Remove the paragraph or land its consumer; an example key nothing reads teaches operators to set dead variables."
   fi
 done
