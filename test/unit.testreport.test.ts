@@ -123,7 +123,8 @@ test('the canned report tallies to per-file skipped/failed counts', async () => 
     failed: 0,
   });
   assert.deepEqual(byFile.get('test/beta.test.ts'), {
-    tests: 2,
+    // The TODO still appears in the raw report, but cannot prove execution.
+    tests: 1,
     suites: 1,
     skipped: 0,
     failed: 2,
