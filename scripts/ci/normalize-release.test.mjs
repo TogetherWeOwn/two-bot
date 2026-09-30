@@ -15,26 +15,34 @@ const header = JSON.parse(readFileSync(new URL('../../release-please-config.json
 
 function fixture({tagStatus = 404, changelog = `# Changelog\n\n${oldHeading}${notes}`, body} = {}) {
   const state = {
-    current: {state: 'open', base: {ref: 'main'}, head: {sha: 'generated-head', ref: branch, repo: {full_name: 'TogetherWeOwn/two-bot'}},
+    current: {number: pr.number, state: 'open', labels: [{name: 'autorelease: pending'}], base: {ref: 'main'},
+      head: {sha: 'generated-head', ref: branch, repo: {full_name: 'TogetherWeOwn/two-bot'}},
       body: body ?? `${header}\n---\n\n${oldHeading}${notes}\n---\nRefs: TOG-9865`},
     changelog,
+    candidates: null,
   };
   const calls = [];
   const wrap = (name, run) => async (args) => {calls.push({name, args}); return run(args);};
   const github = {rest: {
     pulls: {
+      list: wrap('pr.list', () => ({data: state.candidates ?? [structuredClone(state.current)]})),
       get: wrap('pr.get', () => ({data: structuredClone(state.current)})),
       update: wrap('pr.update', ({body}) => {state.current.body = body; return {data: state.current};}),
     },
     repos: {
       getContent: wrap('content.get', () => ({data: {type: 'file', encoding: 'base64', sha: 'blob-sha', content: Buffer.from(state.changelog).toString('base64')}})),
-      createOrUpdateFileContents: wrap('content.put', ({content}) => {state.changelog = Buffer.from(content, 'base64').toString('utf8'); return {data: {commit: {sha: 'normalized-head'}}};}),
+      createOrUpdateFileContents: wrap('content.put', ({content}) => {
+        state.changelog = Buffer.from(content, 'base64').toString('utf8');
+        state.current.head.sha = 'normalized-head';
+        return {data: {commit: {sha: state.current.head.sha}}};
+      }),
     },
     git: {getRef: wrap('ref.get', () => {
       if (tagStatus !== 200) throw Object.assign(new Error(`HTTP ${tagStatus}`), {status: tagStatus});
       return {data: {ref: 'refs/tags/v0.1.0'}};
     })},
   }};
+  github.paginate = async (method, args) => (await method(args)).data;
   return {state, calls, github};
 }
 const writes = (f) => f.calls.filter(({name}) => ['content.put', 'pr.update'].includes(name));
@@ -122,6 +130,8 @@ for (const mutation of [
   (current) => {current.base.ref = 'other';},
   (current) => {current.head.ref = 'main';},
   (current) => {current.head.repo.full_name = 'outside/two-bot';},
+  (current) => {current.labels = [];},
+  (current) => {current.labels = [{name: 'autorelease: tagged'}];},
 ]) {
   test('refuses a closed, wrong-base, wrong-branch or fork PR', async () => {
     const f = fixture();
@@ -153,8 +163,112 @@ test('persistent header complies with the PR template and does not claim checks 
   assert.equal(header.includes('\n---\n'), false); // Keep release-please delimiters parseable.
 });
 
+const workflow = parseDocument(readFileSync(new URL('../../.github/workflows/release.yml', import.meta.url), 'utf8')).toJS();
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+
+// Execute the checked-in Actions script and gates, not just the standalone helper.
+// Models github-script's default JSON result and needs' default success condition:
+// https://github.com/actions/github-script/tree/v9#reading-step-results
+async function workflowRun(f, {generatedPr = pr} = {}) {
+  const values = {'steps.release.outputs.pr': generatedPr ? JSON.stringify(generatedPr) : '',
+    'steps.release.outputs.prs_created': generatedPr ? 'true' : 'false'};
+  const resolve = (expression) => {
+    const match = expression.match(/^\$\{\{ (.+) \}\}$/);
+    assert.ok(match, `Unexpected output expression: ${expression}`);
+    return values[match[1]] ?? '';
+  };
+  const gate = (condition) => !condition || condition.split(' && ').every((part) => {
+    const match = part.match(/^(.+) (!=|==) '([^']*)'$/);
+    assert.ok(match, `Unexpected condition: ${part}`);
+    return match[2] === '==' ? (values[match[1]] ?? '') === match[3] : (values[match[1]] ?? '') !== match[3];
+  });
+  f.dispatched = [];
+  for (const step of workflow.jobs['release-please'].steps.slice(1)) {
+    if (!gate(step.if) || !step.with.script) continue;
+    const run = new AsyncFunction('require', 'github', 'context', 'process', step.with.script);
+    const result = await run((path) => {
+      assert.equal(path, './scripts/ci/normalize-release.cjs');
+      return normalize;
+    }, f.github, {repo}, {env: {PR_JSON: resolve(step.env.PR_JSON)}});
+    values[`steps.${step.id}.outputs.result`] = JSON.stringify(result);
+  }
+  for (const [name, expression] of Object.entries(workflow.jobs['release-please'].outputs)) {
+    values[`needs.release-please.outputs.${name}`] = resolve(expression);
+  }
+  const dispatch = workflow.jobs['dispatch-checks'];
+  if (gate(dispatch.if)) {
+    const releasePr = JSON.parse(resolve(dispatch.steps[0].env.PR_JSON));
+    f.dispatched.push({pr: releasePr, head: f.state.current.head.sha});
+  }
+}
+
+for (const failedWrite of ['createOrUpdateFileContents', 'update']) {
+  test(`workflow recovers ${failedWrite} failure on unchanged generation and dispatches repaired head`, async () => {
+    const f = fixture();
+    const endpoint = failedWrite === 'update' ? f.github.rest.pulls : f.github.rest.repos;
+    const original = endpoint[failedWrite];
+    endpoint[failedWrite] = async () => {throw Object.assign(new Error('transient failure'), {status: 500});};
+    await assert.rejects(workflowRun(f), {status: 500});
+    assert.deepEqual(f.dispatched, []);
+    assert.ok(f.state.current.body.includes(oldHeading)); // Generator sees its unchanged candidate.
+    assert.equal(f.state.changelog.includes(fixedHeading), failedWrite === 'update');
+    endpoint[failedWrite] = original;
+    f.calls.length = 0;
+    await workflowRun(f, {generatedPr: null}); // prs_created=false; PR output absent.
+    assert.ok(f.state.changelog.includes(fixedHeading));
+    assert.ok(f.state.current.body.includes(fixedHeading));
+    assert.deepEqual(f.dispatched, [{pr, head: f.state.current.head.sha}]);
+    assert.equal(f.calls[0].name, 'pr.list');
+    assert.deepEqual(f.calls[0].args, {...repo, state: 'open', base: 'main', head: `${repo.owner}:${branch}`, per_page: 100});
+    assert.deepEqual(writes(f).map(({name}) => name), failedWrite === 'update' ? ['pr.update'] : ['content.put', 'pr.update']);
+  });
+}
+
+test('unchanged corrected PR is still dispatched without additional writes', async () => {
+  const f = fixture();
+  await workflowRun(f);
+  f.calls.length = 0;
+  await workflowRun(f, {generatedPr: null});
+  assert.equal(writes(f).length, 0);
+  assert.deepEqual(f.dispatched, [{pr, head: f.state.current.head.sha}]);
+});
+
+test('no open release PR means no normalization writes or check dispatch', async () => {
+  const f = fixture();
+  f.state.candidates = [];
+  await workflowRun(f, {generatedPr: null});
+  assert.equal(writes(f).length, 0);
+  assert.deepEqual(f.dispatched, []);
+});
+
+test('ambiguous recovery and discovery errors fail before dispatch', async () => {
+  const f = fixture();
+  f.state.candidates = [f.state.current, {...f.state.current, number: 369}];
+  await assert.rejects(workflowRun(f, {generatedPr: null}), /Ambiguous/);
+  assert.deepEqual(f.dispatched, []);
+  f.github.paginate = async () => {throw Object.assign(new Error('denied'), {status: 403});};
+  await assert.rejects(workflowRun(f, {generatedPr: null}), {status: 403});
+  assert.equal(writes(f).length, 0);
+  assert.deepEqual(f.dispatched, []);
+});
+
+for (const mutation of [
+  (current) => {current.state = 'closed';},
+  (current) => {current.base.ref = 'other';},
+  (current) => {current.head.ref = 'main';},
+  (current) => {current.head.repo.full_name = 'outside/two-bot';},
+  (current) => {current.labels = [];},
+]) {
+  test('recovered PR is revalidated before any write or dispatch', async () => {
+    const f = fixture();
+    mutation(f.state.current);
+    await assert.rejects(workflowRun(f, {generatedPr: null}), /non-release PR/);
+    assert.equal(writes(f).length, 0);
+    assert.deepEqual(f.dispatched, []);
+  });
+}
+
 test('workflow runs main-owned normalization before dispatch, with immutable action pins', () => {
-  const workflow = parseDocument(readFileSync(new URL('../../.github/workflows/release.yml', import.meta.url), 'utf8')).toJS();
   const job = workflow.jobs['release-please'];
   assert.equal(job.if, "github.ref == 'refs/heads/main'");
   const steps = job.steps;
@@ -162,13 +276,16 @@ test('workflow runs main-owned normalization before dispatch, with immutable act
   assert.equal(steps[1].uses, 'actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09');
   assert.deepEqual(steps[1].with, {ref: '${{ github.sha }}', 'persist-credentials': false});
   assert.match(steps[2].uses, /^actions\/github-script@[a-f0-9]{40}$/);
-  assert.equal(steps[1].if, "steps.release.outputs.prs_created == 'true'");
-  assert.equal(steps[2].if, steps[1].if);
+  assert.equal(steps[1].if, undefined);
+  assert.equal(steps[2].if, undefined);
   assert.equal(steps[2].env.PR_JSON, '${{ steps.release.outputs.pr }}');
-  assert.ok(steps[2].with.script.includes('JSON.parse(process.env.PR_JSON)'));
+  assert.deepEqual(job.outputs, {pr: '${{ steps.normalize.outputs.result }}'});
   assert.equal(workflow.jobs['dispatch-checks'].needs, 'release-please');
-  assert.equal(workflow.jobs['dispatch-checks'].if, "needs.release-please.outputs.prs_created == 'true'");
-  assert.ok(workflow.jobs['dispatch-checks'].steps[0].run.includes('gh workflow run ci.yml --ref "$HEAD_BRANCH"'));
+  const dispatch = workflow.jobs['dispatch-checks'].steps[0];
+  assert.equal(dispatch.env.PR_JSON, '${{ needs.release-please.outputs.pr }}');
+  for (const filename of ['ci.yml', 'secret-scan.yml', 'pr-lint.yml']) {
+    assert.ok(dispatch.run.includes(`gh workflow run ${filename} --ref "$HEAD_BRANCH"`));
+  }
   const ci = readFileSync(new URL('./run-check-job.sh', import.meta.url), 'utf8');
   const install = ci.indexOf('npm ci --ignore-scripts --prefix scripts/ci');
   const regression = ci.indexOf('node --test scripts/ci/normalize-release.test.mjs');
