@@ -115,4 +115,20 @@ if ! run_guard > /dev/null; then
 fi
 printf '  ok  commented literal ignored\n'
 
+# ---------------------------------------------------------------------------
+# 5. A referenced key near the start of a large token set still passes. Under
+#    pipefail, grep -q can close early and turn printf's SIGPIPE into a false R2.
+# ---------------------------------------------------------------------------
+reset_fixture
+printf '# A_EARLY_CONSUMED_KEY=\n' >> "$FIXTURE/.env.example"
+{
+  printf 'A_EARLY_CONSUMED_KEY\n'
+  printf 'Z_ENV_DRIFT_PADDING_%s\n' {00000..09999}
+} > "$FIXTURE/src/env-drift-padding.ts"
+if ! output="$(run_guard)"; then
+  printf 'large token set: guard failed a tree with a referenced key.\n%s\n' "$output" >&2
+  exit 1
+fi
+printf '  ok  referenced key in large token set\n'
+
 printf 'check-env-drift self-test: all cases pass\n'
