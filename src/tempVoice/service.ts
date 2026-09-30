@@ -232,10 +232,15 @@ export class TempVoiceService {
     const outcome = await this.gateway.deleteChannel(channelId, reason);
     await this.store.deleteById(row.id);
     this.throttle.forget(channelId);
-    await this.store.audit(
-      { guildId, actorId: null, channelId, action: 'delete', outcome, reason },
-      this.iso(),
-    );
+    try {
+      await this.store.audit(
+        { guildId, actorId: null, channelId, action: 'delete', outcome, reason },
+        this.iso(),
+      );
+    } catch (err) {
+      // Cleanup is complete; an audit outage must not hide its outcome from callers.
+      log.error('temp_voice_delete_audit_failed', { guildId, channelId, outcome, err: String(err) });
+    }
     log.info('temp_voice_deleted', { guildId, channelId, outcome, reason });
     return outcome;
   }
