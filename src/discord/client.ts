@@ -403,47 +403,47 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
   // number must not depend on whether we happen to be greeting people.
   client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
     if (!accepts(newMember.guild.id, newMember.id)) return;
+    const occurredAt = nowIso();
+    // discord.js reuses the cached newMember on subsequent frames. Capture
+    // audit evidence before any wait for the membership persistence queue.
+    // A partial old member has no trustworthy role/nickname baseline.
+    if (!oldMember.partial) {
+      const oldRoles = roleIds(oldMember);
+      const newRoles = roleIds(newMember);
+      const addedRoleIds = [...newRoles].filter((id) => !oldRoles.has(id)).sort();
+      const removedRoleIds = [...oldRoles].filter((id) => !newRoles.has(id)).sort();
+      const nicknameChanged = oldMember.nickname !== newMember.nickname;
+      if (nicknameChanged || addedRoleIds.length > 0 || removedRoleIds.length > 0) {
+        const changeDigest = createHash('sha256')
+          .update(JSON.stringify({ nicknameChanged, addedRoleIds, removedRoleIds }))
+          .digest('base64url')
+          .slice(0, 16);
+        auditSafely({
+          // No gateway event id: timestamp preserves later identical changes;
+          // the bounded digest distinguishes simultaneous deltas.
+          entryId: `member-update:${newMember.guild.id}:${newMember.id}:${occurredAt}:${changeDigest}`,
+          kind: 'member_update',
+          channel: 'audit',
+          guildId: newMember.guild.id,
+          occurredAt,
+          targetId: newMember.id,
+          metadata: { nicknameChanged, addedRoleIds, removedRoleIds },
+        });
+      }
+    }
     if (oldMember.pending === true && newMember.pending === false) {
-      void deps.onboardingRota?.gateCleared(newMember, nowIso());
+      void deps.onboardingRota?.gateCleared(newMember, occurredAt);
     }
     if (oldMember.pending && !newMember.pending) {
-      const occurredAt = nowIso();
-      await enqueue(memberChains, `${newMember.guild.id}:${newMember.id}`, () =>
-        handlers.onGateCleared({
-          guildId: newMember.guild.id,
-          memberId: newMember.id,
-          isBot: !!newMember.user?.bot,
-          occurredAt,
-        }));
+      const input = {
+        guildId: newMember.guild.id,
+        memberId: newMember.id,
+        isBot: !!newMember.user?.bot,
+        occurredAt,
+      };
+      await enqueue(memberChains, `${input.guildId}:${input.memberId}`, () =>
+        handlers.onGateCleared(input));
     }
-
-    // A partial old member has no trustworthy role/nickname baseline. Skipping
-    // is safer than reporting every current role as newly granted.
-    if (oldMember.partial) return;
-    const oldRoles = roleIds(oldMember);
-    const newRoles = roleIds(newMember);
-    const addedRoleIds = [...newRoles].filter((id) => !oldRoles.has(id)).sort();
-    const removedRoleIds = [...oldRoles].filter((id) => !newRoles.has(id)).sort();
-    const nicknameChanged = oldMember.nickname !== newMember.nickname;
-    if (!nicknameChanged && addedRoleIds.length === 0 && removedRoleIds.length === 0) return;
-
-    const occurredAt = nowIso();
-    const changeDigest = createHash('sha256')
-      .update(JSON.stringify({ nicknameChanged, addedRoleIds, removedRoleIds }))
-      .digest('base64url')
-      .slice(0, 16);
-    auditSafely({
-      // Discord supplies no id for this gateway event. The occurrence timestamp
-      // preserves a later identical transition; the bounded digest distinguishes
-      // simultaneous deltas without embedding an unbounded role list in the key.
-      entryId: `member-update:${newMember.guild.id}:${newMember.id}:${occurredAt}:${changeDigest}`,
-      kind: 'member_update',
-      channel: 'audit',
-      guildId: newMember.guild.id,
-      occurredAt,
-      targetId: newMember.id,
-      metadata: { nicknameChanged, addedRoleIds, removedRoleIds },
-    });
   });
 
   client.on(Events.GuildMemberRemove, async (member) => {
@@ -568,29 +568,14 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     }
   });
 
-  /**
-   * One chain per member for voice frames, not one concurrent handler per
-   * frame (TOG-5981). discord.js dispatches every gateway event to an async
-   * listener without awaiting the previous one, so two frames for one member
-   * on the same tick interleaved: the move's `onVoiceLeave` chain-read the
-   * tracker BEFORE the join's `onVoiceJoin` chain-wrote it, and the end
-   * landed startKnown:false with a null duration even though the bot saw the
-   * start. Same per-subject chaining precedent as TOG-3695: a stuck write for
-   * member A never stalls member B, and unrelated members stay concurrent.
-   * Scoped to this registerHandlers call so tests get a fresh map per bus.
-   */
-  const voiceChains = new Map<string, Promise<void>>();
+  // Voice frames and membership events mutate the SAME session tracker:
+  // onLeave closes any open voice session. Reserve them on one subject chain
+  // at receipt so a delayed leave cannot close a rejoined member's new session.
+  // Other members remain independent; failed work cannot poison the queue.
   const chainVoice = (guildId: string, memberId: string, work: () => Promise<void>): void => {
-    // Reserve synchronously at dispatch: both same-tick frames for one member
-    // are ordered in the chain before either awaits anything.
-    const subject = `${guildId}:${memberId}`;
-    const tail = (voiceChains.get(subject) ?? Promise.resolve()).then(work).catch(() => {
+    void enqueue(memberChains, `${guildId}:${memberId}`, work).catch(() => {
       // Error strings can contain SQL binds or Discord payloads. Never log them.
       log.error('voice_state_update_failed', { guildId, memberId, classification: 'measurement_gap' });
-    });
-    voiceChains.set(subject, tail);
-    void tail.finally(() => {
-      if (voiceChains.get(subject) === tail) voiceChains.delete(subject);
     });
   };
 
@@ -608,12 +593,10 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     const member = oldState.member ?? newState.member;
     const guildId = guild.id;
 
+    // One receipt timestamp for both halves of a move, on the same clock as
+    // GuildMemberRemove. Queue latency must not place a start after its leave.
+    const at = nowIso();
     chainVoice(guildId, memberId, async () => {
-      // One timestamp for both halves. On a move from A to B the end and the
-      // start are the same instant, and taking nowIso() twice would make the
-      // pair look like a gap. Taken inside the chain so a queued frame stamps
-      // after the frame ahead of it finished, never before its start.
-      const at = nowIso();
       const voiceKind = oldChannelId
         ? newChannelId
           ? 'voice_move'
