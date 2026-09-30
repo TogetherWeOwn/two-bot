@@ -186,11 +186,13 @@ export async function buildList(
                     FROM members
                    WHERE guild_id = ? AND left_at IS NULL AND NOT is_bot`;
 
-  const rows = await db.prepare(`${select}${raid.sql}`).all<Row>(guildId, ...raid.params);
+  // Joining during a raid does not make an engaged member a raid account.
+  // Keep the population complementary to the never-active count below.
+  const population = raid.sql ? ` AND (last_active_at IS NOT NULL OR (1=1${raid.sql}))` : '';
+  const rows = await db.prepare(`${select}${population}`).all<Row>(guildId, ...raid.params);
 
-  // Counted separately rather than merged in: a raid account and a real member
-  // who never posted look identical in this table, and only one of them is a
-  // person the community team can talk to.
+  // Counted separately rather than merged in: only never-active window joiners
+  // are set aside; engaged members still classify normally by recency.
   const raidAccounts = raid.sql
     ? Number(
         (
