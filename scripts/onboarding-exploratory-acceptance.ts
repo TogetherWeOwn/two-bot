@@ -46,6 +46,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
+import { mock } from 'node:test';
 import { EventStore } from '../src/store/eventStore.ts';
 import { FunnelHandlers } from '../src/core/handlers.ts';
 import { isMeasurableGateClearing } from '../src/core/events.ts';
@@ -335,6 +336,8 @@ function openOfflineDb(): Db {
     const recorder = new OnboardingRecorder(store);
     const T0 = Date.parse('2026-09-27T12:00:00.000Z');
     const iso = (ms: number) => new Date(ms).toISOString();
+    // Recorder timestamps and gateway fixtures share one controlled clock.
+    mock.timers.enable({ apis: ['Date'], now: T0 });
 
     // 1. join behind the gate: prompted must refuse while pending.
     await handlers.onJoin({ guildId: G, memberId: M, isBot: false, source: 'invite:abc', occurredAt: iso(T0) });
@@ -345,6 +348,7 @@ function openOfflineDb(): Db {
     await handlers.onGateCleared({ guildId: G, memberId: M, isBot: false, occurredAt: iso(T0 + 5_000) });
     const first = await decidePrompt(store, { guildId: G, memberId: M, isBot: false, pending: false });
     check('cleared member is promptable', first.shouldPrompt === true, JSON.stringify(first));
+    mock.timers.setTime(T0 + 6_000);
     await recorder.prompted(G, M, 'chan-welcome');
     const second = await decidePrompt(store, { guildId: G, memberId: M, isBot: false, pending: false });
     check('welcome stays once-per-member', second.shouldPrompt === false && second.reason === 'already_prompted', JSON.stringify(second));
@@ -356,11 +360,15 @@ function openOfflineDb(): Db {
     // 3. legacy pick: roles granted, routed with hub fallback visible as degraded.
     const plan = planSelection(['shooters'], seeNothing);
     check('dark pick routes to the hub, flagged degraded', plan.channelIds.join(',') === GAME_HUB_CHANNEL_ID && plan.degradedCount === 1, JSON.stringify(plan));
+    mock.timers.setTime(T0 + 9_000);
     await recorder.selected(G, M, plan);
+    mock.timers.setTime(T0 + 10_000);
     await recorder.routed(G, M, plan);
     // Member changes their mind: routed repeats by design, reach still counts one.
     const plan2 = planSelection(['horror'], seeNothing);
+    mock.timers.setTime(T0 + 19_000);
     await recorder.selected(G, M, plan2);
+    mock.timers.setTime(T0 + 20_000);
     await recorder.routed(G, M, plan2);
     check('re-pick reach counts people, not clicks', (await store.countMembersWith('channel_routed')) === 1, 'countMembersWith(channel_routed) != 1');
     const sel = await recorder.selected(G, M, planSelection(['shooters', 'horror'], seeEverything));
@@ -372,7 +380,7 @@ function openOfflineDb(): Db {
 
     // 4. time-to-route: the number TWO-7 is judged on (target: under 60s).
     const ttr = await store.secondsBetween(G, M, 'member_join', 'channel_routed');
-    check('join -> routed measurable in seconds', ttr !== null && ttr >= 0, String(ttr));
+    check('join -> routed is 10s (the under-60s claim shape)', ttr === 10, String(ttr));
     const gateSeconds = await store.timeToGateClearSeconds(G, M);
     check('join -> gate_cleared measurable (gateway source)', gateSeconds === 5, String(gateSeconds));
 
@@ -397,14 +405,24 @@ function openOfflineDb(): Db {
       handlers.onMessage({ guildId: G, memberId: M, isBot: false, channelId: 'c1', occurredAt: iso(at) });
     const r1 = await msg(T0 + 40_000);
     check('first message fills the first rung', r1?.eventType === 'first_message', String(r1?.eventType));
+    const replay1 = await msg(T0 + 40_000);
+    check(
+      'first-message redelivery leaves the second rung empty',
+      replay1 === null && !(await store.hasEvent(G, M, 'second_message')),
+      String(replay1?.eventType),
+    );
     const r2 = await msg(T0 + 50_000);
     check('second message fills the middle rung', r2?.eventType === 'second_message', String(r2?.eventType));
+    const replay2 = await msg(T0 + 50_000);
+    check(
+      'second-message redelivery leaves the third rung empty',
+      replay2 === null && !(await store.hasEvent(G, M, 'third_message')),
+      String(replay2?.eventType),
+    );
     const r3 = await msg(T0 + 60_000);
     check('third message clears the AM7 bar', r3?.eventType === 'third_message', String(r3?.eventType));
     const r4 = await msg(T0 + 70_000);
     check('past the bar: recency only, no fourth rung', r4 === null, String(r4?.eventType));
-    const redelivered = await store.nextMessageRung(G, M, iso(T0 + 60_000));
-    check('same-ms redelivery does not advance the ladder', redelivered === null, String(redelivered));
     const joinToFirst = await store.secondsBetween(G, M, 'member_join', 'first_message');
     check('join -> first_message is 40s (the under-60s claim shape)', joinToFirst === 40, String(joinToFirst));
 
@@ -418,6 +436,7 @@ function openOfflineDb(): Db {
       'currentGameKeys moved',
     );
   } finally {
+    mock.timers.reset();
     await db.close();
   }
 }
@@ -478,11 +497,11 @@ if (!withStaging) {
   check('staging token belongs to the staging app (fails closed otherwise)', tc.ok, tc.message);
   let guildId = '';
   try {
-    guildId = TWO_STAGING_GUILD_ID;
     if (!process.env.DISCORD_STAGING_GUILD_ID) throw new Error('Missing DISCORD_STAGING_GUILD_ID.');
     if (process.env.DISCORD_STAGING_GUILD_ID !== TWO_STAGING_GUILD_ID) {
       throw new Error(`DISCORD_STAGING_GUILD_ID must be ${TWO_STAGING_GUILD_ID}; refusing to continue.`);
     }
+    guildId = TWO_STAGING_GUILD_ID;
   } catch (err) {
     fail('staging guild guard', err instanceof Error ? err.message : String(err));
   }
