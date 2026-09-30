@@ -151,6 +151,26 @@ test('marks chained after a meaningful mark stay meaningful', () => {
   }
 });
 
+test('required marks survive across allowed gaps', () => {
+  const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
+  // A mark whose origin (skipping gap separators) is a word character is
+  // required, not decoration: Latin stacking folds like its attached form,
+  // non-Latin and dotted-i marks stay for literal match.
+  for (const [name, entry, content] of [
+    ['Devanagari vowel sign across space', E('\\u0915\\u093f\\u0924'), E('\\u0915 \\u093f\\u0924')],
+    ['Devanagari vowel sign across tab', E('\\u0915\\u093f\\u0924'), E('\\u0915\\u0009\\u093f\\u0924')],
+    ['Arabic vowel across space', E('\\u0639\\u064e\\u0644\\u064e\\u0645'), E('\\u0639 \\u064e\\u0644\\u064e\\u0645')],
+    ['dotted-i dot across space', E('\\u0130stanbul'), E('i \\u0307stanbul')],
+    ['Latin stacking across space folds', 'shit', E('s \\u0301h i t')],
+  ] as Array<[string, string, string]>) {
+    assert.equal(match(content, { ...policy, badWords: [entry] }), 'bad_words', name);
+  }
+  // A spaced dotted-I configuration keeps its dot, so plain ASCII stays distinct.
+  const spacedCfg = loadAutomodConfig({ TWO_AUTOMOD_BAD_WORDS: E('i \\u0307stanbul') }, null).policy;
+  assert.equal(match('istanbul', spacedCfg), null, 'spaced dotted-I config vs ASCII');
+  assert.equal(match(E('i \\u0307stanbul'), spacedCfg), 'bad_words', 'spaced config matches spaced content');
+});
+
 test('separator-plus-mark near-misses match in linear time', () => {
   const probe = { ...policy, badWords: ['shit'] };
   const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);

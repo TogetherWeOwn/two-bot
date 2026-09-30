@@ -106,17 +106,39 @@ export function normalizeBadWord(raw: string): string {
   return stripStandaloneMarkRuns(foldLatinMarks(normalize(raw))).replace(/\s+/g, '');
 }
 
-// Drop mark runs that decorate nothing: a maximal run is standalone
-// decoration iff the character before the run is not a word character
-// (string start, whitespace, punctuation, format controls, emoji, …). Runs
-// extending a letter/number/underscore are meaningful (dotted-i dot,
-// Indic/Arabic vowel signs) and stay — including marks chained after them,
-// whose eligibility comes from the run's origin, never the preceding mark.
+// Drop mark runs that decorate nothing, keeping required marks across
+// allowed gaps. A maximal run is judged by its origin — the nearest preceding
+// character skipping over gap separators (whitespace, format controls):
+//   - origin is a Latin letter: same fold as directly-attached stacking
+//     (dotted-i keeps its dot, other Latin stacking drops), so `s ́h`
+//     folds exactly like `śh`;
+//   - origin is another word character (non-Latin letter, digit,
+//     underscore): the run is meaningful (Indic/Arabic vowel signs, chained
+//     marks) and stays, so `क ित` still matches `कित`;
+//   - otherwise (string start, punctuation, emoji): standalone decoration,
+//     dropped, so `f*́ck` matches `f*ck`.
 // Single linear pass, so the matcher below needs no mark-skipping of its own.
 function stripStandaloneMarkRuns(value: string): string {
-  return value.replace(/\p{M}+/gu, (run, offset, whole) =>
-    offset > 0 && /[\p{L}\p{N}_]$/u.test(whole.slice(0, offset)) ? run : '',
-  );
+  const dotAbove = String.fromCodePoint(0x0307);
+  return value.replace(/\p{M}+/gu, (run, offset, whole) => {
+    const origin = precedingOrigin(whole, offset);
+    if (!origin || !/[\p{L}\p{N}_]/u.test(origin)) return '';
+    if (!/\p{Script=Latin}/u.test(origin)) return run;
+    return origin === 'i' && run.includes(dotAbove) ? dotAbove : '';
+  });
+}
+
+// Nearest character before `offset`, skipping allowed gap separators.
+function precedingOrigin(whole: string, offset: number): string {
+  let i = offset;
+  while (i > 0) {
+    let cp = whole.codePointAt(i - 1) ?? 0;
+    if (cp >= 0xdc00 && cp <= 0xdfff && i >= 2) cp = whole.codePointAt(i - 2) ?? 0;
+    const ch = String.fromCodePoint(cp);
+    if (!/[\s\p{Cf}]/u.test(ch)) return ch;
+    i -= ch.length;
+  }
+  return '';
 }
 
 function hasBadWord(content: string, words: string[]): boolean {
