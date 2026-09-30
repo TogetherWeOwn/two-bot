@@ -38,9 +38,17 @@ export type RestoreOverwriteTarget = {
   permissionCeilingOverwrites: GuildConfigOverwrite[];
 };
 
+export type RestoreRoleTarget = {
+  currentId: string | null;
+  name: string;
+  position: number;
+  permissions?: string;
+};
+
 export type RestorePlan = {
   counts: { roles: number; channels: number; overwrites: number; settings: number; emojis: number; operations: number };
   knownIds: RestoreIdMap;
+  roleTargets: RestoreRoleTarget[];
   overwriteRoles: Array<{ id: string; name: string; position: number }>;
   overwriteTargets: RestoreOverwriteTarget[];
   operations: RestoreOperation[];
@@ -149,6 +157,7 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
   const channelIds = new Map<string, string>();
   const emojiIds = new Map<string, string>();
   const roleOperations: RestoreOperation[] = [];
+  const roleTargets: RestoreRoleTarget[] = [];
   const everyoneOperations: RestoreOperation[] = [];
   const rolePositionOperations: RestoreOperation[] = [];
   const categoryOperations: RestoreOperation[] = [];
@@ -180,6 +189,7 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
       path: `/guilds/${current.guildId}/roles/${current.guildId}`,
       body: { permissions: sourceEveryone.permissions },
     });
+    roleTargets.push({ currentId: currentEveryone.id, name: '@everyone', position: 0, permissions: sourceEveryone.permissions });
     roleWrites++;
   }
 
@@ -196,6 +206,7 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
         body: roleBody(role),
         captureId: { resource: 'role', sourceId: role.id },
       });
+      roleTargets.push({ currentId: null, name: role.name, position: 0, permissions: role.permissions });
       roleWrites++;
       rolePositionsDiffer = true;
       continue;
@@ -204,10 +215,17 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
     rolePositionsDiffer ||= role.position !== actual.position;
     if (!same(roleBody(role), roleBody(actual))) {
       roleOperations.push({ label: `patch role ${role.name}`, method: 'PATCH', path: `/guilds/${current.guildId}/roles/${actual.id}`, body: roleBody(role) });
+      roleTargets.push({ currentId: actual.id, name: role.name, position: actual.position, permissions: role.permissions });
       roleWrites++;
     }
   }
   if (rolePositionsDiffer) {
+    // The batch sends every source role, even when only one position drifted.
+    for (const role of sourceRoles) {
+      const currentId = roleIds.get(role.id) ?? null;
+      const actual = current.roles.find((item) => item.id === currentId);
+      roleTargets.push({ currentId, name: role.name, position: Math.max(actual?.position ?? 0, role.position) });
+    }
     rolePositionOperations.push({
       label: 'restore role positions',
       method: 'PATCH',
@@ -444,6 +462,7 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
       operations: operations.length,
     },
     knownIds: { roles: Object.fromEntries(roleIds), channels: Object.fromEntries(channelIds), emojis: Object.fromEntries(emojiIds) },
+    roleTargets,
     overwriteRoles,
     overwriteTargets,
     operations,

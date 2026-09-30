@@ -88,7 +88,7 @@ export class GuildConfigDiscordApi {
     }
   }
 
-  async assertRestorePermissions(snapshot: GuildConfigSnapshot, plan: Pick<RestorePlan, 'counts' | 'overwriteRoles' | 'overwriteTargets'>): Promise<void> {
+  async assertRestorePermissions(snapshot: GuildConfigSnapshot, plan: Pick<RestorePlan, 'counts' | 'roleTargets' | 'overwriteRoles' | 'overwriteTargets'>): Promise<void> {
     const member = await this.request<{ roles?: string[] }>('GET', `/guilds/${this.guildId}/members/${this.applicationId}`);
     if (member.status !== 200 || !member.body) throw new Error(`Could not read Owen's guild member for permission preflight: HTTP ${member.status}.`);
     const heldRoleIds = new Set([this.guildId, ...(member.body.roles ?? [])]);
@@ -106,15 +106,24 @@ export class GuildConfigDiscordApi {
     if (missing.length > 0) throw new Error(`Restore permission preflight failed: missing ${missing.join(', ')}.`);
     if (needsManageRoles && snapshot.guild.owner_id !== this.applicationId) {
       const botPosition = Math.max(...heldRoles.map((role) => role.position), -1);
-      const targets = plan.counts.roles > 0
-        ? snapshot.roles.filter((role) => !role.managed && role.id !== this.guildId)
-        : plan.overwriteRoles;
+      const targets = [
+        ...plan.roleTargets.filter((role) => role.currentId !== this.guildId),
+        ...plan.overwriteRoles,
+      ];
       const blocked = targets.filter((role) => botPosition <= role.position);
       if (blocked.length > 0) {
         throw new Error(`Restore hierarchy preflight failed: Owen role position ${botPosition} is not above overwrite target ${blocked.map((role) => `${role.name} (${role.position})`).join(', ')}.`);
       }
     }
     if (!administrator) {
+      const blockedRoles = plan.roleTargets.flatMap((target) => {
+        if (target.permissions === undefined) return [];
+        const unowned = BigInt(target.permissions) & ~permissions;
+        return unowned === 0n ? [] : [`${target.name} (unowned mask ${unowned})`];
+      });
+      if (blockedRoles.length > 0) {
+        throw new Error(`Restore role permission preflight failed: ${blockedRoles.join('; ')}.`);
+      }
       const effectivePermissions = (overwrites: GuildConfigChannel['permission_overwrites']) => {
         let effective = permissions;
         const everyone = overwrites.find((overwrite) => overwrite.type === 0 && overwrite.id === this.guildId);
