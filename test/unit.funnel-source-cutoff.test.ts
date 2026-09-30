@@ -63,10 +63,17 @@ async function cli(rows: SourceRow[], asJson: boolean): Promise<string> {
   `;
   const { stdout } = await run(
     process.execPath,
-    ['--import', `data:text/javascript,${encodeURIComponent(loader)}`, SCRIPT, ...(asJson ? ['--json'] : [])],
+    [
+      '--import', new URL('./helpers/helpOffline.ts', import.meta.url).href,
+      '--import', `data:text/javascript,${encodeURIComponent(loader)}`,
+      SCRIPT, ...(asJson ? ['--json'] : []),
+    ],
     {
+      timeout: 15_000,
       env: {
-        ...process.env,
+        PATH: '',
+        LANG: 'C',
+        TZ: 'UTC',
         TWO_DATABASE_URL: 'postgres://offline-fixture.invalid/unused',
         DISCORD_GUILD_ID: GUILD,
       },
