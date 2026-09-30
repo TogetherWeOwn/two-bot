@@ -113,6 +113,7 @@ DELETE FROM xp_awards                  WHERE member_id = '<id>';
 DELETE FROM xp_cooldowns               WHERE member_id = '<id>';
 DELETE FROM member_levels              WHERE member_id = '<id>';
 DELETE FROM events                     WHERE member_id = '<id>';
+DELETE FROM capture_pending_joins      WHERE member_id = '<id>';
 DELETE FROM members                    WHERE member_id = '<id>';
 DELETE FROM member_ranks               WHERE member_id = '<id>';
 DELETE FROM member_exclusions          WHERE member_id = '<id>';

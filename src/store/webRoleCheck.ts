@@ -154,6 +154,8 @@ export const BOT_TABLES = [
   // 0027 — the audit-mirror kill switch (TOG-3187). One operational row that
   // says who halted sends and when; an operator control, never website data.
   'audit_kill_switch',
+  // 0040 — observed member arrivals awaiting host-less capture attribution.
+  'capture_pending_joins',
 ];
 
 function ident(schema: string, name: string): string {

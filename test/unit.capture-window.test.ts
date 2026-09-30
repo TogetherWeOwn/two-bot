@@ -66,6 +66,43 @@ test('capture defers a post-stamp join exposed by the delayed roster read', () =
   assert.deepEqual(next.events[0].metadata?.window, { from: capturedAt, to: nextAt });
 });
 
+for (const uses of [5, 6]) {
+  test(`zero-growth read preserves a departed post-stamp join for retry with counter ${uses}`, () => {
+    const first = capture([member('late', lateAt)]).result;
+    assert.deepEqual(first.events, []);
+    assert.deepEqual(first.pending, [{ id: 'late', joinedAt: lateAt }]);
+    assert.equal(first.rows[0].uses, 5);
+    assert.equal(first.rows[0].updated_at, capturedAt);
+
+    const nextAt = '2026-10-01T10:00:00.000Z';
+    const options = {
+      previousRows: first.rows, previousEvents: first.storedEvents,
+      previousPending: first.pending, capturedAt: nextAt, rosterReadAt: nextAt, uses,
+    };
+    const dry = capture([member('old', since)], options, true).result;
+    assert.deepEqual(dry.pending, first.pending);
+    assert.deepEqual(dry.rows, first.rows);
+    assert.deepEqual(dry.events, []);
+    assert.equal(dry.pendingWrites, 0);
+
+    const next = capture([member('old', since)], options).result;
+    assert.equal(next.events.length, 1);
+    assert.equal(next.events[0].memberId, 'late');
+    assert.equal(next.events[0].occurredAt, lateAt);
+    assert.equal(next.events[0].source, uses === 6 ? 'invite:fixture' : 'unknown');
+    assert.deepEqual(next.events[0].metadata?.window, { from: capturedAt, to: nextAt });
+    assert.deepEqual(next.pending, []);
+
+    const replay = capture([member('old', since)], {
+      previousRows: next.rows, previousEvents: next.storedEvents,
+      previousPending: next.pending, uses,
+      capturedAt: '2026-10-02T10:00:00.000Z', rosterReadAt: nextAt,
+    }).result;
+    assert.deepEqual(replay.events, []);
+    assert.equal(replay.storedEvents.length, 1);
+  });
+}
+
 test('capture retains early counter growth for a deferred join across real tracker runs', () => {
   const first = capture([member('late', lateAt)], { uses: 6 });
   assert.deepEqual(first.result.events, []);

@@ -68,6 +68,7 @@ export const DUMP_TABLES = [
   'events',
   'members',
   'invite_snapshots',
+  'capture_pending_joins',
   'operational_audit_log',
   'moderation_warnings',
   'moderation_scheduled_unbans',
