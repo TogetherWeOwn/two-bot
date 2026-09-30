@@ -2,11 +2,11 @@
  * TOG-7197: voice session lifecycle matrix (join/leave/close-on-leave).
  *
  * Seeds open sessions, server-leaves, and partial halves through the real
- * FunnelHandlers against an offline node:sqlite store; asserts durations and
+ * FunnelHandlers against isolated test Postgres; asserts durations and
  * that no session is left dangling open.
  *
- * Offline by design (node:sqlite behind the narrow Db surface the handlers
- * touch, `?` placeholders and UPSERT): no Postgres, no token, no gateway.
+ * No Discord token or gateway; the card-scoped test DB exercises the shipping
+ * membership projection and its PostgreSQL locking/JSON behavior.
  *
  * What this pins (all passing, all current behavior):
  *   A. full session: join -> leave carries duration + start, credited channel.
@@ -26,58 +26,21 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DatabaseSync } from 'node:sqlite';
 import { EventStore } from '../src/store/eventStore.ts';
 import { FunnelHandlers } from '../src/core/handlers.ts';
-import type { Db, Statement } from '../src/store/db.ts';
+import type { Db } from '../src/store/db.ts';
+import { openTestDb } from './helpers/testDb.ts';
 
 const G = 'g7197';
 const CH_A = 'chan-a';
 const CH_B = 'chan-b';
 
-function wrapStatement(db: DatabaseSync, sql: string): Statement {
-  const stmt = db.prepare(sql);
-  return {
-    get: async <T>(...params: unknown[]): Promise<T | undefined> =>
-      stmt.get(...(params as never[])) as T | undefined,
-    all: async <T>(...params: unknown[]): Promise<T[]> =>
-      stmt.all(...(params as never[])) as T[],
-    run: async (...params: unknown[]): Promise<{ changes: number }> => {
-      const r = stmt.run(...(params as never[]));
-      return { changes: Number(r.changes) };
-    },
-  };
-}
-
-function openOfflineDb(): Db {
-  const db = new DatabaseSync(':memory:');
-  db.exec(`CREATE TABLE events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_type TEXT NOT NULL, member_id TEXT, guild_id TEXT NOT NULL,
-    occurred_at TEXT NOT NULL, recorded_at TEXT NOT NULL DEFAULT '',
-    source TEXT NOT NULL, metadata TEXT, idempotency_key TEXT NOT NULL UNIQUE
-  )`);
-  db.exec(`CREATE TABLE members (
-    guild_id TEXT NOT NULL, member_id TEXT NOT NULL,
-    joined_at TEXT, join_source TEXT, first_message_at TEXT,
-    first_voice_at TEXT, last_active_at TEXT, left_at TEXT,
-    inactive_flagged_at TEXT, is_bot INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (guild_id, member_id)
-  )`);
-  const facade: Db = {
-    prepare: (sql) => wrapStatement(db, sql),
-    exec: async (sql) => { db.exec(sql); },
-    transaction: async <T>(fn: (tx: Db) => Promise<T>): Promise<T> => fn(facade),
-    close: async () => { db.close(); },
-  };
-  return facade;
-}
-
 async function fixture() {
-  const db = openOfflineDb();
+  const harness = await openTestDb(import.meta.filename);
+  const db = harness.db;
   const store = new EventStore(db);
   const handlers = new FunnelHandlers(store);
-  return { db, store, handlers };
+  return { db, store, handlers, cleanup: harness.cleanup };
 }
 
 type EndMeta = { startKnown: boolean; startedAt: string | null; durationSeconds: number | null };
@@ -131,7 +94,7 @@ export async function findDanglingVoiceStarts(
 // --- A. full session ---------------------------------------------------------
 
 test('lifecycle: join then leave carries its duration and its start', async () => {
-  const { db, handlers } = await fixture();
+  const { db, handlers, cleanup } = await fixture();
   try {
     await handlers.onVoiceJoin({ guildId: G, memberId: 'full', isBot: false, channelId: CH_A, occurredAt: '2026-08-02T19:00:00.000Z' });
     await handlers.onVoiceLeave({ guildId: G, memberId: 'full', isBot: false, channelId: CH_A, occurredAt: '2026-08-02T20:30:00.000Z' });
@@ -145,14 +108,14 @@ test('lifecycle: join then leave carries its duration and its start', async () =
     assert.equal(row?.source, 'channel:chan-a');
     assert.equal(handlers.voiceSessions.openCount, 0, 'nothing left open');
   } finally {
-    await db.close();
+    await cleanup();
   }
 });
 
 // --- B. channel move ----------------------------------------------------------
 
 test('lifecycle: move A to B ends A and starts B with split durations', async () => {
-  const { db, handlers } = await fixture();
+  const { db, handlers, cleanup } = await fixture();
   try {
     await handlers.onVoiceJoin({ guildId: G, memberId: 'mover', isBot: false, channelId: CH_A, occurredAt: '2026-08-02T19:00:00.000Z' });
     // What the adapter does on a move: leave old, join new, same instant.
@@ -165,14 +128,14 @@ test('lifecycle: move A to B ends A and starts B with split durations', async ()
     assert.ok(ends.every((e) => e.startKnown), 'both halves measured');
     assert.equal(handlers.voiceSessions.openCount, 0, 'nothing left open');
   } finally {
-    await db.close();
+    await cleanup();
   }
 });
 
 // --- C. server-leave mid-voice (c24113f2) --------------------------------------
 
 test('lifecycle: server-leave mid-voice closes the session to leave time', async () => {
-  const { db, handlers } = await fixture();
+  const { db, handlers, cleanup } = await fixture();
   try {
     await handlers.onVoiceJoin({ guildId: G, memberId: 'leaver', isBot: false, channelId: CH_A, occurredAt: '2026-08-02T19:00:00.000Z' });
     await handlers.onLeave(G, 'leaver', '2026-08-02T19:30:00.000Z');
@@ -187,28 +150,28 @@ test('lifecycle: server-leave mid-voice closes the session to leave time', async
     assert.equal(handlers.voiceSessions.isOpen(G, 'leaver'), false, 'tracker entry closed, not leaked');
     assert.equal(await countByType(db, 'member_leave', 'leaver'), 1, 'the gone marker still lands');
   } finally {
-    await db.close();
+    await cleanup();
   }
 });
 
 // --- D. server-leave with no open session ---------------------------------------
 
 test('lifecycle: server-leave with no open session writes no end row', async () => {
-  const { db, handlers } = await fixture();
+  const { db, handlers, cleanup } = await fixture();
   try {
     await handlers.onLeave(G, 'quiet', '2026-08-02T19:30:00.000Z');
     assert.equal(await countByType(db, 'voice_session_end', 'quiet'), 0, 'no session open, nothing to close');
     assert.equal(await countByType(db, 'member_leave', 'quiet'), 1);
     assert.equal(handlers.voiceSessions.openCount, 0);
   } finally {
-    await db.close();
+    await cleanup();
   }
 });
 
 // --- E. partial join: open until the leave lands ---------------------------------
 
 test('lifecycle: a join with no leave yet is open, not dangling', async () => {
-  const { db, handlers } = await fixture();
+  const { db, handlers, cleanup } = await fixture();
   try {
     await handlers.onVoiceJoin({ guildId: G, memberId: 'partial', isBot: false, channelId: CH_A, occurredAt: '2026-08-02T19:00:00.000Z' });
     assert.equal(handlers.voiceSessions.isOpen(G, 'partial'), true, 'the session is open');
@@ -219,14 +182,14 @@ test('lifecycle: a join with no leave yet is open, not dangling', async () => {
     assert.equal(end.durationSeconds, 45 * 60);
     assert.equal(handlers.voiceSessions.openCount, 0);
   } finally {
-    await db.close();
+    await cleanup();
   }
 });
 
 // --- F. partial leave: unknown start ----------------------------------------------
 
 test('lifecycle: a leave with no seen start ends unknown-start with no duration', async () => {
-  const { db, handlers } = await fixture();
+  const { db, handlers, cleanup } = await fixture();
   try {
     // The bot came up while this member was already sitting in voice.
     await handlers.onVoiceLeave({ guildId: G, memberId: 'unknown', isBot: false, channelId: CH_B, occurredAt: '2026-08-02T20:30:00.000Z' });
@@ -240,7 +203,7 @@ test('lifecycle: a leave with no seen start ends unknown-start with no duration'
     assert.equal(row?.source, 'channel:chan-b', 'no open session: credit the caller channel');
     assert.equal(await countByType(db, 'voice_session_start', 'unknown'), 0);
   } finally {
-    await db.close();
+    await cleanup();
   }
 });
 
@@ -255,7 +218,7 @@ test('lifecycle: a leave with no seen start ends unknown-start with no duration'
 // timestamptz, so "no throw" must hold on both backends).
 
 test('lifecycle: a malformed leave timestamp ends unknown-start, never the lying row', async () => {
-  const { db, handlers } = await fixture();
+  const { db, handlers, cleanup } = await fixture();
   try {
     await handlers.onVoiceJoin({ guildId: G, memberId: 'garbage-leave', isBot: false, channelId: CH_A, occurredAt: '2026-08-02T19:00:00.000Z' });
     const end = await handlers.onVoiceLeave({ guildId: G, memberId: 'garbage-leave', isBot: false, channelId: CH_A, occurredAt: 'not-a-date' });
@@ -275,14 +238,15 @@ test('lifecycle: a malformed leave timestamp ends unknown-start, never the lying
     );
     assert.equal(row?.source, 'channel:chan-a', 'credited to the open channel');
   } finally {
-    await db.close();
+    await cleanup();
   }
 });
 
 test('lifecycle: a malformed join start is equally unmeasurable on the way out', async () => {
-  const { db, handlers } = await fixture();
+  const { db, handlers, cleanup } = await fixture();
   try {
-    await handlers.onVoiceJoin({ guildId: G, memberId: 'garbage-start', isBot: false, channelId: CH_A, occurredAt: 'also-not-a-date' });
+    // Corrupt the in-memory tracker only: Postgres correctly rejects invalid event timestamps.
+    handlers.voiceSessions.start(G, 'garbage-start', CH_A, 'also-not-a-date');
     await handlers.onVoiceLeave({ guildId: G, memberId: 'garbage-start', isBot: false, channelId: CH_A, occurredAt: '2026-08-02T20:30:00.000Z' });
     const [meta] = await endMetas(db, 'garbage-start');
     assert.equal(meta.startKnown, false, 'a start we could never read is not a KNOWN start');
@@ -290,14 +254,14 @@ test('lifecycle: a malformed join start is equally unmeasurable on the way out',
     assert.equal(meta.startedAt, null);
     assert.equal(handlers.voiceSessions.isOpen(G, 'garbage-start'), false);
   } finally {
-    await db.close();
+    await cleanup();
   }
 });
 
 // --- G. dangling-open scan ----------------------------------------------------------
 
 test('lifecycle: dangling-open scan is empty across the matrix and bites on a synthetic orphan', async () => {
-  const { db, store, handlers } = await fixture();
+  const { db, store, handlers, cleanup } = await fixture();
   try {
     // The matrix: a full session, a server-leave close, a quiet leave, and an
     // unknown-start leave. None of these may leave a start unaccounted for.
@@ -327,6 +291,6 @@ test('lifecycle: dangling-open scan is empty across the matrix and bites on a sy
     assert.equal(orphanEnd.durationSeconds, null);
     assert.deepEqual(await findDanglingVoiceStarts(db), [], 'scan green again');
   } finally {
-    await db.close();
+    await cleanup();
   }
 });

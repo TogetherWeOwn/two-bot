@@ -3,10 +3,9 @@
  * suites skip, pinned as passing behavior, with the live bugs they surfaced
  * filed as child cards (one fixed and pinned in section G, one still open).
  *
- * Offline by design (node:sqlite behind the narrow Db surface the handlers
- * touch, `?` placeholders and UPSERT): no Postgres, no token, no gateway, no
- * paid services. The Postgres-backed e2e session/funnel suites still cover
- * the same handlers against the real driver.
+ * Isolated test Postgres exercises the shipping membership projection and
+ * its locking/JSON behavior. No live Discord token, gateway or paid services;
+ * script probes remain offline.
  *
  * What this pins (all passing, all current behavior):
  *   A. restart-mid-session: start -> clear() (what the gateway adapter does
@@ -48,60 +47,23 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFileSync } from 'node:fs';
-import { DatabaseSync } from 'node:sqlite';
+import { openTestDb } from './helpers/testDb.ts';
 import { EventStore } from '../src/store/eventStore.ts';
 import { FunnelHandlers } from '../src/core/handlers.ts';
 import { flagInactive, joinedNeverPosted } from '../src/jobs/inactivity.ts';
 import { planSession, sessionAckText } from '../src/onboarding/session.ts';
-import type { Db, Statement } from '../src/store/db.ts';
+import type { Db } from '../src/store/db.ts';
 
 const run = promisify(execFile);
 const G = 'g5695';
 const CH = 'chan-a';
 
-function wrapStatement(db: DatabaseSync, sql: string): Statement {
-  const stmt = db.prepare(sql);
-  return {
-    get: async <T>(...params: unknown[]): Promise<T | undefined> =>
-      stmt.get(...(params as never[])) as T | undefined,
-    all: async <T>(...params: unknown[]): Promise<T[]> =>
-      stmt.all(...(params as never[])) as T[],
-    run: async (...params: unknown[]): Promise<{ changes: number }> => {
-      const r = stmt.run(...(params as never[]));
-      return { changes: Number(r.changes) };
-    },
-  };
-}
-
-function openOfflineDb(): Db {
-  const db = new DatabaseSync(':memory:');
-  db.exec(`CREATE TABLE events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_type TEXT NOT NULL, member_id TEXT, guild_id TEXT NOT NULL,
-    occurred_at TEXT NOT NULL, recorded_at TEXT NOT NULL DEFAULT '',
-    source TEXT NOT NULL, metadata TEXT, idempotency_key TEXT NOT NULL UNIQUE
-  )`);
-  db.exec(`CREATE TABLE members (
-    guild_id TEXT NOT NULL, member_id TEXT NOT NULL,
-    joined_at TEXT, join_source TEXT, first_message_at TEXT,
-    first_voice_at TEXT, last_active_at TEXT, left_at TEXT,
-    inactive_flagged_at TEXT, is_bot INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (guild_id, member_id)
-  )`);
-  const facade: Db = {
-    prepare: (sql) => wrapStatement(db, sql),
-    exec: async (sql) => { db.exec(sql); },
-    transaction: async <T>(fn: (tx: Db) => Promise<T>): Promise<T> => fn(facade),
-    close: async () => { db.close(); },
-  };
-  return facade;
-}
-
 async function fixture() {
-  const db = openOfflineDb();
+  const harness = await openTestDb(import.meta.filename);
+  const db = harness.db;
   const store = new EventStore(db);
   const handlers = new FunnelHandlers(store);
-  return { db, store, handlers };
+  return { db, store, handlers, cleanup: harness.cleanup };
 }
 
 type EndMeta = { startKnown: boolean; startedAt: string | null; durationSeconds: number | null };
@@ -125,7 +87,7 @@ async function countByType(db: Db, type: string, memberId?: string): Promise<num
 // --- A. restart-mid-session -------------------------------------------------
 
 test('restart-mid-session: clear-then-leave ends startKnown:false with null duration', async () => {
-  const { db, handlers } = await fixture();
+  const { db, handlers, cleanup } = await fixture();
   try {
     await handlers.onVoiceJoin({ guildId: G, memberId: 'r', isBot: false, channelId: CH, occurredAt: '2026-08-02T19:00:00.000Z' });
     // What src/discord/client.ts does on ShardResume: every open session is
@@ -138,12 +100,12 @@ test('restart-mid-session: clear-then-leave ends startKnown:false with null dura
     assert.equal(end.startedAt, null);
     assert.equal(await countByType(db, 'voice_session_start', 'r'), 1, 'the pre-outage start row is untouched');
   } finally {
-    await db.close();
+    await cleanup();
   }
 });
 
 test('restart-mid-session: unknown-start end falls back to the caller channel', async () => {
-  const { db, handlers } = await fixture();
+  const { db, handlers, cleanup } = await fixture();
   try {
     handlers.voiceSessions.clear();
     await handlers.onVoiceLeave({ guildId: G, memberId: 'u', isBot: false, channelId: 'chan-b', occurredAt: '2026-08-02T20:00:00.000Z' });
@@ -152,14 +114,14 @@ test('restart-mid-session: unknown-start end falls back to the caller channel', 
       .get<{ source: string }>('u');
     assert.equal(row?.source, 'channel:chan-b', 'no open session: credit the channel the caller named');
   } finally {
-    await db.close();
+    await cleanup();
   }
 });
 
 // --- B. double-start ----------------------------------------------------------
 
 test('double-start: two starts then one leave write 2 starts, 1 end on the latest start', async () => {
-  const { db, handlers } = await fixture();
+  const { db, handlers, cleanup } = await fixture();
   try {
     await handlers.onVoiceJoin({ guildId: G, memberId: 'd', isBot: false, channelId: CH, occurredAt: '2026-08-02T19:00:00.000Z' });
     await handlers.onVoiceJoin({ guildId: G, memberId: 'd', isBot: false, channelId: CH, occurredAt: '2026-08-02T19:05:00.000Z' });
@@ -173,14 +135,14 @@ test('double-start: two starts then one leave write 2 starts, 1 end on the lates
     assert.equal(end.startedAt, '2026-08-02T19:05:00.000Z');
     assert.equal(end.durationSeconds, 25 * 60);
   } finally {
-    await db.close();
+    await cleanup();
   }
 });
 
 // --- C. never-posted list ------------------------------------------------------
 
 test('never-posted: voice-only members are out, truly silent members are in', async () => {
-  const { db, handlers } = await fixture();
+  const { db, handlers, cleanup } = await fixture();
   try {
     await handlers.onJoin({ guildId: G, memberId: 'voiceonly', isBot: false, source: 'invite:x', occurredAt: '2026-01-01T00:00:00.000Z' });
     await handlers.onVoiceJoin({ guildId: G, memberId: 'voiceonly', isBot: false, channelId: CH, occurredAt: '2026-02-01T00:00:00.000Z' });
@@ -190,14 +152,14 @@ test('never-posted: voice-only members are out, truly silent members are in', as
     await handlers.onMessage({ guildId: G, memberId: 'chatty', isBot: false, channelId: 'c1', occurredAt: '2026-02-01T00:00:00.000Z' });
     assert.deepEqual(await joinedNeverPosted(db, G), ['silent']);
   } finally {
-    await db.close();
+    await cleanup();
   }
 });
 
 // --- D. inactivity flags ---------------------------------------------------------
 
 test('inactivity: recent voice spares, stale voice does not immunize', async () => {
-  const { db, store, handlers } = await fixture();
+  const { db, store, handlers, cleanup } = await fixture();
   try {
     const old = new Date(Date.now() - 90 * 86_400_000).toISOString();
     const recentVoice = new Date(Date.now() - 1 * 86_400_000).toISOString();
@@ -214,7 +176,7 @@ test('inactivity: recent voice spares, stale voice does not immunize', async () 
     assert.ok(flagged.includes('stale-voice'), 'voice two months ago is not immunity');
     assert.ok(flagged.includes('quiet'));
   } finally {
-    await db.close();
+    await cleanup();
   }
 });
 
@@ -285,7 +247,7 @@ test('session picker: stale keys are reported, never routed', () => {
 // channel, duration to leave time).
 
 test('server-leave mid-voice closes the session: end credited to the open channel, duration to leave time', async () => {
-  const { db, handlers } = await fixture();
+  const { db, handlers, cleanup } = await fixture();
   try {
     await handlers.onVoiceJoin({ guildId: G, memberId: 'leaver', isBot: false, channelId: 'chan-a', occurredAt: '2026-08-02T19:00:00.000Z' });
     await handlers.onLeave(G, 'leaver', '2026-08-02T19:30:00.000Z');
@@ -300,24 +262,24 @@ test('server-leave mid-voice closes the session: end credited to the open channe
     assert.equal(handlers.voiceSessions.isOpen(G, 'leaver'), false, 'tracker entry closed, not leaked');
     assert.equal(await countByType(db, 'member_leave', 'leaver'), 1, 'the gone marker still lands');
   } finally {
-    await db.close();
+    await cleanup();
   }
 });
 
 test('server-leave with no open session writes no end row', async () => {
-  const { db, handlers } = await fixture();
+  const { db, handlers, cleanup } = await fixture();
   try {
     await handlers.onLeave(G, 'quiet', '2026-08-02T19:30:00.000Z');
     assert.equal(await countByType(db, 'voice_session_end', 'quiet'), 0, 'no session open, nothing to close');
     assert.equal(await countByType(db, 'member_leave', 'quiet'), 1);
     assert.equal(handlers.voiceSessions.openCount, 0);
   } finally {
-    await db.close();
+    await cleanup();
   }
 });
 
 test('a voice leave after a server-leave is unknown-start, not a duration spanning the absence', async () => {
-  const { db, handlers } = await fixture();
+  const { db, handlers, cleanup } = await fixture();
   try {
     // The issue's probe: join -> server-leave -> a stale voice frame 2h later.
     await handlers.onVoiceJoin({ guildId: G, memberId: 'gone-then-frame', isBot: false, channelId: CH, occurredAt: '2026-08-02T19:00:00.000Z' });
@@ -329,12 +291,12 @@ test('a voice leave after a server-leave is unknown-start, not a duration spanni
     assert.equal(ends[1].startKnown, false, 'the bot never saw this session start');
     assert.equal(ends[1].durationSeconds, null, 'no invented 7200s spanning the absence');
   } finally {
-    await db.close();
+    await cleanup();
   }
 });
 
 test('a repeated server-leave writes one end row, not two', async () => {
-  const { db, handlers } = await fixture();
+  const { db, handlers, cleanup } = await fixture();
   try {
     await handlers.onVoiceJoin({ guildId: G, memberId: 'twice', isBot: false, channelId: CH, occurredAt: '2026-08-02T19:00:00.000Z' });
     await handlers.onLeave(G, 'twice', '2026-08-02T19:30:00.000Z');
@@ -342,6 +304,6 @@ test('a repeated server-leave writes one end row, not two', async () => {
     assert.equal(await countByType(db, 'voice_session_end', 'twice'), 1, 'second leave peeks no open session');
     assert.equal(await countByType(db, 'member_leave', 'twice'), 1, 'repeatable key dedupes');
   } finally {
-    await db.close();
+    await cleanup();
   }
 });
