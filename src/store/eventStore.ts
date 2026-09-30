@@ -15,6 +15,44 @@ export interface RecordResult {
 }
 
 /**
+ * Normalize an ISO-8601 UTC timestamp to a fixed-width 6-digit fraction so
+ * lexicographic comparison is chronological. Postgres `timestamptz`
+ * preserves microseconds; `Date.parse` does not (millisecond precision), so
+ * the membership clock's same-millisecond observations (e.g. `...000001Z`
+ * vs `...000002Z`) would compare equal and ordering would collapse.
+ */
+function normalizeIso(s: string): string {
+  const m = /^(.+T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z)$/.exec(s);
+  if (!m) return s;
+  return `${m[1]}.${(m[2] ?? '').padEnd(6, '0').slice(0, 6)}Z`;
+}
+
+/** Chronological comparison of ISO-8601 UTC timestamps; see normalizeIso. */
+function compareIso(a: string, b: string): number {
+  const na = normalizeIso(a);
+  const nb = normalizeIso(b);
+  return na < nb ? -1 : na > nb ? 1 : 0;
+}
+
+/** Live dispatch order when supplied, otherwise historical occurrence time. */
+function membershipOrderedAt(occurredAt: string, metadata: string | null): string {
+  if (metadata) {
+    try {
+      const parsed = JSON.parse(metadata) as { membershipObservedAt?: unknown };
+      if (
+        typeof parsed.membershipObservedAt === 'string' &&
+        Number.isFinite(Date.parse(parsed.membershipObservedAt))
+      ) {
+        return parsed.membershipObservedAt;
+      }
+    } catch {
+      /* not JSON - fall through to occurrence time */
+    }
+  }
+  return occurredAt;
+}
+
+/**
  * The only write path into the funnel log.
  *
  * Every emitter goes through here so that (a) idempotency is enforced in one
@@ -78,12 +116,36 @@ export class EventStore {
           .get<{ id: number }>(key);
         if (existing && observedAt !== undefined) {
           // A live redelivery reconfirms presence, not attribution or occurrence.
-          await tx.prepare(
-            `UPDATE events SET metadata =
-               (COALESCE(metadata::jsonb, '{}'::jsonb) || jsonb_build_object('membershipObservedAt', ?::text))::text
-             WHERE id = ? AND (metadata::jsonb ->> 'membershipObservedAt' IS NULL
-               OR (metadata::jsonb ->> 'membershipObservedAt')::timestamptz < ?::timestamptz)`,
-          ).run(observedAt, existing.id, observedAt);
+          // Portable read-modify-write: the Postgres jsonb one-statement form
+          // breaks the offline SQLite probes (near "FOR"/"::" syntax error),
+          // so parse in JS. Concurrent redeliveries carry increasing
+          // observations, so last-writer-wins still converges on the newest.
+          const cur = await tx
+            .prepare(`SELECT metadata FROM events WHERE id = ?`)
+            .get<{ metadata: string | null }>(existing.id);
+          let stored: string | null = null;
+          if (cur?.metadata) {
+            try {
+              const parsed = JSON.parse(cur.metadata) as { membershipObservedAt?: unknown };
+              if (typeof parsed.membershipObservedAt === 'string') stored = parsed.membershipObservedAt;
+            } catch {
+              stored = null;
+            }
+          }
+          if (stored === null || compareIso(stored, observedAt) < 0) {
+            let base: Record<string, unknown> = {};
+            if (cur?.metadata) {
+              try {
+                base = JSON.parse(cur.metadata) as Record<string, unknown>;
+              } catch {
+                base = {};
+              }
+            }
+            await tx.prepare(`UPDATE events SET metadata = ? WHERE id = ?`).run(
+              JSON.stringify({ ...base, membershipObservedAt: observedAt }),
+              existing.id,
+            );
+          }
           await this.project(tx, e);
         }
         return { inserted: false, eventId: existing ? Number(existing.id) : null };
@@ -169,32 +231,71 @@ export class EventStore {
     // spell, independent of whether a newer leave currently wins presence.
     // Reconfirming presence is not activity: a duplicate observation keeps the
     // original occurrence, so it cannot clear a later flag.
-    // Read AFTER acquiring the member lock: a competing transaction may have
-    // committed while we waited. A same-statement CTE would retain its old snapshot.
+    //
+    // Portable by design: the offline SQLite probes run this same code behind
+    // the narrow Db surface, so no `FOR UPDATE`, `::` casts, CTEs, or
+    // UPDATE..FROM. The no-op UPDATE below takes the member row lock on
+    // Postgres - so a competing transaction that committed while we waited is
+    // visible to the reads that follow - and is a harmless no-op on SQLite.
+    // Ordering ties mirror the previous single-statement form exactly: latest
+    // join wins on occurrence with the earliest row breaking ties; presence
+    // wins on observation order with a leave breaking ties, then the newest row.
     await db.prepare(
-      `SELECT member_id FROM members WHERE guild_id = ? AND member_id = ? FOR UPDATE`,
-    ).get(guildId, memberId);
+      `UPDATE members SET member_id = member_id WHERE guild_id = ? AND member_id = ?`,
+    ).run(guildId, memberId);
+    const rows = await db.prepare(
+      `SELECT id, event_type, occurred_at, source, metadata FROM events
+        WHERE guild_id = ? AND member_id = ?
+          AND event_type IN ('member_join', 'member_leave')`,
+    ).all<{
+      id: number; event_type: string; occurred_at: string; source: string; metadata: string | null;
+    }>(guildId, memberId);
+    if (rows.length === 0) return;
+    let latestJoin: (typeof rows)[number] | undefined;
+    let latestPresence: (typeof rows)[number] | undefined;
+    let latestOrdered = '';
+    for (const r of rows) {
+      if (r.event_type === 'member_join') {
+        if (
+          !latestJoin || compareIso(r.occurred_at, latestJoin.occurred_at) > 0 ||
+          (compareIso(r.occurred_at, latestJoin.occurred_at) === 0 && r.id < latestJoin.id)
+        ) {
+          latestJoin = r;
+        }
+      }
+      const ordered = normalizeIso(membershipOrderedAt(r.occurred_at, r.metadata));
+      if (
+        !latestPresence || ordered > latestOrdered ||
+        (ordered === latestOrdered &&
+          ((r.event_type === 'member_leave') !== (latestPresence.event_type === 'member_leave')
+            ? r.event_type === 'member_leave'
+            : r.id > latestPresence.id))
+      ) {
+        latestPresence = r;
+        latestOrdered = ordered;
+      }
+    }
+    const current = await db.prepare(
+      `SELECT inactive_flagged_at FROM members WHERE guild_id = ? AND member_id = ?`,
+    ).get<{ inactive_flagged_at: string | null }>(guildId, memberId);
+    const flag = current?.inactive_flagged_at ?? null;
+    const cleared =
+      flag !== null && latestJoin && compareIso(flag, latestJoin.occurred_at) <= 0 ? null : flag;
     await db.prepare(
-      `WITH membership AS (
-         SELECT id, event_type, occurred_at, source,
-           COALESCE((metadata::jsonb ->> 'membershipObservedAt')::timestamptz, occurred_at) AS ordered_at
-         FROM events WHERE guild_id = ? AND member_id = ?
-           AND event_type IN ('member_join', 'member_leave')
-       ), latest_join AS (
-         SELECT occurred_at, source FROM membership WHERE event_type = 'member_join'
-         ORDER BY occurred_at DESC, id ASC LIMIT 1
-       ), latest_presence AS (
-         SELECT event_type, occurred_at, ordered_at FROM membership
-         ORDER BY ordered_at DESC, (event_type = 'member_leave') DESC, id DESC LIMIT 1
-       )
-       UPDATE members SET
-         joined_at = COALESCE((SELECT occurred_at FROM latest_join), joined_at),
-         join_source = COALESCE((SELECT source FROM latest_join), join_source),
-         left_at = CASE WHEN p.event_type = 'member_leave' THEN p.occurred_at ELSE NULL END,
-         inactive_flagged_at = CASE WHEN inactive_flagged_at <= (SELECT occurred_at FROM latest_join)
-           THEN NULL ELSE inactive_flagged_at END
-       FROM latest_presence p WHERE guild_id = ? AND member_id = ?`,
-    ).run(guildId, memberId, guildId, memberId);
+      `UPDATE members SET
+         joined_at = COALESCE(?, joined_at),
+         join_source = COALESCE(?, join_source),
+         left_at = ?,
+         inactive_flagged_at = ?
+       WHERE guild_id = ? AND member_id = ?`,
+    ).run(
+      latestJoin?.occurred_at ?? null,
+      latestJoin?.source ?? null,
+      latestPresence?.event_type === 'member_leave' ? (latestPresence?.occurred_at ?? null) : null,
+      cleared,
+      guildId,
+      memberId,
+    );
   }
 
   /**
