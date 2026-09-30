@@ -500,6 +500,23 @@ describe('rename throttling', () => {
     assert.equal(throttle.ready('c', at - 1), false, 'the failed attempt must still spend no window');
   });
 
+  test('nested definitive rollbacks preserve a same-name successor of an older outstanding attempt', () => {
+    const throttle = new RenameThrottle();
+    // A remains in flight while Discord answers; B applies once the window opens.
+    assert.equal(throttle.request('c', 'name-X', 1000).apply, true);
+    const nextAt = 1000 + RENAME_MIN_INTERVAL_MS;
+    assert.equal(throttle.request('c', 'name-Y', nextAt).apply, true);
+    // C is acknowledged while both attempts are still outstanding.
+    assert.equal(throttle.request('c', 'name-X', nextAt + 1).apply, false);
+    // Reverse order: B rejects first and rolls back only its own reservation.
+    throttle.rejected('c', 'name-Y', nextAt);
+    assert.equal(throttle.pending('c', 'original'), 'name-X');
+    // A rejects later. Its own reservation rolls back too, but C arrived
+    // after A's attempt (higher generation), so C's acknowledgement survives.
+    throttle.rejected('c', 'name-X', 1000);
+    assert.equal(throttle.pending('c', 'original'), 'name-X');
+  });
+
   test('opens again once the window passes', () => {
     const throttle = new RenameThrottle();
     throttle.request('c', 'one', 0);
@@ -1227,6 +1244,48 @@ describe('owner controls', () => {
     await svc.sweep(GUILD);
     assert.equal(gateway.channels.get(channelId)!.name, 'wanted-name', 'only the failed attempt is discarded');
     assert.equal((await store.getByChannel(GUILD, channelId))?.lastRenamedAt !== before?.lastRenamedAt, true);
+  });
+
+  test('the service keeps an acknowledged same-name successor when overlapping attempts reject in reverse order', async (t) => {
+    await setup();
+    const enteredA = deferred();
+    const releaseA = deferred();
+    const enteredB = deferred();
+    const releaseB = deferred();
+    t.after(() => { releaseA.resolve(); releaseB.resolve(); });
+    let attempt = 0;
+    const renameChannel = gateway.renameChannel.bind(gateway);
+    t.mock.method(gateway, 'renameChannel', async (id: string, name: string) => {
+      attempt++;
+      if (attempt === 1) {
+        // A stays in flight past its window; the gateway has no timeout.
+        enteredA.resolve();
+        await releaseA.promise;
+        throw new TempVoiceGatewayError('Missing Permissions A', MISSING_PERMISSIONS_CODE);
+      }
+      if (attempt === 2) {
+        enteredB.resolve();
+        await releaseB.promise;
+        throw new TempVoiceGatewayError('Missing Permissions B', MISSING_PERMISSIONS_CODE);
+      }
+      await renameChannel(id, name);
+    });
+    const first = assert.rejects(svc.rename(ctx(OWNER, channelId), 'name-X'), /Missing Permissions A/);
+    await enteredA.promise;
+    clock += RENAME_MIN_INTERVAL_MS;
+    const second = assert.rejects(svc.rename(ctx(OWNER, channelId), 'name-Y'), /Missing Permissions B/);
+    await enteredB.promise;
+    // C is acknowledged while both attempts are still outstanding.
+    clock += 1;
+    assert.match((await svc.rename(ctx(OWNER, channelId), 'name-X')).message, /queued/);
+    // Reverse order: B rejects first, then the older attempt A.
+    releaseB.resolve();
+    await second;
+    releaseA.resolve();
+    await first;
+    clock += RENAME_MIN_INTERVAL_MS;
+    await svc.sweep(GUILD);
+    assert.equal(gateway.channels.get(channelId)!.name, 'name-X', 'the acknowledged successor must still land');
   });
 
   test('other definitive Discord rename refusals also discard intent', async () => {
