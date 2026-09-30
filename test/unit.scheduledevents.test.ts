@@ -98,6 +98,97 @@ describe('scheduled events poller', () => {
     assert.deepEqual(await db.prepare(`SELECT * FROM scheduled_events`).all(), []);
   });
 
+  test('replacement and empty snapshots change only the processed guild, even with a shared event ID', async () => {
+    const guildA = 'guild-a';
+    const guildB = 'guild-b';
+    const seededAt = '2026-09-03T12:00:00.123Z';
+    const emptyAt = '2026-09-04T18:10:00.456Z';
+    const rowsBefore = [
+      {
+        guild_id: guildA, event_id: 'shared', name: 'A old name',
+        starts_at: '2026-09-06T18:00:00.000Z', channel_id: 'a-voice',
+        description: 'A old description', status: 'scheduled', updated_at: seededAt,
+      },
+      {
+        guild_id: guildA, event_id: 'stale', name: 'A stale event',
+        starts_at: '2026-09-07T18:00:00.000Z', channel_id: null,
+        description: null, status: 'cancelled', updated_at: seededAt,
+      },
+      {
+        guild_id: guildB, event_id: 'b-only', name: 'B exclusive event',
+        starts_at: '2026-09-08T20:00:00.000Z', channel_id: null,
+        description: null, status: 'completed', updated_at: '2026-09-02T09:15:00.789Z',
+      },
+      {
+        guild_id: guildB, event_id: 'shared', name: 'B shared event — unchanged',
+        starts_at: '2026-09-06T21:00:00.000Z', channel_id: 'b-voice',
+        description: 'Keep every field, including timestamps.', status: 'active', updated_at: seededAt,
+      },
+    ];
+    const seed = db.prepare(
+      `INSERT INTO scheduled_events
+         (guild_id, event_id, name, starts_at, channel_id, description, status, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const row of rowsBefore) {
+      await seed.run(row.guild_id, row.event_id, row.name, row.starts_at,
+        row.channel_id, row.description, row.status, row.updated_at);
+    }
+    const readRows = () => db.prepare(
+      `SELECT * FROM scheduled_events ORDER BY guild_id, event_id`,
+    ).all();
+    assert.deepEqual(await readRows(), rowsBefore);
+    const bBefore = JSON.stringify(rowsBefore.filter((row) => row.guild_id === guildB));
+    const assertBUnchanged = async () => {
+      const rows = await db.prepare(
+        `SELECT * FROM scheduled_events WHERE guild_id = ? ORDER BY event_id`,
+      ).all(guildB);
+      assert.equal(JSON.stringify(rows), bBefore, 'guild B must remain byte-for-byte unchanged');
+    };
+    const pin = db.prepare(`UPDATE web_contract_meta SET guild_id = ? WHERE singleton = TRUE`);
+    const readPin = () => db.prepare(`SELECT guild_id FROM web_contract_meta`).all();
+    await pin.run(guildB);
+    assert.deepEqual(await readPin(), [{ guild_id: guildB }]);
+
+    const { rest } = stubRest(() => [
+      {
+        id: 'shared', name: 'A updated event',
+        scheduled_start_time: '2026-09-06T20:30:00+01:00', channel_id: null,
+        description: 'A updated description', status: 2,
+      },
+      {
+        id: 'fresh', name: 'A fresh event',
+        scheduled_start_time: '2026-09-09T18:00:00.000Z', channel_id: 'a-new-voice', status: 1,
+      },
+    ]);
+    const result = await runScheduledEventsCycle({ db, rest, guildId: guildA, now: () => OBSERVED_AT });
+    assert.deepEqual(result, { recorded: true, observedAt: OBSERVED_AT, eventCount: 2 });
+    assert.deepEqual(await readRows(), [
+      {
+        guild_id: guildA, event_id: 'fresh', name: 'A fresh event',
+        starts_at: '2026-09-09T18:00:00.000Z', channel_id: 'a-new-voice',
+        description: null, status: 'scheduled', updated_at: OBSERVED_AT,
+      },
+      {
+        guild_id: guildA, event_id: 'shared', name: 'A updated event',
+        starts_at: '2026-09-06T19:30:00.000Z', channel_id: null,
+        description: 'A updated description', status: 'active', updated_at: OBSERVED_AT,
+      },
+      ...rowsBefore.filter((row) => row.guild_id === guildB),
+    ]);
+    await assertBUnchanged();
+    assert.deepEqual(await readPin(), [{ guild_id: guildA }]);
+
+    // The singleton pin follows the processed guild, including a successful empty read.
+    await pin.run(guildB);
+    const { rest: emptyRest } = stubRest(() => []);
+    const emptyResult = await runScheduledEventsCycle({ db, rest: emptyRest, guildId: guildA, now: () => emptyAt });
+    assert.deepEqual(emptyResult, { recorded: true, observedAt: emptyAt, eventCount: 0 });
+    assert.deepEqual(await readRows(), rowsBefore.filter((row) => row.guild_id === guildB));
+    await assertBUnchanged();
+    assert.deepEqual(await readPin(), [{ guild_id: guildA }]);
+  });
+
   test('a failed read preserves the last good snapshot', async () => {
     await db.prepare(
       `INSERT INTO scheduled_events
