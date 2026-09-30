@@ -23,6 +23,7 @@ const TOKEN = `${Buffer.from(STAGING_BOT_APPLICATION_ID).toString('base64')}.fix
 
 function runScript(options: {
   staging?: boolean;
+  args?: string[];
   guildId?: string;
   token?: string;
   now?: string;
@@ -68,7 +69,7 @@ function runScript(options: {
         return { ...loaded, source: source.replace(loop, 'for (const p of catalog.filter(p => picks.includes(p))) {') };
       } });
     ` : ''}
-    process.argv = [process.execPath, ${JSON.stringify(SCRIPT)}, ${options.staging ? "'--staging'" : ''}];
+    process.argv = [process.execPath, ${JSON.stringify(SCRIPT)}, ...${JSON.stringify(options.args ?? (options.staging ? ['--staging'] : []))}];
     await import(${JSON.stringify(SCRIPT)});
   `;
   const run = spawnSync(process.execPath, ['--input-type=module', '-e', bootstrap], {
@@ -85,6 +86,24 @@ function runScript(options: {
   assert.ifError(run.error);
   return { status: run.status, output: `${run.stdout ?? ''}${run.stderr ?? ''}` };
 }
+
+for (const args of [['--help'], ['-h'], ['--staging', '--help'], ['-h', '--staging']]) {
+  test(`help ${args.join(' ')} exits zero before probes or staging identity checks`, () => {
+    const run = runScript({ args });
+    assert.equal(run.status, 0, run.output);
+    assert.match(run.output, /^Usage: node scripts\/onboarding-exploratory-acceptance\.ts/m);
+    assert.doesNotMatch(run.output, /preconditions|==|FAIL |onboarding-exploratory-acceptance:/);
+    assert.match(run.output, /MOCK_REQUESTS=0/);
+  });
+}
+
+test('unknown arguments remain usage errors without running probes', () => {
+  const run = runScript({ args: ['--unknown'] });
+  assert.equal(run.status, 2, run.output);
+  assert.match(run.output, /Usage:/);
+  assert.doesNotMatch(run.output, /preconditions|==|FAIL /);
+  assert.match(run.output, /MOCK_REQUESTS=0/);
+});
 
 for (const guildId of [undefined, '326474832151838730']) {
   test(`staging refuses ${guildId === undefined ? 'missing' : 'non-staging'} guild before any request`, () => {
@@ -114,6 +133,8 @@ for (const now of ['2026-09-26T12:00:00.000Z', '2030-01-01T00:00:00.000Z']) {
   test(`offline funnel controls its clock even when the ambient clock is ${now}`, () => {
     const run = runScript({ now });
     assertProbeOutcome(run);
+    assert.match(run.output, /ok   invisible legacy fallback is withheld, not routed/);
+    assert.match(run.output, /ok   dark pick routes to the visible hub, flagged degraded/);
     assert.match(run.output, /ok   join -> routed is 10s \(the under-60s claim shape\)/);
     assert.match(run.output, /ok   join -> first_message is 40s/);
     assert.match(run.output, /MOCK_REQUESTS=0/);
