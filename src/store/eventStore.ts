@@ -110,10 +110,18 @@ export class EventStore {
 
     switch (e.eventType) {
       case 'member_join':
-        await set('joined_at', e.occurredAt);
-        await set('join_source', e.source);
-        await set('left_at', null);
-        await set('inactive_flagged_at', null);
+        // Latest join and its attribution move together, even if a later leave
+        // arrived first. Only a join after that leave reopens the member.
+        await db
+          .prepare(
+            `UPDATE members SET joined_at = ?, join_source = ?,
+               left_at = CASE WHEN left_at < ? THEN NULL ELSE left_at END,
+               inactive_flagged_at = CASE WHEN inactive_flagged_at <= ?
+                 THEN NULL ELSE inactive_flagged_at END
+             WHERE guild_id = ? AND member_id = ?
+               AND (joined_at IS NULL OR joined_at < ?)`,
+          )
+          .run(e.occurredAt, e.source, e.occurredAt, e.occurredAt, e.guildId, e.memberId, e.occurredAt);
         break;
       case 'gate_cleared':
         // Earliest wins. A rejoin re-screens the member and the live listener
@@ -143,7 +151,13 @@ export class EventStore {
         await set('inactive_flagged_at', e.occurredAt);
         break;
       case 'member_leave':
-        await set('left_at', e.occurredAt);
+        await db
+          .prepare(
+            `UPDATE members SET left_at = ? WHERE guild_id = ? AND member_id = ?
+               AND (joined_at IS NULL OR joined_at <= ?)
+               AND (left_at IS NULL OR left_at < ?)`,
+          )
+          .run(e.occurredAt, e.guildId, e.memberId, e.occurredAt, e.occurredAt);
         break;
       case 'invite_click':
         break;
