@@ -81,4 +81,16 @@ regexes = [
   #    variable whose name ends in _ID. A real bot token is base64 with dots in
   #    it and does not match this, so `discord-bot-token` above still fires.
   '''(?i)[A-Z0-9_]*(GUILD|CHANNEL|ROLE|APPLICATION|CLIENT|USER|CATEGORY)_ID['"]?\s*[:=]\s*['"]?[0-9]{17,20}['"]?''',
+
+  # 3. Synthetic PEM marker fixtures in redaction tests (TOG-10037). The
+  #    logs-redaction test builds fake key blocks from JS repeat runs -
+  #    `${"X".repeat(100)}`, `${"Y".repeat(50)}` - with no key material, and
+  #    says so in the comment above the lines. Read by hand 2026-09-30: the
+  #    flagged lines are those repeat constructions, nothing else.
+  #
+  #    Deliberately narrow: it requires the literal `${"X".repeat(N)}` /
+  #    `${"Y".repeat(N)}` template construction. Real PEM body is base64 and
+  #    can never contain that literal, so the `private-key` rule still fires
+  #    on any genuine key.
+  '''\$\{"[XY]"\.repeat\(\d+\)\}''',
 ]
