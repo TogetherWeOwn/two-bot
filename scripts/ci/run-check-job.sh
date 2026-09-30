@@ -22,6 +22,11 @@ npm run check:script-targets
 # ratchet is only worth its line here if it still refuses things.
 npm run check:credentials
 npm run check:credentials:selftest
+# Service-unit env literals must match .env.example in both directions
+# (TOG-9986): undocumented Environment= keys and orphan example paragraphs
+# each fail here in seconds. Hermetic bash+grep like the snowflake ratchet.
+npm run check:env-drift
+npm run check:env-drift:selftest
 # Deploy guard + mirror-settle + trigger/poll + smoke, each executed per
 # configuration with exit codes pinned (TOG-6911). Hermetic: no network, no
 # token, no target — the interesting cases are the ones where none exists

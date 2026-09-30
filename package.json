@@ -55,6 +55,8 @@
     "check:credentials:selftest": "bash scripts/ci/check-systemd-credentials.test.sh",
     "check:console": "bash scripts/ci/check-src-console.sh",
     "check:console:selftest": "bash scripts/ci/check-src-console.test.sh",
+    "check:env-drift": "bash scripts/ci/check-env-drift.sh",
+    "check:env-drift:selftest": "bash scripts/ci/check-env-drift.test.sh",
     "check:script-targets": "node scripts/check-script-targets.ts",
     "deploy:selftest": "node --test scripts/deploy-target-selftest.mjs",
     "broker:selftest": "node --test ops/staging-deploy-broker/server.test.mjs",

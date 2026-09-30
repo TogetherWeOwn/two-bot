@@ -250,6 +250,35 @@ test('--manifest writes the same JSON to disk for evidence', async () => {
   assert.deepEqual(JSON.parse(readFileSync(out, 'utf8')), printed);
 });
 
+test('--manifest pointing at a directory refuses before touching the database (TOG-9914)', async () => {
+  const path = exportFile('dir-guard.json', [{ id: ALICE, xp: 100 }]);
+  const result = await cli(['--guild', GUILD, '--file', path, '--apply', '--manifest', dir]);
+  assert.equal(result.code, 2, result.stdout + result.stderr);
+  assert.match(result.stderr, /--manifest destination is a directory, refusing to import/);
+  assert.equal(
+    Number((await harness.db.prepare(`SELECT COUNT(*) AS c FROM member_levels`).get<{ c: number }>())?.c),
+    0,
+    'a doomed evidence write must not mutate member_levels first',
+  );
+});
+
+test('an unwritable --manifest still prints the manifest to stdout (TOG-9914)', async () => {
+  const path = exportFile('unwritable.json', [{ id: ALICE, xp: 100 }]);
+  const bad = join(dir, 'no-such-dir', 'manifest.json');
+  const result = await cli(['--guild', GUILD, '--file', path, '--apply', '--manifest', bad]);
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /Failed to write --manifest/);
+  // The mutation landed, but the evidence survived: stdout holds the manifest.
+  const manifest = JSON.parse(result.stdout);
+  assert.equal(manifest.mode, 'apply');
+  assert.equal(manifest.rowsWritten, 1);
+  assert.equal(manifest.reconciled, true);
+  assert.equal(
+    Number((await harness.db.prepare(`SELECT COUNT(*) AS c FROM member_levels`).get<{ c: number }>())?.c),
+    1,
+  );
+});
+
 test('a malformed export fails with every bad row at once, and writes nothing', async () => {
   const path = join(dir, 'bad.json');
   writeFileSync(
