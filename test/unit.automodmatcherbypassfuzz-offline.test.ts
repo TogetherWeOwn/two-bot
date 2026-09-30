@@ -19,10 +19,12 @@
  *   1. Invisible format characters (Cf, SHY, VS16) that `normalize()` lets
  *      through, splitting bad-words matches, the INVITE literal and repeat
  *      digests. Filed as [TOG-10048](/TOG/issues/TOG-10048).
- *   2. Combining-mark stacking (`\p{M}`) that splits bad-words and repeat
- *      digests. Filed as [TOG-10049](/TOG/issues/TOG-10049). Homoglyph /
- *      leet substitutions are a separate wordlist-level root cause, filed as
- *      [TOG-10066](/TOG/issues/TOG-10066) and pinned alongside.
+ *   2. Combining-mark stacking (`\p{M}`) that split bad-words and repeat
+ *      digests. FIXED by [TOG-10049](/TOG/issues/TOG-10049) (NFKD-strip in
+ *      `normalize()` + `\p{M}`-tolerant gaps); the rows below pin the caught
+ *      behaviour. Homoglyph / leet substitutions are a separate
+ *      wordlist-level root cause, filed as [TOG-10066](/TOG/issues/TOG-10066)
+ *      and pinned alongside.
  *   3. Bare-domain TLD allowlist gaps (only 15 TLDs in the alternation) that
  *      let scheme-less phishing links — including shorteners — through while
  *      the explicit-scheme path catches them. Filed as
@@ -100,24 +102,27 @@ test('bypass fuzz: invisible format chars split bad-words (TOG-10048)', () => {
     ['bidi isolate FSI U+2066', E('very\\u2066bad')],
     ['bidi isolate PDI U+2069', E('very\\u2069bad')],
     ['invisible separator U+2063', E('very\\u2063bad')],
-    ['variation selector VS16 U+FE0F', E('very\\ufe0fbad')],
     ['mongolian vowel separator U+180E', E('very\\u180ebad')],
   ];
   for (const [name, content] of bypasses) {
     assert.equal(match({ content }), null, `${name}: still bypasses (TOG-10048)`);
   }
+  // VS16 U+FE0F is category Mn, so the TOG-10049 mark-strip catches it as a
+  // side effect — pinned as caught, not bypass.
+  assert.equal(match({ content: E('very\\ufe0fbad') }), 'bad_words', 'VS16 U+FE0F caught via TOG-10049');
 });
 
-test('bypass fuzz: combining marks split bad-words and repeat counts (TOG-10049)', () => {
-  const bypasses: Array<[string, string]> = [
+test('combining marks no longer split bad-words or repeat counts (TOG-10049)', () => {
+  // Fixed: NFKD-strip in normalize() folds every row to the plain phrase.
+  const caught: Array<[string, string]> = [
     ['combining acute U+0301 on the e', E('ve\\u0301ry bad')],
     ['combining dot above U+0307 splitting the words', E('very\\u0307bad')],
     ['combining enclosing U+20DD on the a', E('very b\\u20ddad')],
   ];
-  for (const [name, content] of bypasses) {
-    assert.equal(match({ content }, ['very bad']), null, `${name}: still bypasses (TOG-10049)`);
+  for (const [name, content] of caught) {
+    assert.equal(match({ content }, ['very bad']), 'bad_words', `${name}: caught (TOG-10049)`);
   }
-  // Repeat digest splits across mark variants: three sightings, three digests.
+  // Mark variants now hash to one digest: the third sighting trips the count.
   const tracker = new MemoryRepeatTracker();
   const texts = ['repeat me', E('repe\\u0301at me'), E('repeat me\\u0301')];
   const outcomes = texts.map((content, i) =>
@@ -127,7 +132,7 @@ test('bypass fuzz: combining marks split bad-words and repeat counts (TOG-10049)
       tracker,
     ),
   );
-  assert.deepEqual(outcomes, [null, null, null], 'mark variants split the digest (TOG-10049)');
+  assert.deepEqual(outcomes, [null, null, 'repeated_message'], 'mark variants share one digest (TOG-10049)');
 });
 
 test('bypass fuzz: invisible format chars split repeat counts (TOG-10048)', () => {

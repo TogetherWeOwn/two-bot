@@ -63,17 +63,33 @@ export function matchAutomod(
   return null;
 }
 
+// TOG-10049: NFKC leaves combining marks (`\p{M}`) intact, so one accent
+// keystroke (`véry bad`) split bad-words matches and repeat digests.
+// NFKD decomposes the pinned compatibility folds identically (fullwidth,
+// Kelvin K, long s, ﬁ ligature — see TOG-10052), then marks are stripped.
+// Turkish dotted capital İ (U+0130) is sentineled to dotless ı (U+0131)
+// first so the İ≠i no-overblock pin keeps holding.
+const COMBINING_MARKS = /\p{M}/gu;
+
 function normalize(value: string): string {
-  return value.normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim();
+  return value
+    .replace(/İ/g, 'ı')
+    .normalize('NFKD')
+    .replace(COMBINING_MARKS, '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function hasBadWord(content: string, words: string[]): boolean {
   for (const raw of words) {
     const word = normalize(raw).replace(ZERO_WIDTH, '').replace(/\s+/g, '');
     if (!word) continue;
+    // TOG-10049: tolerate residual combining marks between letters so a
+    // stray accent that survives normalization cannot split the word.
     const escaped = [...word]
       .map((char) => char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-      .join('[\\s\\u200B-\\u200D\\u2060\\uFEFF]*');
+      .join('[\\s\\u200B-\\u200D\\u2060\\uFEFF\\p{M}]*');
     if (new RegExp(`(^|[^\\p{L}\\p{N}_])${escaped}([^\\p{L}\\p{N}_]|$)`, 'iu').test(content)) return true;
   }
   return false;
