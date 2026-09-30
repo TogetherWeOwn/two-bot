@@ -56,19 +56,21 @@ test('spawn failure, nonzero exit and child signal propagate as failure', async 
 test('required workflow wrapper reaches owned storage in order and fails fast at every command', () => {
   const work = mkdtempSync(join(tmpdir(), 'check-job-'));
   try {
-    const fake = join(work, 'npm');
-    writeFileSync(fake, '#!/usr/bin/env bash\nprintf "%s\\n" "$*" >> "$TRACE"\nif [[ "${FAIL_ON:-}" == "$*" ]]; then exit 23; fi\n');
-    chmodSync(fake, 0o755);
-    const sequence = ['run check:script-targets', 'run check:credentials', 'run check:credentials:selftest', 'run check:env-drift', 'run check:env-drift:selftest', 'run deploy:selftest', 'run typecheck', 'run eval:funnel-attribution', 'run test:postgres', 'run test:restart-storage -- --provision', 'run verify:grant:selftest'];
+    for (const binary of ['npm', 'node']) {
+      const fake = join(work, binary);
+      writeFileSync(fake, '#!/usr/bin/env bash\ncommand="${0##*/} $*"\nprintf "%s\\n" "$command" >> "$TRACE"\nif [[ "${FAIL_ON:-}" == "$command" ]]; then exit 23; fi\n');
+      chmodSync(fake, 0o755);
+    }
+    const sequence = ['npm run check:script-targets', 'npm run check:credentials', 'npm run check:credentials:selftest', 'npm run check:env-drift', 'npm run check:env-drift:selftest', 'npm run deploy:selftest', 'npm ci --ignore-scripts --prefix scripts/ci', 'node --test scripts/ci/normalize-release.test.mjs', 'npm run typecheck', 'npm run eval:funnel-attribution', 'npm run test:postgres', 'npm run test:restart-storage -- --provision', 'npm run verify:grant:selftest'];
     for (const failOn of ['', ...sequence]) {
       const trace = join(work, 'trace'); writeFileSync(trace, '');
       const result = spawnSync('bash', ['scripts/ci/run-check-job.sh'], {
         cwd: ROOT, encoding: 'utf8', env: { PATH: `${work}:/usr/bin:/bin`, TRACE: trace, FAIL_ON: failOn },
       });
-      assert.equal(result.status, failOn ? 23 : 0);
+      assert.equal(result.status, failOn ? 23 : 0, result.stdout + result.stderr);
       const expected = failOn ? sequence.slice(0, sequence.indexOf(failOn) + 1) : sequence;
       assert.deepEqual(readFileSync(trace, 'utf8').trim().split('\n'), expected);
-      if (failOn) assert.ok(result.stdout.includes(`::error title=Required check command failed::npm ${failOn} exited 23`));
+      if (failOn) assert.ok(result.stdout.includes(`::error title=Required check command failed::${failOn} exited 23`));
     }
     const workflow = readFileSync(join(ROOT, '.github/workflows/ci.yml'), 'utf8');
     const checkJob = workflow.split('\n  check:\n')[1].split('\n  postgres:\n')[0];
