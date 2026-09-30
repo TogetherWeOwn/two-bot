@@ -101,10 +101,11 @@ export class ModerationDiscord implements ModerationDiscordClient {
     let overwrite: EveryoneOverwrite | null = null;
     for (const entry of body.permission_overwrites) {
       if (typeof entry !== 'object' || entry === null || Array.isArray(entry)
-        || typeof entry.id !== 'string' || (entry.type !== 0 && entry.type !== 1)) {
+        || typeof entry.id !== 'string' || (entry.type !== 0 && entry.type !== 1)
+        || (entry.id === guildId && entry.type !== EVERYONE_OVERWRITE_TYPE)) {
         throw invalidChannelOverwrites();
       }
-      if (entry.id !== guildId || entry.type !== EVERYONE_OVERWRITE_TYPE) continue;
+      if (entry.id !== guildId) continue;
       // Never coerce masks: numeric JSON can already have lost permission bits.
       // Ambiguous duplicate rows cannot be authoritative recovery state either.
       if (overwrite || !isDecimalMask(entry.allow) || !isDecimalMask(entry.deny)) {

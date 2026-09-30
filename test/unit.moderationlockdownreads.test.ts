@@ -92,6 +92,15 @@ const invalidBodies: Array<[string, string]> = [
   ['null row', '{"permission_overwrites":[null]}'],
   ['missing row identity', '{"permission_overwrites":[{}]}'],
   ['invalid everyone type', JSON.stringify({ permission_overwrites: [{ id: GUILD, type: '0', allow: '0', deny: '0' }] })],
+  ['guild ID with member type', JSON.stringify({ permission_overwrites: [{ id: GUILD, type: 1, allow: '1024', deny: '8192' }] })],
+  ['guild ID with member type before everyone row', JSON.stringify({ permission_overwrites: [
+    { id: GUILD, type: 1, allow: '1024', deny: '8192' },
+    { id: GUILD, type: 0, allow: '0', deny: '0' },
+  ] })],
+  ['guild ID with member type after everyone row', JSON.stringify({ permission_overwrites: [
+    { id: GUILD, type: 0, allow: '0', deny: '0' },
+    { id: GUILD, type: 1, allow: '1024', deny: '8192' },
+  ] })],
   ['duplicate everyone rows', JSON.stringify({ permission_overwrites: [
     { id: GUILD, type: 0, allow: '1024', deny: '8192' },
     { id: GUILD, type: 0, allow: '0', deny: '0' },
@@ -165,7 +174,7 @@ test('valid decimal masks preserve unrelated high bits and restore the exact fir
   const allow = ((1n << 60n) | 1024n | 2048n).toString();
   const deny = ((1n << 61n) | 8192n).toString();
   const f = fixture(JSON.stringify({ permission_overwrites: [
-    { id: GUILD, type: 1, allow: '0', deny: '0' },
+    { id: ACTOR, type: 1, allow: '0', deny: '0' },
     { id: GUILD, type: 0, allow, deny },
   ] }));
   await f.service.execute(request('moderation.lockdown'));
