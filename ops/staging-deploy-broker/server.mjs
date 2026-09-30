@@ -194,7 +194,11 @@ export function shapeStatus(panelJson) {
 //
 // Shape contract (fixed by the smoke's parser, broker-smoke.mjs):
 //   * raw strings pass through as scrubbed, capped text — the smoke extracts
-//     the bot's ready-line JSON out of the message text itself;
+//     the bot's ready-line JSON out of the message text itself; strings with
+//     an embedded {...} record (e.g. a log prefix like `INFO {...}`) get that
+//     record shaped in place with the same brace-matching the smoke uses, so
+//     prefixed structured secrets redact exactly like whole-string JSON while
+//     benign prefixed records stay byte-identical;
 //   * JSON objects keep their STRUCTURE but sensitive keys
 //     (token/secret/password/bearer/authorization/cookie/session/api[_-]key,
 //     webhook path segments, ssh/private-key material) are replaced by the
@@ -216,7 +220,14 @@ const GENERIC_SECRET_RES = [
   /gh[pousr]_[A-Za-z0-9]{20,}/g,
   /sk-(live|test)-[A-Za-z0-9]{10,}/g,
   /AKIA[0-9A-Z]{16}/g,
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]{0,4096}?-----END [A-Z ]*PRIVATE KEY-----/g,
+  // A private-key BEGIN marker is sensitive even when its END marker is
+  // beyond the match window or absent entirely (chunked/incomplete key
+  // blocks, larger keys): the lazy match runs to the first END marker, or —
+  // when there is none — to the end of the string, and this runs inside
+  // scrubSecrets, BEFORE the per-message output truncation below (TOG-9053
+  // finding 2). Trailing text on the same line as an unterminated marker is
+  // redacted with it: fail closed.
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
   /https:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/api\/webhooks\/[0-9]{10,}\/[A-Za-z0-9_-]{20,}/g,
   /Bearer [A-Za-z0-9._~+/=-]{8,}/g,
 ];
@@ -272,6 +283,31 @@ export function scrubSecrets(text, secrets) {
  * leaves raw, bypassing key redaction and credential scrubbing for deeply
  * nested secrets (TOG-9053 finding 2).
  */
+/**
+ * Yield the [start, end) spans of {...} records embedded in text — the same
+ * brace-matching the smoke uses to find bot records (broker-smoke.mjs
+ * jsonCandidates), so broker and smoke agree on what counts as a structured
+ * record. Ordered outermost-first (siblings in document order): shaping the
+ * outermost parseable span first lets the recursive policy redact nested
+ * secrets AND outer key names together; innermost-first would stop after the
+ * inner span and leave a sensitive outer key name behind as raw text.
+ * Never throws.
+ */
+export function extractJsonCandidates(text) {
+  const out = [];
+  const stack = [];
+  const s = String(text ?? "");
+  for (let i = 0; i < s.length; i += 1) {
+    if (s[i] === "{") stack.push(i);
+    else if (s[i] === "}" && stack.length > 0) {
+      const start = stack.pop();
+      out.push([start, i + 1]);
+    }
+  }
+  out.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
+  return out;
+}
+
 export function shapeLogValue(value, secrets, depth = 0) {
   if (depth > 10) return SECRET_PLACEHOLDER;
   if (typeof value === "string") {
@@ -280,7 +316,8 @@ export function shapeLogValue(value, secrets, depth = 0) {
     // OBJECT the caller's single JSON.stringify can encode once — returning
     // a stringified blob here would double-encode when nested inside a
     // {message} wrapper and hide the ready line from the smoke's
-    // jsonCandidates parser. Unparseable text falls through to scrubbed raw.
+    // jsonCandidates parser. Unparseable text falls through to the embedded
+    // path below, then to scrubbed raw.
     // (Depth is already bounded above, so decoding here cannot recurse past
     // the cap: shapeLogValue re-checks depth on entry.)
     const trimmed = value.trim();
@@ -291,8 +328,36 @@ export function shapeLogValue(value, secrets, depth = 0) {
           return shapeLogValue(decoded, secrets, depth + 1);
         }
       } catch {
-        // Not JSON — fall through to raw scrubbed text.
+        // Not JSON — fall through to the embedded-record path.
       }
+    }
+    // Embedded structured records: a prefixed line like
+    // `INFO {"password":"..."}` carries the same secret fields as whole-string
+    // JSON, so each parseable {...} span is shaped in place (same policy as
+    // whole-string JSON) while the surrounding text is scrubbed but otherwise
+    // untouched. Only a span whose shaped form DIFFERS (i.e. redaction
+    // actually fired) is replaced — a benign prefixed record shapes to
+    // itself, so it falls through to scrubbed raw text and comes out
+    // byte-identical; a span nesting secrets under a benign outer (or vice
+    // versa) differs at the outer level, fixing both together. When no span
+    // needs redaction, fall through to scrubbed raw text.
+    for (const [start, end] of extractJsonCandidates(value)) {
+      const original = value.slice(start, end);
+      let decoded = null;
+      try {
+        decoded = JSON.parse(original);
+      } catch {
+        continue;
+      }
+      if (decoded === null || typeof decoded !== "object") continue;
+      const shaped = shapeLogValue(decoded, secrets, depth + 1);
+      if (typeof shaped !== "object" || shaped === null || Array.isArray(shaped)) continue;
+      const encoded = JSON.stringify(shaped);
+      if (encoded === original) continue;
+      return (scrubSecrets(value.slice(0, start), secrets) + encoded + scrubSecrets(value.slice(end), secrets)).slice(
+        0,
+        MAX_LOG_MESSAGE_CHARS,
+      );
     }
     return scrubSecrets(value, secrets).slice(0, MAX_LOG_MESSAGE_CHARS);
   }
@@ -317,26 +382,23 @@ export function shapeLogValue(value, secrets, depth = 0) {
 }
 
 /**
- * Shape one raw panel log item. Strings pass as scrubbed text; JSON text
- * re-encodes redacted (structure preserved for the smoke's ready-line
- * parser); non-text items are JSON-decoded when they are objects, and
- * message-less scalars return null (dropped, not forwarded). Never throws.
+ * Shape one raw panel log item. Strings run the single string policy in
+ * shapeLogValue (whole-string JSON, then embedded-record shaping, then
+ * scrubbed raw text); re-encoded JSON keeps its structure for the smoke's
+ * ready-line parser. Non-text items are shaped when they are objects, and
+ * message-less scalars return null (dropped, not forwarded). Raw, wrapped
+ * and embedded inputs share one boundary policy (TOG-9053 finding 2).
+ * Never throws.
  */
 export function shapeLogItem(item, secrets) {
   const secretList = Array.isArray(secrets) ? secrets : [];
   if (typeof item === "string") {
-    const trimmed = item.trim();
-    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-      try {
-        const decoded = JSON.parse(trimmed);
-        if (decoded !== null && typeof decoded === "object") {
-          return { message: JSON.stringify(shapeLogValue(decoded, secretList)) };
-        }
-      } catch {
-        // Not JSON — fall through to raw scrubbed text.
-      }
-    }
-    return { message: scrubSecrets(item, secretList).slice(0, MAX_LOG_MESSAGE_CHARS) };
+    const shaped = shapeLogValue(item, secretList);
+    // shapeLogValue on a string always returns a string (objects decode and
+    // re-shape; over-depth returns the placeholder) — but a raw panel string
+    // is never message-less, so a structured result re-encodes as the message
+    // rather than dropping.
+    return { message: typeof shaped === "string" ? shaped : JSON.stringify(shaped) };
   }
   if (item !== null && typeof item === "object") {
     return { message: JSON.stringify(shapeLogValue(item, secretList)) };

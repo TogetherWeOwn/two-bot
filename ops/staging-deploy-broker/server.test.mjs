@@ -41,6 +41,7 @@ import test from "node:test";
 import {
   checkAuth,
   createHandler,
+  extractJsonCandidates,
   parseConfig,
   parseLogLines,
   PINNED_REPO,
@@ -488,6 +489,68 @@ test("logs-redaction: credential-bearing timestamp metadata is rejected whole", 
     embedded.timestamp,
     `Wed, 30 Sep 2026 03:00:00 GMT (${SECRET_PLACEHOLDER})`,
     "embedded timestamp survives only scrubbed, never with credential text",
+  );
+});
+
+test("logs-redaction: prefixed JSON secrets redact, benign prefixed records pass through", async (t) => {
+  // One boundary policy across raw, wrapped and embedded inputs (TOG-9053
+  // finding 2): a prefixed structured record carries the same secret fields
+  // as whole-string JSON. Fixtures are synthetic and scanner-safe (plain
+  // words, no high-entropy shapes); nothing here is a credential.
+  const rawPrefixed = 'INFO {"password":"ordinary-db-password"}';
+  const wrappedPrefixed = { message: 'INFO {"password":"ordinary-db-password"}' };
+  const benignPrefixed = 'INFO {"ts":"2026-09-30T03:01:00.000Z","msg":"ready","guilds":1}';
+  const srv = await boot(() => ({ logs: [rawPrefixed, wrappedPrefixed, benignPrefixed] }));
+  t.after(srv.close);
+  const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+  assert.equal(out.status, 200);
+  const text = JSON.stringify(out.json);
+  assert.ok(!text.includes("ordinary-db-password"), "prefixed password value must not cross raw or wrapped");
+  assert.ok(text.includes("[redacted]"), "prefixed secret crosses only as the placeholder");
+  // Benign prefixed smoke records stay readable: no redaction fires, so the
+  // line falls through to scrubbed raw text byte-identical.
+  const [rawMsg, wrappedMsg, benignMsg] = out.json.logs.map((entry) => entry.message);
+  assert.equal(rawMsg, `INFO {"password":"${SECRET_PLACEHOLDER}"}`, "raw prefixed record shapes in place");
+  assert.equal(JSON.parse(wrappedMsg).message, rawMsg, "wrapped prefixed record matches the raw policy");
+  assert.equal(benignMsg, benignPrefixed, "benign prefixed record passes through byte-identical");
+  // The smoke finds the embedded ready record through its own brace-matching.
+  assert.match(benignMsg, /"msg":"ready"/, "ready-line structure survives prefixing");
+  assert.match(benignMsg, /"guilds":1/, "ready-line guilds survive prefixing");
+});
+
+test("logs-redaction: private-key markers redact short, overlong and incomplete", async (t) => {
+  // The BEGIN marker is sensitive even when END is beyond any match window
+  // or absent (TOG-9053 finding 2). Synthetic marker blocks: 'X'/'Y' runs,
+  // no key material, scanner-safe by construction.
+  const shortPem = `-----BEGIN RSA PRIVATE KEY-----\n${"X".repeat(100)}\n-----END RSA PRIVATE KEY-----`;
+  const overlongPem = `-----BEGIN RSA PRIVATE KEY-----\n${"X".repeat(6000)}\n-----END RSA PRIVATE KEY-----`;
+  const incompletePem = `partial dump -----BEGIN RSA PRIVATE KEY-----\n${"Y".repeat(50)}`;
+  const srv = await boot(() => ({ logs: [shortPem, overlongPem, incompletePem] }));
+  t.after(srv.close);
+  const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+  assert.equal(out.status, 200);
+  const text = JSON.stringify(out.json);
+  assert.ok(!text.includes("X".repeat(20)), "no private-key body text crosses, however long");
+  assert.ok(!text.includes("Y".repeat(20)), "no incomplete key-block body crosses");
+  assert.ok(!text.includes("BEGIN RSA PRIVATE KEY"), "key marker labels never cross");
+  assert.equal(out.json.logs.length, 3, "all three marker lines still return a (redacted) message");
+});
+
+test("logs-redaction unit: extractJsonCandidates matches the smoke brace policy", () => {
+  // Broker and smoke must agree on what counts as a structured record.
+  assert.deepEqual(extractJsonCandidates('INFO {"a":1} tail'), [[5, 12]]);
+  assert.deepEqual(extractJsonCandidates("no braces here"), []);
+  assert.deepEqual(extractJsonCandidates('{"x":{"y":1}}'), [
+    [0, 13],
+    [5, 12],
+  ]);
+  // Benign prefixed records shape to themselves (byte-identical passthrough).
+  const benign = 'INFO {"ts":"2026-09-30T03:01:00.000Z","msg":"ready","guilds":1}';
+  assert.equal(shapeLogValue(benign, []), benign);
+  // Sensitive spans differ and shape in place.
+  assert.equal(
+    shapeLogValue('INFO {"password":"ordinary-db-password"}', []),
+    `INFO {"password":"${SECRET_PLACEHOLDER}"}`,
   );
 });
 
