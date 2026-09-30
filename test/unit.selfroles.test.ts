@@ -1068,30 +1068,41 @@ test('registered button replay preserves committed roles and audit after acknowl
   const replies: Array<{ content: string; state: Awaited<ReturnType<typeof committedState>> }> = [];
   let deferrals = 0;
   let freshReplies = 0;
-  const interaction = {
-    id: eventId,
-    customId: selfRoleCustomId(panel.id, 'red'),
-    user: { id: C },
-    member,
-    guild: member.guild,
-    guildId: A,
-    channelId: panel.channelId,
-    message: { id: panel.messageId },
-    deferred: false,
-    replied: false,
-    isButton: () => true,
-    isStringSelectMenu: () => false,
-    deferReply: async () => { deferrals++; interaction.deferred = true; },
-    editReply: async ({ content }: { content: string }) => {
-      // Observe the real transaction before failing both the acknowledgement and fallback.
-      replies.push({ content, state: await committedState() });
-      throw new Error('fixture acknowledgement unavailable');
-    },
-    reply: async () => { freshReplies++; throw new Error('fixture acknowledgement unavailable'); },
+  // Discord redelivers the same event as a fresh object: same id, unacknowledged.
+  // Each delivery acknowledges once; a second acknowledgement on the same object
+  // rejects (InteractionAlreadyReplied) before any store work, as in Discord.js.
+  const makeInteraction = () => {
+    const delivery = {
+      id: eventId,
+      customId: selfRoleCustomId(panel.id, 'red'),
+      user: { id: C },
+      member,
+      guild: member.guild,
+      guildId: A,
+      channelId: panel.channelId,
+      message: { id: panel.messageId },
+      deferred: false,
+      replied: false,
+      isButton: () => true,
+      isStringSelectMenu: () => false,
+      deferReply: async () => {
+        if (delivery.deferred || delivery.replied) throw new Error('InteractionAlreadyReplied');
+        deferrals++;
+        delivery.deferred = true;
+      },
+      editReply: async ({ content }: { content: string }) => {
+        // Observe the real transaction before failing both the acknowledgement and fallback.
+        replies.push({ content, state: await committedState() });
+        throw new Error('fixture acknowledgement unavailable');
+      },
+      reply: async () => { freshReplies++; throw new Error('fixture acknowledgement unavailable'); },
+    };
+    return delivery;
   };
   const dispatch = listeners.get(Events.InteractionCreate)!;
 
-  await assert.doesNotReject(() => dispatch(interaction as never));
+  const firstDelivery = makeInteraction();
+  await assert.doesNotReject(() => dispatch(firstDelivery as never));
   const committed = await committedState();
   assert.equal(committed.audits.length, 1);
   const audit = committed.audits[0]!;
@@ -1114,7 +1125,9 @@ test('registered button replay preserves committed roles and audit after acknowl
   assert.equal(committed.panel?.target_committed, true);
 
   // Forced fetch now sees the added role: replay would toggle it off without final-audit dedupe.
-  await assert.doesNotReject(() => dispatch(interaction as never));
+  // Redelivered as a fresh object carrying the same event ID, as Discord redelivers
+  // the same event; the first object stays acknowledged and is never reused.
+  await assert.doesNotReject(() => dispatch(makeInteraction() as never));
 
   assert.deepEqual(await committedState(), committed);
   assert.deepEqual(mutations, [{ operation: 'add', roleId: A, reason: `TWO self-role panel ${panel.id}` }]);
