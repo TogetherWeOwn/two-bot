@@ -185,6 +185,18 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     why: 'the voice-sessions averages CLI itself, not just the helpers underneath it - without this floor a silent skip re-opens the startKnown averaging gap',
   },
   {
+    // TOG-9993. The voice-reconcile sweep run twice end to end through the
+    // real npm entry: byte-identical reports (3 resolved, 4 flagged, 1
+    // complete) and an unchanged events table. Read-only by design, so the
+    // double run is the property; without this floor a future write path or
+    // unstable output would stay green while every re-run drifted. Counted
+    // from the 2 top-level test() blocks; CI's postgres job confirms the
+    // count on the first run after this commit.
+    file: 'test/e2e.voicereconcile-idempotency.test.ts',
+    minTests: 2,
+    why: 'the voice-reconcile idempotency proof itself - without this floor a silent skip re-opens the double-run drift gap',
+  },
+  {
     // TOG-6493. The audit kill switch operated end to end through the real
     // CLI: disengaged status on a fresh schema, halt engages and a second
     // halt changes nothing, seeded pending rows are reported honestly, and
@@ -206,6 +218,30 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     file: 'test/e2e.presencetrend-cli.test.ts',
     minTests: 5,
     why: 'the presence-trend output CLI itself, not just the helpers underneath it - without this floor a silent skip re-opens the unpinned staffing/event-slot numbers gap',
+  },
+  {
+    // TOG-9985. The moderation disable-preflight script executed end to end
+    // through the real script: exit 0 CLEAR on empty state (plain and
+    // --json), exit 1 REFUSED for each partial shape (unban-only,
+    // lockdown-only, both plus a running claim with hand-release SQL) with
+    // --json counts and stranded id lists, and exit 2 could-not-tell for a
+    // missing URL, an unreachable database, a non-postgres URL, and a schema
+    // without the tables. Counted from the 10 top-level test() blocks; CI's
+    // postgres job confirms the count on the first run after this commit.
+    file: 'test/e2e.moderation-disable-preflight.test.ts',
+    minTests: 10,
+    why: 'the moderation-disable-preflight exits themselves, not just the library underneath them - without this floor a silent skip re-opens the wave-through-disable gap',
+  },
+  {
+    // TOG-9998. The dedupe-events repair script run end to end through the
+    // real script: --dry-run counts without deleting, the real run deletes
+    // exactly the copies (keeping the earliest of each cluster) and a second
+    // run deletes nothing with a byte-identical digest. Counted from the 2
+    // top-level test() blocks; CI's postgres job confirms the count on the
+    // first run after this commit.
+    file: 'test/e2e.dedupeevents.test.ts',
+    minTests: 2,
+    why: 'the dedupe-events duplicate-detection and idempotent-delete proof itself - without this floor a silent skip re-opens the phantom-join count gap',
   },
 ];
 
