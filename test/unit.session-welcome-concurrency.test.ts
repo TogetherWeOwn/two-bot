@@ -137,10 +137,11 @@ test('concurrent join/rules callbacks send and record once, holding the claim th
 
     record.release();
     await turn();
+    assert.deepEqual(h.checks, Array(4).fill('member'), 'queued callbacks check the persisted event');
     assertWelcome(h);
     h.clearGate(member);
     await turn();
-    assert.deepEqual(h.checks, ['member', 'member'], 'later callbacks check the persisted event');
+    assert.deepEqual(h.checks, Array(5).fill('member'), 'later callbacks check the persisted event');
     assertWelcome(h);
   });
 
@@ -182,6 +183,39 @@ test('pre-send failures release the claim for a later valid callback', async (t)
     });
   }
 });
+
+test('an overlapping callback retries after the active attempt fails before delivery',
+  { timeout: 2000 }, async (t) => {
+    for (const failure of ['lookup', 'send'] as const) {
+      await t.test(failure, { timeout: 2000 }, async () => {
+        const h = harness();
+        const entered = barrier();
+        const active = barrier();
+        let attempts = 0;
+        h.hooks[failure === 'lookup' ? 'check' : 'send'] = async () => {
+          if (++attempts !== 1) return;
+          entered.release();
+          await active.wait;
+          throw new Error(`${failure} failed before delivery`);
+        };
+
+        h.join(h.member());
+        await entered.wait;
+        try {
+          h.clearGate(h.member());
+          await turn();
+          assert.deepEqual(h.checks, ['member'], 'overlapping callback waits for the active attempt');
+          assert.equal(h.messages.length, 0);
+          assert.equal(h.events.length, 0);
+        } finally {
+          active.release();
+        }
+        await turn();
+        assert.deepEqual(h.checks, ['member', 'member'], 'queued callback rechecks persistence');
+        assertWelcome(h);
+      });
+    }
+  });
 
 test('session dry-run retains its welcome behavior with concurrent callbacks', async () => {
   const h = harness(true);
