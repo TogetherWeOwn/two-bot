@@ -7,10 +7,16 @@
 # scoped staging credential through TOG-8272 (TOG-6911 hand-back, 2026-09-28).
 #
 # WHAT IT INSTALLS. ops/staging-deploy-broker/server.mjs at a PINNED reviewed
-# commit, as the twobot user under /opt/two-staging-broker, fronted by the
-# two-staging-broker.service unit (loopback :8091). The panel bearer and the
-# scoped staging credential arrive as systemd credentials (0400, twobot-only),
-# never as Actions secrets and never on a command line.
+# commit, as the dedicated twobroker system user under /opt/two-staging-broker,
+# fronted by the two-staging-broker.service unit (loopback :8091). The broker
+# never shares the `twobot` identity with the sibling bot/dashboard/redirect
+# services: a compromised sibling must not be able to replace broker code that
+# later executes with the panel bearer (TOG-9053 finding 1). /opt/two-staging-
+# broker and server.mjs are root-owned and non-writable by the broker user,
+# and the unit grants no write paths at all (ProtectSystem=strict, no
+# ReadWritePaths — the broker keeps no on-disk state). The panel bearer and
+# the scoped staging credential arrive as systemd credentials (0400,
+# twobroker-only), never as Actions secrets and never on a command line.
 #
 # INSTALL:
 #   git fetch origin && git rev-parse <sha>   # confirm the reviewed commit exists
@@ -18,11 +24,15 @@
 #     --source /path/to/two-bot/checkout --commit <40-hex-sha> \
 #     --panel-url https://<coolify-panel>
 #
-# The script verifies the source checkout's HEAD equals --commit, copies
-# server.mjs, writes broker.env (COOLIFY_URL only), provisions EMPTY
-# credential files, installs the unit, and REFUSES to start until the operator
-# fills both credentials (a broker that starts unauthenticated authenticates
-# nobody — install fails loudly instead, TOG-913):
+# The script verifies the source checkout's HEAD equals --commit (resolving
+# both plain checkouts and git-worktree .git files, and refusing dirty trees),
+# installs server.mjs DIRECTLY from the pinned commit object (never the
+# working tree — TOG-9053 finding 5), writes broker.env (COOLIFY_URL only),
+# provisions EMPTY credential files, installs the unit RESTARTED onto the new
+# artifact (TOG-9053 finding 6: enable alone leaves the old Node process
+# serving), and REFUSES to finish until the operator fills both credentials
+# (a broker that starts unauthenticated authenticates nobody — install fails
+# loudly instead, TOG-913):
 #
 #   sudo $EDITOR /etc/two-staging-broker/credentials/staging_broker_token  # scoped staging credential, >=16 chars
 #   sudo $EDITOR /etc/two-staging-broker/credentials/coolify_token         # panel bearer (existing token)
@@ -87,20 +97,54 @@ command -v node >/dev/null || fail "no node on PATH - the broker needs Node >= 2
 [[ -f "$SOURCE/ops/staging-deploy-broker/two-staging-broker.service" ]] || fail "$SOURCE has no unit file - wrong checkout?"
 
 # The pinned commit is the trust anchor: the reviewed artifact, not "whatever
-# HEAD happens to be". Refuse anything else.
+# HEAD happens to be". Refuse anything else. A git worktree carries `.git` as
+# a FILE (commondir pointer), not a directory — the old `-d` test silently
+# skipped verification there and let any 40-hex value through with a warning
+# (TOG-9053 finding 5). And even a checkout AT the pinned HEAD can carry
+# modified working-tree files, so the artifact comes from the commit object
+# itself (`git show <commit>:<path>`), never from the working tree.
+GIT_DIR=""
 if [[ -d "$SOURCE/.git" ]]; then
-  HEAD="$(git -C "$SOURCE" rev-parse HEAD 2>/dev/null || true)"
-  [[ "$HEAD" == "$COMMIT" ]] || fail "source HEAD is ${HEAD:-unknown}, not the pinned commit $COMMIT - check out the reviewed commit first"
-  say PASS "source checkout at pinned commit ${COMMIT:0:12}"
+  GIT_DIR="$SOURCE/.git"
+elif [[ -f "$SOURCE/.git" ]]; then
+  GIT_DIR="$SOURCE/.git"
 else
-  say WARN "no .git in $SOURCE - cannot verify HEAD; proceeding on operator assertion only"
+  fail "no .git in $SOURCE - cannot verify HEAD; refusing to install unverified files"
 fi
-id twobot >/dev/null 2>&1 || fail "no twobot user - provision it first (scripts/bootstrap-host.sh)"
+HEAD="$(git -C "$SOURCE" rev-parse HEAD 2>/dev/null || true)"
+[[ "$HEAD" == "$COMMIT" ]] || fail "source HEAD is ${HEAD:-unknown}, not the pinned commit $COMMIT - check out the reviewed commit first"
+[[ -z "$(git -C "$SOURCE" status --porcelain 2>/dev/null)" ]] || fail "source checkout is dirty - stash or reset before installing the reviewed artifact"
+command -v git >/dev/null || fail "no git on PATH - the pinned artifact is extracted from the commit object"
+git -C "$SOURCE" cat-file -e "$COMMIT:ops/staging-deploy-broker/server.mjs" 2>/dev/null \
+  || fail "pinned commit $COMMIT has no ops/staging-deploy-broker/server.mjs - wrong commit?"
+say PASS "source checkout at pinned commit ${COMMIT:0:12}, tree clean"
+
+# Dedicated least-privilege identity (TOG-9053 finding 1): the broker holds a
+# production-capable panel bearer, so it never runs as `twobot` (the sibling
+# bot/dashboard/redirect services). A system user with no login shell and no
+# home directory; created here (operator runs this script as root) rather than
+# in bootstrap-host.sh, which provisions the bot identity only.
+BROKER_USER="twobroker"
+BROKER_GROUP="twobroker"
+if ! id "$BROKER_USER" >/dev/null 2>&1; then
+  useradd --system --no-create-home --shell /usr/sbin/nologin --user-group "$BROKER_USER"
+  say PASS "created system user $BROKER_USER (no login, no home)"
+else
+  say PASS "system user $BROKER_USER exists"
+fi
 
 # --- Install -----------------------------------------------------------------
-install -d -m 0755 -o twobot -g twobot "$APP_DIR"
-install -m 0644 -o twobot -g twobot "$SOURCE/ops/staging-deploy-broker/server.mjs" "$APP_DIR/server.mjs"
-say PASS "server.mjs installed at pinned commit ${COMMIT:0:12}"
+# Root-owned, non-writable by the broker user: a compromised broker process
+# (or a compromised `twobot` sibling) cannot persist a backdoor in the
+# executable that later runs with the panel bearer.
+install -d -m 0755 -o root -g root "$APP_DIR"
+git -C "$SOURCE" show "$COMMIT:ops/staging-deploy-broker/server.mjs" > "$APP_DIR/server.mjs"
+chmod 0644 "$APP_DIR/server.mjs"
+chown root:root "$APP_DIR/server.mjs"
+# Paranoia both ways: the bytes on disk must equal the commit object.
+git -C "$SOURCE" show "$COMMIT:ops/staging-deploy-broker/server.mjs" | cmp -s - "$APP_DIR/server.mjs" \
+  || fail "installed server.mjs differs from the pinned commit object - refusing to serve unverified bytes"
+say PASS "server.mjs installed FROM the pinned commit object ${COMMIT:0:12} (never the working tree)"
 
 install -d -m 0755 -o root -g root "$ENV_DIR"
 printf 'COOLIFY_URL=%s\n' "$PANEL_URL" > "$ENV_DIR/broker.env"
@@ -139,10 +183,21 @@ if [[ "${#EMPTY[@]}" -gt 0 ]]; then
   exit 2
 fi
 
+# --- Activate the new artifact -------------------------------------------------
+# `enable` alone is not activation: on a reinstall it leaves the PREVIOUS Node
+# process serving old code (`start` is a no-op on an active unit — TOG-9053
+# finding 6). Restart after credential validation so the running process is
+# always the artifact just installed, then verify it answers AND serves the
+# pinned commit.
 systemctl enable "$UNIT" >/dev/null
-say PASS "unit enabled (start it with: sudo systemctl start $UNIT)"
-printf '\ninstall: verify loopback with: curl -s http://127.0.0.1:8091/healthz\n'
-printf 'install: then expose the broker to hosted CI per reverse-proxy.Caddyfile.example,\n'
+say PASS "unit enabled"
+systemctl restart "$UNIT"
+say PASS "unit restarted onto the new artifact"
+sleep 2
+HEALTH="$(curl -s --max-time 10 http://127.0.0.1:8091/healthz || true)"
+[[ "$HEALTH" == *'"ok":true'* ]] || fail "broker does not answer healthy after restart (got: ${HEALTH:0:120}) - unit installed but NOT serving; inspect with: sudo journalctl -u $UNIT"
+say PASS "broker answers healthy on loopback after restart: $HEALTH"
+printf '\ninstall: next, expose the broker to hosted CI per reverse-proxy.Caddyfile.example,\n'
 printf 'install: provision STAGING_BROKER_URL=https://<broker-host> as the Actions secret\n'
 printf 'install: through TOG-8272, and verify the hosted-runner view:\n'
 printf 'install:   curl -s https://<broker-host>/healthz  # {"ok":true,...}\n'

@@ -7,6 +7,16 @@
 # app (uy4d9ndeygjcem6lgayhxgub) only. Actions never sees the panel bearer;
 # the broker never serves any other app or production.
 #
+# WHY A DEDICATED USER. The broker process holds a production-capable panel
+# bearer, so it runs as its own system user `twobroker` — never as `twobot`,
+# the identity that also runs the bot, dashboard and redirect units
+# (deploy/two-bot.service, deploy/two-dashboard.service,
+# deploy/two-redirect.service). A compromised sibling service running as
+# `twobot` must not be able to replace broker code that later executes with
+# the panel credential: /opt/two-staging-broker and server.mjs are root-owned
+# and non-writable by the broker user, and the unit grants no write paths at
+# all (the broker keeps no on-disk state — logs go to stdout for journald).
+#
 # WHY NOT AN ACTIONS SECRET. The live panel token carries abilities
 # [read,deploy] and is NOT app-scoped: any job holding it can reach
 # production applications, and a GitHub environment label is not a resource
@@ -37,8 +47,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=twobot
-Group=twobot
+# Dedicated least-privilege identity (TOG-9053 finding 1): the broker holds a
+# production-capable panel bearer, so it never shares the `twobot` identity
+# with the sibling bot/dashboard/redirect services.
+User=twobroker
+Group=twobroker
 WorkingDirectory=/opt/two-staging-broker
 ExecStart=/usr/bin/node server.mjs
 
@@ -55,6 +68,9 @@ ExecStart=/usr/bin/node server.mjs
 # empty and REFUSES to start the unit until the operator fills both — a
 # broker that starts with a placeholder credential is a broker that cannot
 # authenticate anyone, so install fails loudly instead (TOG-913).
+# Credential files land in $CREDENTIALS_DIRECTORY mode 0400 owned by the
+# unit user (systemd default); install.sh provisions the source files 0600
+# root-owned for the same reason.
 LoadCredential=staging_broker_token:/etc/two-staging-broker/credentials/staging_broker_token
 LoadCredential=coolify_token:/etc/two-staging-broker/credentials/coolify_token
 
@@ -67,13 +83,18 @@ Environment=STAGING_BROKER_BIND=127.0.0.1
 EnvironmentFile=/etc/two-staging-broker/broker.env
 
 # --- Containment (shared box: website, Postgres, staging live here) --------
+# The broker keeps no on-disk state (the issued-deployment set is in-memory,
+# logs go to stdout for journald), so there is deliberately NO ReadWritePaths:
+# with ProtectSystem=strict the whole filesystem tree is read-only to the
+# broker user, and /opt/two-staging-broker + server.mjs stay root-owned and
+# non-writable by it (install.sh enforces this). A compromised broker process
+# cannot persist a backdoor in its own executable.
 MemoryMax=256M
 CPUQuota=50%
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/two-staging-broker
 
 Restart=on-failure
 RestartSec=5

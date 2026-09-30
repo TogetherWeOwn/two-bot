@@ -23,7 +23,13 @@
 //     client-supplied app UUID that is not the pinned staging UUID, or any
 //     production/staging-excepting target label, is rejected with 403
 //   * bounded, redacted responses: deployment-status and app reads return
-//     `{status}` only; logs are size-capped and forwarded without secrets;
+//     `{status}` only; logs cross only as scrubbed text (raw strings) or
+//     key-redacted JSON (objects: sensitive names redacted, every string
+//     value scrubbed) — objects must stay structured because the smoke
+//     parses the ready-line JSON out of the message text; message-less
+//     scalars are dropped; output is byte-capped. Deployment-status reads
+//     serve only IDs this broker process issued (a restart clears the set,
+//     failing in-flight polls red rather than leaking foreign reads);
 //     error bodies are static codes, never panel output, never tokens or URLs
 //   * no panel bearer in Actions: the workflow speaks only to the broker
 //
@@ -176,6 +182,204 @@ export function shapeStatus(panelJson) {
   return { status: String(panelJson?.status ?? "").slice(0, 64) };
 }
 
+// Panel log payloads are credential-adjacent: the container's own log lines
+// can embed token-shaped text (a fake bot token survived the handler verbatim
+// — TOG-9053 finding 2), and unrelated panel fields rode along in the same
+// response body. Line/size caps bound the volume but redact nothing, so the
+// handler shapes logs before they cross the broker boundary, scrubbing every
+// string against the host credentials the broker holds plus generic
+// token/webhook/bearer shapes. Secrets never touch a regex character class
+// (they are replaced by index search), and the placeholder is fixed so a
+// secret's length is not leaked either.
+//
+// Shape contract (fixed by the smoke's parser, broker-smoke.mjs):
+//   * raw strings pass through as scrubbed, capped text — the smoke extracts
+//     the bot's ready-line JSON out of the message text itself;
+//   * JSON objects keep their STRUCTURE but sensitive keys
+//     (token/secret/password/bearer/authorization/cookie/session/api[_-]key,
+//     webhook path segments, ssh/private-key material) are replaced by the
+//     placeholder and every remaining string value is scrubbed;
+//   * JSON scalars (numbers, booleans, nulls) carry no message and are
+//     dropped — nothing to smoke-parse, nothing to leak.
+// Output is byte-capped so one chatty container cannot push an unbounded
+// redacted blob at the runner. Never throws.
+export const LOG_TS_KEYS = ["timestamp", "ts", "time", "_ts", "created_at"];
+export const LOG_PAYLOAD_KEYS = ["logs", "data", "output", "lines", "result"];
+export const MAX_LOG_MESSAGE_CHARS = 4096;
+export const MAX_SHAPED_LOG_BYTES = 64 * 1024;
+export const SECRET_PLACEHOLDER = "[redacted]";
+
+const GENERIC_SECRET_RES = [
+  /[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}/g,
+  /mfa\.[A-Za-z0-9_-]{20,}/g,
+  /xox[bpas]-[A-Za-z0-9-]{10,}/g,
+  /gh[pousr]_[A-Za-z0-9]{20,}/g,
+  /sk-(live|test)-[A-Za-z0-9]{10,}/g,
+  /AKIA[0-9A-Z]{16}/g,
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]{0,4096}?-----END [A-Z ]*PRIVATE KEY-----/g,
+  /https:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/api\/webhooks\/[0-9]{10,}\/[A-Za-z0-9_-]{20,}/g,
+  /Bearer [A-Za-z0-9._~+/=-]{8,}/g,
+];
+
+// Object keys whose VALUE is sensitive regardless of shape (matched
+// case-insensitively by substring). `headers`/`auth` ride along because a
+// logged fetch-options object nests the bearer one level down.
+const SENSITIVE_KEY_RES = [
+  /token/i,
+  /secret/i,
+  /password/i,
+  /passwd/i,
+  /bearer/i,
+  /authorization/i,
+  /cookie/i,
+  /session/i,
+  /api[-_]?key/i,
+  /webhook/i,
+  /private[-_]?key/i,
+  /headers?/i,
+  /\bauth\b/i,
+];
+
+/** Scrub known host credentials and generic secret shapes from one string. */
+export function scrubSecrets(text, secrets) {
+  let out = String(text ?? "");
+  if (Array.isArray(secrets)) {
+    for (const secret of secrets) {
+      if (typeof secret !== "string" || secret.length < 4) continue;
+      let at = out.indexOf(secret);
+      while (at !== -1) {
+        out = out.slice(0, at) + SECRET_PLACEHOLDER + out.slice(at + secret.length);
+        at = out.indexOf(secret, at + SECRET_PLACEHOLDER.length);
+      }
+    }
+  }
+  for (const re of GENERIC_SECRET_RES) {
+    re.lastIndex = 0;
+    out = out.replace(re, SECRET_PLACEHOLDER);
+  }
+  return out;
+}
+
+/**
+ * Recursively shape one JSON-decoded value from a log line: objects keep
+ * their keys (sensitive names redacted, every string scrubbed), arrays are
+ * mapped, strings are scrubbed and capped, scalars pass through (the caller
+ * drops message-less top-level scalars). Depth-capped so a hostile nested
+ * payload cannot recurse the broker into a stack overflow.
+ */
+export function shapeLogValue(value, secrets, depth = 0) {
+  if (typeof value === "string") {
+    // JSON-in-strings decodes before shaping: a log message carrying the
+    // bot's ready-line record as escaped JSON must come out as a redacted
+    // OBJECT the caller's single JSON.stringify can encode once — returning
+    // a stringified blob here would double-encode when nested inside a
+    // {message} wrapper and hide the ready line from the smoke's
+    // jsonCandidates parser. Unparseable text falls through to scrubbed raw.
+    const trimmed = value.trim();
+    if ((trimmed.startsWith("{") || trimmed.startsWith("[")) && depth <= 10) {
+      try {
+        const decoded = JSON.parse(trimmed);
+        if (decoded !== null && typeof decoded === "object") {
+          return shapeLogValue(decoded, secrets, depth + 1);
+        }
+      } catch {
+        // Not JSON — fall through to raw scrubbed text.
+      }
+    }
+    return scrubSecrets(value, secrets).slice(0, MAX_LOG_MESSAGE_CHARS);
+  }
+  if (value === null || typeof value !== "object" || depth > 10) return value;
+  if (Array.isArray(value)) {
+    return value.map((entry) => shapeLogValue(entry, secrets, depth + 1));
+  }
+  const shaped = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (SENSITIVE_KEY_RES.some((re) => re.test(key))) {
+      shaped[key] = SECRET_PLACEHOLDER;
+    } else {
+      shaped[key] = shapeLogValue(entry, secrets, depth + 1);
+    }
+  }
+  return shaped;
+}
+
+/**
+ * Shape one raw panel log item. Strings pass as scrubbed text; JSON text
+ * re-encodes redacted (structure preserved for the smoke's ready-line
+ * parser); non-text items are JSON-decoded when they are objects, and
+ * message-less scalars return null (dropped, not forwarded). Never throws.
+ */
+export function shapeLogItem(item, secrets) {
+  const secretList = Array.isArray(secrets) ? secrets : [];
+  if (typeof item === "string") {
+    const trimmed = item.trim();
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        const decoded = JSON.parse(trimmed);
+        if (decoded !== null && typeof decoded === "object") {
+          return { message: JSON.stringify(shapeLogValue(decoded, secretList)) };
+        }
+      } catch {
+        // Not JSON — fall through to raw scrubbed text.
+      }
+    }
+    return { message: scrubSecrets(item, secretList).slice(0, MAX_LOG_MESSAGE_CHARS) };
+  }
+  if (item !== null && typeof item === "object") {
+    return { message: JSON.stringify(shapeLogValue(item, secretList)) };
+  }
+  return null;
+}
+
+/**
+ * Shape a panel logs payload into { logs: [{message}, ...] }. Top-level
+ * timestamp metadata (Coolify's per-line ts wrappers) is preserved on the
+ * pair when the item carries it alongside the message — the smoke falls back
+ * to embedded record timestamps first. Output is capped at
+ * MAX_SHAPED_LOG_BYTES. Never throws.
+ */
+export function shapeLogs(panelJson, secrets) {
+  const secretList = Array.isArray(secrets) ? secrets : [];
+  let items = [];
+  if (typeof panelJson === "string") {
+    items = panelJson.split("\n");
+  } else if (Array.isArray(panelJson)) {
+    items = panelJson;
+  } else if (panelJson !== null && typeof panelJson === "object") {
+    for (const key of LOG_PAYLOAD_KEYS) {
+      if (panelJson[key] !== undefined) {
+        const inner = panelJson[key];
+        items = Array.isArray(inner) ? inner : String(inner ?? "").split("\n");
+        break;
+      }
+    }
+  }
+  const shaped = [];
+  let bytes = 0;
+  for (const item of items) {
+    const pair = shapeLogItem(item, secretList);
+    if (pair === null) continue;
+    let timestamp = null;
+    if (item !== null && typeof item === "object" && !Array.isArray(item)) {
+      for (const key of LOG_TS_KEYS) {
+        if (typeof item[key] === "string" || typeof item[key] === "number") {
+          timestamp = String(item[key]).slice(0, 64);
+          break;
+        }
+      }
+    }
+    const out = timestamp === null ? pair : { ...pair, timestamp };
+    // Budget counts WIRE bytes (JSON encoding included), not just message
+    // text: {"message":"..."} roughly triples short lines, so a message-only
+    // budget would let the response run ~3x past the cap.
+    const size = Buffer.byteLength(JSON.stringify(out), "utf8") + 1; // +1 for the comma separator
+    if (bytes + size > MAX_SHAPED_LOG_BYTES) break;
+    bytes += size;
+    shaped.push(out);
+  }
+  return { logs: shaped };
+}
+
 export function parseLogLines(query) {
   const raw = String(query.get("lines") ?? String(DEFAULT_LOG_LINES)).trim();
   const n = /^\d+$/.test(raw) ? Number(raw) : NaN;
@@ -247,6 +451,16 @@ function readBody(req) {
 
 export function createHandler(config, panel = panelRequest) {
   const base = { panelUrl: config.panelUrl, panelToken: config.panelToken };
+  // Deployment UUIDs this process queued via POST /v1/staging/deploy. Status
+  // reads serve ONLY these IDs: the panel bearer is broad, so handing a
+  // caller-supplied ID straight to `deployments/<id>` would read foreign
+  // (production) deployments as {status:"finished"} with 200 (TOG-9053
+  // finding 4). Unknown IDs get the static 404 unknown_deployment without
+  // touching the panel. A broker restart clears the set, so in-flight polls
+  // fail naming the unknown deployment (TOG-913 red, never silently) rather
+  // than resuming against a deployment this process never issued.
+  const issuedDeployments = new Set();
+  const hostSecrets = () => [config.panelToken, config.brokerToken, config.panelUrl];
   return async function handler(req, res) {
     try {
       const url = new URL(req.url ?? "/", "http://broker.local");
@@ -275,6 +489,7 @@ export function createHandler(config, panel = panelRequest) {
         const list = Array.isArray(panelJson?.deployments) ? panelJson.deployments : [];
         const deploymentUuid = String(list[0]?.deployment_uuid ?? "");
         if (!DEPLOYMENT_UUID_RE.test(deploymentUuid)) throw httpError(502, "bad_gateway");
+        issuedDeployments.add(deploymentUuid);
         process.stdout.write(`BROKER: deploy queued for staging app ${config.appUuid.slice(0, 8)} sha ${shortSha} (deployment ${deploymentUuid.slice(0, 12)}).\n`);
         send(res, 200, { deployment_uuid: deploymentUuid });
         return;
@@ -295,6 +510,14 @@ export function createHandler(config, panel = panelRequest) {
       const depMatch = /^\/v1\/staging\/deployments\/([A-Za-z0-9_-]+)$/.exec(pathname);
       if (req.method === "GET" && depMatch) {
         if (!DEPLOYMENT_UUID_RE.test(depMatch[1])) throw httpError(400, "bad_request");
+        // Scoped read: only deployments this broker process queued. A
+        // well-formed foreign ID never reaches the panel — it gets the static
+        // unknown_deployment, so a production deployment UUID cannot be probed
+        // through the staging broker.
+        if (!issuedDeployments.has(depMatch[1])) {
+          send(res, 404, { error: "unknown_deployment" });
+          return;
+        }
         const panelJson = await panel({
           ...base,
           method: "GET",
@@ -315,7 +538,9 @@ export function createHandler(config, panel = panelRequest) {
           timeoutMs: PANEL_TIMEOUT_MS,
           maxBytes: MAX_PANEL_BYTES,
         });
-        send(res, 200, typeof panelJson === "string" ? { logs: panelJson } : panelJson);
+        // Redacted, allowlist-shaped logs: raw panel text never crosses the
+        // broker boundary (TOG-9053 finding 2).
+        send(res, 200, shapeLogs(panelJson, hostSecrets()));
         return;
       }
 

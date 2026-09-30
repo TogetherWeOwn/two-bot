@@ -229,13 +229,17 @@ jobs:
           MERGE_SHA: ${{ github.sha }}
         run: node scripts/wait-for-host-mirror.mjs
 
-      # PRODUCTION HOLD (TOG-6903): no production broker exists and no
-      # production credential is provisioned by TOG-6911, so this gate fails
-      # the job red by design (TOG-913) until the hold lifts. The panel-bearer
-      # steps below stay as the documented shape for that future path — they
-      # are NOT provisioned now, and production gets the same broker
-      # treatment as staging before it ever goes live (never a copied panel
-      # bearer).
+      # PRODUCTION HOLD (TOG-6903, TOG-9053 finding 3): no production broker
+      # exists and no production credential is provisioned by TOG-6911. The
+      # gate above fails red while unprovisioned (TOG-913, naming the missing
+      # credential). Once a token IS present, the HOLD step below fails red
+      # unconditionally instead: the previous shape (presence checks as the
+      # deploy/smoke steps) exited 0 on any nonblank placeholder token without
+      # contacting a target — a green production Deployment that deployed
+      # nothing, the exact skip-and-pass TOG-913 forbids. When the hold lifts,
+      # production gets the same broker treatment as staging (never a copied
+      # panel bearer), and the HOLD step is replaced by the real trigger +
+      # smoke — not by presence checks.
       - name: Deploy-target gate
         env:
           PRODUCTION_BROKER_TOKEN: ${{ secrets.PRODUCTION_BROKER_TOKEN }}
@@ -245,27 +249,7 @@ jobs:
           --credential-env PRODUCTION_BROKER_TOKEN
           --require-env MERGE_SHA
 
-      - name: Record deploy start time
-        id: start
-        run: echo "since=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-
-      # HELD: unreachable while the production gate above is red (the step
-      # never starts). Shape preserved for the post-TOG-6903 production
-      # broker path; it must NOT be re-provisioned with a panel bearer.
-      - name: Trigger production deploy and wait for healthy (HELD)
-        env:
-          PRODUCTION_BROKER_TOKEN: ${{ secrets.PRODUCTION_BROKER_TOKEN }}
-          MERGE_SHA: ${{ github.sha }}
-        run: >-
-          node scripts/check-deploy-target.mjs --env-name production-held
-          --credential-env PRODUCTION_BROKER_TOKEN
-          --require-env MERGE_SHA
-
-      - name: Post-deploy smoke against production (HELD)
-        env:
-          PRODUCTION_BROKER_TOKEN: ${{ secrets.PRODUCTION_BROKER_TOKEN }}
-          MERGE_SHA: ${{ github.sha }}
-        run: >-
-          node scripts/check-deploy-target.mjs --env-name production-smoke-held
-          --credential-env PRODUCTION_BROKER_TOKEN
-          --require-env MERGE_SHA
+      - name: Production HOLD — fails until TOG-6903 lifts it
+        run: |
+          echo "HOLD production: no production broker exists (TOG-6903). Failing red by design (TOG-913) — an approved dispatch must never record a green production Deployment that deployed nothing."
+          exit 1

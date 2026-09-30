@@ -21,9 +21,14 @@
 //   deploy-no-client-uuid   a body carrying the pinned UUID itself still
 //                           deploys the pinned app (client value never steers)
 //   redaction               app/deployment reads return {status} ONLY, even
-//                           when the panel leaks extra fields; no error body
+//                           when the panel leaks extra fields; deployment
+//                           reads serve only IDs this broker issued (foreign
+//                           IDs 404 without reaching the panel); no error body
 //                           anywhere contains the panel token or panel URL
-//   logs-bounded            lines=0 / lines=9999 -> 400; valid -> passthrough
+//   logs-bounded            lines=0 / lines=9999 -> 400; valid -> shaped
+//   logs-redaction          fake bot-token + sensitive panel fields never
+//                           cross the boundary; ready-line JSON structure
+//                           survives for the smoke parser
 //   routing                 unknown path -> 404, wrong method -> 405
 //
 // Usage: node --test ops/staging-deploy-broker/server.test.mjs
@@ -40,6 +45,11 @@ import {
   parseLogLines,
   PINNED_REPO,
   PINNED_STAGING_APP_UUID,
+  scrubSecrets,
+  SECRET_PLACEHOLDER,
+  shapeLogs,
+  shapeLogItem,
+  shapeLogValue,
   shapeStatus,
   validateDeployBody,
 } from "./server.mjs";
@@ -245,17 +255,32 @@ test("deploy-no-client-uuid: valid body deploys the PINNED staging app", async (
 // --- redaction + bounds -----------------------------------------------------
 
 test("redaction: app and deployment reads return {status} only", async (t) => {
-  const srv = await boot(() => ({
-    status: "running:healthy",
-    uuid: PINNED_STAGING_APP_UUID,
-    git_repository: "git@135.148.42.223:/srv/git/two-bot.git",
-    internal_secret: "should-never-leave",
-  }));
+  const srv = await boot((args) =>
+    args.method === "POST"
+      ? { deployments: [{ deployment_uuid: "dep-issued-redact-1" }] }
+      : {
+          status: "running:healthy",
+          uuid: PINNED_STAGING_APP_UUID,
+          git_repository: "git@135.148.42.223:/srv/git/two-bot.git",
+          internal_secret: "should-never-leave",
+        },
+  );
   t.after(srv.close);
   const app = assertRedacted(t, await req(srv.base, "/v1/staging/app"));
   assert.equal(app.status, 200);
   assert.deepEqual(app.json, { status: "running:healthy" });
-  const dep = assertRedacted(t, await req(srv.base, "/v1/staging/deployments/dep-abc123"));
+  // Deployment reads serve only IDs this broker process queued via POST
+  // /v1/staging/deploy (TOG-9053 finding 4): boot a deploy first, then read
+  // exactly that ID. The deploy stub below answers the trigger shape; the app
+  // stub above already handles /v1/staging/app.
+  const queued = await req(srv.base, "/v1/staging/deploy", {
+    method: "POST",
+    body: { repo: PINNED_REPO, sha: GOOD_SHA },
+  });
+  assert.equal(queued.status, 200);
+  const issuedId = queued.json.deployment_uuid;
+  assert.ok(issuedId, "trigger must return a deployment id");
+  const dep = assertRedacted(t, await req(srv.base, `/v1/staging/deployments/${issuedId}`));
   assert.equal(dep.status, 200);
   assert.deepEqual(dep.json, { status: "running:healthy" });
   const badId = assertRedacted(t, await req(srv.base, "/v1/staging/deployments/abc"));
@@ -264,12 +289,31 @@ test("redaction: app and deployment reads return {status} only", async (t) => {
   assert.ok([400, 404].includes(traversal.status), "encoded traversal never reaches the panel");
 });
 
+test("deployment-scope: well-formed foreign IDs 404 without reaching the panel", async (t) => {
+  // TOG-9053 finding 4: the panel bearer is broad, so a caller-supplied ID
+  // that is merely well-formed must NOT be forwarded to `deployments/<id>` —
+  // a foreign (production) deployment UUID would otherwise come back as
+  // {status:"finished"} with 200. Unknown IDs get the static
+  // unknown_deployment and the panel is never called.
+  let panelCalls = 0;
+  const srv = await boot((args) => {
+    panelCalls += 1;
+    return { status: "finished", uuid: "foreign-production-app" };
+  });
+  t.after(srv.close);
+  const foreign = assertRedacted(t, await req(srv.base, "/v1/staging/deployments/dep-foreign-prod-9"));
+  assert.equal(foreign.status, 404);
+  assert.deepEqual(foreign.json, { error: "unknown_deployment" });
+  assert.equal(panelCalls, 0, "foreign deployment read must never reach the panel");
+  assert.equal(srv.calls.length, 0);
+});
+
 test("redaction unit: shapeStatus keeps status only", () => {
   assert.deepEqual(shapeStatus({ status: "finished", token: "x", url: "y" }), { status: "finished" });
   assert.deepEqual(shapeStatus(null), { status: "" });
 });
 
-test("logs-bounded: out-of-range lines is 400, valid passes through", async (t) => {
+test("logs-bounded: out-of-range lines is 400, valid returns shaped logs", async (t) => {
   const srv = await boot((args) => {
     assert.match(args.path, /logs\?lines=200$/);
     return { logs: [{ message: "line" }] };
@@ -281,7 +325,115 @@ test("logs-bounded: out-of-range lines is 400, valid passes through", async (t) 
   }
   const ok = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
   assert.equal(ok.status, 200);
-  assert.deepEqual(ok.json, { logs: [{ message: "line" }] });
+  // Shaped: the panel object crosses as key-redacted JSON text the smoke can
+  // still parse (ready-line structure survives), never as the raw object.
+  assert.deepEqual(ok.json, { logs: [{ message: '{"message":"line"}' }] });
+});
+
+// --- TOG-9053 finding 2 regression -------------------------------------------
+// Fake sensitive values. Nothing here is a credential: every value is
+// synthetic and labeled fake, and each stays UNDER the gitleaks/tokenleak
+// trip shapes by construction — the fake "bot token" is an mfa.-style string
+// of 38 chars (the repo rules trip at 80-100; the BROKER's own scrub shape
+// trips at 20+, which is the point: the broker must catch MORE than the
+// repo-wide sweep). Verified against the shapes, not assumed: if the repo
+// rules ever widen, the tokenleak suite names this file, and this test's
+// doesNotMatch assertions would go vacuous — the calibration below guards it.
+const FAKE_SENSITIVE_PANEL_TOKEN = "PANEL-BEARER-FAKE-abcdef-0123456789";
+const FAKE_BOT_TOKEN_TEXT = "mfa.FAKE-NOT-A-REAL-TOKEN-abcdef-0123456789";
+
+test("logs-redaction: fake bot-token text and sensitive panel fields never cross", async (t) => {
+  // Calibration: the fixture MUST trip the broker's generic scrub shape, or
+  // the scrub assertions below prove nothing.
+  assert.match(scrubSecrets(`leaked ${FAKE_BOT_TOKEN_TEXT} end`, []), /\[redacted\]/);
+  const fakeBotTokenText = `bot logged token ${FAKE_BOT_TOKEN_TEXT} and bearer Bearer ${FAKE_SENSITIVE_PANEL_TOKEN}`;
+  const srv = await boot(() => ({
+    status: "finished",
+    uuid: "foreign-production-app",
+    internal_secret: "panel-field-should-never-leave",
+    coolify_token_echo: FAKE_SENSITIVE_PANEL_TOKEN,
+    logs: [
+      { message: fakeBotTokenText, timestamp: "2026-09-30T03:00:00.000Z" },
+      { message: '{"ts":"2026-09-30T03:01:00.000Z","msg":"ready","user":"FakeBot","guilds":1}', timestamp: "2026-09-30T03:01:00.000Z" },
+      { message: "plain line, no secrets" },
+      { token: "object-token-value-should-never-leave", message: "has sensitive key" },
+      42,
+      null,
+    ],
+  }));
+  t.after(srv.close);
+  const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+  assert.equal(out.status, 200);
+  const text = JSON.stringify(out.json);
+  // The exact sensitive values are gone, everywhere in the response.
+  assert.doesNotMatch(text, new RegExp(FAKE_BOT_TOKEN_TEXT.replace(/\./g, "\\.")), "fake bot token text must be scrubbed");
+  assert.doesNotMatch(text, new RegExp(FAKE_SENSITIVE_PANEL_TOKEN), "panel bearer value must be scrubbed");
+  assert.doesNotMatch(text, /internal_secret/, "sensitive panel field name must not cross");
+  assert.doesNotMatch(text, /panel-field-should-never-leave/, "sensitive panel field value must not cross");
+  assert.doesNotMatch(text, /coolify_token_echo/, "echoed credential field name must not cross");
+  assert.doesNotMatch(text, /foreign-production-app/, "foreign app UUID must not cross in logs");
+  assert.doesNotMatch(text, /object-token-value-should-never-leave/, "sensitive object value must be redacted");
+  assert.ok(out.json.logs.length >= 3, "benign lines must survive redaction");
+  // The smoke's ready-line JSON structure survives: a {msg:"ready",guilds:1}
+  // record is still parseable out of some message in the response.
+  const messages = out.json.logs.map((entry) => entry.message).join("\n");
+  assert.match(messages, /"msg":"ready"/, "ready-line structure must survive shaping");
+  assert.match(messages, /"guilds":1/, "ready-line guilds must survive shaping");
+  assert.match(messages, /plain line, no secrets/, "plain text lines pass through scrubbed");
+});
+
+test("logs-redaction unit: shapeLogValue redacts sensitive keys, scrubs strings", () => {
+  const shaped = shapeLogValue(
+    {
+      msg: "ready",
+      guilds: 1,
+      token: "live-value",
+      nested: { api_key: "live-value", safe: "ok" },
+      list: [{ password: "live-value" }, "plain"],
+    },
+    [],
+  );
+  assert.equal(shaped.msg, "ready");
+  assert.equal(shaped.guilds, 1);
+  assert.equal(shaped.token, SECRET_PLACEHOLDER);
+  assert.equal(shaped.nested.api_key, SECRET_PLACEHOLDER);
+  assert.equal(shaped.nested.safe, "ok");
+  assert.equal(shaped.list[0].password, SECRET_PLACEHOLDER);
+  assert.equal(shaped.list[1], "plain");
+  // Known host credential embedded mid-string is scrubbed by index search.
+  assert.equal(
+    scrubSecrets(`prefix ${PANEL_TOKEN} suffix`, [PANEL_TOKEN]),
+    `prefix ${SECRET_PLACEHOLDER} suffix`,
+  );
+  assert.equal(scrubSecrets("nothing secret here", [PANEL_TOKEN]), "nothing secret here");
+  // Generic token shape is scrubbed even when the exact value is unknown.
+  assert.doesNotMatch(
+    scrubSecrets("leaked mfa.abcdefghijklmnopqrstuvwxyz0123456789", []),
+    /mfa\.abcdef/,
+  );
+});
+
+test("logs-redaction unit: shapeLogItem drops message-less scalars", () => {
+  assert.equal(shapeLogItem(42, []), null);
+  assert.equal(shapeLogItem(null, []), null);
+  assert.equal(shapeLogItem(true, []), null);
+  // Arrays re-encode redacted (each entry shaped) — still structured data the
+  // smoke can parse, never raw panel text. Only message-less SCALARS drop.
+  assert.deepEqual(shapeLogItem([1, { token: "x" }], []).message, '[1,{"token":"[redacted]"}]');
+  const text = shapeLogItem("plain line", []);
+  assert.deepEqual(text, { message: "plain line" });
+  // JSON text re-encodes redacted, structure preserved.
+  const json = shapeLogItem('{"msg":"ready","guilds":1,"token":"x"}', []);
+  assert.deepEqual(JSON.parse(json.message), { msg: "ready", guilds: 1, token: SECRET_PLACEHOLDER });
+});
+
+test("logs-redaction unit: shapeLogs caps output and wraps payload keys", () => {
+  const big = shapeLogs({ logs: Array.from({ length: 5000 }, (_, i) => `line ${i}`) }, []);
+  assert.ok(JSON.stringify(big).length <= 64 * 1024, "shaped output stays within the wire-byte cap");
+  const wrapped = shapeLogs({ data: ["a"] }, []);
+  assert.deepEqual(wrapped, { logs: [{ message: "a" }] });
+  const empty = shapeLogs({ nope: 1 }, []);
+  assert.deepEqual(empty, { logs: [] });
 });
 
 test("logs-bounded unit: parseLogLines clamps to 1..500", () => {
