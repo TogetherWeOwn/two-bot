@@ -586,26 +586,31 @@ export class TempVoiceService {
 
     for (const row of await this.store.listLive(guildId)) {
       const channelId = row.channelId!;
-      const occupants = await this.gateway.occupantsOf(channelId);
-      if (occupants === null) {
-        await this.store.deleteById(row.id);
-        this.throttle.forget(channelId);
-        report.rowsDropped++;
-        continue;
-      }
-      if (occupants.length > 0) {
-        if (row.pendingOwnerId !== null && !(await this.recoverOwnerChange(guildId, channelId))) continue;
-        if (row.emptySince !== null) await this.store.setEmptySince(row.id, null);
-        await this.flushPendingRename(row, channelId);
-        continue;
-      }
-      if (row.emptySince === null) {
-        await this.store.setEmptySince(row.id, this.iso());
-        continue;
-      }
-      if (this.now() - Date.parse(row.emptySince) < graceMs) continue;
-      if ((await this.deleteGeneratedChannel(guildId, channelId, 'temp-voice sweep: empty past grace')) !== 'refused') {
-        report.deleted++;
+      try {
+        const occupants = await this.gateway.occupantsOf(channelId);
+        if (occupants === null) {
+          await this.store.deleteById(row.id);
+          this.throttle.forget(channelId);
+          report.rowsDropped++;
+          continue;
+        }
+        if (occupants.length > 0) {
+          if (row.pendingOwnerId !== null && !(await this.recoverOwnerChange(guildId, channelId))) continue;
+          if (row.emptySince !== null) await this.store.setEmptySince(row.id, null);
+          await this.flushPendingRename(row, channelId);
+          continue;
+        }
+        if (row.emptySince === null) {
+          await this.store.setEmptySince(row.id, this.iso());
+          continue;
+        }
+        if (this.now() - Date.parse(row.emptySince) < graceMs) continue;
+        if ((await this.deleteGeneratedChannel(guildId, channelId, 'temp-voice sweep: empty past grace')) !== 'refused') {
+          report.deleted++;
+        }
+      } catch (err) {
+        // Keep failed gateway/deletion provenance for retry without starving later rows.
+        log.error('temp_voice_sweep_channel_failed', { guildId, channelId, err: String(err) });
       }
     }
     return report;
