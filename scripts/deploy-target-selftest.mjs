@@ -34,9 +34,11 @@
 //   mirror-bad-sha       non-hex MERGE_SHA               -> exit 2
 //   mirror-bad-delay     negative MIRROR_POLL_SECONDS    -> exit 2
 //   broker-trigger-pure  staging-only refusal, status predicates, arg validation
+//   broker-url-policy    https-only off loopback, no creds, no path, both clients
 //   broker-smoke-pure    log normalization, ready-line + freshness logic
 //   workflow-uses-guard  deploy.yml calls the broker scripts, never the panel ones
 //   workflow-no-panel    staging carries no panel bearer / caller app UUID
+//   workflow-broker-url  staging gate requires STAGING_BROKER_URL
 //   workflow-has-no-skip no step gated on secrets/target presence
 //
 // Usage: node scripts/deploy-target-selftest.mjs
@@ -64,6 +66,7 @@ import {
   brokerJson,
   deploymentTerminal as brokerDeploymentTerminal,
   parseArgs as brokerTriggerParseArgs,
+  resolveBrokerUrl as brokerTriggerResolveUrl,
 } from "./broker-deploy.mjs";
 import {
   findBotRecords,
@@ -72,6 +75,7 @@ import {
   maxTimestampMs,
   normalizeLogPayload,
   parseArgs as brokerSmokeParseArgs,
+  resolveBrokerUrl as brokerSmokeResolveUrl,
 } from "./broker-smoke.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -112,6 +116,8 @@ const GATE_ARGS = [
   "--credential-env",
   "STAGING_BROKER_TOKEN",
   "--require-env",
+  "STAGING_BROKER_URL",
+  "--require-env",
   "MERGE_SHA",
 ];
 
@@ -125,7 +131,7 @@ test("gate-ready: all vars set exits 0, prints names only", () => {
   assert.doesNotMatch(run.stdout + run.stderr, /NOT-A-REAL-TOKEN-Z9Q8/);
 });
 
-for (const missing of ["STAGING_BROKER_TOKEN", "MERGE_SHA"]) {
+for (const missing of ["STAGING_BROKER_TOKEN", "STAGING_BROKER_URL", "MERGE_SHA"]) {
   test(`gate-missing: unset ${missing} exits 1 and names it`, () => {
     const env = { ...FAKE };
     delete env[missing];
@@ -249,6 +255,39 @@ test("broker unit: parseArgs accepts a valid SHA and pins repo staging-only", ()
   assert.equal(withUrl.brokerUrl, "http://127.0.0.1:8091");
 });
 
+test("broker unit: resolveBrokerUrl is fail-closed and identical in both clients", () => {
+  // Deploy jobs run on ubuntu-latest (public repo, #304): the broker is
+  // reached over public HTTPS through the host proxy. Plaintext off loopback
+  // would send the broker token unencrypted; credentials-in-URL would leak it
+  // into logs; a path prefix would 404 every absolute broker route. All three
+  // refuse before any request is sent. Both clients carry the same policy
+  // (duplicated, stdlib-only, no shared module), so both resolvers must agree
+  // on every case.
+  for (const resolve of [brokerTriggerResolveUrl, brokerSmokeResolveUrl]) {
+    assert.equal(resolve(""), "http://127.0.0.1:8091");
+    assert.equal(resolve(undefined), "http://127.0.0.1:8091");
+    assert.equal(resolve("http://127.0.0.1:8091"), "http://127.0.0.1:8091");
+    assert.equal(resolve("http://127.0.0.1:8091/"), "http://127.0.0.1:8091");
+    assert.equal(resolve("http://[::1]:8091"), "http://[::1]:8091");
+    assert.equal(resolve("https://broker.example.invalid"), "https://broker.example.invalid");
+    assert.throws(() => resolve("http://broker.example.invalid"), /https/);
+    assert.throws(() => resolve("ftp://broker.example.invalid/x"), /http\(s\)/);
+    assert.throws(() => resolve("not-a-url"), /http\(s\)/);
+    assert.throws(
+      () => resolve("https://user:pass@broker.example.invalid"),
+      /credential-in-URL/,
+    );
+    assert.throws(
+      () => resolve("https://broker.example.invalid/prefix"),
+      /bare origin/,
+    );
+    assert.throws(
+      () => resolve("https://broker.example.invalid?x=1"),
+      /bare origin/,
+    );
+  }
+});
+
 test("broker unit: deploymentTerminal only on finished/failed/cancelled", () => {
   assert.equal(brokerDeploymentTerminal("finished"), true);
   assert.equal(brokerDeploymentTerminal("failed"), true);
@@ -360,6 +399,19 @@ test("workflow-no-panel: staging carries no panel bearer or caller app UUID", ()
   assert.doesNotMatch(staging, /smoke-staging-deploy/, "staging must not call the retired panel client");
   assert.match(staging, /STAGING_BROKER_TOKEN/, "staging gates and triggers carry the scoped broker credential");
   assert.match(staging, /MERGE_SHA/, "staging trigger pins the merge commit for broker validation");
+});
+
+test("workflow-broker-url: staging gate requires STAGING_BROKER_URL", () => {
+  // Deploy jobs run on ubuntu-latest (public repo, #304), so host loopback is
+  // unreachable from the runner. The clients fall back to the loopback
+  // default only when STAGING_BROKER_URL is empty/unset (local smoke); in CI
+  // the gate must require the public https:// origin, or a missing secret
+  // would send the trigger at unreachable loopback and fail confusingly
+  // instead of naming the missing secret (TOG-913).
+  const workflow = readFileSync(WORKFLOW, "utf8");
+  const staging = workflow.split("deploy-production:")[0];
+  assert.match(staging, /--require-env STAGING_BROKER_URL/, "staging gate must require the broker origin");
+  assert.match(staging, /STAGING_BROKER_URL: \$\{\{ secrets\.STAGING_BROKER_URL \}\}/, "staging passes the broker origin from secrets");
 });
 
 test("workflow-has-no-skip: no step gated on secrets or target presence", () => {

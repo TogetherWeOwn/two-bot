@@ -249,9 +249,15 @@ the scoped `STAGING_BROKER_TOKEN`, and the broker
 two-bot staging app `uy4d9ndeygjcem6lgayhxgub` — rejecting arbitrary app UUIDs
 and production. Install and rollback are the pinned packet in
 `ops/staging-deploy-broker/install.sh` (operator-only; the operator provisions
-only the scoped staging credential through TOG-8272). The broker listens on
-host loopback (:8091), which the two-selfhosted runners share — the first
-green staging Deployment+smoke on that runner path IS the reachability proof.
+only the scoped staging credential plus the public broker origin
+`STAGING_BROKER_URL` through TOG-8272). The broker listens on host loopback
+ONLY (:8091) — a deploy authority never listens publicly. Deploy jobs run on
+ubuntu-latest (the repo is public, #304), so hosted runners reach the broker
+over public HTTPS through the host's TLS-terminating reverse proxy
+(`ops/staging-deploy-broker/reverse-proxy.Caddyfile.example`), which forwards
+at root to loopback. The first green staging Deployment+smoke over that public
+origin IS the reachability proof (an unreachable broker fails the job red,
+TOG-913, never silently).
 
 **Production deploys only by operator dispatch — and stays HOLD until TOG-6903.**
 `deploy-production` runs on `workflow_dispatch` only — never automatically —
@@ -266,9 +272,8 @@ weakening the workflow file.
 
 Each staging deploy runs the same six gates in order:
 
-1. **Attest the runner.** Logs `runner_name`/`environment` first, so broker
-   reachability below is provable from the actual two-selfhosted runner path,
-   not org-level runner status.
+1. **Attest the runner.** Logs `runner_name`/`environment` first, so the
+   reachability proof below names the hosted runner it actually ran from.
 2. **Wait for the host mirror** (`scripts/wait-for-host-mirror.mjs`). Coolify
    clones the host mirror (§2), never github.com, and the box re-mirrors
    roughly every 2 minutes. This step waits out one mirror interval so the
@@ -276,9 +281,12 @@ Each staging deploy runs the same six gates in order:
    merge SHA so a stale deploy can be told apart from a lagging mirror. Same
    rule as §6.1, automated.
 3. **Deploy-target gate** (`scripts/check-deploy-target.mjs`). Fails the job
-   when the scoped broker credential or merge SHA is missing — printing secret
+   when the scoped broker credential, the public broker origin
+   (`STAGING_BROKER_URL`), or the merge SHA is missing — printing secret
    NAMES only, never values. A missing deploy target is red, naming the
-   secrets that clear it.
+   secrets that clear it. The clients additionally refuse plaintext
+   non-loopback origins and credential-in-URL shapes before any request is
+   sent.
 4. **Record deploy start time.** A freshness anchor: the smoke step's `ready`
    line must prove THIS deploy, not the previous release's surviving log tail.
 5. **Trigger staging deploy and wait for healthy**

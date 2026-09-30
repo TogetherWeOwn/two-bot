@@ -186,6 +186,7 @@ const SCRIPT_DIRS: ReadonlyArray<string> = [
   'ci',
   'ops',
   'ops/auto-voice',
+  'ops/staging-deploy-broker',
   'ops/tog-4104',
   'ops/tog-4230',
   'ops/two-web-bootstrap',

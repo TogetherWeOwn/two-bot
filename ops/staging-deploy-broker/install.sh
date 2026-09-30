@@ -141,4 +141,10 @@ fi
 
 systemctl enable "$UNIT" >/dev/null
 say PASS "unit enabled (start it with: sudo systemctl start $UNIT)"
-printf '\ninstall: verify with: curl -s http://127.0.0.1:8091/healthz\n'
+printf '\ninstall: verify loopback with: curl -s http://127.0.0.1:8091/healthz\n'
+printf 'install: then expose the broker to hosted CI per reverse-proxy.Caddyfile.example,\n'
+printf 'install: provision STAGING_BROKER_URL=https://<broker-host> as the Actions secret\n'
+printf 'install: through TOG-8272, and verify the hosted-runner view:\n'
+printf 'install:   curl -s https://<broker-host>/healthz  # {"ok":true,...}\n'
+printf 'install: (Deploy jobs run on ubuntu-latest and cannot reach loopback;\n'
+printf 'install: without the proxy + origin the staging gate fails red, TOG-913.)\n'

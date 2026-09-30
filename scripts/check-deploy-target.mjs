@@ -9,29 +9,33 @@
 // for work it did not do produces false "it shipped" claims; two-web's
 // ci/deploy-target.sh is the in-org precedent).
 //
-// Transport model: there is no token-in-URL hook. The deploy step POSTs the
-// Coolify API (`/api/v1/deploy?uuid=<app>&force=true`) with the panel token
-// as an `Authorization: Bearer` HEADER from a self-hosted runner — the same
-// shape as docs/DEPLOY.md §6.1 and the wayselect TOG-7131 recipe. So the gate
-// checks the bearer credential (--credential-env), the panel URL and the
-// Coolify app UUID (--require-env, repeatable). A broad bearer is never
-// embedded in a URL and never printed.
+// Transport model: Actions holds NO panel bearer. Staging deploys through the
+// staging-only broker (ops/staging-deploy-broker/server.mjs), reached over
+// public HTTPS through the host's TLS-terminating reverse proxy — deploy jobs
+// run on ubuntu-latest (public repo, #304), so host loopback is unreachable
+// from the runner. The panel bearer lives on the host inside the broker's
+// systemd unit; the broker admits only the pinned staging app. So the gate
+// checks the scoped broker credential (--credential-env), the public broker
+// origin STAGING_BROKER_URL and the merge SHA (--require-env, repeatable).
+// The broker token travels in an Authorization header only and is never
+// printed; credential-in-URL and plaintext non-loopback origins are refused
+// by the clients (resolveBrokerUrl) before any request is sent.
 //
-// There is deliberately no --url-env: a bot publishes no ports
+// There is deliberately no app-URL check: a bot publishes no ports
 // (docker-compose.yml), so the staging app's sslip.io address answers proxy
-// 404 by design (docs/DEPLOY.md §6.1). Liveness is proved through the panel
-// instead — scripts/wait-for-coolify-deploy.mjs polls the deployment to
-// `finished` and the app to `running:healthy`, whose compose healthcheck is
-// /readyz (gateway connected AND database answering).
+// 404 by design (docs/DEPLOY.md §6.1). Liveness is proved through the broker
+// instead — scripts/broker-deploy.mjs polls the deployment to `finished` and
+// the app to `running:healthy`, whose compose healthcheck is /readyz
+// (gateway connected AND database answering).
 //
 // Secret hygiene: only env var NAMES are ever printed, never values. The
-// bearer token reaches later steps via the secrets context directly, never
+// broker token reaches later steps via the secrets context directly, never
 // through this script's output.
 //
 // Usage:
 //   node scripts/check-deploy-target.mjs --env-name staging \
-//     --credential-env COOLIFY_TOKEN \
-//     --require-env COOLIFY_URL --require-env TWO_BOT_STAGING_APP_UUID
+//     --credential-env STAGING_BROKER_TOKEN \
+//     --require-env STAGING_BROKER_URL --require-env MERGE_SHA
 //
 // Exit codes: 0 ready, 1 missing target, 2 usage error. Stdlib only.
 
@@ -43,10 +47,10 @@ function usage() {
     "    --credential-env <VAR> [--require-env <VAR> ...]",
     "",
     "  --env-name        deployment environment label for log lines (e.g. staging)",
-    "  --credential-env  env var holding the Coolify bearer credential",
+    "  --credential-env  env var holding the scoped staging broker credential",
     "                    (a Bearer HEADER, never a token-in-URL hook)",
     "  --require-env     extra env var that must be present (repeatable:",
-    "                    panel URL, Coolify app UUID, ...)",
+    "                    broker origin, merge SHA, ...)",
     "",
     "Only variable NAMES are printed, never values.",
   ].join("\n");
@@ -100,8 +104,8 @@ function main() {
   if (missing.length > 0) {
     process.stderr.write(
       `FAIL deploy-target (${args.envName}): missing ${missing.join(", ")} — ` +
-        `no deploy target is provisioned. Set the Coolify bearer credential + ` +
-        `panel URL + app UUID as repository secrets, then re-run. ` +
+        `no deploy target is provisioned. Set the scoped staging broker credential + ` +
+        `broker origin + merge SHA as repository secrets, then re-run. ` +
         `Refusing to skip-and-pass (TOG-913; see TOG-6911).\n`,
     );
     exit(1);

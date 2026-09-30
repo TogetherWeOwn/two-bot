@@ -1,0 +1,60 @@
+# Example reverse proxy in front of the two-bot staging deploy broker (TOG-6911).
+#
+# WHY THIS EXISTS. Deploy jobs run on ubuntu-latest (the repo is public, #304;
+# stale docs naming private self-hosted runners are not permission to switch
+# back). A hosted runner cannot dial the broker's loopback bind (127.0.0.1:8091
+# in server.mjs — a deploy authority never listens on a public interface), so
+# the host terminates public TLS and forwards at root to loopback. The proxy is
+# UNTRUSTED transport: every authority check (Bearer token, pinned staging app
+# UUID, repo/SHA validation, redaction) lives in the broker itself, so a proxy
+# misconfiguration can deny service but cannot deploy production or mint
+# authority. The broker token does travel through the proxy, so the proxy must
+# terminate TLS (never forward over plaintext) and must not log headers/bodies.
+#
+# OPERATOR-ONLY. Agents never install this: it binds public ports and carries
+# the public origin. The operator picks the real public hostname (a name the box
+# already serves TLS for, or a new one), provisions
+# STAGING_BROKER_URL=https://<that-hostname> as the Actions secret through
+# TOG-8272, installs the proxy, and verifies with the checks below. Source
+# changes stay with agents; the operator deploys the reviewed artifact.
+#
+# PROXY CONTRACT (any mechanism — Caddy, a Traefik route, a tunnel — must
+# satisfy every item; the Caddy block at the bottom is one known-good shape):
+#   1. Public origin is https:// only. Plaintext http:// from outside is
+#      refused or redirected — never a 200 (the broker token never travels
+#      over plaintext; the clients refuse it too, see resolveBrokerUrl).
+#   2. Forwards at ROOT. GET /healthz on the public origin must return the
+#      broker's {"ok":true,"service":"two-staging-broker"}. A path prefix
+#      (e.g. /broker/...) breaks every broker route — clients send absolute
+#      paths and the broker has no prefix stripping, on purpose.
+#   3. Forwards the Authorization header byte-identical (the broker's
+#      constant-time Bearer check fails closed on any rewrite).
+#   4. No access/error logging of headers or bodies (the Bearer token is in
+#      every request). Status line + status code only.
+#   5. Forwards ONLY to 127.0.0.1:8091. No other backend, no fallback.
+#   6. Staging only: this proxy never fronts a production deploy path.
+#      Production stays HOLD until TOG-6903.
+#
+# VERIFY (operator, from anywhere with curl — this is the hosted-runner view):
+#   curl -s https://<broker-host>/healthz
+#     # {"ok":true,"service":"two-staging-broker"}
+#   curl -s -o /dev/null -w '%{http_code}\n' https://<broker-host>/v1/staging/app
+#     # 401 (auth reaches the broker; the body is the static code only)
+#   curl -s -o /dev/null -w '%{http_code}\n' http://<broker-host>/healthz
+#     # 301/308 to https://, or connection refused — never a 200 over plaintext
+#
+# ROLLBACK: remove the site block and reload the proxy. Staging deploys then go
+# red naming the unreachable broker (TOG-913) — nothing silently deploys, and
+# production was never reachable through this proxy.
+#
+# --- Caddy example (the contract above is normative; this block is illustrative)
+#
+# Replace broker.example.invalid with the real public hostname, drop this block
+# into the Caddyfile, and `caddy reload` (or `systemctl reload caddy`).
+# Automatic TLS on first request. Caddy's default access log carries method,
+# URI, status and size — no headers, no bodies; keep it that way (never enable
+# header/body debug logging on this site).
+#
+# broker.example.invalid {
+# 	reverse_proxy 127.0.0.1:8091
+# }

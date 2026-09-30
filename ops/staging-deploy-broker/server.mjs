@@ -28,11 +28,14 @@
 //   * no panel bearer in Actions: the workflow speaks only to the broker
 //
 // BIND. Loopback only (127.0.0.1, ::1, localhost). Anything else refuses to
-// start: a deploy authority must never listen on a public interface. The
-// two-selfhosted runners share the host's network namespace, so loopback from
-// a runner job reaches this broker — reachability is proved by the staging
-// Deployment+smoke run itself, which also attests its runner
-// (scripts/ci/attest-runner.sh).
+// start: a deploy authority must never listen on a public interface. Deploy
+// jobs run on ubuntu-latest (public repo, #304), so hosted runners reach this
+// broker over public HTTPS through the host's TLS-terminating reverse proxy
+// (reverse-proxy.Caddyfile.example in this directory), which forwards at root
+// to the loopback bind. The first green staging Deployment+smoke over that
+// public origin IS the reachability proof (a broker the runner cannot reach
+// fails the job red, TOG-913, never silently); the workflow's "Attest the
+// runner" step records the hosted runner the proof ran from.
 //
 // PRODUCTION. This broker cannot deploy production: the app UUID is pinned,
 // override attempts are rejected, and there is no production route. Production

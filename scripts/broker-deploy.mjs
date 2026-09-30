@@ -4,12 +4,19 @@
 // (ops/staging-deploy-broker/server.mjs) for the TOG-6911 deploy-staging job.
 //
 // TRANSPORT. Actions holds NO panel bearer. This script speaks only to the
-// broker on loopback (default http://127.0.0.1:8091, override
-// STAGING_BROKER_URL) with the scoped staging credential STAGING_BROKER_TOKEN
+// staging-only broker with the scoped staging credential STAGING_BROKER_TOKEN
 // as an Authorization Bearer header. The panel bearer lives on the host inside
 // the broker's systemd unit; the broker's server-side authority admits only
 // the pinned two-bot staging app (uy4d9ndeygjcem6lgayhxgub) and rejects
 // arbitrary app UUIDs and production (operator hand-back, 2026-09-28).
+//
+// REACHABILITY. Deploy jobs run on ubuntu-latest (public repo, #304), so the
+// broker is reached over public HTTPS through a TLS-terminating reverse proxy
+// on the host (ops/staging-deploy-broker/reverse-proxy.caddy.example) that
+// forwards to the broker's loopback bind. STAGING_BROKER_URL carries that
+// public https:// origin in CI; the bare-loopback default below is local-smoke
+// only. Non-loopback http:// and any credential-in-URL shape are refused
+// before any request is sent (resolveBrokerUrl).
 //
 // A 200 from the broker only QUEUED the deploy. This script POSTs
 // /v1/staging/deploy {repo, sha} — the broker validates caller/repo/commit —
@@ -40,6 +47,48 @@ export const DEFAULT_BROKER_URL = "http://127.0.0.1:8091";
 export const DEFAULT_POLL_SECONDS = 30;
 export const DEFAULT_TIMEOUT_SECONDS = 600;
 export const PINNED_REPO = "TogetherWeOwn/two-bot";
+export const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
+
+/**
+ * Resolve the broker origin from STAGING_BROKER_URL, fail-closed.
+ *
+ * Empty/unset means local smoke against the loopback default. Anything else
+ * must be a bare http(s):// origin: plaintext http:// is allowed ONLY for
+ * loopback (local smoke), every non-loopback origin must be https:// (the
+ * broker token never travels over plaintext), credentials in the URL are
+ * refused (the token travels in the Authorization header only), and path,
+ * query and fragment are refused (the proxy must forward at root — the
+ * broker matches absolute paths, so a prefix would 404 every route).
+ * Throws with the reason; never returns a broken origin.
+ */
+export function resolveBrokerUrl(raw) {
+  const trimmed = String(raw ?? "").trim();
+  if (trimmed === "") return DEFAULT_BROKER_URL;
+  let url = null;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    url = null;
+  }
+  if (url === null || (url.protocol !== "http:" && url.protocol !== "https:")) {
+    throw new Error(`Invalid STAGING_BROKER_URL ${JSON.stringify(trimmed)}: expected an http(s):// origin`);
+  }
+  if (url.username !== "" || url.password !== "") {
+    throw new Error("Invalid STAGING_BROKER_URL: credential-in-URL is refused — the broker token travels in the Authorization header only");
+  }
+  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (url.protocol === "http:" && !LOOPBACK_HOSTS.has(host)) {
+    throw new Error(
+      `Invalid STAGING_BROKER_URL ${JSON.stringify(trimmed)}: non-loopback origins must be https:// (the broker token never travels over plaintext)`,
+    );
+  }
+  if (!/^\/+$/.test(url.pathname) || url.search !== "" || url.hash !== "") {
+    throw new Error(
+      `Invalid STAGING_BROKER_URL ${JSON.stringify(trimmed)}: expected a bare origin — the proxy must forward at root, no path prefix`,
+    );
+  }
+  return `${url.protocol}//${url.host}`;
+}
 
 export function parseArgs(args, lookup) {
   const values = { envName: null, pollSeconds: DEFAULT_POLL_SECONDS, timeoutSeconds: DEFAULT_TIMEOUT_SECONDS };
@@ -67,9 +116,10 @@ export function parseArgs(args, lookup) {
     if (!Number.isInteger(n) || n < 1) throw new Error(`${label} must be an integer >= 1`);
   }
   // Empty string falls back to loopback: an unset Actions secret expands to
-  // "" and must not override the default with a broken empty origin.
-  const rawBrokerUrl = (lookup("STAGING_BROKER_URL") ?? "").trim();
-  const brokerUrl = (rawBrokerUrl === "" ? DEFAULT_BROKER_URL : rawBrokerUrl).replace(/\/+$/, "");
+  // "" and must not override the default with a broken empty origin. Every
+  // non-empty value goes through the fail-closed URL policy (resolveBrokerUrl):
+  // https:// for non-loopback, no credentials, no path prefix.
+  const brokerUrl = resolveBrokerUrl(lookup("STAGING_BROKER_URL"));
   const token = lookup("STAGING_BROKER_TOKEN") ?? "";
   const sha = (lookup("MERGE_SHA") ?? "").trim();
   const missing = [];

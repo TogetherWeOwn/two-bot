@@ -22,9 +22,12 @@
 #   # silently deploys, and production was never reachable through this unit.
 #   # To restore: sudo bash ops/staging-deploy-broker/install.sh --commit <prior-sha>
 #
-# PORT. 8091 loopback only. The two-selfhosted runners share the host's
-# network namespace, so a runner job reaches http://127.0.0.1:8091. The
-# broker refuses to start on any non-loopback bind (server.mjs parseConfig).
+# PORT. 8091 loopback only: a deploy authority never listens on a public
+# interface. Deploy jobs run on ubuntu-latest (public repo, #304), so hosted
+# runners reach the broker over public HTTPS through the host's
+# TLS-terminating reverse proxy (reverse-proxy.Caddyfile.example in this
+# directory), which forwards at root to this loopback bind. The broker refuses
+# to start on any non-loopback bind (server.mjs parseConfig).
 
 [Unit]
 Description=TWO staging deploy broker (two-bot, staging app only)

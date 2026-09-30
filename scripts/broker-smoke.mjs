@@ -16,8 +16,13 @@
 //      and ts >= --since (the deploy trigger time);
 //   3. the newest log timestamp ADVANCES between two reads a minute apart.
 //
-// Actions holds NO panel bearer: STAGING_BROKER_TOKEN only. Never skips: an
-// unanswered broker, a missing fresh ready line, or frozen timestamps FAIL
+// Actions holds NO panel bearer: STAGING_BROKER_TOKEN only. The broker is
+// reached over public HTTPS through the host's TLS-terminating reverse proxy
+// (STAGING_BROKER_URL carries the public https:// origin in CI; the
+// bare-loopback default below is local-smoke only). Non-loopback http:// and
+// any credential-in-URL shape are refused before any request is sent
+// (resolveBrokerUrl, same policy as scripts/broker-deploy.mjs). Never skips:
+// an unanswered broker, a missing fresh ready line, or frozen timestamps FAIL
 // (TOG-913).
 //
 // Usage:
@@ -34,6 +39,47 @@ export const DEFAULT_BROKER_URL = "http://127.0.0.1:8091";
 export const DEFAULT_LINES = 200;
 export const DEFAULT_INTERVAL_SECONDS = 65;
 export const DEFAULT_TIMEOUT_SECONDS = 30;
+export const LOOPBACK_HOSTS = new Set(["127.0.0.1", "::1", "localhost"]);
+
+/**
+ * Resolve the broker origin from STAGING_BROKER_URL, fail-closed.
+ *
+ * Same policy as scripts/broker-deploy.mjs (deliberately duplicated: these
+ * deploy scripts are stdlib-only with no shared module). Empty/unset means
+ * local smoke against the loopback default. Anything else must be a bare
+ * http(s):// origin: plaintext http:// is allowed ONLY for loopback,
+ * non-loopback origins must be https://, credentials in the URL are refused,
+ * and path/query/fragment are refused (the proxy must forward at root).
+ * Throws with the reason; never returns a broken origin.
+ */
+export function resolveBrokerUrl(raw) {
+  const trimmed = String(raw ?? "").trim();
+  if (trimmed === "") return DEFAULT_BROKER_URL;
+  let url = null;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    url = null;
+  }
+  if (url === null || (url.protocol !== "http:" && url.protocol !== "https:")) {
+    throw new Error(`Invalid STAGING_BROKER_URL ${JSON.stringify(trimmed)}: expected an http(s):// origin`);
+  }
+  if (url.username !== "" || url.password !== "") {
+    throw new Error("Invalid STAGING_BROKER_URL: credential-in-URL is refused — the broker token travels in the Authorization header only");
+  }
+  const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  if (url.protocol === "http:" && !LOOPBACK_HOSTS.has(host)) {
+    throw new Error(
+      `Invalid STAGING_BROKER_URL ${JSON.stringify(trimmed)}: non-loopback origins must be https:// (the broker token never travels over plaintext)`,
+    );
+  }
+  if (!/^\/+$/.test(url.pathname) || url.search !== "" || url.hash !== "") {
+    throw new Error(
+      `Invalid STAGING_BROKER_URL ${JSON.stringify(trimmed)}: expected a bare origin — the proxy must forward at root, no path prefix`,
+    );
+  }
+  return `${url.protocol}//${url.host}`;
+}
 
 const TEXT_KEYS = ["message", "output", "log", "line", "text", "content"];
 const TS_KEYS = ["timestamp", "ts", "time", "_ts", "created_at"];
@@ -168,9 +214,10 @@ export function parseArgs(args, lookup) {
     if (!Number.isInteger(n) || n < 1) throw new Error(`${label} must be an integer >= 1`);
   }
   // Empty string falls back to loopback: an unset Actions secret expands to
-  // "" and must not override the default with a broken empty origin.
-  const rawBrokerUrl = (lookup("STAGING_BROKER_URL") ?? "").trim();
-  const brokerUrl = (rawBrokerUrl === "" ? DEFAULT_BROKER_URL : rawBrokerUrl).replace(/\/+$/, "");
+  // "" and must not override the default with a broken empty origin. Every
+  // non-empty value goes through the fail-closed URL policy (resolveBrokerUrl):
+  // https:// for non-loopback, no credentials, no path prefix.
+  const brokerUrl = resolveBrokerUrl(lookup("STAGING_BROKER_URL"));
   const token = lookup("STAGING_BROKER_TOKEN") ?? "";
   if (typeof token !== "string" || token.trim() === "") {
     throw new Error("Missing STAGING_BROKER_TOKEN — refusing to skip-and-pass (TOG-913; see TOG-6911)");

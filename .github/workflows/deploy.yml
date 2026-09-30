@@ -35,11 +35,17 @@
 # validation) and polls the broker's bounded, redacted status reads;
 # scripts/broker-smoke.mjs proves liveness through the same path.
 #
-# The broker listens on host loopback (:8091). The two-selfhosted runners
-# share the host's network namespace, so a staging job running on those
-# runners reaches it at http://127.0.0.1:8091 — and the first green staging
-# Deployment+smoke on that runner path IS the reachability proof (a broker
-# the runner cannot reach fails the job red, TOG-913, never silently).
+# The broker listens on host loopback ONLY (:8091) — a deploy authority never
+# listens on a public interface. Deploy jobs run on ubuntu-latest (the repo is
+# public, #304), so hosted runners reach the broker over public HTTPS through
+# the host's TLS-terminating reverse proxy
+# (ops/staging-deploy-broker/reverse-proxy.Caddyfile.example), which forwards
+# at root to loopback. STAGING_BROKER_URL carries that public https:// origin
+# in CI (the bare-loopback default in the clients is local-smoke only); the
+# clients refuse plaintext non-loopback origins and credential-in-URL shapes
+# before any request is sent. The first green staging Deployment+smoke over
+# that public origin IS the reachability proof (a broker the runner cannot
+# reach fails the job red, TOG-913, never silently).
 #
 # The bot publishes no ports, so there is no URL to curl — the staging app's
 # sslip.io address answers proxy 404 BY DESIGN (docs/DEPLOY.md §6.1).
@@ -142,8 +148,9 @@ jobs:
           MERGE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: node scripts/wait-for-host-mirror.mjs
 
-      # Attest the runner first: broker reachability below is only meaningful
-      # from the actual two-selfhosted runner path (TOG-6911 hand-back).
+      # Attest the runner first: broker reachability below runs from a hosted
+      # runner over the public broker origin (TOG-6911 hand-back), so the
+      # record names the runner the proof actually ran from.
       - name: Attest the runner
         run: |
           echo "runner_name=${RUNNER_NAME:-unknown} runner_env=${RUNNER_ENVIRONMENT:-unknown} job=${GITHUB_JOB:-unknown}"
@@ -160,6 +167,7 @@ jobs:
         run: >-
           node scripts/check-deploy-target.mjs --env-name staging
           --credential-env STAGING_BROKER_TOKEN
+          --require-env STAGING_BROKER_URL
           --require-env MERGE_SHA
 
       # Freshness anchor for the smoke step: the ready line must prove THIS
