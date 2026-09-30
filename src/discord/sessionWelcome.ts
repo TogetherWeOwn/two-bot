@@ -111,30 +111,36 @@ function botCanPost(client: Client, channelId: string, guildId: string): GuildTe
 
 export function registerSessionWelcome(client: Client, deps: SessionWelcomeDeps): void {
   const { recorder } = deps;
+  const prompting = new Set<string>();
 
   async function promptMember(member: GuildMember): Promise<void> {
     if (member.guild.id !== deps.guildId) return;
     if (member.user.bot) return;
-    // Idempotency half one: a member who has already been welcomed is not
-    // welcomed again, no matter how many times pending flips.
-    if (await deps.store.hasEvent(member.guild.id, member.id, 'onboarding_prompted')) return;
-
-    const landingChannelIds = deps.landingChannelIds();
-    const target =
-      landingChannelIds.map((id) => botCanPost(client, id, deps.guildId)).find(Boolean) ?? null;
-    if (!target) {
-      log.error('session_welcome_no_channel', {
-        tried: landingChannelIds,
-        memberId: member.id,
-      });
-      return;
-    }
-
-    if (deps.dryRun) {
-      log.info('session_welcome_dry_run', { memberId: member.id, channelId: target.id });
-    }
+    // Claim before the first await, and hold through recording: concurrent
+    // join/rules callbacks must not both pass the event check and send.
+    if (prompting.has(member.id)) return;
+    prompting.add(member.id);
 
     try {
+      // Idempotency half one: a member who has already been welcomed is not
+      // welcomed again, no matter how many times pending flips.
+      if (await deps.store.hasEvent(member.guild.id, member.id, 'onboarding_prompted')) return;
+
+      const landingChannelIds = deps.landingChannelIds();
+      const target =
+        landingChannelIds.map((id) => botCanPost(client, id, deps.guildId)).find(Boolean) ?? null;
+      if (!target) {
+        log.error('session_welcome_no_channel', {
+          tried: landingChannelIds,
+          memberId: member.id,
+        });
+        return;
+      }
+
+      if (deps.dryRun) {
+        log.info('session_welcome_dry_run', { memberId: member.id, channelId: target.id });
+      }
+
       const message = await target.send({
         content: sessionWelcomeText(`<@${member.id}>`),
         components: [buildSessionMenu(deps.picks)],
@@ -147,6 +153,8 @@ export function registerSessionWelcome(client: Client, deps: SessionWelcomeDeps)
       await recorder.prompted(member.guild.id, member.id, target.id);
     } catch (err) {
       log.error('session_welcome_failed', { memberId: member.id, err: String(err) });
+    } finally {
+      prompting.delete(member.id);
     }
   }
 
