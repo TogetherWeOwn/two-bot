@@ -131,15 +131,20 @@ test('a prompt one-click receipt survives queue delay beyond the note TTL', asyn
 
 function projection() {
   const rows = new Map<string, Record<string, unknown>>();
-  const recorded: { type: string; member: string; at: string }[] = [];
+  const recorded: { type: string; member: string; at: string; metadata: Record<string, unknown> | null }[] = [];
   const db = {
     transaction: async (fn: (db: Db) => Promise<unknown>) => fn(db),
     prepare(sql: string) {
       if (sql.includes('INSERT INTO events')) {
-        return { get: async (type: string, member: string, _guild: string, at: string) => {
-          recorded.push({ type, member, at });
+        return { get: async (
+          type: string, member: string, _guild: string, at: string, _source: string, metadata: string | null,
+        ) => {
+          recorded.push({ type, member, at, metadata: metadata ? JSON.parse(metadata) : null });
           return { id: recorded.length };
         } };
+      }
+      if (sql.includes('SELECT 1 AS x FROM events')) {
+        return { get: async () => null };
       }
       if (sql.includes('INSERT INTO members')) {
         return { run: async (_guild: string, member: string) => {
@@ -198,6 +203,97 @@ test('gate, leave and rejoin preserve dispatch order and observation timestamps'
   assert.ok(p.recorded[2].at <= beforeRelease);
   assert.equal(p.rows.get('returning')?.left_at, null);
   assert.equal(p.rows.get('returning')?.joined_at, '2026-09-30T13:00:00.000Z');
+});
+
+function voiceFrame(f: ReturnType<typeof fixture>, id: string, from: string | null, to: string | null) {
+  const state = { id, guild: f.guild, member: f.member(id) };
+  f.bus.emit(Events.VoiceStateUpdate, { ...state, channelId: from }, { ...state, channelId: to });
+}
+
+test('a queued membership leave cannot close a rejoined member’s newer voice session', async () => {
+  const p = projection();
+  const f = fixture({ handlers: p.handlers });
+  f.bus.emit(Events.InviteCreate, { guild: f.guild });
+  await f.started.promise;
+  f.bus.emit(Events.GuildMemberAdd, f.member('returning'));
+  f.bus.emit(Events.GuildMemberRemove, f.member('returning'));
+  f.bus.emit(Events.GuildMemberAdd, {
+    ...f.member('returning'), joinedAt: new Date('2026-09-30T13:00:00Z'),
+  });
+  voiceFrame(f, 'returning', null, 'voice-new');
+  await flush();
+  f.release.resolve();
+  await flush();
+  assert.equal(p.handlers.voiceSessions.peek(GUILD, 'returning')?.channelId, 'voice-new');
+  assert.equal(p.recorded.filter((e) => e.type === 'voice_session_end').length, 0);
+  assert.deepEqual(p.recorded.map((e) => e.type), [
+    'member_join', 'member_leave', 'member_join', 'voice_session_start', 'first_voice_session',
+  ]);
+});
+
+test('queued voice start, server leave and rejoin retain receipt times and the new session', async (t) => {
+  const start = Date.parse('2026-09-30T14:00:00Z');
+  t.mock.timers.enable({ apis: ['Date'], now: start });
+  const p = projection();
+  const f = fixture({ handlers: p.handlers });
+  f.bus.emit(Events.InviteCreate, { guild: f.guild });
+  await f.started.promise;
+  f.bus.emit(Events.GuildMemberAdd, f.member('returning'));
+  voiceFrame(f, 'returning', null, 'voice-old');
+  t.mock.timers.setTime(start + 60_000);
+  f.bus.emit(Events.GuildMemberRemove, f.member('returning'));
+  t.mock.timers.setTime(start + 120_000);
+  f.bus.emit(Events.GuildMemberAdd, { ...f.member('returning'), joinedAt: new Date() });
+  voiceFrame(f, 'returning', null, 'voice-new');
+  // Unrelated members do not wait on this member's invite backlog.
+  voiceFrame(f, 'other', null, 'voice-other');
+  await flush();
+  assert.equal(p.handlers.voiceSessions.peek(GUILD, 'other')?.channelId, 'voice-other');
+  t.mock.timers.setTime(start + 180_000);
+  f.release.resolve();
+  await flush();
+  const ends = p.recorded.filter((e) => e.type === 'voice_session_end');
+  assert.equal(ends.length, 1);
+  assert.equal(ends[0].at, new Date(start + 60_000).toISOString());
+  assert.equal(ends[0].metadata?.startedAt, new Date(start).toISOString());
+  assert.equal(ends[0].metadata?.durationSeconds, 60);
+  assert.equal(p.handlers.voiceSessions.peek(GUILD, 'returning')?.channelId, 'voice-new');
+  assert.equal(p.handlers.voiceSessions.peek(GUILD, 'returning')?.startedAt,
+    new Date(start + 120_000).toISOString());
+});
+
+test('screening audit captures roles, nickname delta and timestamp before cached-member mutation', async (t) => {
+  const start = Date.parse('2026-09-30T14:00:00Z');
+  t.mock.timers.enable({ apis: ['Date'], now: start });
+  type AuditEvent = Parameters<NonNullable<BotDeps['audit']>['record']>[0];
+  const audits: AuditEvent[] = [];
+  const audit = { record: async (event: AuditEvent) => { audits.push(event); } } as unknown as BotDeps['audit'];
+  const f = fixture({ audit });
+  f.bus.emit(Events.InviteCreate, { guild: f.guild });
+  await f.started.promise;
+  f.bus.emit(Events.GuildMemberAdd, f.member('changing'));
+  const oldMember = {
+    ...f.member('changing'), partial: false, nickname: null as string | null,
+    roles: { cache: new Map<string, unknown>() },
+  };
+  const cached = {
+    ...oldMember, pending: false, nickname: 'new',
+    roles: { cache: new Map<string, unknown>([['role-R', {}]]) },
+  };
+  f.bus.emit(Events.GuildMemberUpdate, oldMember, cached);
+  const beforeRemoval = { ...cached, roles: { cache: new Map(cached.roles.cache) } };
+  t.mock.timers.setTime(start + 1_000);
+  cached.roles.cache.clear();
+  cached.nickname = 'later';
+  f.bus.emit(Events.GuildMemberUpdate, beforeRemoval, cached);
+  t.mock.timers.setTime(start + 2_000);
+  f.release.resolve();
+  await flush();
+  const changes = audits.filter((e) => e.kind === 'member_update');
+  assert.deepEqual(changes.map((e) => [e.occurredAt, e.metadata]), [
+    [new Date(start).toISOString(), { nicknameChanged: true, addedRoleIds: ['role-R'], removedRoleIds: [] }],
+    [new Date(start + 1_000).toISOString(), { nicknameChanged: true, addedRoleIds: [], removedRoleIds: ['role-R'] }],
+  ]);
 });
 
 test('a rejected fetch queued behind a slow write preserves the baseline and later joins', async () => {
