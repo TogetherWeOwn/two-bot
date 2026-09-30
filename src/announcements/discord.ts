@@ -119,7 +119,17 @@ const feedParser = new XMLParser({
   parseTagValue: false,
   parseAttributeValue: false,
   trimValues: true,
-  processEntities: { enabled: true, allowedTags: ['title'] },
+  processEntities: {
+    enabled: true,
+    allowedTags: ['title'],
+    // Declared entities are parsed but discarded (addInputEntities is a no-op
+    // below), never expanded and never registered, so declaration limits would
+    // only reject previously accepted feeds. Lift them to restore the exact
+    // pre-change acceptance of ignored declarations; retained storage is
+    // bounded by the 2 MB feed cap enforced in parseXmlFeed.
+    maxEntitySize: Number.POSITIVE_INFINITY,
+    maxEntityCount: Number.POSITIVE_INFINITY,
+  },
   // Decode text before CDATA is concatenated. Never register custom/DOCTYPE entities.
   // Hook contract: https://github.com/NaturalIntelligence/fast-xml-parser/blob/master/src/fxp.d.ts
   entityDecoder: {

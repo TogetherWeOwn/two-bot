@@ -43,6 +43,21 @@ test('title decoding does not expand DOCTYPE-defined entities or leak definition
   assert.equal(parseXmlFeed(xml)[0]?.title, '&custom; &');
 });
 
+test('title decoding accepts ignored DOCTYPE declarations beyond parser declaration limits', () => {
+  const item = (t: string) => `<rss><channel><item><guid>i1</guid><title>${t}</title><link>https://example.com/i</link></item></channel></rss>`;
+  // Unused 10,001-character entity in a ~10 KB one-item feed.
+  const big = 'x'.repeat(10001);
+  const single = `<!DOCTYPE rss [<!ENTITY unused "${big}">]>` + item('hello');
+  assert.ok(single.length < 2_000_000);
+  assert.equal(parseXmlFeed(single)[0]?.title, 'hello');
+  // 1,001 unused declarations in a ~21 KB feed.
+  let decls = '';
+  for (let k = 0; k < 1001; k++) decls += `<!ENTITY e${k} "v${k}">`;
+  const many = `<!DOCTYPE rss [${decls}]>` + item('hello');
+  assert.ok(many.length < 2_000_000);
+  assert.equal(parseXmlFeed(many)[0]?.title, 'hello');
+});
+
 test('title decoding leaves historical keys, links and dates on their existing decoder', () => {
   const rss = parseXmlFeed('<rss><channel><item><guid>&amp;lt;key&amp;gt; &#38;</guid><title>&amp;lt;title&amp;gt; &#38;</title><link>https://example.com/?a=1&amp;b=&#38;</link><pubDate>&amp;lt;date&amp;gt; &#38;</pubDate></item></channel></rss>');
   const atom = parseXmlFeed('<feed><entry><id>&amp;lt;key&amp;gt; &#38;</id><title>&amp;lt;title&amp;gt; &#38;</title><link rel="alternate" href="https://example.com/?a=1&amp;b=&#38;"/><updated>&amp;lt;date&amp;gt; &#38;</updated></entry></feed>');
