@@ -50,7 +50,7 @@ import {
   type JoinEventEvidence,
   type JoinRiskEvidence,
 } from '../src/staging/antiNukeAcceptance.ts';
-import { canonicalSnapshot, configHash, type GuildConfigSnapshot } from '../src/redesign/guildConfig.ts';
+import { canonicalSnapshot, configHash, verifySnapshotIntegrity, type GuildConfigSnapshot } from '../src/redesign/guildConfig.ts';
 import { planRestore } from '../src/redesign/guildConfigRestore.ts';
 import { openDb, type Db } from '../src/store/db.ts';
 import {
@@ -448,10 +448,16 @@ async function actorPreflight(context: CommonContext & { actorApplicationId: str
   return { actorApplicationId: context.actorApplicationId, owenRolePosition, actorDangerousRoleIds, recentActorRows, activeIncidents };
 }
 
-function acceptedSnapshot(path: string, current: GuildConfigSnapshot): { snapshot: GuildConfigSnapshot; hash: string } {
+export function acceptedSnapshot(path: string, current: GuildConfigSnapshot): { snapshot: GuildConfigSnapshot; hash: string } {
   const parsed = JSON.parse(readFileSync(resolve(path), 'utf8')) as GuildConfigSnapshot;
   if (parsed.version !== 1 || parsed.guildId !== TWO_STAGING_GUILD_ID || parsed.applicationId !== STAGING_BOT_APPLICATION_ID) {
     throw new Error('Accepted snapshot is not the Owen QA Test snapshot for TWO Staging.');
+  }
+  // TOG-7678: verify the tamper-evident seal before hash comparison (TOG-3513).
+  // A SnapshotIntegrityError propagates and refuses preflight/drive with zero
+  // Discord writes; legacy pre-seal snapshots warn and proceed, matching restore.
+  if (verifySnapshotIntegrity(parsed) === 'legacy') {
+    console.error('staging-anti-nuke-acceptance: warning: accepted snapshot has no integrity seal (predates TOG-3513); skipping tamper check');
   }
   const hash = configHash(canonicalSnapshot(parsed));
   const currentHash = configHash(canonicalSnapshot(current));
@@ -630,14 +636,19 @@ async function readRunRows(context: CommonContext & { actorApplicationId: string
   return { containmentRows, incidents };
 }
 
-async function runDrive(flags: Map<string, string | true>): Promise<void> {
+export type DriveContext = CommonContext & { actorApplicationId: string; actor: DiscordBotApi };
+
+export async function runDrive(
+  flags: Map<string, string | true>,
+  createContext: () => Promise<DriveContext> = async () => await commonContext(true) as DriveContext,
+): Promise<void> {
   if (flags.get('apply') !== true) throw new Error('drive is write-capable and requires --apply. Default preflight is read-only.');
   const expected = flag(flags, 'expect', true);
   if (expected !== 'dry_run' && expected !== 'contained') throw new Error('--expect must be dry_run or contained.');
   const outputPath = flag(flags, 'output', true)!;
   const manifestPath = flag(flags, 'manifest', true)!;
   const snapshotPath = flag(flags, 'snapshot', true)!;
-  const context = await commonContext(true) as CommonContext & { actorApplicationId: string; actor: DiscordBotApi };
+  const context = await createContext();
   const startedAt = new Date().toISOString();
   const names = fixtureRoleNames(context.runId);
   const manifest: Manifest = {
@@ -662,6 +673,7 @@ async function runDrive(flags: Map<string, string | true>): Promise<void> {
   let selectedAuditEntries: DiscordAuditEntry[] = [];
   let runRows: Awaited<ReturnType<typeof readRunRows>> = { containmentRows: [], incidents: [] };
   let countsBefore: Record<string, number> | null = null;
+  let fixtureCreationAttempted = false;
   try {
     countsBefore = await tableCounts(context.db, context.guildId, context.actorApplicationId);
     if (!context.verifierConfig.ready) {
@@ -677,6 +689,9 @@ async function runDrive(flags: Map<string, string | true>): Promise<void> {
     }
 
     for (const name of names.targets) {
+      // A lost response may leave a role without a persisted ID. Enable recovery
+      // before awaiting creation, but never on a pre-mutation validation failure.
+      fixtureCreationAttempted = true;
       const role = await createRole(context.owen, name, '0', `TOG-3787 ${context.runId} create delete fixture`);
       manifest.roleIds.targets.push(role.id);
       manifest.discordWrites = [...context.owen.writes, ...context.actor.writes];
@@ -764,7 +779,9 @@ async function runDrive(flags: Map<string, string | true>): Promise<void> {
     let cleanupActions: string[] = [];
     let cleanupError: unknown = null;
     try {
-      cleanupActions = await cleanupFixtures(context.owen, manifest, manifestPath);
+      if (fixtureCreationAttempted) {
+        cleanupActions = await cleanupFixtures(context.owen, manifest, manifestPath);
+      }
     } catch (error) {
       cleanupError = error;
     }
