@@ -88,15 +88,21 @@ function normalize(value: string): string {
     .trim();
 }
 
+function keepOverlays(run: string): string {
+  return run.replace(/[^\u{334}-\u{338}]/gu, '');
+}
+
 // Fold accent stacking only on Latin letters. Indic matras, Arabic vowels and
 // standalone marks remain meaningful; NFC restores other decomposed scripts.
 // Dotted i keeps its dot after canonical case folding (no alphabetic sentinel).
+// Overlays change the base's identity, including on Latin letters. Keep them
+// here as well as in the gap-aware scanner so attached/spaced forms agree.
 function foldLatinMarks(value: string): string {
   const dotAbove = String.fromCodePoint(0x0307);
   return value
     .normalize('NFKD')
     .replace(/(\p{Script=Latin})(\p{M}+)/gu, (_cluster, letter: string, marks: string) =>
-      letter === 'i' && marks.includes(dotAbove) ? `${letter}${dotAbove}` : letter,
+      letter + (letter === 'i' && marks.includes(dotAbove) ? dotAbove : '') + keepOverlays(marks),
     )
     .normalize('NFC');
 }
@@ -138,17 +144,15 @@ export function normalizeBadWord(raw: string): string {
 // so a reverse-order multi-link chain (`عّ ُ َل`) meets the same form as the
 // attached entry (`عَُّل`). The real input separators survive after the
 // flushed chain as word boundaries (`İ ́shit` still reads as two tokens).
-// The matcher below needs no mark-skipping of its own.
-function stripStandaloneMarkRuns(value: string): string {
+// With joinChains=false, retain the original gaps too: canonicalizing a split
+// chain must not erase a complete token immediately before a real separator.
+function stripStandaloneMarkRuns(value: string, joinChains = true): string {
   const dotAbove = String.fromCodePoint(0x0307);
   // NFD first: a precomposed initial must expose its marks before scanning.
   value = value.normalize('NFD');
   const at = (i: number): string => String.fromCodePoint(value.codePointAt(i) ?? 0);
   const isMark = (ch: string): boolean => /\p{M}/u.test(ch);
   const isGap = (ch: string): boolean => /[\s\p{Cf}]/u.test(ch);
-  // Overlay marks (codepoints as escapes, per corpus discipline) in a run
-  // survive regardless of origin (see above).
-  const keepOverlays = (run: string): string => run.replace(/[^\u{334}-\u{338}]/gu, '');
   // Fold one run against its chain origin. A Latin `i` chain keeps a single
   // dot across all its links (attached run plus gap-split continuations);
   // other Latin stacking drops; non-Latin runs stay meaningful.
@@ -183,7 +187,7 @@ function stripStandaloneMarkRuns(value: string): string {
       // The scan only moves forward.
       const links: string[] = [];
       const gaps: string[] = [];
-      for (;;) {
+      while (joinChains) {
         let g = i;
         while (g < value.length && isGap(at(g))) g += at(g).length;
         if (g > i && g < value.length && isMark(at(g))) {
@@ -230,6 +234,11 @@ function hasBadWord(content: string, words: string[]): boolean {
   // permitted gap split apart (reverse-order chains), matching the entry
   // normalization in `normalizeBadWord`.
   const plain = stripStandaloneMarkRuns(content).normalize('NFD');
+  // A real gap can also end the previous token, not just split a mark chain.
+  // Match that reading without relocating its suffix marks across the gap.
+  // Neither view drops meaningful marks inside a token; shorter whole-word
+  // entries still cannot consume a longer marked word.
+  const separated = stripStandaloneMarkRuns(content, false).normalize('NFD');
   for (const raw of words) {
     const word = normalizeBadWord(raw);
     if (!word) continue;
@@ -253,11 +262,9 @@ function hasBadWord(content: string, words: string[]): boolean {
       .join('(?:[\\s\\p{Cf}])*');
     // Marks extending a letter stay part of its word. Skip leading marks only
     // after a real boundary (start/punctuation), never after a word character.
-    // Combining overlays (U+0334–U+0338, escapes per corpus discipline) are
-    // never skipped: NFD exposes them in negated operators (≠ → `=` plus
-    // U+0338), where they change the symbol's identity instead of decorating
-    // it — while a genuine acute on `x=` is still tolerated.
-    const leading = `(^|[^\\p{L}\\p{N}\\p{M}_])(?:(?![\\u0334-\\u0338])\\p{M})*`;
+    // An overlay before a separate word cannot veto its start. It remains
+    // required inside an entry and is not tolerated after an entry's operator.
+    const leading = `(^|[^\\p{L}\\p{N}\\p{M}_])\\p{M}*`;
     // A mark after a punctuation-ended entry is standalone decoration (the
     // entry cannot extend it). After a letter-ended word it may be meaningful
     // (Devanagari/Arabic vowel signs extend the word), so keep the strict
@@ -265,7 +272,8 @@ function hasBadWord(content: string, words: string[]): boolean {
     const trailing = /[\p{L}\p{N}\p{M}_]$/u.test(word)
       ? '([^\\p{L}\\p{N}\\p{M}_]|$)'
       : '(?:(?![\\u0334-\\u0338])\\p{M})*([^\\p{L}\\p{N}\\p{M}_]|$)';
-    if (new RegExp(`${leading}${escaped}${trailing}`, 'iu').test(plain)) return true;
+    const pattern = new RegExp(`${leading}${escaped}${trailing}`, 'iu');
+    if (pattern.test(plain) || (separated !== plain && pattern.test(separated))) return true;
   }
   return false;
 }

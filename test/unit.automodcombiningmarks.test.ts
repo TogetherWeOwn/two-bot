@@ -397,6 +397,65 @@ test('decomposed operator overlays keep their symbol identity', () => {
   }
 });
 
+test('unattached overlays cannot hide a bad-word start', () => {
+  const probe = { ...policy, badWords: ['shit'] };
+  for (let cp = 0x334; cp <= 0x338; cp++) {
+    const overlay = String.fromCodePoint(cp);
+    for (const prefix of ['', '!', '😀', 'safe!', 'x ', 'ά ']) {
+      assert.equal(match(`${prefix}${overlay}shit`, probe), 'bad_words', `${cp.toString(16)} after ${prefix}`);
+    }
+    for (const prefix of ['x', 'i̇', 'ά', '1', '_']) {
+      assert.equal(match(`${prefix}${overlay}shit`, probe), null, 'attached overlay does not create a boundary');
+    }
+  }
+});
+
+test('Latin overlay identity agrees across attached and spaced forms', () => {
+  for (let cp = 0x334; cp <= 0x338; cp++) {
+    const overlay = String.fromCodePoint(cp);
+    for (const base of ['x', 'i', 'i̇']) {
+      const attached = `${base}${overlay}=`;
+      const spaced = `${base} ${overlay}=`;
+      for (const entry of [attached, spaced]) {
+        const configured = loadAutomodConfig({ TWO_AUTOMOD_BAD_WORDS: entry }, null).policy;
+        for (const content of [attached, spaced]) {
+          assert.equal(match(content, configured), 'bad_words', `${JSON.stringify(entry)} vs ${JSON.stringify(content)}`);
+        }
+        assert.equal(match(`${base}=`, configured), null, 'overlay entry differs from plain content');
+        assert.equal(match(`${base}=${overlay}`, configured), null, 'overlay on another base differs');
+      }
+      assert.equal(match(attached, { ...policy, badWords: [`${base}=`] }), null, 'plain entry differs from overlay content');
+      assert.equal(normalizeBadWord(attached), normalizeBadWord(spaced), 'shared entry identity');
+    }
+  }
+  const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
+  assert.deepEqual(repeat(['x=', E('x\\u0338='), 'x=']), [null, null, null], 'overlays retain repeat identity');
+  assert.deepEqual(
+    repeat([E('x\\u0338='), E('x\\u0338\\u0301='), E('x\\u0301\\u0338=')]),
+    [null, null, 'repeated_message'], 'genuine Latin accents still fold',
+  );
+});
+
+test('complete preceding tokens survive marks after a real gap', () => {
+  const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
+  for (const entry of [
+    E('\\u0915\\u0932\\u093e'),
+    E('\\u0639\\u064e\\u0644\\u064e\\u0645\\u064e'),
+    E('\\u03ac'),
+    E('\\u03b1\\u03bb\\u03c6\\u03ac'),
+  ]) {
+    const configured = loadAutomodConfig({ TWO_AUTOMOD_BAD_WORDS: entry }, null).policy;
+    for (const marks of [E('\\u0323'), E('\\u0301'), E('\\u0338'), E('\\u0323 \\u0301')]) {
+      for (const gap of [' ', '\t', '\n']) {
+        assert.equal(match(`${entry}${gap}${marks}ok`, configured), 'bad_words', 'complete preceding token');
+        assert.equal(match(`${entry} ${marks}`, configured), 'bad_words', 'complete token before mark-only suffix');
+      }
+    }
+    assert.equal(match(`${entry}${E('\\u0323')}ok`, configured), null, 'without a gap the word continues');
+    assert.equal(match(`${entry}x ${E('\\u0323')}ok`, configured), null, 'a longer preceding token stays distinct');
+  }
+});
+
 test('configured accented attachment extensions retain their identity', () => {
   for (const extension of ['réf', '.réf', 'ＲÉＦ']) {
     const configured = loadAutomodConfig({ TWO_AUTOMOD_BLOCKED_ATTACHMENT_EXTENSIONS: extension }, null).policy;
