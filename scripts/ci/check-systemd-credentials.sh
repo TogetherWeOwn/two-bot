@@ -100,8 +100,11 @@ code_consumers() {
     | sort -u || true
 }
 
-# Environment= quotes whole assignments, not shell-style fragments. Join
-# continued lines before splitting words; only emit matched names, never values.
+# Environment= words follow systemd extract_first_word semantics: quoted
+# fragments may appear anywhere inside a word ('DISCORD_TOKEN'=x is one
+# assignment), separators are ASCII whitespace only, and C-style escapes
+# decode after word/quote boundaries are resolved. Join continued lines
+# before splitting words; only emit matched names, never values.
 # Syntax: https://www.freedesktop.org/software/systemd/man/systemd.syntax.html
 literal_secrets_in_unit() {
   python3 - "$1" "$SECRET_ENV" <<'PY'
@@ -110,7 +113,8 @@ import sys
 from pathlib import Path
 
 secrets = set(sys.argv[2].split())
-words = re.compile(r"""(?<!\S)(?:"((?:\\.|[^"\\])*)"|'((?:\\.|[^'\\])*)'|((?:\\.|[^\s\\])+))(?=\s|$)""")
+# systemd WHITESPACE is exactly " \t\n\r" (src/basic/string-util.h).
+separators = set(" \t\r\n")
 escapes = re.compile(r"\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|U[0-9a-fA-F]{8}|[0-7]{3}|[abfnrtvs\\\"'])")
 simple_escapes = dict(zip("abfnrtvs\\\"'", "\a\b\f\n\r\t\v \\\"'"))
 
@@ -121,6 +125,45 @@ def unescape(match):
         return simple_escapes[escape]
     codepoint = int(escape[1:], 16) if escape[0] in "xuU" else int(escape, 8)
     return chr(codepoint) if 0 < codepoint <= 0x10ffff else match[0]
+
+
+def split_words(text):
+    """Split one directive value into systemd words.
+
+    Quotes group fragments into the surrounding word instead of starting a
+    separate match; backslashes preserve the next character raw for the
+    escape decoding step. Quote characters are consumed, never emitted.
+    """
+    words = []
+    current = []
+    i = 0
+    n = len(text)
+    while i < n:
+        char = text[i]
+        if char in separators:
+            if current:
+                words.append("".join(current))
+                current = []
+            i += 1
+        elif char in "\"'":
+            i += 1
+            while i < n and text[i] != char:
+                if text[i] == "\\" and i + 1 < n:
+                    current.append(text[i:i + 2])
+                    i += 2
+                else:
+                    current.append(text[i])
+                    i += 1
+            i += 1  # skip the closing quote, or past the end if unterminated
+        elif char == "\\" and i + 1 < n:
+            current.append(text[i:i + 2])
+            i += 2
+        else:
+            current.append(char)
+            i += 1
+    if current:
+        words.append("".join(current))
+    return words
 
 
 def logical_lines(text):
@@ -145,9 +188,8 @@ for line in logical_lines(Path(sys.argv[1]).read_text(encoding="utf-8-sig")):
     directive = re.match(r"\s*Environment\s*=\s*(.*)$", line)
     if not directive:
         continue
-    for word in words.finditer(directive[1]):
-        value = next(group for group in word.groups() if group is not None)
-        assignment = escapes.sub(unescape, value)
+    for word in split_words(directive[1]):
+        assignment = escapes.sub(unescape, word)
         key, equals, _ = assignment.partition("=")
         if equals and key in secrets:
             found.add(key)

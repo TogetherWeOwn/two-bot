@@ -103,6 +103,9 @@ expect_r1_literal "R1 continued quoted value" $'Environment="DISCORD_TOKEN=synth
 expect_r1_literal "R1 escaped quote before secret" 'Environment="LABEL=escaped \" quote" "DISCORD_TOKEN=synthetic"'
 expect_r1_literal "R1 escaped key character" 'Environment="DISCORD\x5fTOKEN=synthetic"'
 expect_r1_literal "R1 different secret key" 'Environment="LOG_LEVEL=info" "TWO_BACKUP_S3_SECRET_ACCESS_KEY=synthetic"' TWO_BACKUP_S3_SECRET_ACCESS_KEY
+expect_r1_literal "R1 quoted key fragment" "Environment='DISCORD_TOKEN'=synthetic"
+expect_r1_literal "R1 double-quoted key fragment" 'Environment="DISCORD_TOKEN"=synthetic'
+expect_r1_literal "R1 quoted value fragment" 'Environment=DISCORD_TOKEN="synthetic value"'
 
 # These are not secret assignments: match keys, not substrings of values.
 reset_fixture
@@ -113,6 +116,7 @@ EnvironmentFile=/etc/two-bot/DISCORD_TOKEN=synthetic.env
   ; Environment='DISCORD_TOKEN=synthetic'
 Environment=LOG_LEVEL=info
 Environment="LABEL=DISCORD_TOKEN=synthetic" 'OTHER=prefix DISCORD_TOKEN=synthetic'
+Environment=LABEL="prefix DISCORD_TOKEN=synthetic suffix"
 Environment=PREFIX_DISCORD_TOKEN=synthetic DISCORD_TOKEN_SUFFIX=synthetic
 Environment="LABEL=escaped \" DISCORD_TOKEN=synthetic" "LOG_LEVEL=info"
 Environment="LABEL=escaped \\" "LOG_LEVEL=info"
@@ -122,6 +126,8 @@ Environment=LOG_LEVEL=info \
   "LABEL=DISCORD_TOKEN=synthetic"
 Environment=
 EOF
+# U+00A0 is not a systemd separator: this assigns only LABEL, so it stays allowed.
+printf 'Environment=LABEL=prefix\xc2\xa0DISCORD_TOKEN=synthetic\n' >> "$FIXTURE/deploy/two-redirect.service"
 if ! output="$(run_guard)"; then
   printf 'R1 allowed syntax: guard refused non-secret assignments.\n%s\n' "$output" >&2
   exit 1
