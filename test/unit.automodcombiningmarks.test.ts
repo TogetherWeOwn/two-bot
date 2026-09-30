@@ -196,6 +196,68 @@ test('reverse-order mark chains meet their canonical form', () => {
   assert.equal(match(fwdSplit, { ...policy, badWords: [entry] }), 'bad_words', 'forward-order split control');
 });
 
+test('mark-chain gaps keep real word boundaries', () => {
+  const probe = { ...policy, badWords: ['shit'] };
+  const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
+  // A gap between two mark runs absorbs into one chain, but the separator
+  // survives: a marked prefix token before a real space cannot hide a
+  // separately spaced forbidden word. All six catch; the parent repair that
+  // absorbed chains and discarded the gap missed every one.
+  for (const [name, content] of [
+    ['dotted-I prefix token', E('\\u0130 \\u0301shit')],
+    ['decomposed dotted-I prefix token', E('i\\u0307 \\u0301shit')],
+    ['Arabic prefix token', E('\\u0639\\u064e \\u0301shit')],
+    ['Devanagari prefix token', E('\\u0915\\u093f \\u0301shit')],
+    ['digit prefix token', E('1\\u0301 \\u0301shit')],
+    ['underscore prefix token', E('_\\u0301 \\u0301shit')],
+  ] as Array<[string, string]>) {
+    assert.equal(match(content, probe), 'bad_words', name);
+  }
+  // Controls: an ordinary marked prefix still reads as its own token, and
+  // attached prefix marks stay part of the preceding word.
+  assert.equal(match(E('x \\u0301shit'), probe), 'bad_words', 'ordinary marked prefix');
+  for (const prefix of ['x́', 'i̇', 'ά', 'क़', 'عَ', '1́', '_́']) {
+    assert.equal(match(`${prefix}shit`, probe), null, `attached ${JSON.stringify(prefix)} still bounds`);
+  }
+});
+
+test('composable clusters meet one form across permitted gaps', () => {
+  const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
+  const attached = E('\\u03acl\\u03c6\\u03b1');
+  const spaced = E('\\u03b1 \\u0301l\\u03c6\\u03b1');
+  const spacedCfg = loadAutomodConfig({ TWO_AUTOMOD_BAD_WORDS: spaced }, null).policy;
+  // NFD decomposes the precomposed first letter on both sides, so a gap
+  // inside the cluster meets the attached cluster, and a spaced entry
+  // matches its own content.
+  assert.equal(match(spaced, { ...policy, badWords: [attached] }), 'bad_words', 'attached config vs spaced content');
+  assert.equal(match(spaced, spacedCfg), 'bad_words', 'spaced config matches spaced content');
+  assert.equal(match(attached, spacedCfg), 'bad_words', 'spaced config vs attached content');
+  // Accented-vs-unaccented identity is preserved: the marks are part of the
+  // letter, so stripping them still differs.
+  assert.equal(match('αλφα', { ...policy, badWords: [attached] }), null, 'unaccented content still differs');
+  assert.equal(match(attached, { ...policy, badWords: ['αλφα'] }), null, 'unaccented config still differs');
+});
+
+test('dotted-i chains keep one dot across gap splits', () => {
+  const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
+  const entry = E('\\u0130stanbul');
+  const attachedDup = E('i\\u0307\\u0307stanbul');
+  const splitDup = E('i\\u0307 \\u0307stanbul');
+  const required = E('i \\u0307stanbul');
+  // A logical i-chain keeps a single dot however many links it has, so
+  // attached, split and spaced-config duplicates share one key.
+  for (const content of [attachedDup, splitDup, required]) {
+    assert.equal(match(content, { ...policy, badWords: [entry] }), 'bad_words', JSON.stringify(content));
+    assert.equal(normalizeBadWord(content), normalizeBadWord(entry), `shared key ${JSON.stringify(content)}`);
+  }
+  const splitCfg = loadAutomodConfig({ TWO_AUTOMOD_BAD_WORDS: splitDup }, null).policy;
+  assert.equal(match(entry, splitCfg), 'bad_words', 'split config matches canonical content');
+  assert.equal(match(attachedDup, splitCfg), 'bad_words', 'split config matches attached duplicate');
+  // The dot-vs-ASCII distinction survives: plain ASCII stays distinct.
+  assert.equal(match('istanbul', { ...policy, badWords: [entry] }), null, 'ASCII stays distinct');
+  assert.equal(match('istanbul', splitCfg), null, 'ASCII stays distinct under split config');
+});
+
 test('repeated separator-plus-mark runs stay linear', () => {
   const probe = { ...policy, badWords: ['shit'] };
   const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);

@@ -103,44 +103,53 @@ function foldLatinMarks(value: string): string {
 
 /** Normalized form of one bad-words entry, shared with the wordlist lint (TOG-10066). */
 export function normalizeBadWord(raw: string): string {
-  // Gap removal can place two kept runs side by side; the trailing NFC
-  // restores their canonical order so a spaced configuration meets the same
-  // form as attached content.
-  return stripStandaloneMarkRuns(foldLatinMarks(normalize(raw))).replace(/\s+/g, '').normalize('NFC');
+  // Gap removal can place two kept runs side by side; the trailing NFD
+  // restores their canonical order AND decomposes precomposed letters, so a
+  // spaced configuration meets the same form as attached content (`α ́λφα`
+  // vs `άλφα`). Matches the content normalization in `hasBadWord`.
+  return stripStandaloneMarkRuns(foldLatinMarks(normalize(raw))).replace(/\s+/g, '').normalize('NFD');
 }
 
 // Drop mark runs that decorate nothing, keeping required marks across
 // allowed gaps. One forward pass carrying the last base character as the
 // chain origin — each character is visited once, so repeated
 // `space + mark` pairs stay linear (no backward rescan per run).
-// A gap between a base and a following mark run is emitted as a separator
-// (the word pattern tolerates it), so `x ́shit` still reads as two tokens.
+// A gap between a base and a following mark run stays a separator (the word
+// pattern tolerates it), so `क ित` still matches `कित`.
 // A gap between two mark runs belongs to one split chain (`عَ ّلَم`,
-// `कि ंत`): it absorbs and the later run folds against the carried origin:
+// `कि ंत`, `i̇ ̇stanbul`): the later run folds against the carried origin —
 //   - origin is a Latin letter: same fold as directly-attached stacking
-//     (dotted-i keeps its dot, other Latin stacking drops), so `s ́h`
-//     folds exactly like `śh`;
+//     (dotted-i keeps its one dot per chain, other Latin stacking drops),
+//     so `s ́h` folds exactly like `śh`;
 //   - origin is another word character (non-Latin letter, digit,
 //     underscore): the run is meaningful (Indic/Arabic vowel signs, chained
 //     marks) and stays, so `क ित` still matches `कित` and `عَ ّلَم` still
 //     matches `عَّلَم`;
 //   - otherwise (string start, punctuation, emoji): standalone decoration,
 //     dropped, so `f*́ck` matches `f*ck`.
-// Absorbed chains are reordered by the NFC pass at the call sites, so a
-// reverse-order split chain meets the same canonical form as attached
-// content. The matcher below needs no mark-skipping of its own.
+// The folded link is emitted BEFORE the gap: the real input separator
+// survives as a word boundary (`İ ́shit` still reads as two tokens) while
+// the runs sit side by side for canonical ordering at the call sites, so a
+// reverse-order split chain meets the same form as attached content. The
+// matcher below needs no mark-skipping of its own.
 function stripStandaloneMarkRuns(value: string): string {
   const dotAbove = String.fromCodePoint(0x0307);
   const at = (i: number): string => String.fromCodePoint(value.codePointAt(i) ?? 0);
   const isMark = (ch: string): boolean => /\p{M}/u.test(ch);
   const isGap = (ch: string): boolean => /[\s\p{Cf}]/u.test(ch);
-  const foldRun = (origin: string, run: string): string => {
-    if (!origin || !/[\p{L}\p{N}_]/u.test(origin)) return '';
-    if (!/\p{Script=Latin}/u.test(origin)) return run;
-    return origin === 'i' && run.includes(dotAbove) ? dotAbove : '';
+  // Fold one run against its chain origin. A Latin `i` chain keeps a single
+  // dot across all its links (attached run plus gap-split continuations);
+  // other Latin stacking drops; non-Latin runs stay meaningful.
+  const foldRun = (origin: string, run: string, chainHasDot: boolean): { text: string; hasDot: boolean } => {
+    if (!origin || !/[\p{L}\p{N}_]/u.test(origin)) return { text: '', hasDot: false };
+    if (!/\p{Script=Latin}/u.test(origin)) return { text: run, hasDot: false };
+    if (origin !== 'i') return { text: '', hasDot: false };
+    const hasDot = chainHasDot || run.includes(dotAbove);
+    return { text: !chainHasDot && run.includes(dotAbove) ? dotAbove : '', hasDot };
   };
   let out = '';
   let origin = '';
+  let chainHasDot = false;
   let i = 0;
   while (i < value.length) {
     const ch = at(i);
@@ -152,20 +161,27 @@ function stripStandaloneMarkRuns(value: string): string {
         run += c;
         i += c.length;
       }
-      out += foldRun(origin, run);
+      const folded = foldRun(origin, run, chainHasDot);
+      out += folded.text;
+      chainHasDot = folded.hasDot;
       // Absorb further chain links: each gap run followed by another mark
-      // run extends the same chain. The scan only moves forward.
+      // run extends the same chain. The link is emitted before the gap so
+      // the separator survives; the scan only moves forward.
       for (;;) {
         let g = i;
         while (g < value.length && isGap(at(g))) g += at(g).length;
         if (g > i && g < value.length && isMark(at(g))) {
+          const gap = value.slice(i, g);
           let next = '';
           while (g < value.length && isMark(at(g))) {
             const c = at(g);
             next += c;
             g += c.length;
           }
-          out += foldRun(origin, next);
+          const link = foldRun(origin, next, chainHasDot);
+          out += link.text;
+          chainHasDot = link.hasDot;
+          out += gap;
           i = g;
         } else break;
       }
@@ -173,9 +189,13 @@ function stripStandaloneMarkRuns(value: string): string {
     }
     // Gaps are separators — emit them (the word pattern tolerates gaps
     // between entry characters). The carried origin survives the gap so a
-    // following mark run is judged by its base, exactly as before.
+    // following mark run is judged by its base, exactly as before. A new
+    // base character starts a new chain.
     out += ch;
-    if (!isGap(ch)) origin = ch;
+    if (!isGap(ch)) {
+      origin = ch;
+      chainHasDot = false;
+    }
     i += ch.length;
   }
   return out;
@@ -185,9 +205,10 @@ function hasBadWord(content: string, words: string[]): boolean {
   // Decoration is stripped once, up front: the per-gap pattern below then
   // stays a plain separator class with no overlapping alternatives or nested
   // quantifiers, so near-miss input cannot backtrack exponentially. The
-  // trailing NFC reorders runs a permitted gap split apart (reverse-order
-  // chains), matching the entry normalization in `normalizeBadWord`.
-  const plain = stripStandaloneMarkRuns(content).normalize('NFC');
+  // trailing NFD decomposes precomposed letters AND reorders runs a
+  // permitted gap split apart (reverse-order chains), matching the entry
+  // normalization in `normalizeBadWord`.
+  const plain = stripStandaloneMarkRuns(content).normalize('NFD');
   for (const raw of words) {
     const word = normalizeBadWord(raw);
     if (!word) continue;
