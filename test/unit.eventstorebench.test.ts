@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { BASELINE, checkBudgets, parseArgs, reportBudgets, type BenchMetrics } from '../scripts/event-store-bench.ts';
 
 const fixture = (): BenchMetrics => ({
@@ -77,6 +80,50 @@ test('a budget breach produces a real nonzero process exit without a database', 
     assert.equal(child.status, expectedStatus, child.stderr);
     assert.match(child.stdout, expectedStatus ? /threshold result: FAIL/ : /threshold result: PASS/);
   }
+});
+
+test('CI measures three fixed workloads and cannot hide any failed sample', () => {
+  const dir = mkdtempSync(join(process.env.PAPERCLIP_RUN_SCRATCH_DIR ?? tmpdir(), 'bench-wrapper-'));
+  try {
+    // Stub the benchmark process, not the budget checker: exercise shell exit
+    // propagation and argument pinning without opening any database.
+    writeFileSync(join(dir, 'node'), `#!/usr/bin/env bash
+set -euo pipefail
+[[ "$#" == 2 && "$1" == scripts/event-store-bench.ts && "$2" == --check ]] || exit 99
+count=0
+if [[ -f "$COUNT_FILE" ]]; then read -r count < "$COUNT_FILE"; fi
+count=$((count + 1))
+printf '%s\\n' "$count" > "$COUNT_FILE"
+IFS=, read -r -a codes <<< "$SAMPLE_CODES"
+exit "\${codes[$((count - 1))]}"
+`, { mode: 0o755 });
+    for (const [codes, expectedStatus, expectedSamples] of [
+      ['0,0,0', 0, 3], ['1,0,0', 1, 3], ['0,1,0', 1, 3], ['0,0,1', 1, 3], ['1,1,1', 1, 3],
+      ['2,0,1', 2, 1], ['1,2,0', 2, 2], ['0,0,2', 2, 3],
+    ] as const) {
+      const countFile = join(dir, 'count');
+      rmSync(countFile, { force: true });
+      const child = spawnSync('bash', [new URL('../scripts/ci/run-event-store-bench.sh', import.meta.url).pathname], {
+        encoding: 'utf8',
+        env: { PATH: `${dir}:${process.env.PATH}`, COUNT_FILE: countFile, SAMPLE_CODES: codes },
+      });
+      assert.equal(child.status, expectedStatus, child.stderr);
+      assert.equal(Number(readFileSync(countFile, 'utf8').trim()), expectedSamples);
+      assert.equal((child.stdout.match(/benchmark sample \d\/3/g) ?? []).length, expectedSamples);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('CLI distinguishes a setup error from a measured budget breach without connecting', () => {
+  const child = spawnSync(process.execPath, [new URL('../scripts/event-store-bench.ts', import.meta.url).pathname, '--check'], {
+    encoding: 'utf8',
+    env: { PATH: process.env.PATH, TWO_TEST_DATABASE_URL: 'not-a-postgres-url' },
+  });
+  assert.equal(child.status, 2, child.stderr);
+  assert.match(child.stderr, /Only Postgres is supported/);
+  assert.doesNotMatch(child.stdout, /threshold result/);
 });
 
 test('CLI refuses an ambient production URL when no test URL was explicitly supplied', () => {

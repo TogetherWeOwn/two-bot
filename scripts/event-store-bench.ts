@@ -120,6 +120,20 @@ async function main() {
   const store = new EventStore(db);
 
   try {
+    // Read-only, allowlisted settings make calibration/CI differences visible.
+    // Never log the connection URL or weaken durability to match a baseline.
+    const environment = await db.prepare(`SELECT
+      current_setting('server_version') AS postgres,
+      current_setting('fsync') AS fsync,
+      current_setting('full_page_writes') AS full_page_writes,
+      current_setting('synchronous_commit') AS synchronous_commit,
+      current_setting('wal_sync_method') AS wal_sync_method,
+      current_setting('shared_buffers') AS shared_buffers,
+      current_setting('max_wal_size') AS max_wal_size,
+      current_setting('checkpoint_timeout') AS checkpoint_timeout`).get<Record<string, string>>();
+    if (!environment) throw new Error('benchmark runtime settings were not returned');
+    console.log(`  runtime: ${JSON.stringify({ node: process.version, platform: process.platform, arch: process.arch, ...environment })}`);
+
     const base = Date.parse('2023-01-01T00:00:00.000Z');
     const iso = (ms: number) => new Date(ms).toISOString();
 
@@ -225,4 +239,11 @@ async function main() {
 
 // pathToFileURL keeps direct invocation working on all Node 24 releases.
 // https://nodejs.org/docs/latest-v24.x/api/url.html#urlpathtofileurlpath-options
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  try {
+    await main();
+  } catch (err) {
+    console.error(`event-store-bench: ${(err as Error).message}`);
+    process.exitCode = 2; // runtime/setup failure, not a measured budget breach
+  }
+}
