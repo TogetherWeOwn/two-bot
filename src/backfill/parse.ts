@@ -95,7 +95,12 @@ export function parseVoiceMessage(msg: unknown): VoiceRecord | null {
   }
   if (!kind) return null;
 
-  const memberId = memberIdFromEmbed(e);
+  // Titled Logger descriptions carry the display name ("**ghostly.og** joined
+  // #general"), never a member mention. When the footer has no id, a mention
+  // in the text is incidental (a thank-you, a quoted reply) and must not mint
+  // attribution - see TOG-10025. The titleless Wick format (title === '') keeps
+  // the footer-then-mention fallback below.
+  const memberId = title ? memberIdFromEmbed({ footer: e.footer }) : memberIdFromEmbed(e);
   if (!memberId) return null;
 
   return { memberId, channelId: channelIdFromEmbed(e), kind, occurredAt: msg.timestamp };
@@ -134,7 +139,12 @@ export function parseMemberLogMessage(
   // Same rule as the documented titled-embed guard below: a non-string title
   // is an unrecognised titled embed, so the channel hint must not apply.
   if (e.title !== undefined && typeof e.title !== 'string') return null;
-  const title = asText(e.title).toLowerCase();
+  // Trimmed: logger titles arrive with stray padding often enough to silently
+  // drop real joins under exact equality - see TOG-10027. The channel fallback
+  // still keys on the RAW title: a whitespace-only title is a titled embed we
+  // do not recognise (no guess), while only a truly absent title falls back.
+  const rawTitle = asText(e.title).toLowerCase();
+  const title = rawTitle.trim();
   let kind: MemberLogKind | null = null;
   if (title === 'member joined') kind = 'join';
   else if (title === 'member left' || title === 'member banned') kind = 'leave';
@@ -143,7 +153,7 @@ export function parseMemberLogMessage(
   // (role changes, nickname edits) and must not be counted as a join.
   // The channel hint is trusted only when it is exactly 'join' or 'leave' -
   // a drifted caller passing anything else must not mint a kind from it.
-  else if (!title && (channelKind === 'join' || channelKind === 'leave')) kind = channelKind;
+  else if (!rawTitle && (channelKind === 'join' || channelKind === 'leave')) kind = channelKind;
   if (!kind) return null;
 
   const memberId = memberIdFromEmbed(e);
@@ -187,7 +197,10 @@ export function parseLeaveAttribution(msg: unknown): LeaveAttributionRecord | nu
   const username = (m[1] ?? '').trim();
   // An empty username is a truncated line, not a departure - admitting it
   // would write an unattributable churn row the funnel cannot join to anyone.
+  // Hand-edited fixtures leave the same shape with TODO/TBD/XXX placeholders
+  // in the name slot, which are equally unjoinable - see TOG-10026.
   if (!username) return null;
+  if (/^(todo|tbd|fixme|xxx|\?+|placeholder|unknown(\s+user)?)$/i.test(username)) return null;
   const tail = (m[2] ?? '').toLowerCase();
   let joinedVia = 'unknown';
   if (tail.includes('vanity')) joinedVia = 'vanity';
