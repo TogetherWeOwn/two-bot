@@ -119,7 +119,16 @@ const feedParser = new XMLParser({
   parseTagValue: false,
   parseAttributeValue: false,
   trimValues: true,
-  processEntities: false,
+  processEntities: { enabled: true, allowedTags: ['title'] },
+  // Decode text before CDATA is concatenated. Never register custom/DOCTYPE entities.
+  // Hook contract: https://github.com/NaturalIntelligence/fast-xml-parser/blob/master/src/fxp.d.ts
+  entityDecoder: {
+    decode: decodeTitleXml,
+    setExternalEntities() {},
+    addInputEntities() {},
+    reset() {},
+    setXmlVersion() {},
+  },
 });
 
 export function parseXmlFeed(xml: string): FeedItem[] {
@@ -135,7 +144,7 @@ export function parseXmlFeed(xml: string): FeedItem[] {
     const row = asRecord(entry);
     const link = resolveLink(row?.link);
     const key = textValue(row?.guid) || textValue(row?.id) || link;
-    const title = decodeXml(textValue(row?.title) || 'Untitled');
+    const title = textValue(row?.title) || 'Untitled';
     const publishedAt = decodeXml(textValue(row?.pubDate) || textValue(row?.published) || textValue(row?.updated));
     return { key: decodeXml(key), title, url: decodeXml(link), ...(publishedAt ? { publishedAt } : {}) };
   }).filter((item) => item.key && /^https?:\/\//i.test(item.url));
@@ -176,6 +185,25 @@ function textValue(value: unknown): string {
   return record ? textValue(record['#text']) : '';
 }
 
+function decodeTitleXml(value: string): string {
+  const predefined: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+  return value.replace(/&(amp|lt|gt|quot|apos|#[0-9]+|#x[0-9a-fA-F]+);/g, (reference, entity: string) => {
+    if (!entity.startsWith('#')) return predefined[entity] ?? reference;
+    const hex = entity.startsWith('#x');
+    const codePoint = Number.parseInt(entity.slice(hex ? 2 : 1), hex ? 16 : 10);
+    // XML 1.0 Char production: exclude controls, surrogate code points and FFFE/FFFF.
+    // https://www.w3.org/TR/xml/#charsets
+    if (codePoint === 0x9 || codePoint === 0xa || codePoint === 0xd
+      || (codePoint >= 0x20 && codePoint <= 0xd7ff)
+      || (codePoint >= 0xe000 && codePoint <= 0xfffd)
+      || (codePoint >= 0x10000 && codePoint <= 0x10ffff)) {
+      return String.fromCodePoint(codePoint);
+    }
+    return reference;
+  });
+}
+
+// Preserve the historical key/link/date decoding used by persisted deliveries.
 function decodeXml(value: string): string {
   return value
     .replaceAll('&amp;', '&')
