@@ -212,7 +212,7 @@ for cred_file in "$TOKEN_FILE" "$DATABASE_URL_FILE" "$INTERNAL_KEYS_FILE"; do
     new_secrets=1
   fi
 done
-# database_url may use the env fallback; internal_keys stays empty until actions
+# The DB URL may use the env fallback; signing keys stay empty until actions
 # are enabled. Only the bot token must be nonempty on every run.
 [ -s "$TOKEN_FILE" ] || new_secrets=1
 if [ -s "$STAGING_TOKEN_FILE" ]; then
