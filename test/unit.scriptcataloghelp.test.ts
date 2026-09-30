@@ -9,6 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import dns from 'node:dns';
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -64,7 +65,7 @@ function checkHelp(entry: Entry, root = ROOT): void {
   assert.equal(result.error, undefined, `${entry.name}: --help failed: ${result.error?.message}`);
   assert.equal(result.status, 0,
     `${entry.name}: --help exited ${result.status} (${result.signal ?? 'no signal'}): ${(result.stderr ?? '').slice(0, 500)}`);
-  assert.match(output, /^usage:\s*\S[^\r\n]*$/im, `${entry.name}: --help printed no non-empty usage line`);
+  assert.match(output, /^usage:[ \t]*\S[^\r\n]*$/im, `${entry.name}: --help printed no non-empty usage line`);
 }
 
 function fixture(body: string, check: (entry: Entry, root: string) => void, runner: Entry['runner'] = 'node'): void {
@@ -119,15 +120,60 @@ test('empty usage and nonzero exits fail by registry name', () => {
   });
 });
 
+test('usage content must be on the same line as its label', () => {
+  for (const output of ['Usage:\nMissing configuration', 'Usage: \t\r\nMissing configuration']) {
+    fixture(`console.log(${JSON.stringify(output)});`, (entry, root) => {
+      assert.throws(() => checkHelp(entry, root), /fixture:help: --help printed no non-empty usage line/);
+    });
+  }
+  fixture("console.log('Usage:\\tfixture.mjs');", checkHelp);
+});
+
 test('help network/subprocess attempts fail even when scripts catch the refusal', () => {
   for (const body of [
     "import net from 'node:net'; try { net.connect(443, 'example.invalid'); } catch {}",
     "try { await fetch('https://example.invalid'); } catch {}",
     "import { execSync } from 'node:child_process'; try { execSync('true'); } catch {}",
+    "import { resolve4 } from 'node:dns'; if (resolve4.name !== 'refuse') throw new Error('DNS refusal missing'); try { resolve4('localhost', () => {}); } catch {}",
+    "import { resolve4 } from 'node:dns/promises'; if (resolve4.name !== 'refuse') throw new Error('DNS refusal missing'); try { await resolve4('localhost'); } catch {}",
   ]) {
     fixture(`${body}; console.log('Usage: fixture.mjs');`, (entry, root) => {
       assert.throws(() => checkHelp(entry, root), /fixture:help: --help exited 97/);
     });
+  }
+});
+
+test('all public DNS query APIs refuse help I/O, including Resolver instances', async (t) => {
+  const surfaces = [
+    { name: 'dns', api: dns, expression: 'dns' },
+    { name: 'dns/promises', api: dns.promises, expression: 'dnsPromises' },
+    { name: 'dns.Resolver', api: dns.Resolver.prototype, expression: 'new dns.Resolver()' },
+    { name: 'dnsPromises.Resolver', api: dns.promises.Resolver.prototype, expression: 'new dnsPromises.Resolver()' },
+  ];
+  for (const { name, api, expression } of surfaces) {
+    const methods = Object.getOwnPropertyNames(api).filter((method) => /^(lookup|resolve|reverse)/.test(method));
+    assert.ok(methods.length > 0, `${name}: DNS query coverage must not be empty`);
+    for (const method of methods) {
+      await t.test(`${name}.${method}`, () => {
+        const args = method === 'lookupService' ? "'127.0.0.1', 80, () => {}"
+          : method === 'reverse' ? "'127.0.0.1', () => {}" : "'localhost', () => {}";
+        // Verify the refusal is installed before invoking a query, so a
+        // regression fails without ever sending a real DNS packet.
+        fixture(`
+          import dns from 'node:dns';
+          import dnsPromises from 'node:dns/promises';
+          const api = ${expression};
+          const method = ${JSON.stringify(method)};
+          if (dns.lookup.name !== 'refuse' || api[method] !== dns.lookup) {
+            throw new Error('DNS refusal missing: ' + method);
+          }
+          try { await api[method](${args}); } catch {}
+          console.log('Usage: fixture.mjs');
+        `, (entry, root) => {
+          assert.throws(() => checkHelp(entry, root), /fixture:help: --help exited 97/);
+        });
+      });
+    }
   }
 });
 

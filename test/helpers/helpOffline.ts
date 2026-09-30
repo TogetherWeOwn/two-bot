@@ -21,10 +21,18 @@ net.Server.prototype.listen = refuse;
 tls.connect = refuse;
 dgram.Socket.prototype.connect = refuse;
 dgram.Socket.prototype.send = refuse;
-dns.lookup = refuseCallback;
-dns.resolve = refuseCallback;
-dns.promises.lookup = refuse;
-dns.promises.resolve = refuse;
+// c-ares resolution does not go through the net/dgram JavaScript methods.
+// Cover record-specific APIs and both Resolver classes, not just resolve().
+const dnsQueries = [
+  'lookup', 'lookupService', 'resolve', 'resolve4', 'resolve6', 'resolveAny',
+  'resolveCaa', 'resolveCname', 'resolveMx', 'resolveNaptr', 'resolveNs',
+  'resolvePtr', 'resolveSoa', 'resolveSrv', 'resolveTlsa', 'resolveTxt', 'reverse',
+];
+for (const api of [dns, dns.promises, dns.Resolver.prototype, dns.promises.Resolver.prototype]) {
+  for (const method of dnsQueries) {
+    if (typeof Reflect.get(api, method) === 'function') Reflect.set(api, method, refuseCallback);
+  }
+}
 http.request = refuse;
 http.get = refuse;
 https.request = refuse;
