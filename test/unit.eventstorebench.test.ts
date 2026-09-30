@@ -4,13 +4,13 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { BASELINE, checkBudgets, parseArgs, reportBudgets, type BenchMetrics } from '../scripts/event-store-bench.ts';
+import { BASELINE, CI_BASELINE, baselineForEnvironment, checkBudgets, parseArgs, reportBudgets, type BenchMetrics } from '../scripts/event-store-bench.ts';
 
-const fixture = (): BenchMetrics => ({
-  members: BASELINE.members,
-  events: BASELINE.events,
-  writeMs: BASELINE.writeMsPerEvent * BASELINE.events,
-  reads: Object.entries(BASELINE.reads).map(([label, ms]) => ({ label, ms })),
+const fixture = (baseline = BASELINE): BenchMetrics => ({
+  members: baseline.members,
+  events: baseline.events,
+  writeMs: baseline.writeMsPerEvent * baseline.events,
+  reads: Object.entries(baseline.reads).map(([label, ms]) => ({ label, ms })),
 });
 
 test('baseline and inclusive thresholds pass with a visible report', () => {
@@ -55,6 +55,47 @@ test('changed workload, missing reads and invalid timings fail closed', () => {
   assert.equal(checkBudgets(metrics).filter((c) => !c.pass).length, 3);
 });
 
+test('recorded environments select distinct calibrations; CI cannot use the fast profile', () => {
+  const runtime = (baseline = BASELINE) => ({
+    ...baseline.runtime, node: 'v24.21.0', postgres: '17.11 (Debian 17.11-1.pgdg13+2)',
+  });
+  assert.equal(baselineForEnvironment(runtime()), BASELINE);
+  assert.equal(baselineForEnvironment(runtime(CI_BASELINE), true), CI_BASELINE);
+  assert.throws(() => baselineForEnvironment(runtime(), true), /recorded benchmark baseline/);
+  for (const change of [
+    { fsync: 'on' }, { synchronous_commit: 'local' }, { shared_buffers: '256MB' },
+    { node: 'v25.0.0' }, { postgres: '18.0' }, { arch: 'arm64' }, { checkpoint_timeout: '10min' },
+  ]) {
+    assert.throws(() => baselineForEnvironment({ ...runtime(), ...change }), /recorded benchmark baseline/);
+  }
+  const missing: Record<string, string> = runtime(CI_BASELINE);
+  delete missing.fsync;
+  assert.throws(() => baselineForEnvironment(missing), /recorded benchmark baseline/);
+});
+
+test('both calibration profiles retain exact workloads, 3x writes and unchanged read limits', () => {
+  for (const baseline of [BASELINE, CI_BASELINE]) {
+    const metrics = fixture(baseline);
+    const lines: string[] = [];
+    assert.equal(reportBudgets(metrics, (s) => lines.push(s), baseline), 0);
+    assert.match(lines.join('\n'), new RegExp(baseline.name));
+    const checks = checkBudgets(metrics, baseline);
+    const writeLimit = checks.find((c) => c.label === 'write ms/event')!.limit;
+    assert.equal(writeLimit, Number((baseline.writeMsPerEvent * 3).toFixed(3)));
+    assert.ok(checks.slice(3).every((c) => c.limit === 10));
+    metrics.writeMs = writeLimit * metrics.events;
+    assert.ok(checkBudgets(metrics, baseline).every((c) => c.pass));
+    metrics.writeMs *= 1.001;
+    assert.equal(reportBudgets(metrics, () => {}, baseline), 1);
+    const badCounts = fixture(baseline);
+    badCounts.members++;
+    badCounts.events++;
+    assert.equal(checkBudgets(badCounts, baseline).filter((c) => !c.pass).length, 2);
+  }
+  assert.equal(BASELINE.writeMsPerEvent * 3, 0.741); // original fast gate remains intact
+  assert.equal(checkBudgets(fixture(CI_BASELINE), CI_BASELINE).find((c) => c.label === 'write ms/event')!.limit, 4.998);
+});
+
 test('check mode pins the workload and rejects malformed CLI arguments', () => {
   assert.deepEqual(parseArgs([]), { members: 2000, check: false });
   assert.deepEqual(parseArgs(['--check']), { members: 2000, check: true });
@@ -68,14 +109,16 @@ test('check mode pins the workload and rejects malformed CLI arguments', () => {
 
 test('a budget breach produces a real nonzero process exit without a database', () => {
   const script = new URL('../scripts/event-store-bench.ts', import.meta.url).href;
-  for (const [factor, expectedStatus] of [[1, 0], [4, 1]]) {
+  for (const [name, factor, expectedStatus] of [
+    ['BASELINE', 1, 0], ['BASELINE', 4, 1], ['CI_BASELINE', 1, 0], ['CI_BASELINE', 4, 1],
+  ] as const) {
     const child = spawnSync(process.execPath, ['--input-type=module', '-e', `
-      import { BASELINE, reportBudgets } from ${JSON.stringify(script)};
+      import { ${name} as BASELINE, reportBudgets } from ${JSON.stringify(script)};
       process.exitCode = reportBudgets({
         members: BASELINE.members, events: BASELINE.events,
         writeMs: BASELINE.writeMsPerEvent * BASELINE.events * ${factor},
         reads: Object.entries(BASELINE.reads).map(([label, ms]) => ({ label, ms })),
-      });
+      }, console.log, BASELINE);
     `], { encoding: 'utf8' });
     assert.equal(child.status, expectedStatus, child.stderr);
     assert.match(child.stdout, expectedStatus ? /threshold result: FAIL/ : /threshold result: PASS/);

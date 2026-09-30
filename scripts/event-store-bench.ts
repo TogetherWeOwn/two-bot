@@ -35,6 +35,12 @@ import { MESSAGE_RUNGS, type EventType } from '../src/core/events.ts';
 // samples. Refresh only with measured evidence, not to turn a regression green. Write budget is
 // 3x baseline; reads have a 10ms floor for shared-runner scheduling noise.
 export const BASELINE = {
+  name: 'agent-testdb',
+  runtime: {
+    node: '24', postgres: '17', platform: 'linux', arch: 'x64',
+    fsync: 'off', full_page_writes: 'off', synchronous_commit: 'off',
+    wal_sync_method: 'fdatasync', shared_buffers: '512MB', max_wal_size: '1GB', checkpoint_timeout: '5min',
+  },
   members: 2000,
   events: 8667,
   writeMsPerEvent: 0.247,
@@ -48,6 +54,42 @@ export const BASELINE = {
   },
 };
 
+// Durable CI calibration, not a relaxed agent-testdb limit. Median of three
+// samples (1.674, 1.666, 1.654 ms/event), with identical src/, migrations and
+// lockfile to PR base b0a26a5e. Node 24.21 / stock Postgres 17.11, settings on.
+// Evidence: https://github.com/TogetherWeOwn/two-bot/actions/runs/36656843442/job/109702952854
+// Keep the original fast profile; uncalibrated environments fail closed.
+export const CI_BASELINE = {
+  ...BASELINE,
+  name: 'ci-postgres',
+  runtime: {
+    ...BASELINE.runtime,
+    fsync: 'on', full_page_writes: 'on', synchronous_commit: 'on', shared_buffers: '128MB',
+  },
+  writeMsPerEvent: 1.666,
+  reads: {
+    'funnel count (type+time)': 0.343,
+    'joiners DISTINCT (windowed)': 0.381,
+    'stage DISTINCT (unwindowed)': 0.567,
+    'member rung lookup': 0.328,
+    'hasEvent probe': 0.300,
+    'write series (recorded_at scan)': 1.978,
+  },
+};
+
+export function baselineForEnvironment(environment: Record<string, string>, ci = false) {
+  const actual: Record<string, string> = {
+    ...environment,
+    node: /^v?(\d+)\./.exec(environment.node ?? '')?.[1] ?? '',
+    postgres: /^(\d+)\./.exec(environment.postgres ?? '')?.[1] ?? '',
+  };
+  const baseline = [BASELINE, CI_BASELINE].find((candidate) =>
+    (!ci || candidate === CI_BASELINE) &&
+    Object.entries(candidate.runtime).every(([key, expected]) => actual[key] === expected));
+  if (!baseline) throw new Error('runtime does not match a recorded benchmark baseline; record comparable calibration before using --check');
+  return baseline;
+}
+
 export interface BenchMetrics {
   members: number;
   events: number;
@@ -55,14 +97,17 @@ export interface BenchMetrics {
   reads: Array<{ label: string; ms: number }>;
 }
 
-export function checkBudgets(metrics: BenchMetrics) {
+export function checkBudgets(metrics: BenchMetrics, baseline = BASELINE) {
+  // Calibrations are recorded to 0.001 ms/event; avoid a binary 4.997999...
+  // ceiling rejecting the inclusive, mathematically exact 4.998 boundary.
+  const writeLimit = Number((baseline.writeMsPerEvent * 3).toFixed(3));
   const checks = [
-    { label: 'members', actual: metrics.members, baseline: BASELINE.members, limit: BASELINE.members, exact: true },
-    { label: 'events', actual: metrics.events, baseline: BASELINE.events, limit: BASELINE.events, exact: true },
-    { label: 'write ms/event', actual: metrics.writeMs / metrics.events, baseline: BASELINE.writeMsPerEvent, limit: BASELINE.writeMsPerEvent * 3, exact: false },
-    ...Object.entries(BASELINE.reads).map(([label, baseline]) => ({
+    { label: 'members', actual: metrics.members, baseline: baseline.members, limit: baseline.members, exact: true },
+    { label: 'events', actual: metrics.events, baseline: baseline.events, limit: baseline.events, exact: true },
+    { label: 'write ms/event', actual: metrics.writeMs / metrics.events, baseline: baseline.writeMsPerEvent, limit: writeLimit, exact: false },
+    ...Object.entries(baseline.reads).map(([label, recorded]) => ({
       label, actual: metrics.reads.find((r) => r.label === label)?.ms ?? NaN,
-      baseline, limit: Math.max(10, baseline * 3), exact: false,
+      baseline: recorded, limit: Math.max(10, recorded * 3), exact: false,
     })),
   ];
   return checks.map((c) => ({
@@ -71,9 +116,9 @@ export function checkBudgets(metrics: BenchMetrics) {
   }));
 }
 
-export function reportBudgets(metrics: BenchMetrics, log: (line: string) => void = console.log): number {
-  const checks = checkBudgets(metrics);
-  log('  baseline 2026-09-30 / Node 24 / agent-testdb; reads = median of 7 warm runs:');
+export function reportBudgets(metrics: BenchMetrics, log: (line: string) => void = console.log, baseline = BASELINE): number {
+  const checks = checkBudgets(metrics, baseline);
+  log(`  baseline 2026-09-30 / Node 24 / ${baseline.name}; reads = median of 7 warm runs:`);
   for (const c of checks) {
     log(`    ${c.pass ? 'PASS' : 'FAIL'} ${c.label.padEnd(31)} actual=${c.actual.toFixed(3)} baseline=${c.baseline.toFixed(3)} limit=${c.limit.toFixed(3)}`);
   }
@@ -132,7 +177,10 @@ async function main() {
       current_setting('max_wal_size') AS max_wal_size,
       current_setting('checkpoint_timeout') AS checkpoint_timeout`).get<Record<string, string>>();
     if (!environment) throw new Error('benchmark runtime settings were not returned');
-    console.log(`  runtime: ${JSON.stringify({ node: process.version, platform: process.platform, arch: process.arch, ...environment })}`);
+    const runtime = { node: process.version, platform: process.platform, arch: process.arch, ...environment };
+    console.log(`  runtime: ${JSON.stringify(runtime)}`);
+    const baseline = options.check ? baselineForEnvironment(runtime, process.env.CI === 'true') : BASELINE;
+    if (options.check) console.log(`  calibration profile: ${baseline.name}`);
 
     const base = Date.parse('2023-01-01T00:00:00.000Z');
     const iso = (ms: number) => new Date(ms).toISOString();
@@ -223,7 +271,7 @@ async function main() {
     console.log(`  events indexes:`);
     for (const i of indexSizes) console.log(`    ${i.indexname.padEnd(28)} ${i.size}`);
     if (options.check) {
-      process.exitCode = reportBudgets({ members: N, events, writeMs, reads });
+      process.exitCode = reportBudgets({ members: N, events, writeMs, reads }, console.log, baseline);
     } else {
       console.log(`  exploratory run; use --check with ${BASELINE.members} members for baseline PASS/FAIL.`);
     }
