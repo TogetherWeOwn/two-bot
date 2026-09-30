@@ -41,6 +41,7 @@ import { resolve } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { startMockDiscord, type MockDiscord } from '../tools/mock-discord/server.ts';
+import { assertTestDatabaseHost } from './test-db-guard.ts';
 
 const ROOT = resolve(fileURLToPath(import.meta.url), '../..');
 
@@ -58,7 +59,7 @@ export interface RunbookHealthReport {
 }
 
 export interface RunHealthCheckOptions {
-  /** Postgres URL the bot boots against. Never logged. */
+  /** Isolated test Postgres URL the bot boots against. Never logged. */
   databaseUrl: string;
   /** Extra env for the bot child (e.g. PGOPTIONS to pin a test schema). */
   extraEnv?: Record<string, string>;
@@ -159,6 +160,9 @@ function parseLine(raw: string): BotLogLine {
  * test can assert on the report and an operator can read it.
  */
 export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<RunbookHealthReport> {
+  // The child connects AND migrates. Refuse before any mock, port, or process
+  // starts, including callers that bypass the CLI.
+  const databaseUrl = assertTestDatabaseHost(opts.databaseUrl, 'TWO_DATABASE_URL');
   const timeoutMs = opts.timeoutMs ?? 90_000;
   const checks: HealthCheckResult[] = [];
   const pass = (id: string, detail: string) => checks.push({ id, status: 'pass', detail });
@@ -273,10 +277,16 @@ export async function runHealthCheck(opts: RunHealthCheckOptions): Promise<Runbo
         env: {
           ...process.env,
           ...(opts.extraEnv ?? {}),
+          // Credentials take precedence over env; DISCORD_BOT_TOKEN also wins
+          // over DISCORD_TOKEN. Neither inherited values nor extraEnv may
+          // retarget this mock harness. Disable preloads/env files as well.
+          CREDENTIALS_DIRECTORY: '',
+          NODE_OPTIONS: '',
+          DISCORD_BOT_TOKEN: 'mock.token.value',
           DISCORD_TOKEN: 'mock.token.value',
           DISCORD_API_BASE: mock.apiBase,
           DISCORD_GUILD_ID: mock.guildId,
-          TWO_DATABASE_URL: opts.databaseUrl,
+          TWO_DATABASE_URL: databaseUrl,
           // The variable the container image sets. Bound to loopback so this
           // check never opens a port off the machine running it.
           TWO_HEALTH_PORT: String(port),
@@ -535,7 +545,14 @@ if (invokedDirectly) {
   }
   const databaseUrl = process.env.TWO_DATABASE_URL?.trim() ?? '';
   if (!databaseUrl) {
-    console.error('health-check: TWO_DATABASE_URL is not set. Point it at a Postgres database.');
+    console.error('health-check: TWO_DATABASE_URL is not set. Point it at an isolated test Postgres database.');
+    process.exit(2);
+  }
+
+  try {
+    assertTestDatabaseHost(databaseUrl, 'TWO_DATABASE_URL');
+  } catch (err) {
+    console.error(`health-check: ${(err as Error).message}`);
     process.exit(2);
   }
 
