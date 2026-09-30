@@ -42,7 +42,9 @@ registerHooks({
             return {
               prepare(sql) {
                 trace('prepare ' + sql);
-                const match = /^SELECT COUNT\\(\\*\\) AS n FROM ([a-z_]+)$/.exec(sql);
+                // The probe COUNT must be schema-qualified: an unqualified read
+                // hides schema-USAGE denials behind 42P01 (see pg-restore.ts).
+                const match = /^SELECT COUNT\\(\\*\\) AS n FROM public\\.([a-z_]+)$/.exec(sql);
                 if (!match) return forbidden('unexpected SQL ' + sql);
                 const table = match[1];
                 fail('prepare', table);

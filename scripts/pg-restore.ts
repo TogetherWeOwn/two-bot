@@ -17,9 +17,10 @@
  * not run migrations and does not open a transaction, so it is safe to point at
  * a database you care about. TWO_RESTORE_URL is optional for a dry run - with
  * it you also get the target's current row counts, without it you still get a
- * full check of the file. A missing target table (SQLSTATE 42P01) is information;
- * any other target-probe failure exits 1 with `DRY RUN TARGET PROBE FAILED`,
- * while still reporting that the backup file was verified:
+ * full check of the file. A missing target table (SQLSTATE 42P01 on the
+ * schema-qualified probe COUNT) is information; any other target-probe
+ * failure exits 1 with `DRY RUN TARGET PROBE FAILED`, while still reporting
+ * that the backup file was verified:
  *
  *   node scripts/pg-restore.ts /var/backups/two-bot/two-funnel-<stamp>.ndjson.gz --dry-run
  *
@@ -122,6 +123,13 @@ if (dryRun) {
   // Read the target's current rows where we can, but do not create them. A
   // table that is not there yet is information, not an error: it tells the
   // operator the real restore will have migrations to apply first.
+  //
+  // The COUNT is schema-qualified on purpose. PostgreSQL silently drops
+  // search-path schemas the role cannot USE from name resolution, so an
+  // unqualified COUNT on an existing-but-inaccessible table raises 42P01 -
+  // the missing-table code - and would misreport a permission denial as
+  // "the restore would migrate first". The qualified form surfaces that
+  // denial as 42501 instead, while a genuinely absent table still 42P01s.
   const before: Record<string, string> = {};
   for (const t of DUMP_TABLES) before[t] = '(not checked)';
   let probeFailed = false;
@@ -132,7 +140,7 @@ if (dryRun) {
       try {
         for (const t of DUMP_TABLES) {
           try {
-            const r = await probe.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get<{ n: number }>();
+            const r = await probe.prepare(`SELECT COUNT(*) AS n FROM public.${t}`).get<{ n: number }>();
             before[t] = String(Number(r?.n ?? 0));
           } catch (err) {
             // Diagnose by SQLSTATE, not localized message text or its class:

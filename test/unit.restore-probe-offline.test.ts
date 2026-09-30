@@ -17,7 +17,7 @@ const cli = fileURLToPath(new URL('../scripts/pg-restore.ts', import.meta.url));
 const hooks = fileURLToPath(new URL('./fixtures/restore-probe-hooks.mjs', import.meta.url));
 const open = 'open {"skipMigrations":true,"applicationName":"two-bot-restore"}';
 const countOperations = DUMP_TABLES.flatMap((table) => [
-  `prepare SELECT COUNT(*) AS n FROM ${table}`,
+  `prepare SELECT COUNT(*) AS n FROM public.${table}`,
   `get ${table}`,
 ]);
 
@@ -111,6 +111,10 @@ test('42P01 alone remains informational even with a localized error message', (t
 
 const countFailures: Array<{ name: string; failure: Failure }> = [
   { name: '42501 permission denial', failure: { phase: 'get', code: '42501', message: 'permission denied' } },
+  // A schema-qualified COUNT turns a schema-USAGE denial into 42501, never
+  // 42P01: PostgreSQL only reports 42P01 for the qualified form when the
+  // table is genuinely absent, not when it is merely invisible to the role.
+  { name: '42501 schema-USAGE denial on qualified COUNT', failure: { phase: 'get', code: '42501', message: 'permission denied for schema public' } },
   { name: '08006 connection failure', failure: { phase: 'get', code: '08006', message: 'connection failure', table: 'members' } },
   { name: 'ECONNRESET transport failure', failure: { phase: 'get', code: 'ECONNRESET', message: 'connection reset' } },
   { name: 'uncoded runtime failure', failure: { phase: 'get', message: 'synthetic runtime rejection' } },
