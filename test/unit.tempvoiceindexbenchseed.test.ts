@@ -80,7 +80,7 @@ for (const guilds of [1, 2, 100]) {
   });
 }
 
-test('real benchmark report agrees with the offline stored fixture', () => {
+test('real benchmark channel-and-audit report agrees with the offline stored fixture', () => {
   const storeSource = `
     import assert from 'node:assert/strict';
     ${FakeSeedStore.toString()}
@@ -132,7 +132,7 @@ test('real benchmark report agrees with the offline stored fixture', () => {
   const fixture = JSON.parse(run.stdout.split('\n').find((l) => l.startsWith('fixture:'))!.slice('fixture:'.length));
   assert.deepEqual(fixture, { channels: 38, reservations: 2, interrupted: 1, audits: 81 });
   assert.ok(run.stdout.includes(`${fixture.channels} live channels, ${fixture.reservations} reservations, ${fixture.interrupted} interrupted transitions, ${fixture.audits} audit rows`));
-  assert.match(run.stdout, /write path\s+121 rows/);
+  assert.match(run.stdout, /write path\s+121 channel-and-audit rows \(cooldowns excluded\)/);
 });
 
 test('benchmark seed fails loudly on a refused reservation', async () => {
