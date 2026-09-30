@@ -32,6 +32,7 @@ import {
 import { tempVoiceCommandData, buildTempVoicePanel } from '../src/tempVoice/discord.ts';
 import type { AutomodPolicy } from '../src/automod/types.ts';
 import { openTestDb } from './helpers/testDb.ts';
+import { log } from '../src/core/log.ts';
 
 const GUILD = '1545644954272137297';
 const GENERATOR = '1546211381844512798';
@@ -823,6 +824,86 @@ describe('empty grace', () => {
     assert.equal((await svc.sweep(GUILD)).deleted, 0);
     assert.ok(gateway.channels.has(channelId));
   });
+});
+
+describe('per-channel sweep failures', () => {
+  for (const failure of ['deleteChannel', 'occupantsOf'] as const) {
+    test(`${failure} failure retains provenance and does not starve later channels`, async (t) => {
+      const svc = service();
+      async function emptyGeneratedChannel(userId: string): Promise<string> {
+        const outcome = await join(svc, userId);
+        assert.equal(outcome.status, 'created');
+        const channelId = outcome.status === 'created' ? outcome.channelId : '';
+        gateway.channels.get(channelId)!.members = [];
+        await svc.onVoiceStateChange({ guildId: GUILD, userId, fromChannelId: channelId, toChannelId: null });
+        clock++;
+        return channelId;
+      }
+      const failedId = await emptyGeneratedChannel(OWNER);
+      const healthyId = await emptyGeneratedChannel(OTHER);
+      const vanishedId = await emptyGeneratedChannel(ROLE);
+      gateway.channels.delete(vanishedId);
+      const unownedId = gateway.seed('1600000000000009998', 'manual room').id;
+
+      // Even a forged provenance row must not make Lobby eligible for deletion.
+      const claim = await store.reserveIfUnderCaps({
+        guildId: GUILD, generatorId: GENERATOR, categoryId: CATEGORY, ownerId: '1600000000000009997',
+        name: 'Lobby', createdAt: new Date(clock).toISOString(),
+        maxPerUser: 1, maxPerGuild: 40, cooldownSeconds: 0,
+      });
+      assert.ok(claim.ok);
+      assert.ok(await store.attach(claim.row.id, LOBBY));
+      await store.setEmptySince(claim.row.id, new Date(clock).toISOString());
+      const failedRow = await store.getByChannel(GUILD, failedId);
+      const error = new TempVoiceGatewayError('Missing Permissions', MISSING_PERMISSIONS_CODE);
+      if (failure === 'deleteChannel') {
+        const original = gateway.deleteChannel.bind(gateway);
+        t.mock.method(gateway, 'deleteChannel', async (channelId: string, reason: string) => {
+          if (channelId === failedId) throw error;
+          return original(channelId, reason);
+        });
+      } else {
+        const original = gateway.occupantsOf.bind(gateway);
+        t.mock.method(gateway, 'occupantsOf', async (channelId: string) => {
+          if (channelId === failedId) throw error;
+          return original(channelId);
+        });
+      }
+      const errors = t.mock.method(log, 'error', () => {});
+      clock += 120_000;
+
+      assert.deepEqual(await svc.sweep(GUILD), { adopted: 0, deleted: 1, rowsDropped: 1, reservationsDropped: 0 });
+      assert.deepEqual(await store.getByChannel(GUILD, failedId), failedRow, 'failure must retain the row and empty marker');
+      assert.ok(gateway.channels.has(failedId));
+      assert.equal(await store.getByChannel(GUILD, healthyId), null);
+      assert.equal(gateway.channels.has(healthyId), false);
+      assert.equal(await store.getByChannel(GUILD, vanishedId), null);
+
+      // A consistently failing first row must not starve the next sweep either.
+      const nextId = await emptyGeneratedChannel(OTHER);
+      clock += 120_000;
+      assert.deepEqual(await svc.sweep(GUILD), { adopted: 0, deleted: 1, rowsDropped: 0, reservationsDropped: 0 });
+      assert.deepEqual(await store.getByChannel(GUILD, failedId), failedRow);
+      assert.equal(await store.getByChannel(GUILD, nextId), null);
+      assert.equal(gateway.channels.has(nextId), false);
+      assert.deepEqual(gateway.deleteCalls.map((call) => call.channelId), [healthyId, nextId]);
+      assert.ok(gateway.channels.has(LOBBY));
+      assert.ok(gateway.channels.has(GENERATOR));
+      assert.ok(gateway.channels.has(unownedId));
+      assert.ok(await store.getByChannel(GUILD, LOBBY));
+      assert.deepEqual(
+        errors.mock.calls.filter((call) => call.arguments[0] === 'temp_voice_sweep_channel_failed')
+          .map((call) => call.arguments[1]),
+        Array.from({ length: 2 }, () => ({ guildId: GUILD, channelId: failedId, err: String(error) })),
+      );
+
+      // Once the gateway recovers, the original provenance still authorizes retry.
+      t.mock.restoreAll();
+      assert.equal((await svc.sweep(GUILD)).deleted, 1);
+      assert.equal(await store.getByChannel(GUILD, failedId), null);
+      assert.equal(gateway.channels.has(failedId), false);
+    });
+  }
 });
 
 describe('boot reconcile', () => {
