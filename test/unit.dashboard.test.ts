@@ -255,7 +255,7 @@ test('a raid never reaches the headline numbers, and is never deleted either', a
     await member({ member_id: `raid${i}`, joined_at: at });
   }
 
-  const d = await buildDashboard(t.db, { now: NOW, weeks: 6, anomalies: TEST_ANOMALIES });
+  const d = await buildDashboard(t.db, { guildId: GUILD, now: NOW, weeks: 6, anomalies: TEST_ANOMALIES });
   const raidWeek = d.weeks.find((w) => w.weekStart === '2026-02-02')!;
 
   assert.equal(raidWeek.joins, 3, 'only the real joins count');
@@ -301,7 +301,7 @@ test('the gate number reaches the page, and a backfilled row does not fake a sta
     if (cleared) await gateCleared(id, at, 'backfill:member_list');
   }
 
-  const d = await buildDashboard(t.db, { now: NOW, weeks: 4, anomalies: TEST_ANOMALIES });
+  const d = await buildDashboard(t.db, { guildId: GUILD, now: NOW, weeks: 4, anomalies: TEST_ANOMALIES });
   assert.deepEqual(d.gateOverall, {
     observed: 2,
     cleared: 1,
@@ -325,7 +325,7 @@ test('bots are not members, and never land in a cohort', async () => {
   await join('botty', '2026-02-24T11:00:00.000Z', 'invite:good');
   await member({ member_id: 'botty', joined_at: '2026-02-24T11:00:00.000Z' }, 1);
 
-  const d = await buildDashboard(t.db, { now: NOW, weeks: 4, anomalies: TEST_ANOMALIES });
+  const d = await buildDashboard(t.db, { guildId: GUILD, now: NOW, weeks: 4, anomalies: TEST_ANOMALIES });
   assert.equal(d.weeks.find((w) => w.weekStart === '2026-02-23')!.joins, 1);
   assert.equal(d.humansInServer, 1);
   assert.equal(d.cohorts.find((c) => c.weekStart === '2026-02-23')!.size, 1);
@@ -349,14 +349,14 @@ test('active means the last 7 days, and leavers do not count as active', async (
   });
   await member({ member_id: 'lurker', joined_at: '2026-01-01T00:00:00.000Z' });
 
-  const d = await buildDashboard(t.db, { now: NOW, weeks: 4, anomalies: TEST_ANOMALIES });
+  const d = await buildDashboard(t.db, { guildId: GUILD, now: NOW, weeks: 4, anomalies: TEST_ANOMALIES });
   assert.equal(d.active7d, 1, 'only "here"');
   assert.equal(d.active30d, 2, '"here" and "stale"');
   assert.equal(d.joinedNeverSpoke, 2, '"stale" has no first message/voice recorded, and "lurker"');
 });
 
 test('with no joins at all the page still renders, and says nothing rather than zero', async () => {
-  const d = await buildDashboard(t.db, { now: NOW, weeks: 4, anomalies: TEST_ANOMALIES });
+  const d = await buildDashboard(t.db, { guildId: GUILD, now: NOW, weeks: 4, anomalies: TEST_ANOMALIES });
   assert.equal(d.thisWeek.joins, 0);
   assert.equal(d.retentionOverall.d7, null, 'no cohort at all is not 0% retention');
   assert.ok(d.caveats.some((c) => c.includes('No join has an invite source yet')));
@@ -374,6 +374,7 @@ test('the rendered page carries the real numbers, not just a template', async ()
   await member({ member_id: 'a', joined_at: '2026-02-24T10:00:00.000Z', last_active_at: '2026-03-01T00:00:00.000Z' });
 
   const d = await buildDashboard(t.db, {
+    guildId: GUILD,
     now: NOW,
     weeks: 4,
     anomalies: TEST_ANOMALIES,
@@ -400,6 +401,7 @@ test('with an empty funnel the member count falls back to the snapshot census, l
   // The state before the bot is deployed: nothing in the members table, but a
   // real audit on disk. Reporting 0 real members would be false, not cautious.
   const d = await buildDashboard(t.db, {
+    guildId: GUILD,
     now: NOW,
     weeks: 4,
     anomalies: TEST_ANOMALIES,
@@ -431,6 +433,7 @@ test('a live funnel always beats the snapshot, however stale the snapshot is', a
   await member({ member_id: 'a', joined_at: '2026-02-24T10:00:00.000Z', last_active_at: '2026-03-01T00:00:00.000Z' });
 
   const d = await buildDashboard(t.db, {
+    guildId: GUILD,
     now: NOW,
     weeks: 4,
     anomalies: TEST_ANOMALIES,
@@ -447,7 +450,7 @@ test('a live funnel always beats the snapshot, however stale the snapshot is', a
 });
 
 test('no funnel and no census reports nothing rather than inventing a number', async () => {
-  const d = await buildDashboard(t.db, { now: NOW, weeks: 4, anomalies: TEST_ANOMALIES });
+  const d = await buildDashboard(t.db, { guildId: GUILD, now: NOW, weeks: 4, anomalies: TEST_ANOMALIES });
   assert.equal(d.memberCountSource, 'none');
   assert.equal(d.realHumans, 0);
   assert.equal(d.memberCountAsOf, null);
@@ -455,6 +458,7 @@ test('no funnel and no census reports nothing rather than inventing a number', a
 
 test('html escaping: a channel name cannot inject markup', async () => {
   const d = await buildDashboard(t.db, {
+    guildId: GUILD,
     now: NOW,
     weeks: 2,
     anomalies: TEST_ANOMALIES,

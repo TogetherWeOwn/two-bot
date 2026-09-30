@@ -15,9 +15,12 @@ npm run dashboard -- --json    # the same numbers as JSON, for piping somewhere
 npm run dashboard -- --weeks 26
 ```
 
-It reads the bot's own Postgres database (`TWO_DATABASE_URL`). There is no
-separate analytics store, no nightly sync, and
-therefore nothing that can drift out of agreement with the bot.
+It reads the bot's own Postgres database (`TWO_DATABASE_URL`), restricted to
+`DISCORD_GUILD_ID`. Both values are required; a missing or whitespace-only guild
+is refused before opening the database, including in `--serve` mode. Members,
+joins, leaves, voice durations, channel events and gate history all come from
+that one guild. Audit snapshots in `TWO_DATA_DIR` must be for the same guild.
+There is no separate analytics store or nightly sync.
 
 The HTML file is entirely self-contained — no fonts, no scripts, no CDN. You can
 mail it, post it in Discord, or open it with no network at all and it looks the
@@ -185,7 +188,7 @@ Top-level fields:
 | Field | Type | Meaning |
 |---|---|---|
 | `generatedAt` | string (ISO instant) | When the numbers were built; `thisWeek` covers `[thisWeek.start, generatedAt)` |
-| `guildId` | string \| null | Discord guild the events came from; null when the log is empty |
+| `guildId` | string \| null | Configured `DISCORD_GUILD_ID`, even when that guild has no events (legacy nullable shape retained) |
 | `thisWeek` / `lastWeek` | `{ start, joins, leaves, net }` | `start` is the Monday (`YYYY-MM-DD`) of the week; `net` = joins − leaves, counted numbers only |
 | `active7d` / `active30d` | number | Members still here with `last_active_at` in the window; leavers never count |
 | `humansInServer` | number | Non-bot members who have not left (Discord's member-list number) |

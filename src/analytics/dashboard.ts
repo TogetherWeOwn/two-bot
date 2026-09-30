@@ -214,6 +214,8 @@ export interface ChannelSnapshot {
 }
 
 export interface BuildOptions {
+  /** The one guild whose members and events this dashboard reports. */
+  guildId: string;
   /** Defaults to now. Injected so tests are not time-dependent. */
   now?: Date;
   /** How many weeks of history to chart. */
@@ -409,31 +411,33 @@ export function channelState(row: {
 // The build
 // ---------------------------------------------------------------------------
 
-export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<DashboardData> {
+export async function buildDashboard(db: Db, opts: BuildOptions): Promise<DashboardData> {
+  const guildId = opts.guildId?.trim();
+  if (!guildId) throw new Error('dashboard: guildId is required.');
   const now = opts.now ?? new Date();
   const weekCount = opts.weeks ?? 12;
   const anomalies = opts.anomalies ?? ANOMALIES;
   const snapshot = opts.channelSnapshot ?? null;
 
-  // One scan of each table. See rule 1 at the top of the file.
+  // Read rows for one guild only. See rule 1 at the top of the file.
   const members = await db
     .prepare(
       `SELECT member_id, joined_at, join_source, gate_cleared_at, first_message_at,
               first_voice_at, last_active_at, left_at
          FROM members
-        WHERE NOT is_bot`,
+        WHERE guild_id = ? AND NOT is_bot`,
     )
-    .all<MemberRow>();
+    .all<MemberRow>(guildId);
 
   const joinEvents = await db
     .prepare(
-      `SELECT member_id, occurred_at, source FROM events WHERE event_type = 'member_join'`,
+      `SELECT member_id, occurred_at, source FROM events WHERE guild_id = ? AND event_type = 'member_join'`,
     )
-    .all<{ member_id: string | null; occurred_at: string; source: string }>();
+    .all<{ member_id: string | null; occurred_at: string; source: string }>(guildId);
 
   const leaveEvents = await db
-    .prepare(`SELECT occurred_at FROM events WHERE event_type = 'member_leave'`)
-    .all<{ occurred_at: string }>();
+    .prepare(`SELECT occurred_at FROM events WHERE guild_id = ? AND event_type = 'member_leave'`)
+    .all<{ occurred_at: string }>(guildId);
 
   // Average voice session length, over known-start sessions only (TOG-5684).
   // Raw rows in, one tested code path out: the shared helper parses each
@@ -441,8 +445,8 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
   // bot-down gap can never silently shorten the mean. Rule 1 holds - the DB
   // is asked for rows, the arithmetic stays here in JS where tests reach it.
   const voiceEnds = await db
-    .prepare(`SELECT metadata FROM events WHERE event_type = 'voice_session_end'`)
-    .all<{ metadata: string | null }>();
+    .prepare(`SELECT metadata FROM events WHERE guild_id = ? AND event_type = 'voice_session_end'`)
+    .all<{ metadata: string | null }>(guildId);
   const voiceDurationSummary = summarizeVoiceDurations(
     voiceEnds.map((r) => parseVoiceEndMetadata(r.metadata)),
   );
@@ -450,9 +454,9 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
   const channelEvents = await db
     .prepare(
       `SELECT source, occurred_at FROM events
-        WHERE source LIKE 'channel:%' AND occurred_at >= ?`,
+        WHERE guild_id = ? AND source LIKE 'channel:%' AND occurred_at >= ?`,
     )
-    .all<{ source: string; occurred_at: string }>(iso(now.getTime() - 30 * DAY_MS));
+    .all<{ source: string; occurred_at: string }>(guildId, iso(now.getTime() - 30 * DAY_MS));
 
   // What we know about the rules gate, and from when. Two different things:
   // the first clearing we watched happen live (after which a member who never
@@ -462,9 +466,9 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
   // which for a backfill is exactly when the roster was read.
   const gateEvents = await db
     .prepare(
-      `SELECT source, occurred_at, recorded_at FROM events WHERE event_type = 'gate_cleared'`,
+      `SELECT source, occurred_at, recorded_at FROM events WHERE guild_id = ? AND event_type = 'gate_cleared'`,
     )
-    .all<{ source: string; occurred_at: string; recorded_at: string }>();
+    .all<{ source: string; occurred_at: string; recorded_at: string }>(guildId);
   const liveGate = gateEvents.filter((e) => !e.source.startsWith('backfill:'));
   const gateWatchedSince = liveGate.length
     ? liveGate.reduce((a, e) => (e.occurred_at < a ? e.occurred_at : a), liveGate[0].occurred_at)
@@ -477,12 +481,8 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
       )
     : null;
 
-  const guildRow = await db
-    .prepare(`SELECT guild_id FROM events ORDER BY id DESC LIMIT 1`)
-    .get<{ guild_id: string }>();
-
-  // Bots are excluded from members above; joinEvents still carries them, so
-  // filter by the member set we kept.
+  // Both reads are scoped to the same guild, so member IDs cannot collide
+  // with foreign humans. Bots are excluded by the member set we kept.
   const humanIds = new Set(members.map((m) => m.member_id));
   const humanJoins = joinEvents.filter((e) => e.member_id && humanIds.has(e.member_id));
 
@@ -726,7 +726,7 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
 
   return {
     generatedAt: now.toISOString(),
-    guildId: guildRow?.guild_id ?? null,
+    guildId,
     thisWeek: slim(thisWeekRow),
     lastWeek: slim(lastWeekRow),
     active7d,
