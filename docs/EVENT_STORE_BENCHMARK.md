@@ -21,10 +21,18 @@ environments, not interchangeable write baselines. Applying the fast-container
 Verified CI calibration evidence:
 
 - [Run 36656843442 / check job 109702952854](https://github.com/TogetherWeOwn/two-bot/actions/runs/36656843442/job/109702952854), 2026-09-30.
-- Measured head: `b64abf1ceec8ba39b8b518cff35d40b65f3c9c3a`.
-- PR base: `b0a26a5e3882dd0784d208079f309893e2ede7e8`.
-- `git diff b0a26a5e b64abf1c -- src migrations package.json package-lock.json`
-  is empty: the EventStore implementation, schema and dependencies were unchanged.
+- PR head: `b64abf1ceec8ba39b8b518cff35d40b65f3c9c3a`.
+- Actually measured checkout: GitHub CI merge `08cbb8befa66a60708025662e541243ff9e6247a`,
+  merging that head into main `2d05db020b35c2889c1aa300e2ae0f775dd2c0bb`.
+  The checkout log confirms both parents and the full merge SHA.
+- `git diff 2d05db02 08cbb8be -- src migrations package.json package-lock.json`
+  is empty: the measured EventStore implementation, schema and dependencies were
+  identical to the main reference, not a newly regressed implementation.
+- [Main reference CI run 36656673228](https://github.com/TogetherWeOwn/two-bot/actions/runs/36656673228)
+  completed successfully on `2d05db020b35c2889c1aa300e2ae0f775dd2c0bb`.
+- The PR head itself has no src/migration/dependency changes from its original
+  branch point `b0a26a5e3882dd0784d208079f309893e2ede7e8`. The calibration proof
+  above uses the actual tested merge tree and its green main parent instead.
 - All three fixed workloads and all six read budgets passed. Only the invalid
   cross-environment write comparison failed; the required wrapper passed.
 - These data establish a calibration mismatch. They do not isolate exactly how
