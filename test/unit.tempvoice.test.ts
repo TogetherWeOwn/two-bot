@@ -487,6 +487,19 @@ describe('rename throttling', () => {
     assert.equal(throttle.ready('c', 3001), false);
   });
 
+  test('rejection keeps a newer same-name queue while rolling back the failed window', () => {
+    const throttle = new RenameThrottle();
+    throttle.seed('c', 1000);
+    const at = 1000 + RENAME_MIN_INTERVAL_MS;
+    throttle.request('c', 'wanted-name', at);
+    // A successor acknowledged while Discord answers repeats the failed name.
+    throttle.request('c', 'wanted-name', at + 1);
+    throttle.rejected('c', 'wanted-name', at);
+    assert.equal(throttle.pending('c', 'original'), 'wanted-name');
+    assert.equal(throttle.ready('c', at), true);
+    assert.equal(throttle.ready('c', at - 1), false, 'the failed attempt must still spend no window');
+  });
+
   test('opens again once the window passes', () => {
     const throttle = new RenameThrottle();
     throttle.request('c', 'one', 0);
@@ -1183,6 +1196,37 @@ describe('owner controls', () => {
     assert.equal(gateway.channels.get(channelId)!.name, 'first');
     assert.equal(gateway.renameCalls.length, 2, 'a definitive flush failure is never retried');
     assert.match((await svc.rename(ctx(OWNER, channelId), 'valid')).message, /Renamed to/);
+  });
+
+  test('a definitively rejected attempt keeps a newer same-name queue', async (t) => {
+    await setup();
+    const before = await store.getByChannel(GUILD, channelId);
+    const entered = deferred();
+    const release = deferred();
+    t.after(() => release.resolve());
+    let rejectOnce = true;
+    const renameChannel = gateway.renameChannel.bind(gateway);
+    t.mock.method(gateway, 'renameChannel', async (id: string, name: string) => {
+      if (rejectOnce) {
+        rejectOnce = false;
+        entered.resolve();
+        await release.promise;
+        throw new TempVoiceGatewayError('Missing Permissions', MISSING_PERMISSIONS_CODE);
+      }
+      await renameChannel(id, name);
+    });
+    const first = assert.rejects(svc.rename(ctx(OWNER, channelId), 'wanted-name'), /Missing Permissions/);
+    await entered.promise;
+    // A successor acknowledged while Discord answers repeats the failed name.
+    clock += 1000;
+    assert.match((await svc.rename(ctx(OWNER, channelId), 'wanted-name')).message, /queued/);
+    release.resolve();
+    await first;
+    gateway.failRename = null;
+    clock += RENAME_MIN_INTERVAL_MS;
+    await svc.sweep(GUILD);
+    assert.equal(gateway.channels.get(channelId)!.name, 'wanted-name', 'only the failed attempt is discarded');
+    assert.equal((await store.getByChannel(GUILD, channelId))?.lastRenamedAt !== before?.lastRenamedAt, true);
   });
 
   test('other definitive Discord rename refusals also discard intent', async () => {
