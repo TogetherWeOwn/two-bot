@@ -81,6 +81,7 @@ export function inviteUrl(code: string): string {
 export class CampaignStore {
   private db: Db;
   private cache = new Map<string, { value: Campaign | null; expiresAt: number }>();
+  private inFlight = new Map<string, Promise<Campaign | null>>();
   private ttlMs: number;
   private negativeTtlMs: number;
   private now: () => number;
@@ -104,6 +105,29 @@ export class CampaignStore {
     const hit = this.cache.get(slug);
     if (hit && hit.expiresAt > this.now()) return hit.value;
 
+    // Share the query, not just its cached result: simultaneous cold or expired
+    // lookups for one slug must not each open a database round trip.
+    const pending = this.inFlight.get(slug);
+    if (pending) return pending;
+
+    const request = this.readCampaign(slug);
+    this.inFlight.set(slug, request);
+    try {
+      const value = await request;
+      // A write may invalidate this request while it is reading. Its existing
+      // waiters can finish, but it must not repopulate the cache after that write.
+      if (this.inFlight.get(slug) === request) {
+        const ttl = value === null ? this.negativeTtlMs : this.ttlMs;
+        this.cache.set(slug, { value, expiresAt: this.now() + ttl });
+      }
+      return value;
+    } finally {
+      // Failures are never cached; a later lookup can retry immediately.
+      if (this.inFlight.get(slug) === request) this.inFlight.delete(slug);
+    }
+  }
+
+  private async readCampaign(slug: string): Promise<Campaign | null> {
     const row = await this.db
       .prepare(
         `SELECT slug, invite_code, label, disabled_at, created_at
@@ -117,7 +141,7 @@ export class CampaignStore {
         created_at: string;
       }>(slug);
 
-    const value: Campaign | null = row
+    return row
       ? {
           slug: row.slug,
           inviteCode: row.invite_code,
@@ -126,15 +150,6 @@ export class CampaignStore {
           createdAt: row.created_at,
         }
       : null;
-
-    // Misses are cached too, but at a short negative TTL. Otherwise a bot
-    // walking URLs turns every 404 into a database query, which is the
-    // cheapest denial of service anyone could mount against us - while a
-    // full-TTL miss would keep 404ing a just-added slug (the CLI runs in a
-    // separate process) for up to 30s after --add (TOG-9926).
-    const ttl = value === null ? this.negativeTtlMs : this.ttlMs;
-    this.cache.set(slug, { value, expiresAt: this.now() + ttl });
-    return value;
   }
 
   async list(): Promise<Campaign[]> {
@@ -196,6 +211,7 @@ export class CampaignStore {
       );
     }
     this.cache.delete(c.slug);
+    this.inFlight.delete(c.slug);
   }
 
   /** Stop listing a campaign as current. The link keeps redirecting. */
@@ -204,6 +220,7 @@ export class CampaignStore {
       .prepare(`UPDATE invite_campaigns SET disabled_at = ? WHERE slug = ? AND disabled_at IS NULL`)
       .run(at, slug);
     this.cache.delete(slug);
+    this.inFlight.delete(slug);
     return r.changes > 0;
   }
 }
