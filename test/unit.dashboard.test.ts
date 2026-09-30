@@ -452,7 +452,12 @@ for (const [label, advancedAt] of [
   });
 }
 
-for (const eventType of ['third_message', 'voice_session_start', 'voice_session_end'] as const) {
+const retainedActivityTypes = [
+  'first_message', 'second_message', 'third_message',
+  'first_voice_session', 'voice_session_start', 'voice_session_end',
+] as const;
+
+for (const eventType of retainedActivityTypes) {
   for (const [label, advancedAt] of [
     ['exactly-now', '2026-09-30T12:00:00.000Z'],
     ['future', '2026-10-01T12:00:00.000Z'],
@@ -493,7 +498,7 @@ test('retained activity events respect rolling bounds, human membership and dedu
   const store = new EventStore(t.db);
   for (const [id, at] of boundaries) {
     await member({ member_id: id, joined_at: old, first_message_at: old, first_voice_at: old, last_active_at: future });
-    for (const eventType of ['third_message', 'voice_session_start', 'voice_session_end'] as const) {
+    for (const eventType of retainedActivityTypes) {
       await store.record({ guildId: GUILD, memberId: id, eventType, occurredAt: at, source: 'channel:tracked' });
     }
   }

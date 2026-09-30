@@ -581,7 +581,7 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
   const activityEvents = await db
     .prepare(
       `SELECT member_id, occurred_at FROM events
-        WHERE event_type IN ('first_message', 'third_message', 'first_voice_session',
+        WHERE event_type IN ('first_message', 'second_message', 'third_message', 'first_voice_session',
                              'voice_session_start', 'voice_session_end')
           AND occurred_at >= ? AND occurred_at < ?`,
     )
