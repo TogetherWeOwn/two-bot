@@ -1,0 +1,69 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "packages": {
+    ".": {
+      "release-type": "node",
+      "include-component-in-tag": false,
+      "pull-request-header": "## Summary\n\nPublish the next two-bot release from Conventional Commits on main.\n\n## Changes\n\nUpdate CHANGELOG.md, package versions and the release manifest; generated release notes follow below.\n\n## Testing\n\nMetadata-only release; no local runtime test applies. The release workflow dispatches CI, secret-scan and PR lint on this branch after generation. Their results must be green on the exact head before review and merge.\n\n### Release notes",
+      "pull-request-footer": "Refs: TOG-9865",
+      "changelog-sections": [
+        {
+          "type": "perf",
+          "section": "Changed"
+        },
+        {
+          "type": "refactor",
+          "section": "Changed",
+          "hidden": true
+        },
+        {
+          "type": "revert",
+          "section": "Changed"
+        },
+        {
+          "type": "feat",
+          "section": "Added"
+        },
+        {
+          "type": "fix",
+          "section": "Fixed"
+        },
+        {
+          "type": "deps",
+          "section": "Changed",
+          "hidden": true
+        },
+        {
+          "type": "docs",
+          "section": "Documentation",
+          "hidden": true
+        },
+        {
+          "type": "chore",
+          "section": "Miscellaneous",
+          "hidden": true
+        },
+        {
+          "type": "test",
+          "section": "Tests",
+          "hidden": true
+        },
+        {
+          "type": "ci",
+          "section": "CI",
+          "hidden": true
+        },
+        {
+          "type": "build",
+          "section": "Build",
+          "hidden": true
+        },
+        {
+          "type": "style",
+          "section": "Style",
+          "hidden": true
+        }
+      ]
+    }
+  }
+}

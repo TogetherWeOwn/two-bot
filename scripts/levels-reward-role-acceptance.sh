@@ -19,6 +19,14 @@
 #   bash scripts/levels-reward-role-acceptance.sh --selftest   # offline checks
 set -uo pipefail
 
+for arg in "$@"; do
+  if [[ "$arg" == "--help" ]]; then
+    printf '%s\n' 'Usage: bash scripts/levels-reward-role-acceptance.sh [--selftest]'
+    printf '%s\n' 'Live run: MEMBER=<staging-user-id> ROLE_ID=<staging-role-id> OUT=<evidence-directory> bash scripts/levels-reward-role-acceptance.sh'
+    exit 0
+  fi
+done
+
 STAGING_GUILD_ID='1545644954272137297'
 LIVE_GUILD_ID='326474832151838730'
 STAGING_APP_ID='1469137636663758888'

@@ -37,6 +37,11 @@ import { openDb, isPostgresSpec } from '../src/store/db.ts';
 import { restore, inspect, DUMP_TABLES } from '../src/store/dump.ts';
 import { migrate } from '../src/store/migrate.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/pg-restore.ts <backup.ndjson.gz> (--force | --dry-run)');
+  process.exit(0);
+}
+
 const argv = process.argv.slice(2);
 const flags = new Set(argv.filter((a) => a.startsWith('--')));
 const file = argv.find((a) => !a.startsWith('--'));
@@ -133,6 +138,18 @@ if (dryRun) {
   console.log(`\nrestore: ${contents.rows} rows read and verified. Nothing was written.`);
   console.log('DRY RUN VERIFIED');
   process.exit(0);
+}
+
+// Validate the backup before opening or migrating the target (TOG-10566): a
+// wrong-version or truncated archive must be refused before openDb/migrate
+// can change target schema. restore() re-reads the file before its own
+// destructive transaction; this check only orders the CLI's side effects.
+try {
+  await inspect(file);
+} catch (err) {
+  console.error(`restore: ${String(err)}`);
+  console.error('RESTORE FAILED - the backup is invalid; the target was not opened or migrated.');
+  process.exit(1);
 }
 
 const db = await openDb(url!, { skipMigrations: true, applicationName: 'two-bot-restore' });

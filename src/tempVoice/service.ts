@@ -16,7 +16,7 @@
 import { log } from '../core/log.ts';
 import type { AutomodPolicy } from '../automod/types.ts';
 import { filterChannelName, renderNameTemplate } from './nameFilter.ts';
-import { RenameThrottle } from './rename.ts';
+import { RenameThrottle, findRenameCollision } from './rename.ts';
 import type { TempVoiceConfig, TempVoiceControl } from './config.ts';
 import {
   CREATE_BURST_PER_GUILD, CREATE_BURST_PER_USER, CREATE_BURST_WINDOW_SECONDS,
@@ -232,10 +232,15 @@ export class TempVoiceService {
     const outcome = await this.gateway.deleteChannel(channelId, reason);
     await this.store.deleteById(row.id);
     this.throttle.forget(channelId);
-    await this.store.audit(
-      { guildId, actorId: null, channelId, action: 'delete', outcome, reason },
-      this.iso(),
-    );
+    try {
+      await this.store.audit(
+        { guildId, actorId: null, channelId, action: 'delete', outcome, reason },
+        this.iso(),
+      );
+    } catch (err) {
+      // Cleanup is complete; an audit outage must not hide its outcome from callers.
+      log.error('temp_voice_delete_audit_failed', { guildId, channelId, outcome, err: String(err) });
+    }
     log.info('temp_voice_deleted', { guildId, channelId, outcome, reason });
     return outcome;
   }
@@ -586,35 +591,66 @@ export class TempVoiceService {
 
     for (const row of await this.store.listLive(guildId)) {
       const channelId = row.channelId!;
-      const occupants = await this.gateway.occupantsOf(channelId);
-      if (occupants === null) {
-        await this.store.deleteById(row.id);
-        this.throttle.forget(channelId);
-        report.rowsDropped++;
-        continue;
-      }
-      if (occupants.length > 0) {
-        if (row.pendingOwnerId !== null && !(await this.recoverOwnerChange(guildId, channelId))) continue;
-        if (row.emptySince !== null) await this.store.setEmptySince(row.id, null);
-        await this.flushPendingRename(row, channelId);
-        continue;
-      }
-      if (row.emptySince === null) {
-        await this.store.setEmptySince(row.id, this.iso());
-        continue;
-      }
-      if (this.now() - Date.parse(row.emptySince) < graceMs) continue;
-      if ((await this.deleteGeneratedChannel(guildId, channelId, 'temp-voice sweep: empty past grace')) !== 'refused') {
-        report.deleted++;
+      try {
+        const occupants = await this.gateway.occupantsOf(channelId);
+        if (occupants === null) {
+          await this.store.deleteById(row.id);
+          this.throttle.forget(channelId);
+          report.rowsDropped++;
+          continue;
+        }
+        if (occupants.length > 0) {
+          if (row.pendingOwnerId !== null && !(await this.recoverOwnerChange(guildId, channelId))) continue;
+          if (row.emptySince !== null) await this.store.setEmptySince(row.id, null);
+          await this.flushPendingRename(row, channelId);
+          continue;
+        }
+        if (row.emptySince === null) {
+          await this.store.setEmptySince(row.id, this.iso());
+          continue;
+        }
+        if (this.now() - Date.parse(row.emptySince) < graceMs) continue;
+        if ((await this.deleteGeneratedChannel(guildId, channelId, 'temp-voice sweep: empty past grace')) !== 'refused') {
+          report.deleted++;
+        }
+      } catch (err) {
+        // Keep failed gateway/deletion provenance for retry without starving later rows.
+        log.error('temp_voice_sweep_channel_failed', { guildId, channelId, err: String(err) });
       }
     }
     return report;
+  }
+
+  /**
+   * Live sibling names with queued renames applied: a name another channel
+   * has queued but not yet landed still occupies that name, or two owners
+   * racing for the same name would mint a duplicate at flush time.
+   */
+  private async siblingNames(guildId: string): Promise<Array<{ channelId: string; name: string }>> {
+    return (await this.store.listLive(guildId)).map((sibling) => ({
+      channelId: sibling.channelId!,
+      name: this.throttle.pending(sibling.channelId!, sibling.name) ?? sibling.name,
+    }));
   }
 
   /** Apply a rename that was throttled earlier, once its window has opened. */
   private async flushPendingRename(row: TempVoiceRow, channelId: string): Promise<void> {
     const pending = this.throttle.pending(channelId, row.name);
     if (!pending || !this.throttle.ready(channelId, this.now())) return;
+    // Re-check: a sibling may have taken the name while it was queued (a
+    // queued name occupies it for new rename requests, but the create template
+    // can still render it). Landing a duplicate is worse than dropping the
+    // queue, so the flush is refused and audited like a direct collision.
+    const collision = findRenameCollision(pending, channelId, await this.siblingNames(row.guildId));
+    if (collision) {
+      this.throttle.forget(channelId);
+      await this.store.audit(
+        { guildId: row.guildId, actorId: null, channelId, action: 'name', outcome: 'refused', reason: 'name_collision' },
+        this.iso(),
+      );
+      log.error('temp_voice_rename_flush_collision', { channelId, name: pending });
+      return;
+    }
     try {
       await this.gateway.renameChannel(channelId, pending);
       const at = this.iso();
@@ -695,6 +731,19 @@ export class TempVoiceService {
       userId: ctx.actorId,
     });
     if (!filtered.ok) return this.record(ctx, channelId, 'name', { status: 'refused', message: filtered.reason });
+
+    // Discord permits duplicate voice-channel names, so check the persisted
+    // live rows before touching Discord or the throttle: a rename that clones
+    // a sibling's name is refused with a named error, never minted. The
+    // channel being renamed never collides with itself. Throttle state is
+    // deliberately untouched on this path - a refused rename spends nothing.
+    const collision = findRenameCollision(filtered.name, channelId, await this.siblingNames(ctx.guildId));
+    if (collision) {
+      return this.record(ctx, channelId, 'name', {
+        status: 'refused',
+        message: `Another voice channel is already named **${collision.name}**. Pick a different name.`,
+      });
+    }
 
     const decision = this.throttle.request(channelId, filtered.name, this.now());
     if (!decision.apply) {

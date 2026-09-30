@@ -11,6 +11,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - run: ./scripts/ci/check-src-snowflakes.sh
       - run: ./scripts/ci/check-src-snowflakes.test.sh

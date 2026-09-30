@@ -14,12 +14,25 @@ on:
     types: [opened, edited, synchronize, reopened, ready_for_review]
   push:
     branches: [main]
+  # Dispatched by the release workflow (TOG-9865) on release-please branches:
+  # PRs opened with GITHUB_TOKEN trigger no workflows, so the required
+  # `pr-lint` check would never run on the release PR without this path.
+  # The release workflow passes the release PR number; this job fetches the
+  # title/body via the API (needs pull-requests: read) and validates them with
+  # the same ci/check-pr-conventions.py script as the pull_request path.
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Release PR number to validate"
+        required: true
+        type: string
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
-  group: pr-lint-${{ github.event.pull_request.number || github.sha }}
+  group: pr-lint-${{ github.event.pull_request.number || inputs.pr_number || github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -28,10 +41,10 @@ jobs:
   # commit, so the fork cannot supply the script that decides whether to trust
   # it; scripts/ci/check-fork-gate-coverage.mjs pins the exact step list.
   fork-gate:
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.base.sha || github.sha }}
           persist-credentials: false
@@ -39,13 +52,13 @@ jobs:
         env:
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: ./scripts/ci/refuse-fork-pr.sh
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
       - name: Install trusted workflow parser
         run: npm ci --ignore-scripts --prefix scripts/ci
       - name: Read candidate workflows
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: candidate
@@ -57,74 +70,57 @@ jobs:
   pr-lint:
     name: pr-lint
     needs: fork-gate
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     # Job-level, not workflow-wide: the fork-gate coverage check rejects
     # workflow env because it would also reach the trusted gate.
     env:
       REQUIRE_CARD_REF: "true"
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve PR title/body
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Passed via env (not inlined into the script) so titles/bodies
+          # containing quotes can't break shell parsing.
+          EVENT_TITLE: ${{ github.event.pull_request.title }}
+          EVENT_BODY: ${{ github.event.pull_request.body }}
+          EVENT_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Validating release PR #$PR_NUMBER via the API."
+            TITLE=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title --jq .title)
+            BODY=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body --jq .body)
+            AUTHOR=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json author --jq .author.login)
+            # The default checkout is the dispatch ref (the release branch
+            # head = the PR head), which is the SHA required checks match on.
+            EVENT=pull_request
+          else
+            TITLE="$EVENT_TITLE"
+            BODY="$EVENT_BODY"
+            AUTHOR="$EVENT_AUTHOR"
+            EVENT='${{ github.event_name }}'
+          fi
+          {
+            echo "title<<PR_EOF"
+            echo "$TITLE"
+            echo "PR_EOF"
+            echo "body<<PR_EOF"
+            echo "$BODY"
+            echo "PR_EOF"
+            echo "author=$AUTHOR"
+            echo "event=$EVENT"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Check title, body and commits
         env:
-          EVENT: ${{ github.event_name }}
-          TITLE: ${{ github.event.pull_request.title }}
-          BODY: ${{ github.event.pull_request.body }}
-          AUTHOR: ${{ github.event.pull_request.user.login }}
+          EVENT: ${{ steps.pr.outputs.event }}
+          TITLE: ${{ steps.pr.outputs.title }}
+          BODY: ${{ steps.pr.outputs.body }}
+          AUTHOR: ${{ steps.pr.outputs.author }}
           COMMITS: ${{ toJSON(github.event.commits) }}
-        shell: python3 {0}
-        run: |
-          import json, os, re, sys
-
-          TYPES = "feat|fix|perf|refactor|test|docs|build|ci|chore|revert|style|security"
-          HEADER = re.compile(rf"^({TYPES})(\([A-Za-z0-9._/,-]+\))?!?: \S.*$")
-          HELP = ("Expected a Conventional Commits header, e.g. 'fix(auth): refuse expired sudo "
-                  "sessions' or 'feat(events): shareable event page'. Allowed types: "
-                  + TYPES.replace("|", ", ") + ". Put the card ID in the body as 'Refs: TOG-1234'.")
-
-          def header_errors(text):
-              errs = []
-              if not HEADER.match(text):
-                  errs.append("not a Conventional Commits header")
-              if len(text) > 100:
-                  errs.append(f"{len(text)} chars (max 100)")
-              if text.rstrip().endswith("."):
-                  errs.append("ends with a period")
-              return errs
-
-          failed = False
-          if os.environ["EVENT"] == "pull_request":
-              title = os.environ.get("TITLE", "").strip()
-              body = os.environ.get("BODY", "") or ""
-              author = os.environ.get("AUTHOR", "")
-              if author.endswith("[bot]") and author.startswith(("dependabot", "renovate")):
-                  if header_errors(title):
-                      print(f"::warning::{author} title '{title}' is not conventional; set "
-                            "commit-message.prefix (e.g. chore(deps)) in the bot config.")
-                  sys.exit(0)
-              errs = header_errors(title)
-              if errs:
-                  failed = True
-                  print(f"::error title=PR title::'{title}': {'; '.join(errs)}. {HELP}")
-              text = re.sub(r"<!--.*?-->", "", body, flags=re.S)
-              if len(re.sub(r"\s", "", text)) < 40:
-                  failed = True
-                  print("::error title=PR body::The description is empty. Say what changed, why, "
-                        "and how it was tested (see the PR template).")
-              if not re.search(r"\bTOG-\d+\b", body):
-                  level = "error" if os.environ["REQUIRE_CARD_REF"] == "true" else "warning"
-                  failed = failed or level == "error"
-                  print(f"::{level} title=Card reference::Add 'Refs: TOG-1234' to the PR body.")
-          else:
-              for c in json.loads(os.environ.get("COMMITS") or "[]") or []:
-                  subject = (c.get("message") or "").splitlines()[0] if c.get("message") else ""
-                  if subject.startswith(("Merge ", "Revert \"")):
-                      continue
-                  errs = header_errors(subject)
-                  if errs:
-                      failed = True
-                      print(f"::error title=Commit on main::{c.get('id','')[:10]} '{subject}': "
-                            f"{'; '.join(errs)}. Merge PRs with squash and the PR title as the "
-                            "commit title.")
-          if failed:
-              sys.exit(1)
-          print("PR conventions OK")
+        run: python3 ci/check-pr-conventions.py

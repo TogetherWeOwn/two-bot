@@ -230,6 +230,187 @@ test('valid snowflake conversions are unchanged', () => {
   assert.equal(snowflakeToDate(MID).toISOString().slice(0, 4), '2026');
 });
 
+// --- TOG-9989 regressions: probe-found bugs ------------------------------------
+
+test('titled voice with no footer id ignores a stray description mention (TOG-10025)', () => {
+  // Logger titled descriptions carry the display name, never a member mention.
+  // A mention in the text with an id-less footer is incidental (a thank-you, a
+  // quoted reply) - minting attribution from it fabricates a voice session.
+  assert.equal(
+    parseVoiceMessage({
+      id: '1',
+      timestamp: at,
+      embeds: [{
+        title: 'Member joined voice channel',
+        description: '**ghostly.og** joined #general, thanks <@1298143954834817030>!',
+        footer: { text: 'ID: n/a' },
+      }],
+    }),
+    null,
+  );
+  // The footer-id path is untouched: titled rows with a real footer still parse.
+  assert.equal(
+    parseVoiceMessage({ id: '1', timestamp: at, embeds: [voiceEmbed()] })?.memberId,
+    MID,
+  );
+  // Wick titleless embeds keep the footer-then-mention fallback.
+  assert.equal(
+    parseVoiceMessage({
+      id: '1',
+      timestamp: at,
+      embeds: [{
+        description: `**<@${MID}> joined voice channel <#1175127344072118405>**`,
+        footer: { text: 'n/a' },
+      }],
+    })?.memberId,
+    MID,
+  );
+});
+
+test('placeholder usernames are truncated rows, not churn (TOG-10026)', () => {
+  for (const name of ['TODO', 'todo', 'TBD', 'FIXME', 'xxx', '???', '?', 'Placeholder', 'UNKNOWN', 'Unknown User']) {
+    assert.equal(
+      parseLeaveAttribution({ id: '1', timestamp: at, content: `${name} left the server. vanity` }),
+      null,
+      `placeholder refused: ${name}`,
+    );
+  }
+  // Real usernames still parse, including ones merely CONTAINING a keyword.
+  assert.equal(
+    parseLeaveAttribution({ id: '1', timestamp: at, content: 'TodoFan99 left the server. vanity' })?.username,
+    'TodoFan99',
+  );
+  assert.equal(
+    parseLeaveAttribution({ id: '1', timestamp: at, content: 'X#1 left the server. vanity' })?.username,
+    'X#1',
+  );
+});
+
+test('padded member titles still parse, whitespace-only titles still guess nothing (TOG-10027)', () => {
+  const padded = (title: string) => ({
+    id: '1',
+    timestamp: at,
+    embeds: [{ title, description: `<@${MID}> hi`, footer: { text: `ID: ${MID}` } }],
+  });
+  assert.equal(parseMemberLogMessage(padded('Member joined '))?.kind, 'join');
+  assert.equal(parseMemberLogMessage(padded('  Member left  '))?.kind, 'leave');
+  // A whitespace-only title is a titled embed we do not recognise: the channel
+  // hint must not mint a join from it.
+  assert.equal(parseMemberLogMessage(padded('   '), 'join'), null);
+});
+
+// --- TOG-9989 extensions: garbage, truncated, TODO markers -----------------------
+
+test('TODO-marker rows parse as null across every parser', () => {
+  assert.equal(memberIdFromEmbed({ footer: { text: 'ID: TODO' } }), null);
+  assert.equal(
+    parseVoiceMessage({ id: '1', timestamp: at, embeds: [{ title: 'TODO', description: 'TODO', footer: { text: 'TODO' } }] }),
+    null,
+  );
+  assert.equal(
+    parseVoiceMessage({ id: '1', timestamp: 'TODO', embeds: [voiceEmbed()] }),
+    null,
+    'TODO timestamp is a truncated row',
+  );
+  // A drifted TODO channel hint on a titleless embed mints nothing (and a
+  // titled embed ignores any hint - title wins, covered in unit.backfill).
+  const titleless = { id: '1', timestamp: at, embeds: [{ description: `<@${MID}> x`, footer: { text: `ID: ${MID}` } }] };
+  assert.equal(
+    parseMemberLogMessage(titleless, 'TODO' as never),
+    null,
+    'TODO channel hint mints nothing',
+  );
+});
+
+test('truncated logger rows refuse instead of half-parsing', () => {
+  // Timestamp with trailing garbage: corrupt export row, not a date.
+  assert.equal(
+    parseVoiceMessage({
+      id: '1',
+      timestamp: `${at}xyz`,
+      embeds: [voiceEmbed()],
+    }),
+    null,
+  );
+  // Numeric timestamps never appear in export JSON (strings only).
+  assert.equal(
+    parseVoiceMessage({ id: '1', timestamp: 1784988735762, embeds: [voiceEmbed()] }),
+    null,
+  );
+  // Mid-phrase truncation of a Wick description: no complete kind phrase.
+  assert.equal(
+    parseVoiceMessage({
+      id: '1',
+      timestamp: at,
+      embeds: [{ description: `**<@${MID}> joined voice cha`, footer: { text: `ID: ${MID}` } }],
+    }),
+    null,
+  );
+  // A footer truncated below snowflake width with no mention: no record.
+  assert.equal(
+    parseVoiceMessage({
+      id: '1',
+      timestamp: at,
+      embeds: [{ title: 'Member joined voice channel', description: 'x', footer: { text: 'ID: 15397' } }],
+    }),
+    null,
+  );
+  // Boundary: exactly 15 digits still counts as a snowflake.
+  assert.equal(memberIdFromEmbed({ footer: { text: 'ID: 123456789012345' } }), '123456789012345');
+});
+
+test('channel-name mapping refuses near-miss suffixes', () => {
+  assert.equal(memberLogKindForChannel('member-join-log'), 'join', 'hyphen boundary is a separator');
+  assert.equal(memberLogKindForChannel('member-join2'), 'join', 'digit boundary is a separator');
+  assert.equal(memberLogKindForChannel('member-joinx'), null, 'letter suffix is a different channel');
+  assert.equal(memberLogKindForChannel('premember-join'), null, 'letter prefix is a different channel');
+  assert.equal(memberLogKindForChannel('MEMBER-JOIN'), 'join', 'case-insensitive');
+});
+
+test('title-case and wick move variants keep their kinds', () => {
+  assert.equal(
+    parseVoiceMessage({
+      id: '1',
+      timestamp: at,
+      embeds: [{ title: 'MEMBER JOINED VOICE CHANNEL', description: 'x', footer: { text: `ID: ${MID}` } }],
+    })?.kind,
+    'join',
+  );
+  // Wick historic "moved" phrasing is a channel change, not a fresh join.
+  assert.equal(
+    parseVoiceMessage({
+      id: '1',
+      timestamp: at,
+      embeds: [{
+        description: `**<@${MID}> moved voice channel <#1175127344072118405>**`,
+        footer: { text: `ID: ${MID}` },
+      }],
+    })?.kind,
+    'change',
+  );
+  // An explicitly empty title is titleless: description mention still resolves.
+  assert.equal(
+    parseVoiceMessage({
+      id: '1',
+      timestamp: at,
+      embeds: [{
+        title: '',
+        description: `**<@${MID}> joined voice channel <#1175127344072118405>**`,
+        footer: { text: 'n/a' },
+      }],
+    })?.memberId,
+    MID,
+  );
+});
+
+test('multiline leave content still attributes', () => {
+  // Export JSON may carry a literal newline inside the username slot from a
+  // copy-paste; the match spans it and the tail still classifies.
+  const r = parseLeaveAttribution({ id: '1', timestamp: at, content: 'SomeUser\nleft the server. vanity' });
+  assert.equal(r?.username, 'SomeUser');
+  assert.equal(r?.joinedVia, 'vanity');
+});
+
 // --- no-throw, no-partial-write sweep -------------------------------------------
 
 test('every parser returns records with write-safe timestamps', () => {

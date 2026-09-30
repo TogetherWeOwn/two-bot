@@ -14,7 +14,7 @@ import assert from 'node:assert/strict';
 import test, { after, beforeEach, describe } from 'node:test';
 import { loadTempVoiceConfig, TEMP_VOICE_CONTROLS, type TempVoiceConfig, type TempVoiceControl } from '../src/tempVoice/config.ts';
 import { filterChannelName, renderNameTemplate } from '../src/tempVoice/nameFilter.ts';
-import { RenameThrottle, RENAME_MIN_INTERVAL_MS } from '../src/tempVoice/rename.ts';
+import { RenameThrottle, RENAME_MIN_INTERVAL_MS, findRenameCollision, foldChannelNameForCollision } from '../src/tempVoice/rename.ts';
 import { TempVoiceStore } from '../src/tempVoice/store.ts';
 import { openPostgres } from '../src/store/postgresDriver.ts';
 import {
@@ -32,6 +32,7 @@ import {
 import { tempVoiceCommandData, buildTempVoicePanel } from '../src/tempVoice/discord.ts';
 import type { AutomodPolicy } from '../src/automod/types.ts';
 import { openTestDb } from './helpers/testDb.ts';
+import { log } from '../src/core/log.ts';
 
 const GUILD = '1545644954272137297';
 const GENERATOR = '1546211381844512798';
@@ -825,6 +826,131 @@ describe('empty grace', () => {
   });
 });
 
+describe('per-channel sweep failures', () => {
+  for (const outcome of ['deleted', 'missing'] as const) {
+    test(`audit failure after ${outcome} cleanup does not undercount or starve later channels`, async (t) => {
+      const svc = service();
+      const channelIds: string[] = [];
+      for (const userId of [OWNER, OTHER]) {
+        const created = await join(svc, userId);
+        assert.equal(created.status, 'created');
+        const channelId = created.status === 'created' ? created.channelId : '';
+        gateway.channels.get(channelId)!.members = [];
+        await svc.onVoiceStateChange({ guildId: GUILD, userId, fromChannelId: channelId, toChannelId: null });
+        channelIds.push(channelId);
+        clock++;
+      }
+      const [failedAuditId, healthyId] = channelIds;
+      if (outcome === 'missing') {
+        const original = gateway.deleteChannel.bind(gateway);
+        t.mock.method(gateway, 'deleteChannel', async (channelId: string, reason: string) => {
+          if (channelId === failedAuditId) gateway.channels.delete(channelId);
+          return original(channelId, reason);
+        });
+      }
+      const error = new Error('audit unavailable');
+      const audit = store.audit.bind(store);
+      t.mock.method(store, 'audit', async (...args: Parameters<TempVoiceStore['audit']>) => {
+        if (args[0].channelId === failedAuditId && args[0].action === 'delete') throw error;
+        return audit(...args);
+      });
+      const errors = t.mock.method(log, 'error', () => {});
+      clock += 120_000;
+
+      const report = await svc.sweep(GUILD);
+      for (const channelId of channelIds) {
+        assert.equal(gateway.channels.has(channelId), false);
+        assert.equal(await store.getByChannel(GUILD, channelId), null);
+      }
+      assert.equal(await store.countForGuild(GUILD), 0);
+      assert.deepEqual(gateway.deleteCalls.map((call) => call.channelId), [failedAuditId, healthyId]);
+      assert.deepEqual(report, { adopted: 0, deleted: 2, rowsDropped: 0, reservationsDropped: 0 });
+      assert.deepEqual(errors.mock.calls.map((call) => call.arguments), [
+        ['temp_voice_delete_audit_failed', { guildId: GUILD, channelId: failedAuditId, outcome, err: String(error) }],
+      ]);
+      assert.equal((await svc.sweep(GUILD)).deleted, 0, 'completed cleanup is not retried or double-counted');
+    });
+  }
+
+  for (const failure of ['deleteChannel', 'occupantsOf'] as const) {
+    test(`${failure} failure retains provenance and does not starve later channels`, async (t) => {
+      const svc = service();
+      async function emptyGeneratedChannel(userId: string): Promise<string> {
+        const outcome = await join(svc, userId);
+        assert.equal(outcome.status, 'created');
+        const channelId = outcome.status === 'created' ? outcome.channelId : '';
+        gateway.channels.get(channelId)!.members = [];
+        await svc.onVoiceStateChange({ guildId: GUILD, userId, fromChannelId: channelId, toChannelId: null });
+        clock++;
+        return channelId;
+      }
+      const failedId = await emptyGeneratedChannel(OWNER);
+      const healthyId = await emptyGeneratedChannel(OTHER);
+      const vanishedId = await emptyGeneratedChannel(ROLE);
+      gateway.channels.delete(vanishedId);
+      const unownedId = gateway.seed('1600000000000009998', 'manual room').id;
+
+      // Even a forged provenance row must not make Lobby eligible for deletion.
+      const claim = await store.reserveIfUnderCaps({
+        guildId: GUILD, generatorId: GENERATOR, categoryId: CATEGORY, ownerId: '1600000000000009997',
+        name: 'Lobby', createdAt: new Date(clock).toISOString(),
+        maxPerUser: 1, maxPerGuild: 40, cooldownSeconds: 0,
+      });
+      assert.ok(claim.ok);
+      assert.ok(await store.attach(claim.row.id, LOBBY));
+      await store.setEmptySince(claim.row.id, new Date(clock).toISOString());
+      const failedRow = await store.getByChannel(GUILD, failedId);
+      const error = new TempVoiceGatewayError('Missing Permissions', MISSING_PERMISSIONS_CODE);
+      if (failure === 'deleteChannel') {
+        const original = gateway.deleteChannel.bind(gateway);
+        t.mock.method(gateway, 'deleteChannel', async (channelId: string, reason: string) => {
+          if (channelId === failedId) throw error;
+          return original(channelId, reason);
+        });
+      } else {
+        const original = gateway.occupantsOf.bind(gateway);
+        t.mock.method(gateway, 'occupantsOf', async (channelId: string) => {
+          if (channelId === failedId) throw error;
+          return original(channelId);
+        });
+      }
+      const errors = t.mock.method(log, 'error', () => {});
+      clock += 120_000;
+
+      assert.deepEqual(await svc.sweep(GUILD), { adopted: 0, deleted: 1, rowsDropped: 1, reservationsDropped: 0 });
+      assert.deepEqual(await store.getByChannel(GUILD, failedId), failedRow, 'failure must retain the row and empty marker');
+      assert.ok(gateway.channels.has(failedId));
+      assert.equal(await store.getByChannel(GUILD, healthyId), null);
+      assert.equal(gateway.channels.has(healthyId), false);
+      assert.equal(await store.getByChannel(GUILD, vanishedId), null);
+
+      // A consistently failing first row must not starve the next sweep either.
+      const nextId = await emptyGeneratedChannel(OTHER);
+      clock += 120_000;
+      assert.deepEqual(await svc.sweep(GUILD), { adopted: 0, deleted: 1, rowsDropped: 0, reservationsDropped: 0 });
+      assert.deepEqual(await store.getByChannel(GUILD, failedId), failedRow);
+      assert.equal(await store.getByChannel(GUILD, nextId), null);
+      assert.equal(gateway.channels.has(nextId), false);
+      assert.deepEqual(gateway.deleteCalls.map((call) => call.channelId), [healthyId, nextId]);
+      assert.ok(gateway.channels.has(LOBBY));
+      assert.ok(gateway.channels.has(GENERATOR));
+      assert.ok(gateway.channels.has(unownedId));
+      assert.ok(await store.getByChannel(GUILD, LOBBY));
+      assert.deepEqual(
+        errors.mock.calls.filter((call) => call.arguments[0] === 'temp_voice_sweep_channel_failed')
+          .map((call) => call.arguments[1]),
+        Array.from({ length: 2 }, () => ({ guildId: GUILD, channelId: failedId, err: String(error) })),
+      );
+
+      // Once the gateway recovers, the original provenance still authorizes retry.
+      t.mock.restoreAll();
+      assert.equal((await svc.sweep(GUILD)).deleted, 1);
+      assert.equal(await store.getByChannel(GUILD, failedId), null);
+      assert.equal(gateway.channels.has(failedId), false);
+    });
+  }
+});
+
 describe('boot reconcile', () => {
   test('re-adopts a channel that still has somebody in it', async () => {
     const first = service();
@@ -988,6 +1114,105 @@ describe('owner controls', () => {
     const outcome = await svc.rename(ctx(OWNER, channelId), 'badword lounge');
     assert.equal(outcome.status, 'refused');
     assert.notEqual(gateway.channels.get(channelId)!.name, 'badword lounge');
+  });
+
+  test('renaming onto a sibling channel name is refused with a named error, never a duplicate', async () => {
+    // One service, like production: a single shared throttle sees every queue.
+    await setup(config({ maxPerUser: 5 }));
+    const second = await join(svc, OTHER, 'other-champion');
+    assert.equal(second.status, 'created');
+    const otherId = second.status === 'created' ? second.channelId : '';
+    const before = gateway.channels.get(channelId)!.name;
+
+    // The generator template renders "{username}'s channel", so the sibling
+    // holds "other-champion's channel", not the bare username.
+    const outcome = await svc.rename(ctx(OWNER, channelId), "other-champion's channel");
+    assert.equal(outcome.status, 'refused');
+    assert.match(outcome.message, /already named/, 'the refusal must name the collision');
+    assert.match(outcome.message, /other-champion/);
+    assert.equal(gateway.channels.get(channelId)!.name, before, 'a colliding rename must not reach Discord');
+    assert.equal(gateway.channels.get(otherId)!.name, "other-champion's channel", 'the sibling keeps its name');
+  });
+
+  test('a collision check is case-insensitive and fullwidth-folded', async () => {
+    await setup(config({ maxPerUser: 5 }));
+    const second = await join(svc, OTHER, 'Squad Alpha');
+    assert.equal(second.status, 'created');
+
+    // Sibling holds "Squad Alpha's channel" (template-rendered); case,
+    // fullwidth, and the fullwidth apostrophe (NFKC-folds to ') all collide.
+    assert.equal((await svc.rename(ctx(OWNER, channelId), "SQUAD ALPHA'S CHANNEL")).status, 'refused');
+    assert.equal((await svc.rename(ctx(OWNER, channelId), 'Ｓｑｕａｄ Ａｌｐｈａ＇ｓ ｃｈａｎｎｅｌ')).status, 'refused');
+    assert.equal(gateway.channels.get(channelId)!.name, "owen's channel");
+  });
+
+  test('renaming to the channel’s own current name is not a collision', async () => {
+    await setup();
+    assert.equal((await svc.rename(ctx(OWNER, channelId), 'first')).status, 'ok');
+    clock += RENAME_MIN_INTERVAL_MS;
+    assert.equal((await svc.rename(ctx(OWNER, channelId), 'first')).status, 'ok');
+    assert.equal(gateway.channels.get(channelId)!.name, 'first');
+  });
+
+  test('a refused collision spends no throttle budget', async () => {
+    await setup(config({ maxPerUser: 5 }));
+    assert.equal((await join(svc, OTHER, 'room two')).status, 'created');
+
+    assert.equal((await svc.rename(ctx(OWNER, channelId), "room two's channel")).status, 'refused');
+    const outcome = await svc.rename(ctx(OWNER, channelId), 'fresh start');
+    assert.equal(outcome.status, 'ok');
+    assert.equal(gateway.channels.get(channelId)!.name, 'fresh start');
+  });
+
+  test('unicode names survive the rename round trip', async () => {
+    await setup();
+    const names = ['日本語ラウンジ', 'squad Café ☕', 'комната отдыха'];
+    for (const [index, name] of names.entries()) {
+      if (index > 0) clock += RENAME_MIN_INTERVAL_MS;
+      const outcome = await svc.rename(ctx(OWNER, channelId), name);
+      assert.equal(outcome.status, 'ok', JSON.stringify(name));
+      assert.equal(gateway.channels.get(channelId)!.name, name);
+      assert.equal((await store.getByChannel(GUILD, channelId))?.name, name, 'the persisted row must store the exact name');
+    }
+  });
+
+  test('a name another channel queued but has not landed yet still collides', async () => {
+    await setup(config({ maxPerUser: 5 }));
+    const second = await join(svc, OTHER, 'starter name');
+    assert.equal(second.status, 'created');
+    const otherId = second.status === 'created' ? second.channelId : '';
+    // Queue "claimed" on the other channel: throttled, so Discord still holds
+    // the old name while the shared throttle holds the new one.
+    assert.equal((await svc.rename(ctx(OTHER, otherId), 'first pick')).status, 'ok');
+    clock += 60_000;
+    const queued = await svc.rename(ctx(OTHER, otherId), 'claimed');
+    assert.equal(queued.status, 'ok');
+    assert.match(queued.message, /queued/);
+
+    assert.equal((await svc.rename(ctx(OWNER, channelId), 'claimed')).status, 'refused');
+  });
+
+  test('a queued rename a new channel takes in the meantime is dropped, never landed as a duplicate', async () => {
+    await setup(config({ maxPerUser: 5 }));
+    assert.equal((await svc.rename(ctx(OWNER, channelId), 'first pick')).status, 'ok');
+    clock += 60_000;
+    const queued = await svc.rename(ctx(OWNER, channelId), "ava's channel");
+    assert.equal(queued.status, 'ok');
+    assert.match(queued.message, /queued/);
+    // A new member joins; the create template renders the same name the owner
+    // queued. The create path does not collision-check, so the queued flush
+    // must yield rather than land a duplicate.
+    assert.equal((await join(svc, OTHER, 'ava')).status, 'created');
+
+    clock += RENAME_MIN_INTERVAL_MS;
+    await svc.sweep(GUILD);
+    const live = [...gateway.channels.values()].filter((channel) => ![LOBBY, GENERATOR].includes(channel.id));
+    assert.equal(
+      live.filter((channel) => channel.name === "ava's channel").length,
+      1,
+      'exactly one channel may hold the name',
+    );
+    assert.equal(gateway.channels.get(channelId)!.name, 'first pick', 'the queued rename is dropped, not landed');
   });
 
   test('reject removes a member who is already inside', async () => {

@@ -13,7 +13,9 @@
  * the schedule/add/remove paths a reviewer must be able to run offline.
  * Every export of src/automations/scheduler.ts has a case:
  * startScheduler, SchedulerHandle.tick, SchedulerHandle.stop, and
- * SCHEDULER_TICK_MS.
+ * SCHEDULER_TICK_MS - plus the `enabled: false` disable kill-path (TOG-8697),
+ * the scheduling half of disable next to deregistration (disable.ts),
+ * invocation refusal, and no-republish.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -283,4 +285,40 @@ test('stop clears the interval but leaves manual ticks available for ops', async
 
 test('default tick interval is fifteen seconds', () => {
   assert.equal(SCHEDULER_TICK_MS, 15_000);
+});
+
+test('disable: a disabled scheduler fires zero jobs without side effects', async () => {
+  const { store, posts, service } = setup();
+  await schedule(service);
+  let claimed = 0;
+  const origClaim = store.claimDueScheduled.bind(store);
+  store.claimDueScheduled = async (...args) => {
+    claimed++;
+    return origClaim(...args);
+  };
+
+  // putScheduled above audits its own create; the disabled tick must add none.
+  const auditsBeforeTick = store.audits.length;
+  const handle = startScheduler(service, GUILD, { intervalMs: 60_000, now: () => NOW, enabled: false });
+  try {
+    assert.equal(await handle.tick(), 0);
+    assert.equal(posts.length, 0, 'a disabled scheduler must not post');
+    assert.equal(claimed, 0, 'a disabled tick must not touch the store');
+    assert.equal(store.audits.length, auditsBeforeTick, 'a disabled tick must not audit');
+    // Disable is not destructive: the due row is untouched, ready for re-enable.
+    const row = store.rows.get('sched-one');
+    assert.equal(row?.enabled, true);
+    assert.equal(row?.claimToken, null);
+    // The enabled control on the same fixture proves the row was genuinely due.
+    handle.stop();
+    const live = startScheduler(service, GUILD, { intervalMs: 60_000, now: () => NOW });
+    try {
+      assert.equal(await live.tick(), 1);
+      assert.equal(posts.length, 1);
+    } finally {
+      live.stop();
+    }
+  } finally {
+    handle.stop();
+  }
 });

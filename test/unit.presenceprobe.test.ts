@@ -179,6 +179,8 @@ describe('presence probe containment', () => {
     // blast radius to three files is what makes the rule above enforceable.
     const allowed = new Set([
       join('migrations', '0004_presence_probe.sql'),
+      // Aggregate-only scan outcome: no new reader or rendering path.
+      join('migrations', '0041_presence_probe_truncated_scan.sql'),
       join('src', 'jobs', 'presenceProbe.ts'),
       join('scripts', 'presence-trend.ts'),
       join('test', 'unit.presenceprobe.test.ts'),
@@ -198,6 +200,12 @@ describe('presence probe containment', () => {
       // TOG-5718 privacy-retention doc test names the table once, in a comment
       // documenting the deliberate out-of-scope exclusion. No rendering path.
       join('test', 'unit.privacyretention.test.ts'),
+      // TOG-9074 backup path. The dump inventory names every bot-owned table
+      // and the e2e seeds rows to prove the round trip - rows move to and
+      // from a file, never to a page. Same non-rendering status as the role
+      // verifier above.
+      join('src', 'store', 'dump.ts'),
+      join('test', 'e2e.backup.test.ts'),
     ]);
     // The BARE identifier only. `\b` on both sides deliberately does not match
     // `presence_probe_enabled` (a log event name) or `0004_presence_probe.sql`
@@ -226,12 +234,13 @@ describe('presence probe containment', () => {
         .all<{ column_name: string }>()
     ).map((r) => r.column_name);
 
-    // Exactly these four. A member id would break the aggregate-only promise
-    // that makes this acceptable at all; a `human_estimate` column would be a
-    // stored guess that someone eventually publishes. See migration 0004.
+    // Counts and scan outcome only. A member id would break the aggregate-only
+    // promise; a `human_estimate` would be a stored guess eventually published.
+    // The boolean budgets retries without pretending truncation is a floor.
     assert.deepEqual(cols.sort(), [
       'approximate_presence_count',
       'bot_floor',
+      'bot_floor_scan_truncated',
       'guild_id',
       'observed_at',
     ]);

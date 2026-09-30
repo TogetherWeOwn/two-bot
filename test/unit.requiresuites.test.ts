@@ -12,8 +12,12 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { check, tally, parseResults, annotations, POSTGRES_SUITES } from '../scripts/require-suites.ts';
-import type { ReportedTest } from '../scripts/test-report.ts';
+import reporter, { type ReportedTest } from '../scripts/test-report.ts';
 
 const ROOT = '/repo';
 
@@ -42,6 +46,100 @@ function goodRun(): ReportedTest[] {
 
 test('a run where every Postgres suite ran is accepted', () => {
   assert.deepEqual(check(goodRun(), { root: ROOT }), []);
+});
+
+const ONE_TEST = [{ file: 'test/required.test.ts', minTests: 1, why: 'synthetic execution floor' }];
+
+test('one valid pass meets a one-test required floor', () => {
+  assert.deepEqual(check([point(ONE_TEST[0].file)], { root: ROOT, required: ONE_TEST }), []);
+});
+
+test('bare, reason-bearing and empty-reason TODO tests and suites cannot prove execution', async () => {
+  for (const type of ['test', 'suite']) {
+    for (const todo of [true, 'not implemented', '']) {
+      async function* events() {
+        yield {
+          type: 'test:pass',
+          data: { file: `${ROOT}/${ONE_TEST[0].file}`, name: 'placeholder', nesting: 0, details: { type }, todo },
+        };
+      }
+      const lines: string[] = [];
+      for await (const line of reporter(events())) lines.push(line);
+      const rows = parseResults(lines.join(''));
+      assert.equal(rows[0].status, 'pass');
+      assert.equal(rows[0].todo, true);
+      // A TODO suite must fail even if a valid child meets the floor.
+      if (type === 'suite') rows.push(point(ONE_TEST[0].file));
+      const problems = check(rows, { root: ROOT, required: ONE_TEST });
+      assert.ok(problems.some((p) => /required\.test\.ts.*TODO.*placeholder/.test(p)), problems.join('\n'));
+      assert.equal(tally(rows.slice(0, 1), ROOT).size, 0, 'TODOs are not executed test points');
+    }
+  }
+});
+
+test('unregistered TODO points are rejected even in a file allowed to skip', () => {
+  const rows = [point(ONE_TEST[0].file), point('test/optional.test.ts', { todo: true })];
+  assert.ok(check(rows, { root: ROOT, required: ONE_TEST, maySkip: ['test/optional.test.ts'] })
+    .some((p) => /optional\.test\.ts.*TODO/.test(p)));
+});
+
+function malformedPoints(): unknown[] {
+  const good = point(ONE_TEST[0].file);
+  const out: unknown[] = [null, false, 3, 'test', [], {}];
+  const badFields = {
+    file: [undefined, null, 42, '', '   '],
+    name: [undefined, null, 42],
+    nesting: [undefined, null, '0', -1, 0.5],
+    type: [undefined, null, 42, '', 'not-a-node-type'],
+    status: [undefined, null, 42, '', 'not-a-node-status'],
+    skip: [undefined, null, 0, '', 'false'],
+    todo: [undefined, null, 0, '', 'reason'],
+  };
+  for (const [field, values] of Object.entries(badFields)) {
+    for (const value of values) out.push({ ...good, [field]: value });
+  }
+  return out;
+}
+
+test('malformed report points fail before tallying and cannot manufacture a required floor', () => {
+  for (const bad of malformedPoints()) {
+    // Exercise JSON input as well as check(): TypeScript types cannot validate --results.
+    const rows = parseResults(JSON.stringify(bad));
+    const problems = check(rows, { root: ROOT, required: ONE_TEST });
+    assert.ok(problems.some((p) => /malformed.*test point #1/i.test(p)), JSON.stringify(bad));
+    assert.equal(tally(rows, ROOT).size, 0, 'malformed rows must not be counted');
+    assert.doesNotThrow(() => annotations(rows, problems, ROOT));
+    assert.ok(check([point(ONE_TEST[0].file), ...rows], { root: ROOT, required: ONE_TEST }).length,
+      'meeting the floor must not hide a malformed extra row');
+  }
+});
+
+test('--results emits report problems and exits nonzero for TODO and malformed rows without a database', () => {
+  const work = mkdtempSync(join(tmpdir(), 'required-suite-report-'));
+  try {
+    const path = join(work, 'results.ndjson');
+    const env = { PATH: process.env.PATH, GITHUB_ACTIONS: 'true' };
+    const run = (rows: unknown[]) => {
+      writeFileSync(path, rows.map((row) => JSON.stringify(row)).join('\n') + '\n');
+      return spawnSync(process.execPath, ['scripts/require-suites.ts', '--results', path], {
+        cwd: resolve(import.meta.dirname, '..'), env, encoding: 'utf8', timeout: 10_000,
+      });
+    };
+    const greenRows = goodRun().map((row) => ({ ...row, file: row.file.slice(ROOT.length + 1) }));
+    const green = run(greenRows);
+    assert.equal(green.status, 0, green.stdout + green.stderr);
+    for (const bad of [null, { ...point(ONE_TEST[0].file), file: null },
+      { ...point(ONE_TEST[0].file), status: 'not-a-node-status' },
+      point(ONE_TEST[0].file, { todo: true }), point(ONE_TEST[0].file, { type: 'suite', todo: true })]) {
+      const red = run([...greenRows, bad]);
+      assert.equal(red.status, 1, red.stdout + red.stderr);
+      assert.match(red.stdout, /::error title=Postgres suite requirement::/);
+      assert.match(red.stderr, /malformed|TODO/);
+      assert.doesNotMatch(red.stderr, /TypeError/);
+    }
+  } finally {
+    rmSync(work, { recursive: true });
+  }
 });
 
 test('a suite that skipped itself is caught, though the summary counts it as nothing', () => {

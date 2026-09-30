@@ -20,6 +20,11 @@ import { loadRedirectConfig } from '../src/redirect/config.ts';
 import { CampaignStore } from '../src/redirect/campaigns.ts';
 import { startRedirectServer } from '../src/redirect/server.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/redirect.ts');
+  process.exit(0);
+}
+
 setLogLevel((process.env.LOG_LEVEL as 'debug' | 'info' | 'error') || 'info');
 
 const cfg = loadRedirectConfig();
@@ -37,6 +42,10 @@ const server = await startRedirectServer({
   campaigns,
   recorder: handlers,
   fallbackInviteCode: cfg.fallbackInviteCode,
+  // TOG-9924: without this the throttle buckets on the proxy's socket IP and
+  // one crawler 429s every real visitor. The allowlist itself stays env-only
+  // (src/core/settingsCatalog.ts) so a dashboard write can never widen it.
+  trustedProxies: cfg.trustedProxies,
 });
 
 const live = await campaigns.list();

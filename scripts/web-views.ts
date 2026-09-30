@@ -22,6 +22,11 @@ import {
   WEB_CONTRACT_VIEWS,
 } from '../src/store/webContract.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/web-views.ts [--status]');
+  process.exit(0);
+}
+
 const args = new Set(process.argv.slice(2));
 const statusOnly = args.has('--status');
 

@@ -81,6 +81,11 @@ import {
   stagingGuildId,
 } from '../src/staging/spec.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/staging-provision.ts [--apply] [--invite] [--grant-admin <user-id>]');
+  process.exit(0);
+}
+
 const API = 'https://discord.com/api/v10';
 
 const token = process.env.DISCORD_STAGING_BOT_TOKEN;

@@ -185,6 +185,18 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     why: 'the voice-sessions averages CLI itself, not just the helpers underneath it - without this floor a silent skip re-opens the startKnown averaging gap',
   },
   {
+    // TOG-9993. The voice-reconcile sweep run twice end to end through the
+    // real npm entry: byte-identical reports (3 resolved, 4 flagged, 1
+    // complete) and an unchanged events table. Read-only by design, so the
+    // double run is the property; without this floor a future write path or
+    // unstable output would stay green while every re-run drifted. Counted
+    // from the 2 top-level test() blocks; CI's postgres job confirms the
+    // count on the first run after this commit.
+    file: 'test/e2e.voicereconcile-idempotency.test.ts',
+    minTests: 2,
+    why: 'the voice-reconcile idempotency proof itself - without this floor a silent skip re-opens the double-run drift gap',
+  },
+  {
     // TOG-6493. The audit kill switch operated end to end through the real
     // CLI: disengaged status on a fresh schema, halt engages and a second
     // halt changes nothing, seeded pending rows are reported honestly, and
@@ -207,6 +219,30 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     minTests: 5,
     why: 'the presence-trend output CLI itself, not just the helpers underneath it - without this floor a silent skip re-opens the unpinned staffing/event-slot numbers gap',
   },
+  {
+    // TOG-9985. The moderation disable-preflight script executed end to end
+    // through the real script: exit 0 CLEAR on empty state (plain and
+    // --json), exit 1 REFUSED for each partial shape (unban-only,
+    // lockdown-only, both plus a running claim with hand-release SQL) with
+    // --json counts and stranded id lists, and exit 2 could-not-tell for a
+    // missing URL, an unreachable database, a non-postgres URL, and a schema
+    // without the tables. Counted from the 10 top-level test() blocks; CI's
+    // postgres job confirms the count on the first run after this commit.
+    file: 'test/e2e.moderation-disable-preflight.test.ts',
+    minTests: 10,
+    why: 'the moderation-disable-preflight exits themselves, not just the library underneath them - without this floor a silent skip re-opens the wave-through-disable gap',
+  },
+  {
+    // TOG-9998. The dedupe-events repair script run end to end through the
+    // real script: --dry-run counts without deleting, the real run deletes
+    // exactly the copies (keeping the earliest of each cluster) and a second
+    // run deletes nothing with a byte-identical digest. Counted from the 2
+    // top-level test() blocks; CI's postgres job confirms the count on the
+    // first run after this commit.
+    file: 'test/e2e.dedupeevents.test.ts',
+    minTests: 2,
+    why: 'the dedupe-events duplicate-detection and idempotent-delete proof itself - without this floor a silent skip re-opens the phantom-join count gap',
+  },
 ];
 
 /**
@@ -223,10 +259,23 @@ export interface FileTally {
   failed: number;
 }
 
-/** Reduce reporter rows to a per-file tally, keyed by repo-relative path. */
+/** JSON reports are runtime input; a TypeScript cast is not validation. */
+function isReportedTest(row: unknown): row is ReportedTest {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return false;
+  const point = row as Partial<ReportedTest>;
+  return typeof point.file === 'string' && point.file.trim() !== '' &&
+    typeof point.name === 'string' && typeof point.nesting === 'number' &&
+    Number.isInteger(point.nesting) && point.nesting >= 0 &&
+    (point.type === 'test' || point.type === 'suite') &&
+    (point.status === 'pass' || point.status === 'fail') &&
+    typeof point.skip === 'boolean' && typeof point.todo === 'boolean';
+}
+
+/** Reduce valid, non-TODO reporter rows to a per-file tally, keyed by repo-relative path. */
 export function tally(rows: ReportedTest[], root: string = ROOT): Map<string, FileTally> {
   const out = new Map<string, FileTally>();
   for (const row of rows) {
+    if (!isReportedTest(row) || row.todo) continue;
     // The reporter records absolute paths; the manifest is repo-relative so it
     // reads like the file listing and survives being run from anywhere.
     const key = row.file.startsWith(`${root}/`) ? row.file.slice(root.length + 1) : row.file;
@@ -257,8 +306,20 @@ export function check(
   const root = opts.root ?? ROOT;
   const required = opts.required ?? POSTGRES_SUITES;
   const maySkip = opts.maySkip ?? MAY_SKIP;
-  const byFile = tally(rows, root);
   const problems: string[] = [];
+  for (const [index, row] of rows.entries()) {
+    if (!isReportedTest(row)) {
+      problems.push(
+        `malformed report test point #${index + 1}: expected a non-empty file, string name, ` +
+          'non-negative integer nesting, type test/suite, status pass/fail and boolean skip/todo.',
+      );
+    } else if (row.todo) {
+      problems.push(`${row.file}: TODO ${row.type} "${row.name}" does not prove execution (test point #${index + 1}).`);
+    }
+  }
+  // Do not let placeholders or malformed JSON rows manufacture a passing floor.
+  if (problems.length > 0) return problems;
+  const byFile = tally(rows, root);
 
   for (const suite of required) {
     const t = byFile.get(suite.file);
@@ -322,7 +383,7 @@ export function annotations(
   const out: string[] = [];
 
   for (const row of rows) {
-    if (row.status !== 'fail' || row.type === 'suite') continue;
+    if (!isReportedTest(row) || row.todo || row.status !== 'fail' || row.type === 'suite') continue;
     const file = row.file.startsWith(`${root}/`) ? row.file.slice(root.length + 1) : row.file;
     out.push(`::error file=${esc(file)},title=Failing test::${esc(`${file} > ${row.name}`)}`);
   }
@@ -366,6 +427,10 @@ const invokedDirectly =
   process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (invokedDirectly) {
+  if (process.argv.includes('--help')) {
+    console.log('Usage: node scripts/require-suites.ts [--results <report.ndjson>]');
+    process.exit(0);
+  }
   const at = process.argv.indexOf('--results');
   const existing = at >= 0 ? process.argv[at + 1] : undefined;
 
@@ -376,9 +441,42 @@ if (invokedDirectly) {
   if (existing) {
     resultsPath = existing;
   } else {
-    if (!process.env.TWO_TEST_DATABASE_URL?.trim()) {
-      // Fail before spawning dozens of files that all require the same URL.
+    // Fail before spawning dozens of files that all require the same URL —
+    // and refuse a non-test host before any migration runs (TOG-9656). The
+    // allowlist is inline here, not imported, because
+    // test/unit.restartstorageci.test.ts executes this file from a bare
+    // fixture tree containing only this file plus test-report.ts. Mirrors
+    // scripts/test-db-guard.ts, including the query-string refusal:
+    // node-postgres promotes ?host=/?port= over the hostname, so a query
+    // string bypasses any hostname allowlist.
+    const testDbUrl = process.env.TWO_TEST_DATABASE_URL?.trim() ?? '';
+    const allowedTestDbHosts = new Set(['agent-testdb', '127.0.0.1', 'localhost', '::1', '[::1]', 'postgres']);
+    let testDbHost = '';
+    let testDbHasQuery = false;
+    try {
+      const parsedTestDbUrl = new URL(testDbUrl);
+      testDbHost = parsedTestDbUrl.hostname.toLowerCase().replace(/\.$/, '');
+      testDbHasQuery = parsedTestDbUrl.search !== '';
+    } catch {
+      testDbHost = '';
+    }
+    if (!testDbUrl) {
       console.error('require-suites: TWO_TEST_DATABASE_URL is not set. This suite requires Postgres.');
+      process.exit(1);
+    }
+    if (testDbHasQuery) {
+      console.error(
+        'require-suites: TWO_TEST_DATABASE_URL carries a query string, which node-postgres promotes over ' +
+          'the hostname (?host=/?port= retarget the connection), refusing to run. Pass a bare database URL.',
+      );
+      process.exit(1);
+    }
+    if (!allowedTestDbHosts.has(testDbHost)) {
+      console.error(
+        `require-suites: TWO_TEST_DATABASE_URL host "${testDbHost || '(unparsable)'}" is not an isolated test ` +
+          'database, refusing to run. Tests may only target agent-testdb, 127.0.0.1/localhost, or the CI ' +
+          '"postgres" service container; production and staging hosts are never valid test targets.',
+      );
       process.exit(1);
     }
     resultsPath = join(tmpdir(), `two-bot-results-${process.pid}.ndjson`);

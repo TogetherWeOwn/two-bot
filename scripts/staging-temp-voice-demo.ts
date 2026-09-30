@@ -27,6 +27,7 @@ import { Client, GatewayIntentBits } from 'discord.js';
 import { openDb } from '../src/store/db.ts';
 import { migrate } from '../src/store/migrate.ts';
 import { TWO_STAGING_GUILD_ID } from '../src/staging/spec.ts';
+import { assertTestDatabaseHost } from './test-db-guard.ts';
 import { loadTempVoiceConfig } from '../src/tempVoice/config.ts';
 import { TempVoiceStore } from '../src/tempVoice/store.ts';
 import { TempVoiceService, type ControlContext } from '../src/tempVoice/service.ts';
@@ -53,6 +54,8 @@ const token = process.env.DISCORD_STAGING_BOT_TOKEN;
 if (!token) throw new Error('DISCORD_STAGING_BOT_TOKEN is required; this script is staging-only.');
 const databaseUrl = process.env.TWO_TEST_DATABASE_URL;
 if (!databaseUrl) throw new Error('TWO_TEST_DATABASE_URL is required.');
+// TOG-9656: refuse production/staging hosts before opening the staging DB.
+assertTestDatabaseHost(databaseUrl);
 
 const ARTIFACT = process.env.TEMP_VOICE_EVIDENCE ?? 'temp-voice-evidence.ndjson';
 mkdirSync(dirname(join(process.cwd(), ARTIFACT)), { recursive: true });

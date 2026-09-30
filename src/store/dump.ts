@@ -31,6 +31,8 @@
  * backup at an unpleasant hour.
  */
 import { createReadStream, createWriteStream } from 'node:fs';
+import { rename, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { createGunzip, createGzip } from 'node:zlib';
 import { createInterface } from 'node:readline';
 import { once } from 'node:events';
@@ -38,11 +40,31 @@ import { pipeline } from 'node:stream/promises';
 import type { Db } from './driver.ts';
 
 /**
- * Everything the bot owns. The website's own tables are not ours to back up.
+ * Everything the bot owns. The website's own tables are not ours to back up -
+ * and there are none in this database: the website reads the `web_v1` contract
+ * views, so every CREATE TABLE in migrations/ is a bot-owned table and every
+ * one of them is listed here. That is the invariant, and
+ * test/unit.dumpcover.test.ts holds it: if a migration adds a table without
+ * adding it here, the suite fails.
  *
  * The moderation tables are here because losing them is not cosmetic: a lost
  * scheduled unban is a tempban that became permanent, and a lost warn ledger
- * is a moderation history the staff cannot see (TOG-1659 High 5).
+ * is a moderation history the staff cannot see (TOG-1659 High 5). The same
+ * reasoning covers the rest - a lost leveling ledger, scorecard run, guild
+ * setting or pending feed delivery is staff-visible state silently rewound
+ * (TOG-9074).
+ *
+ * Deliberate exclusions (the complete list):
+ * - `schema_migrations` is not dumped. Its contents travel in the manifest's
+ *   `schemaMigrations` field instead, which is what diagnoses an old backup.
+ *   Dumping it would also restore it, and a restore must never mark a
+ *   half-migrated target as fully migrated.
+ *
+ * Order matters: parents come before children (`tickets` before
+ * `ticket_transcripts`, `lfg_posts` before `lfg_roles` before `lfg_signups`,
+ * `feed_relays` before `feed_deliveries`, `rank_ladder` before the tables that
+ * reference it), because restore inserts in manifest order and the foreign
+ * keys are enforced on the way in. The drift test checks this too.
  */
 export const DUMP_TABLES = [
   'events',
@@ -67,8 +89,73 @@ export const DUMP_TABLES = [
   'automod_processed_messages',
   'self_role_audit',
   'self_role_panel_claims',
+  // Web-contract collectors (TOG-9074): counters, ranks, scheduled events,
+  // raid exclusions, the presence instrument, and the contract version row.
+  'guild_counters',
+  'counter_snapshots',
+  'rank_ladder',
+  'member_ranks',
+  'rank_snapshots',
+  'scheduled_events',
+  'member_exclusions',
+  'presence_probe',
+  'web_contract_meta',
+  // Leveling (TOG-9074).
+  'xp_awards',
+  'member_levels',
+  'xp_cooldowns',
+  'level_role_rewards',
+  'level_import_runs',
+  // Community scorecard (TOG-9074).
+  'community_facts',
+  'community_stream_heartbeats',
+  'community_scorecard_runs',
+  'community_scorecard_alerts',
+  // Guild settings and its append-only audit trail (TOG-9074).
+  'guild_settings',
+  'guild_settings_audit',
+  // RSVP, LFG and feed relays (TOG-1649, TOG-9074).
+  'event_rsvps',
+  'lfg_posts',
+  'lfg_roles',
+  'lfg_signups',
+  'feed_relays',
+  'feed_deliveries',
+  // Temporary voice (TOG-9074).
+  'temp_voice_channels',
+  'temp_voice_creates',
+  'temp_voice_audit',
+  // Announcements audit, invite campaigns, audit kill switch (TOG-9074).
+  'announcements_audit_log',
+  'invite_campaigns',
+  'audit_kill_switch',
+  // Internal-actions API state (TOG-9074): in-flight claims and nonces are
+  // short-lived, but a backup that silently drops them is a backup that lies
+  // about what it holds. Restoring a stale in-flight claim is safe - the
+  // claim-staleness check treats a corpse holder as releasable.
+  'internal_action_log',
+  'internal_discord_events',
+  'internal_idempotency',
+  'internal_nonces',
 ] as const;
 export type DumpTable = (typeof DUMP_TABLES)[number];
+
+/**
+ * The tables whose `id` is a BIGSERIAL sequence that a restore must put back.
+ *
+ * `events` was the only one until TOG-9074; every added BIGSERIAL table needs
+ * the same setval treatment or the first write after a restore collides with
+ * a restored row. `audit_kill_switch.id` is deliberately absent: it is an
+ * app-assigned INTEGER (always 1), not a sequence.
+ */
+export const SERIAL_TABLES = [
+  'events',
+  'xp_awards',
+  'level_import_runs',
+  'community_facts',
+  'community_scorecard_runs',
+  'guild_settings_audit',
+] as const satisfies readonly DumpTable[];
 
 /**
  * The only table names a restore will ever interpolate into SQL.
@@ -89,7 +176,16 @@ function assertDumpTable(name: unknown, where: string): asserts name is DumpTabl
   }
 }
 
-export const DUMP_VERSION = 3;
+/**
+ * A JSON object with string keys - the only record shape the dump format
+ * allows. Rules out null, arrays and primitives in one check, so a crafted
+ * line like `42` or `"str"` cannot slide past the kind dispatch below.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+export const DUMP_VERSION = 4;
 
 export interface DumpTableInfo {
   name: DumpTable;
@@ -102,8 +198,15 @@ export interface DumpManifest {
   version: number;
   createdAt: string;
   tables: DumpTableInfo[];
-  /** So a restore can put the id sequence back where it belongs. */
+  /**
+   * High-water mark per BIGSERIAL table, so a restore can put each id
+   * sequence back where it belongs. `eventsSequence` is the v3-era field,
+   * carried forward so v4 manifests stay structurally comparable; there is
+   * no v3 read path (`inspect()` refuses any version != 4, pinned in
+   * test/unit.dumpread.test.ts), and v4 restores use `sequences`.
+   */
   eventsSequence: number;
+  sequences: Partial<Record<DumpTable, number>>;
   /** Which migrations the source had applied, for diagnosing an old backup. */
   schemaMigrations: string[];
 }
@@ -153,6 +256,42 @@ function orderFor(table: DumpTable, columns: string[]): string {
   if (table === 'automod_processed_messages') return 'guild_id, message_id';
   if (table === 'self_role_audit') return 'created_at, event_id';
   if (table === 'self_role_panel_claims') return 'guild_id, member_id, panel_id';
+  if (table === 'guild_counters') return 'guild_id';
+  if (table === 'counter_snapshots') return 'guild_id';
+  if (table === 'rank_ladder') return 'rank_order, rank_key';
+  if (table === 'member_ranks') return 'guild_id, member_id';
+  if (table === 'rank_snapshots') return 'guild_id, rank_key';
+  if (table === 'scheduled_events') return 'guild_id, event_id';
+  if (table === 'member_exclusions') return 'guild_id, member_id';
+  if (table === 'presence_probe') return 'guild_id, observed_at';
+  if (table === 'web_contract_meta') return 'singleton';
+  if (table === 'xp_awards') return 'id';
+  if (table === 'member_levels') return 'guild_id, member_id';
+  if (table === 'xp_cooldowns') return 'guild_id, member_id, source';
+  if (table === 'level_role_rewards') return 'guild_id, level';
+  if (table === 'level_import_runs') return 'id';
+  if (table === 'community_facts') return 'id';
+  if (table === 'community_stream_heartbeats') return 'guild_id, stream';
+  if (table === 'community_scorecard_runs') return 'id';
+  if (table === 'community_scorecard_alerts') return 'guild_id, alert_key';
+  if (table === 'guild_settings') return 'guild_id, key';
+  if (table === 'guild_settings_audit') return 'id';
+  if (table === 'event_rsvps') return 'guild_id, event_id, user_id';
+  if (table === 'lfg_posts') return 'id';
+  if (table === 'lfg_roles') return 'lfg_id, role_key';
+  if (table === 'lfg_signups') return 'lfg_id, user_id';
+  if (table === 'feed_relays') return 'id';
+  if (table === 'feed_deliveries') return 'feed_id, item_key';
+  if (table === 'temp_voice_channels') return 'id';
+  if (table === 'temp_voice_creates') return 'guild_id, user_id';
+  if (table === 'temp_voice_audit') return 'id';
+  if (table === 'announcements_audit_log') return 'id';
+  if (table === 'invite_campaigns') return 'slug';
+  if (table === 'audit_kill_switch') return 'id';
+  if (table === 'internal_action_log') return 'request_id';
+  if (table === 'internal_discord_events') return 'guild_id, event_key';
+  if (table === 'internal_idempotency') return 'key_id, idempotency_key';
+  if (table === 'internal_nonces') return 'key_id, nonce';
   return columns.slice(0, 1).join(', ');
 }
 
@@ -165,10 +304,17 @@ function orderFor(table: DumpTable, columns: string[]): string {
  * produce a backup whose projection disagrees with its own event log.
  */
 export async function dump(db: Db, outPath: string): Promise<DumpManifest> {
+  // Same directory makes publication an atomic rename. The trailing .tmp keeps
+  // even an abandoned partial file out of restore-drill and retention selectors.
+  const tempPath = `${outPath}.${randomUUID()}.tmp`;
   const gz = createGzip({ level: 9 });
-  const written = pipeline(gz, createWriteStream(outPath));
+  const written = pipeline(gz, createWriteStream(tempPath, { flags: 'wx', mode: 0o600 }));
+  // The output can fail while a database read is pending. Observe it immediately;
+  // awaiting the original promise below still propagates the stream failure.
+  void written.catch(() => {});
 
   const write = async (obj: unknown): Promise<void> => {
+    if (gz.destroyed) await written;
     if (!gz.write(JSON.stringify(obj) + '\n')) await once(gz, 'drain');
   };
 
@@ -185,9 +331,31 @@ export async function dump(db: Db, outPath: string): Promise<DumpManifest> {
         tables.push({ name, columns: await columnsOf(tx, name), count: await countOf(tx, name) });
       }
 
-      const seq = await tx
-        .prepare(`SELECT COALESCE(MAX(id), 0) AS n FROM events`)
-        .get<{ n: number }>();
+      // High-water mark per BIGSERIAL table, read in the same snapshot as
+      // the rows. A table the source has not migrated to yet has no sequence
+      // to read; it contributes nothing, and the restore creates nothing.
+      const sequences: Partial<Record<DumpTable, number>> = {};
+      for (const name of SERIAL_TABLES) {
+        const cols = tables.find((t) => t.name === name)?.columns ?? [];
+        if (!cols.includes('id')) continue;
+        const seq = await tx
+          .prepare(`SELECT COALESCE(MAX(id), 0) AS n FROM ${name}`)
+          .get<{ n: number }>();
+        sequences[name] = Number(seq?.n ?? 0);
+      }
+      // The reader refuses marks that are not non-negative safe integers
+      // (validateManifest), so publishing one would hand pg-backup an archive
+      // nothing can read back - and pg-backup rotates good recovery history
+      // for a successful dump. Refuse here, before the manifest line is
+      // written and long before the atomic rename publishes anything: the
+      // existing catch removes the temp file and the destination is untouched.
+      for (const [name, mark] of Object.entries(sequences)) {
+        if (!Number.isSafeInteger(mark) || mark < 0) {
+          throw new Error(
+            `sequence ${name} has a high-water mark the dump format cannot represent: ${String(mark)}`,
+          );
+        }
+      }
       const applied = await tx
         .prepare(`SELECT id FROM schema_migrations ORDER BY id`)
         .all<{ id: string }>();
@@ -197,7 +365,8 @@ export async function dump(db: Db, outPath: string): Promise<DumpManifest> {
         version: DUMP_VERSION,
         createdAt: new Date().toISOString(),
         tables,
-        eventsSequence: Number(seq?.n ?? 0),
+        eventsSequence: sequences.events ?? 0,
+        sequences,
         schemaMigrations: applied.map((r) => r.id),
       };
       await write(m);
@@ -225,9 +394,15 @@ export async function dump(db: Db, outPath: string): Promise<DumpManifest> {
     });
 
     await write({ kind: 'end', rows });
-  } finally {
     gz.end();
     await written;
+    await rename(tempPath, outPath);
+  } catch (error) {
+    gz.destroy();
+    // Wait for the output to close before removing it, including open failures.
+    await written.catch(() => {});
+    await rm(tempPath, { force: true });
+    throw error;
   }
 
   return manifest;
@@ -273,7 +448,11 @@ export async function inspect(inPath: string): Promise<DumpContents> {
 
   for await (const line of rl) {
     if (!line.trim()) continue;
-    const obj = JSON.parse(line);
+    const obj: unknown = JSON.parse(line);
+    // A backup file is bytes off a disk, not a trusted input. Every line must
+    // be an object with a known kind before anything else is believed about
+    // it - a bare `42`, `"str"` or `null` line must not reach the dispatch.
+    if (!isRecord(obj)) throw new Error('dump line is not an object - the file is not a two-bot dump');
     if (sawEnd) throw new Error('dump contains data after its end marker');
     if (obj.kind === 'manifest') {
       if (manifest) throw new Error('dump contains more than one manifest');
@@ -287,12 +466,27 @@ export async function inspect(inPath: string): Promise<DumpContents> {
       if (!manifest.tables.some((table) => table.name === obj.table)) {
         throw new Error(`row table ${obj.table} is not declared in the manifest`);
       }
+      // The row payload is interpolated into INSERTs on restore. It must be
+      // an object; a primitive here would sail through the count checks and
+      // detonate later, past the point where restore has committed.
+      if (!isRecord(obj.data)) {
+        throw new Error(`row in ${obj.table} has a data payload that is not an object`);
+      }
       let buf = buffers.get(obj.table);
       if (!buf) buffers.set(obj.table, (buf = []));
-      buf.push(obj.data as Record<string, unknown>);
+      buf.push(obj.data);
     } else if (obj.kind === 'end') {
+      // Coercion hid shape errors: end.rows of '1' read back as 1 and a
+      // missing count read as 0, both passing a file that is not well-formed.
+      if (!Number.isSafeInteger(obj.rows) || (obj.rows as number) < 0) {
+        throw new Error(`dump end marker has an invalid row count: ${JSON.stringify(obj.rows)}`);
+      }
       sawEnd = true;
-      declaredRows = Number(obj.rows ?? 0);
+      declaredRows = obj.rows as number;
+    } else {
+      // Unknown kinds used to fall through silently, so a file with a
+      // misspelled or foreign record type verified as if it were complete.
+      throw new Error(`dump contains an unknown record kind: ${JSON.stringify(obj.kind)}`);
     }
   }
 
@@ -318,9 +512,30 @@ export async function inspect(inPath: string): Promise<DumpContents> {
 
 function validateManifest(obj: Record<string, unknown>): DumpManifest {
   if (!Array.isArray(obj.tables)) throw new Error('manifest has no table list');
+  // Everything else the writer emits is read back somewhere: createdAt is
+  // reported, eventsSequence/sequences position the id sequences, and
+  // schemaMigrations is .join'ed by both pg-restore verdict paths - where a
+  // missing field crashes after a force restore has already committed. Refuse
+  // the misshapen manifest here, before any transaction opens.
+  if (typeof obj.createdAt !== 'string') {
+    throw new Error('manifest has no createdAt timestamp');
+  }
+  if (!Number.isSafeInteger(obj.eventsSequence) || (obj.eventsSequence as number) < 0) {
+    throw new Error('manifest has an invalid eventsSequence');
+  }
+  if (!isRecord(obj.sequences)) throw new Error('manifest has invalid sequences');
+  for (const [name, mark] of Object.entries(obj.sequences)) {
+    assertDumpTable(name, 'manifest sequence');
+    if (!Number.isSafeInteger(mark) || (mark as number) < 0) {
+      throw new Error(`manifest sequence ${name} has an invalid high-water mark`);
+    }
+  }
+  if (!Array.isArray(obj.schemaMigrations) || obj.schemaMigrations.some((m) => typeof m !== 'string')) {
+    throw new Error('manifest has an invalid schemaMigrations list');
+  }
   const names = new Set<DumpTable>();
   for (const table of obj.tables) {
-    if (!table || typeof table !== 'object') throw new Error('manifest table is not an object');
+    if (!isRecord(table)) throw new Error('manifest table is not an object');
     const row = table as Record<string, unknown>;
     assertDumpTable(row.name, 'manifest table');
     if (names.has(row.name)) throw new Error(`manifest table ${row.name} is duplicated`);
@@ -389,13 +604,24 @@ export async function restore(db: Db, inPath: string): Promise<RestoreReport> {
       }
     }
 
-    // Put the id sequence back past the restored high-water mark, or the first
-    // write after the restore collides with a row we just put back.
-    await tx.exec(
-      `SELECT setval(pg_get_serial_sequence('events', 'id'),
-                     GREATEST((SELECT COALESCE(MAX(id), 0) FROM events), 1),
-                     (SELECT COUNT(*) FROM events) > 0)`,
-    );
+    // Put every id sequence back past the restored high-water mark, or the
+    // first write after the restore collides with a row we just put back.
+    // The value is GREATEST(manifest mark, actual restored max): a manifest
+    // that understates the rows must not wedge the sequence below them.
+    const seqMarks =
+      (manifest.sequences as Partial<Record<string, number>> | undefined) ?? {};
+    for (const name of SERIAL_TABLES) {
+      assertDumpTable(name, 'sequence table');
+      const target = await columnsOf(tx, name);
+      if (!target.includes('id')) continue;
+      const mark = Number(seqMarks[name] ?? (name === 'events' ? manifest.eventsSequence : 0) ?? 0);
+      await tx.exec(
+        `SELECT setval(pg_get_serial_sequence('${name}', 'id'),
+                       GREATEST(${Number.isSafeInteger(mark) && mark >= 0 ? mark : 0},
+                                (SELECT COALESCE(MAX(id), 0) FROM ${name}), 1),
+                       (SELECT COUNT(*) FROM ${name}) > 0)`,
+      );
+    }
   });
 
   const restored: Record<string, number> = {};

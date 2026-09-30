@@ -34,6 +34,23 @@ export function isValidSlug(slug: string): boolean {
 }
 
 /**
+ * Slugs the redirect will never hand to a campaign (TOG-9925).
+ *
+ * `GET /healthz` is answered before campaign lookup in server.ts so the
+ * liveness probe never touches the database - so a campaign named `healthz`
+ * would silently die: the exact-lowercase path returns 200 with no redirect
+ * and no click, while only case variants (lowercased before lookup) redirect.
+ * Refuse it at add() time instead of reordering the probe, which health
+ * checks depend on. `/favicon.ico` and `/robots.txt` need no entry here: the
+ * `.` already keeps them out of SLUG, so add() refuses them as invalid.
+ */
+export const RESERVED_SLUGS: ReadonlySet<string> = new Set(['healthz']);
+
+export function isReservedSlug(slug: string): boolean {
+  return RESERVED_SLUGS.has(slug.toLowerCase());
+}
+
+/**
  * A Discord invite code as it appears after `discord.gg/`.
  *
  * Discord's own codes are alphanumeric; vanity URLs additionally allow hyphens.
@@ -65,11 +82,18 @@ export class CampaignStore {
   private db: Db;
   private cache = new Map<string, { value: Campaign | null; expiresAt: number }>();
   private ttlMs: number;
+  private negativeTtlMs: number;
   private now: () => number;
 
-  constructor(db: Db, opts: { ttlMs?: number; now?: () => number } = {}) {
+  constructor(db: Db, opts: { ttlMs?: number; negativeTtlMs?: number; now?: () => number } = {}) {
     this.db = db;
     this.ttlMs = opts.ttlMs ?? 30_000;
+    // Misses (404s) get a much shorter TTL than hits. The CLI runs in a
+    // separate process whose add() can only invalidate its own in-memory
+    // cache, so a miss cached at full TTL would keep 404ing a just-added
+    // slug in the redirect process for up to 30s (TOG-9926). Clamped to the
+    // hit TTL so ttlMs: 0 still means "no caching at all".
+    this.negativeTtlMs = opts.negativeTtlMs ?? Math.min(2_000, this.ttlMs);
     this.now = opts.now ?? Date.now;
   }
 
@@ -103,10 +127,13 @@ export class CampaignStore {
         }
       : null;
 
-    // Misses are cached too, at the same TTL. Otherwise a bot walking URLs
-    // turns every 404 into a database query, which is the cheapest denial of
-    // service anyone could mount against us.
-    this.cache.set(slug, { value, expiresAt: this.now() + this.ttlMs });
+    // Misses are cached too, but at a short negative TTL. Otherwise a bot
+    // walking URLs turns every 404 into a database query, which is the
+    // cheapest denial of service anyone could mount against us - while a
+    // full-TTL miss would keep 404ing a just-added slug (the CLI runs in a
+    // separate process) for up to 30s after --add (TOG-9926).
+    const ttl = value === null ? this.negativeTtlMs : this.ttlMs;
+    this.cache.set(slug, { value, expiresAt: this.now() + ttl });
     return value;
   }
 
@@ -144,6 +171,11 @@ export class CampaignStore {
     if (!isValidSlug(c.slug)) {
       throw new Error(
         `Invalid campaign slug "${c.slug}". Lowercase letters, digits and hyphens, 2-40 characters.`,
+      );
+    }
+    if (isReservedSlug(c.slug)) {
+      throw new Error(
+        `Campaign slug "${c.slug}" is reserved - GET /${c.slug.toLowerCase()} is answered before campaign lookup and would never redirect. Pick another slug.`,
       );
     }
     if (!isValidInviteCode(c.inviteCode)) {

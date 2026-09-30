@@ -62,6 +62,11 @@ import { SessionRecorder } from '../src/onboarding/session.ts';
 import { registerSessionWelcome } from '../src/discord/sessionWelcome.ts';
 import { log } from '../src/core/log.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/staging-goodbye-live-verify.ts');
+  process.exit(0);
+}
+
 const API = 'https://discord.com/api/v10';
 const TIMEOUT_MS = 30_000;
 

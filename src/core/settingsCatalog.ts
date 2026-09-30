@@ -115,6 +115,10 @@ export const SETTING_CLASSES: Readonly<Record<string, SettingClass>> = {
   TWO_HEALTH_PORT: 'env_only',
   TWO_REDIRECT_BIND_HOST: 'env_only',
   TWO_REDIRECT_PORT: 'env_only',
+  // Whose X-Forwarded-For the redirect believes when picking its throttle
+  // bucket (src/redirect/config.ts:34). A stored value could bless a spoofed
+  // header, so this stays with the network binds, never in guild_settings.
+  TWO_REDIRECT_TRUSTED_PROXIES: 'env_only',
   // Repoints discord.js at another API host. Intended for tools/mock-discord;
   // settable from a web UI it is a redirect of every token-bearing request.
   DISCORD_API_BASE: 'env_only',
@@ -156,6 +160,15 @@ export const SETTING_CLASSES: Readonly<Record<string, SettingClass>> = {
 
   // A filesystem path chosen by a web form is a write primitive.
   TWO_ANTI_NUKE_SNAPSHOT_PATH: 'env_only',
+
+  // Terminal-output presentation, never settings. NO_COLOR / FORCE_COLOR /
+  // TERM only decide whether CLI text carries ANSI styling
+  // (src/analytics/cliColor.ts): a stored value would let a dashboard write
+  // change operator-visible output with no restart and no audit trail, so
+  // these stay in the process environment, never in guild_settings.
+  NO_COLOR: 'env_only',
+  FORCE_COLOR: 'env_only',
+  TERM: 'env_only',
 
   // ------------------------------------------------------------------- cold
   // Read once at boot. The card scoped cold to TWO_AUTOMOD; reading src/index.ts

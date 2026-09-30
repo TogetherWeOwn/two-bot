@@ -20,10 +20,15 @@ import {
   STAGING_BOT_APPLICATION_NAME,
   stagingGuildId,
 } from '../src/staging/spec.ts';
-import { loadSelfRolePanels } from '../src/selfRoles/config.ts';
+import { loadSelfRolePanels, SelfRoleConfigError } from '../src/selfRoles/config.ts';
 import { buildSelfRoleComponents } from '../src/discord/selfRoles.ts';
 import { reactionEndpointEmoji } from '../src/selfRoles/plan.ts';
 import { proveGrantRevoke } from '../src/selfRoles/proof.ts';
+
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/self-role-panel.ts --panel <id> [--apply]');
+  process.exit(0);
+}
 
 const API = process.env.SELF_ROLE_PANEL_API_BASE ?? 'https://discord.com/api/v10';
 if (API !== 'https://discord.com/api/v10' && !/^http:\/\/(127\.0\.0\.1|\[::1\]|localhost)(:\d+)?(?:\/|$)/.test(API)) {
@@ -38,7 +43,16 @@ if (!panelId) {
   console.error('usage: node scripts/self-role-panel.ts --panel <id> [--apply]');
   process.exit(2);
 }
-const panels = loadSelfRolePanels();
+let panels: ReturnType<typeof loadSelfRolePanels>;
+try {
+  panels = loadSelfRolePanels();
+} catch (err) {
+  if (err instanceof SelfRoleConfigError) {
+    console.error(err.message);
+    process.exit(2);
+  }
+  throw err;
+}
 const panel = panels.find((candidate) => candidate.id === panelId);
 if (!panel) {
   console.error(`panel "${panelId}" is not in TWO_SELF_ROLE_PANELS`);

@@ -104,10 +104,10 @@ jobs:
   # The "reports only on a PR" rule above is about the plan changing, which is
   # nobody's fault. Coming from a fork is a different thing and does fail.
   fork-gate:
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.base.sha || github.sha }}
           persist-credentials: false
@@ -117,13 +117,13 @@ jobs:
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: ./scripts/ci/refuse-fork-pr.sh
       # Match ci.yml: only trusted policy code runs; candidate checkout is data.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
       - name: Install trusted workflow parser
         run: npm ci --ignore-scripts --prefix scripts/ci
       - name: Read candidate workflows
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: candidate
@@ -134,10 +134,10 @@ jobs:
 
   protection-available:
     needs: fork-gate
-    runs-on: [self-hosted, two-selfhosted]
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install GitHub CLI
         run: |

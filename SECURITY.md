@@ -8,3 +8,9 @@ is, and how to reproduce it.
 
 Vulnerability reports are handled by the maintainers. Ordinary bugs and
 feature requests go through public issues as usual.
+
+## Supported Versions
+
+Security fixes land on `main` and ship with the next release-please release
+(see [CHANGELOG.md](CHANGELOG.md)). Pre-`1.0.0` versions are pre-production;
+upgrade to the latest tagged release.
