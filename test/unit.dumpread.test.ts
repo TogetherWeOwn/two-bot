@@ -1,10 +1,10 @@
 /**
- * The backup reader, against files it should refuse.
+ * The backup reader's refusals and offline restore column compatibility.
  *
  * `inspect()` touches no database, which is deliberate: every check that can be
- * made from the file alone is made before a connection is involved, so these
- * run in CI without Postgres and without the e2e suite's skip. The round trip
- * against a real database is test/e2e.backup.test.ts.
+ * made from the file alone is made before a connection is involved. Restore
+ * compatibility uses an in-memory Db, so these run in CI without Postgres and
+ * without the e2e suite's skip. The real round trip is test/e2e.backup.test.ts.
  *
  * The case that matters most here is a dump naming a table the bot does not
  * own. A backup file is not a trusted input - it is bytes off a disk, possibly
@@ -22,7 +22,7 @@ import { gzipSync } from 'node:zlib';
 import { inspect, restore, DUMP_TABLES, DUMP_VERSION } from '../src/store/dump.ts';
 import type { Db, RunResult, Statement } from '../src/store/driver.ts';
 
-const dir = mkdtempSync(join(tmpdir(), 'two-dumpread-'));
+const dir = mkdtempSync(join(process.env.PAPERCLIP_RUN_SCRATCH_DIR ?? tmpdir(), 'two-dumpread-'));
 process.on('exit', () => rmSync(dir, { recursive: true, force: true }));
 
 let seq = 0;
@@ -92,6 +92,119 @@ function recordingDb() {
   };
   return { db, calls };
 }
+
+/** In-memory target: writes use a separate tx handle and publish only on commit. */
+function restoreTarget(columns: string[]) {
+  let rows: unknown[][] = [['prior target row']];
+  const inserts: { sql: string; params: unknown[] }[] = [];
+  const calls = { transaction: 0, truncate: 0, commit: 0, rollback: 0, counts: 0 };
+  let transactionError: unknown;
+  const unsupported = () => { throw new Error('unexpected fake-target operation'); };
+  const db: Db = {
+    prepare(sql) {
+      return {
+        async get<T>(): Promise<T | undefined> {
+          const match = /^SELECT COUNT\(\*\) AS n FROM (\w+)$/.exec(sql);
+          assert.ok(match, `unexpected post-transaction query: ${sql}`);
+          calls.counts++;
+          return { n: match[1] === 'members' ? rows.length : 0 } as T;
+        },
+        all: unsupported,
+        run: unsupported,
+      };
+    },
+    exec: unsupported,
+    async transaction<T>(fn: (tx: Db) => Promise<T>): Promise<T> {
+      calls.transaction++;
+      let pending = rows.map((row) => [...row]);
+      const tx: Db = {
+        prepare(sql) {
+          return {
+            get: unsupported,
+            async all<T>(...params: unknown[]): Promise<T[]> {
+              assert.match(sql, /FROM information_schema\.columns/);
+              return (params[0] === 'members' ? columns.map((column_name) => ({ column_name })) : []) as T[];
+            },
+            async run(...params: unknown[]): Promise<RunResult> {
+              const match = /^INSERT INTO members \((.+)\) VALUES /.exec(sql);
+              assert.ok(match, `unexpected transaction write: ${sql}`);
+              inserts.push({ sql, params });
+              const width = match[1].split(', ').length;
+              assert.equal(params.length % width, 0);
+              for (let i = 0; i < params.length; i += width) pending.push(params.slice(i, i + width));
+              return { changes: params.length / width };
+            },
+          };
+        },
+        async exec(sql) {
+          assert.equal(sql, `TRUNCATE ${DUMP_TABLES.join(', ')} RESTART IDENTITY`);
+          calls.truncate++;
+          pending = [];
+        },
+        transaction: unsupported,
+        close: unsupported,
+      };
+      try {
+        const result = await fn(tx);
+        rows = pending;
+        calls.commit++;
+        return result;
+      } catch (error) {
+        transactionError = error;
+        calls.rollback++;
+        throw error;
+      }
+    },
+    close: unsupported,
+  };
+  return { db, inserts, calls, rows: () => rows, transactionError: () => transactionError };
+}
+
+describe('restore: target-column compatibility (offline)', () => {
+  test('drops only the removed column and binds surviving falsy and quoted values in dump order', async () => {
+    const quoted = "'); DROP TABLE members; --";
+    const dumpColumns = ['active', 'removed_nullable', 'count', 'label', 'optional', 'note'];
+    const path = writeDump([
+      manifest(completeTables({ members: { columns: dumpColumns, count: 1 } })),
+      // Deliberately different key order from the manifest and target metadata.
+      { kind: 'row', table: 'members', data: {
+        note: quoted, optional: null, label: '', count: 0, removed_nullable: null, active: false,
+      } },
+      { kind: 'end', rows: 1 },
+    ]);
+    const target = restoreTarget(['note', 'optional', 'label', 'count', 'active', 'target_only']);
+    const report = await restore(target.db, path);
+
+    assert.deepEqual(target.inserts, [{
+      sql: 'INSERT INTO members ("active", "count", "label", "optional", "note") VALUES (?, ?, ?, ?, ?)',
+      params: [false, 0, '', null, quoted],
+    }]);
+    assert.deepEqual(target.rows(), [[false, 0, '', null, quoted]]);
+    assert.deepEqual(report.droppedColumns, { members: ['removed_nullable'] });
+    assert.equal(report.ok, true);
+    assert.deepEqual(report.restored, Object.fromEntries(DUMP_TABLES.map((name) => [name, name === 'members' ? 1 : 0])));
+    assert.deepEqual(target.calls, { transaction: 1, truncate: 1, commit: 1, rollback: 0, counts: DUMP_TABLES.length });
+  });
+
+  test('a nonempty table with no common columns rejects inside the transaction without a report', async () => {
+    const path = writeDump([
+      manifest(completeTables({ members: { columns: ['removed_nullable'], count: 1 } })),
+      { kind: 'row', table: 'members', data: { removed_nullable: null } },
+      { kind: 'end', rows: 1 },
+    ]);
+    const target = restoreTarget(['target_only']);
+    const before = target.rows().map((row) => [...row]);
+
+    await assert.rejects(restore(target.db, path), (error) => {
+      assert.equal(error, target.transactionError(), 'the transaction callback must propagate the refusal');
+      assert.match((error as Error).message, /members: no columns in common with the target/);
+      return true;
+    });
+    assert.deepEqual(target.inserts, []);
+    assert.deepEqual(target.rows(), before, 'the pending truncate must not commit');
+    assert.deepEqual(target.calls, { transaction: 1, truncate: 1, commit: 0, rollback: 1, counts: 0 });
+  });
+});
 
 /** Every malformed dump a restore attempt must refuse without touching the Db. */
 function malformedDumps(): { name: string; objs: unknown[]; match: RegExp }[] {
