@@ -112,12 +112,14 @@ function hasBadWord(content: string, words: string[]): boolean {
     if (!word) continue;
     const escaped = [...word]
       .map((char) => char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-      // Marks decorating a separator (space/Cf) are standalone decoration and
-      // must not split the word. Marks attached to a preceding letter are
-      // never skipped here: folding already removed Latin-attached stacking,
-      // so a surviving letter-attached mark is meaningful (notably the
-      // dotted-i dot in `i` + U+0307, or a non-Latin vowel sign).
-      .join('(?:[\\s\\p{Cf}]\\p{M}*)*');
+      // Marks decorating a separator (space/Cf) or entry punctuation are
+      // standalone decoration and must not split the word. Marks attached to
+      // a preceding letter are never skipped here: folding already removed
+      // Latin-attached stacking, so a surviving letter-attached mark is
+      // meaningful (notably the dotted-i dot in `i` + U+0307, or a non-Latin
+      // vowel sign). The lookbehind admits a mark only after a non-letter,
+      // so a chain can start at punctuation/whitespace but never on a word.
+      .join('(?:[\\s\\p{Cf}]\\p{M}*|(?<=[^\\p{L}\\p{N}_])\\p{M})*');
     // Marks extending a letter stay part of its word. Skip leading marks only
     // after a real boundary (start/punctuation), never after a word character.
     const leading = `(^|[^\\p{L}\\p{N}\\p{M}_])\\p{M}*`;

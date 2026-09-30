@@ -101,6 +101,25 @@ test('marks decorating separators cannot split a bad word', () => {
   assert.equal(match('SHİT happens', probe), null, 'dotted-I dot stays meaningful');
 });
 
+test('marks decorating internal punctuation cannot split a bad word', () => {
+  const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
+  for (const [name, entry, content] of [
+    ['acute on the star', 'f*ck', E('f*\\u0301ck')],
+    ['stacked marks on the star', 'f*ck', E('f*\\u0301\\u20ddck')],
+    ['decorated star plus spaced letters', 'f*ck', E('f*\\u0301 c k')],
+    ['acute on the plus', 'c++', E('c+\\u0301+')],
+  ] as Array<[string, string, string]>) {
+    assert.equal(match(content, { ...policy, badWords: [entry] }), 'bad_words', name);
+  }
+  // Contrast: marks must be skippable only after non-letters. A letter in the
+  // message where the entry has punctuation still bounds, and surviving
+  // letter-attached marks stay meaningful.
+  const starProbe = { ...policy, badWords: ['f*ck'] };
+  assert.equal(match('f*!ck', starProbe), null, 'content letter for entry punctuation still bounds');
+  assert.equal(match(E('fx\\u0301ck'), starProbe), null, 'mark extending a content letter still bounds');
+  assert.equal(match('i love c++ lots', { ...policy, badWords: ['c++'] }), 'bad_words', 'punctuation entry still matches');
+});
+
 test('punctuation-ended entries tolerate trailing standalone marks', () => {
   const probe = { ...policy, badWords: ['shit!'] };
   const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
