@@ -29,6 +29,7 @@ import { pathToFileURL } from 'node:url';
 import { openDb } from '../src/store/db.ts';
 import { EventStore } from '../src/store/eventStore.ts';
 import { MESSAGE_RUNGS, type EventType } from '../src/core/events.ts';
+import { assertTestDatabaseHost } from './test-db-guard.ts';
 
 // Recorded 2026-09-30 on Node 24.21 / Postgres 17.11 / agent-testdb: median of three complete
 // runs (write 0.247, 0.262, 0.246 ms/event), each read a median of seven warm
@@ -162,6 +163,17 @@ async function main() {
   const N = options.members;
   const schema = `bench_${process.pid}_${Date.now().toString(36)}`;
   const GUILD = 'bench-guild';
+  // TOG-8324: the allowlist also refuses ?host=/?port= retargeting, which
+  // node-postgres promotes over the URL hostname. Assert on the raw spec
+  // before openDb connects or migrates, so a forbidden host never reaches a
+  // socket. The guard throws with the offending label; keep exit 2 semantics.
+  try {
+    assertTestDatabaseHost(spec);
+  } catch (err) {
+    console.error(`event-store-bench: ${(err as Error).message}`);
+    process.exitCode = 2;
+    return;
+  }
   const db = await openDb(spec, { schema, applicationName: 'two-bot:bench' });
   const store = new EventStore(db);
 
@@ -188,6 +200,9 @@ async function main() {
 
     // --- write path: one realistic member lifecycle per member ----------------
     // https://nodejs.org/docs/latest-v24.x/api/perf_hooks.html#performancenow
+    // TOG-8324: record() dedupes on the idempotency key, so attempting a seed
+    // twice inserts nothing new. Count only inserted rows; the stored-row
+    // check below refuses a silent-dedup run that would benchmark a no-op.
     const t0 = performance.now();
     let events = 0;
     for (let i = 0; i < N; i++) {
@@ -204,8 +219,8 @@ async function main() {
       }
       if (i % 3 === 0) batch.push({ type: 'first_voice_session', at: j + 7200_000, source: 'voice:v1' });
       for (const e of batch) {
-        await store.record({ guildId: GUILD, memberId: m, eventType: e.type, occurredAt: iso(e.at), source: e.source });
-        events++;
+        const res = await store.record({ guildId: GUILD, memberId: m, eventType: e.type, occurredAt: iso(e.at), source: e.source });
+        if (res.inserted) events++;
       }
     }
     const writeMs = performance.now() - t0;
@@ -215,6 +230,23 @@ async function main() {
     // fetches and the planner prices it as a sort instead).
     await db.exec('VACUUM (ANALYZE) events');
     await db.exec('VACUUM (ANALYZE) members');
+
+    // TOG-8324: the budget compares stored rows, not attempted calls. A
+    // no-op record() (mocked store, deduped seed, wrong guild filter) passes
+    // every timing budget and exits 0 on an empty table, so verify the
+    // persisted counts outside the write timing before reporting. This is a
+    // setup error (exit 2), not a measured regression (exit 1).
+    const storedEvents = Number((await db.prepare(`SELECT COUNT(*) AS n FROM events WHERE guild_id = ?`).get<{ n: number | string }>(GUILD))?.n ?? -1);
+    const storedMembers = Number((await db.prepare(`SELECT COUNT(*) AS n FROM members WHERE guild_id = ?`).get<{ n: number | string }>(GUILD))?.n ?? -1);
+    if (storedEvents !== events || storedMembers !== N) {
+      console.error(
+        `event-store-bench: stored-row mismatch: events table has ${storedEvents} rows for ${GUILD} ` +
+        `(seeded ${events}), members table has ${storedMembers} (seeded ${N}). Refusing to benchmark an ` +
+        'unexpected store state; check for a mocked record(), a deduped seed, or a guild filter mismatch.',
+      );
+      process.exitCode = 2;
+      return;
+    }
 
     // --- read path: the queries the funnel actually issues --------------------
     const since = iso(base + (N - 168) * 3600_000); // last 7 days of seeded joins

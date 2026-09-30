@@ -165,7 +165,44 @@ test('CLI distinguishes a setup error from a measured budget breach without conn
     env: { PATH: process.env.PATH, TWO_TEST_DATABASE_URL: 'not-a-postgres-url' },
   });
   assert.equal(child.status, 2, child.stderr);
-  assert.match(child.stderr, /Only Postgres is supported/);
+  assert.match(child.stderr, /not an isolated test database/);
+  assert.doesNotMatch(child.stdout, /threshold result/);
+});
+
+test('CLI refuses forbidden hosts and query-param retargeting before any connection', () => {
+  // TOG-8324 P1: the host allowlist runs on the raw spec before openDb
+  // connects or migrates. `.invalid` (RFC 2606) never resolves, so if the
+  // guard regressed and a socket were attempted the run would fail with a
+  // DNS/connection error instead of the guard message; the timeout bounds a
+  // hang. None of these URLs may reach a socket.
+  const script = new URL('../scripts/event-store-bench.ts', import.meta.url).pathname;
+  for (const [name, url, pattern] of [
+    ['production-looking host', 'postgres://bot:botpw@db.internal.invalid:5432/two', /not an isolated test database/],
+    ['staging host', 'postgres://bot:botpw@staging.internal.invalid:5432/two', /not an isolated test database/],
+    ['host override on allowlisted loopback', 'postgres://two:two@127.0.0.1:5432/two_test?host=db.internal.invalid', /query string/],
+    ['host override on sandbox host', 'postgres://agent_test@agent-testdb:5432/agent_test?host=db.internal.invalid', /query string/],
+  ] as Array<[string, string, RegExp]>) {
+    const child = spawnSync(process.execPath, [script, '--check'], {
+      encoding: 'utf8',
+      timeout: 30_000,
+      env: { PATH: process.env.PATH, TWO_TEST_DATABASE_URL: url },
+    });
+    assert.equal(child.status, 2, `${name}: status=${child.status} stderr=${child.stderr}`);
+    assert.match(child.stderr, pattern, name);
+    assert.doesNotMatch(child.stdout, /threshold result/, name);
+  }
+});
+
+test('CLI still opens connections for allowlisted hosts (guard passes, connect fails)', () => {
+  // Boundary pin: the guard must not over-block. Loopback port 1 refuses
+  // instantly, so openDb fails with a connection error — never a guard message.
+  const child = spawnSync(process.execPath, [new URL('../scripts/event-store-bench.ts', import.meta.url).pathname, '--check'], {
+    encoding: 'utf8',
+    timeout: 30_000,
+    env: { PATH: process.env.PATH, TWO_TEST_DATABASE_URL: 'postgres://agent_test@127.0.0.1:1/two_scratch_must_not_connect' },
+  });
+  assert.equal(child.status, 2, child.stderr);
+  assert.doesNotMatch(child.stderr, /not an isolated test database|query string/);
   assert.doesNotMatch(child.stdout, /threshold result/);
 });
 
