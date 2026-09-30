@@ -138,6 +138,7 @@ const guild = await rest.get<{ vanity_url_code?: string | null }>(`/guilds/${gui
 const hasVanity = !!guild?.vanity_url_code;
 
 const newJoins: { id: string; joinedAt: string }[] = [];
+let deferredJoins = 0;
 let bots = 0;
 for (const m of members) {
   const id = m.user?.id;
@@ -148,10 +149,11 @@ for (const m of members) {
     continue;
   }
   const joinedAt = new Date(m.joined_at).toISOString();
+  if (joinedAt > capturedAt) deferredJoins++;
   // First ever capture has no `since`; the member list is history, not this
   // window, and backfill.ts owns history. Baseline only, emit nothing.
   // Keep the window (since, capturedAt]: joins seen after the stamp belong to
-  // the next capture, not to counters read before they arrived.
+  // a later capture, not to an event window ending before they arrived.
   if (since !== null && joinedAt > since && joinedAt <= capturedAt) newJoins.push({ id, joinedAt });
 }
 newJoins.sort((a, b) => a.joinedAt.localeCompare(b.joinedAt));
@@ -187,8 +189,15 @@ const events: FunnelEvent[] = newJoins.map((j, i) => ({
   },
 }));
 
+// A post-stamp join may already be reflected in the invite read. Keep both
+// counters AND their window end until it is eligible, rather than consuming
+// that evidence now. Defer eligible join writes too: splitting this growth over
+// an incomplete roster could lock in worse first-wins attribution for them.
+// First capture still establishes a baseline, and no-growth reads lose no delta.
+const retainSnapshot = since !== null && deferredJoins > 0 && totalGrowth > 0;
+
 let written = 0;
-if (!dryRun) {
+if (!dryRun && !retainSnapshot) {
   for (const e of events) {
     const res = await store.record(e);
     if (res.inserted) written++;
@@ -213,6 +222,10 @@ console.log(`  invites              ${current.length} readable, ${grew.length} m
   (grew.length ? ` (${grew.map((c) => `${c} +${growth.get(c)}`).join(', ')})` : ''));
 console.log(`  members              ${members.length} total (${bots} bots)`);
 console.log(`  new joins in window  ${newJoins.length}`);
+if (retainSnapshot) {
+  console.log(`  ${dryRun ? 'would retain' : 'retaining'} previous counters and window: ` +
+    `${deferredJoins} post-stamp join(s) may already be in the invite growth; join writes deferred until next capture.`);
+}
 if (newJoins.length) {
   // One line per source, not one line per join: the operator wants to see the
   // split the campaign will be read off.
@@ -235,7 +248,7 @@ if (newJoins.length) {
  * printing every time: the usual cause is somebody who joined and left again
  * inside the window, which is exactly the blind spot this script cannot fix.
  */
-if (since !== null && totalGrowth !== newJoins.length) {
+if (since !== null && totalGrowth !== newJoins.length && !retainSnapshot) {
   console.log(
     `\n  note: invite counters moved ${totalGrowth}, member list gained ${newJoins.length}.` +
       `\n        Likely a join+leave inside the window, or a join through the vanity URL.` +
