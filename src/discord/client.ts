@@ -10,6 +10,7 @@ import {
   type GuildMember,
 } from 'discord.js';
 import { nowIso } from '../core/events.ts';
+import { observeMembership } from '../core/membershipClock.ts';
 import type { FunnelHandlers } from '../core/handlers.ts';
 import type { InviteTracker, InviteState } from '../core/inviteTracker.ts';
 import type { ExpectedJoins } from '../core/expectedJoins.ts';
@@ -302,6 +303,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
   client.on(Events.GuildMemberAdd, async (member) => {
     if (!accepts(member.guild.id, member.id)) return;
     const observedAt = nowIso();
+    const membershipObservedAt = observeMembership();
     const joining = (async () => {
       // Snapshot regardless of how this member arrived, so the counters stay
       // current for the next organic join. A one-click join consumes no invite,
@@ -322,6 +324,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
         source,
         inviterId,
         occurredAt: member.joinedAt?.toISOString(),
+        observedAt: membershipObservedAt,
         sourceEventId: `${member.guild.id}:${member.id}:${member.joinedAt?.toISOString() ?? 'observed'}`,
       });
       return source;
@@ -420,7 +423,8 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     if (!accepts(member.guild.id, member.id)) return;
     // A server-leave is also a voice-leave: Discord drops them from voice with
     // no VoiceStateUpdate, so onLeave closes any open session (TOG-6122).
-    await handlers.onLeave(member.guild.id, member.id, undefined, { isBot: !!member.user?.bot });
+    const observedAt = observeMembership();
+    await handlers.onLeave(member.guild.id, member.id, undefined, { isBot: !!member.user?.bot, observedAt });
   });
 
   const inspectAutomod = async (msg: {

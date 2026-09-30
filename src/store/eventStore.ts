@@ -40,8 +40,15 @@ export class EventStore {
     this.db = db;
   }
 
-  async record(e: FunnelEvent): Promise<RecordResult> {
+  async record(e: FunnelEvent, opts: { membershipObservedAt?: string } = {}): Promise<RecordResult> {
     const key = idempotencyKey(e);
+    const observedAt = opts.membershipObservedAt;
+    if (observedAt !== undefined && (
+      !['member_join', 'member_leave'].includes(e.eventType) ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3,6}Z$/.test(observedAt) ||
+      !Number.isFinite(Date.parse(observedAt))
+    )) throw new Error('membershipObservedAt requires a membership event and a valid UTC timestamp');
+    const metadata = observedAt === undefined ? e.metadata : { ...e.metadata, membershipObservedAt: observedAt };
 
     return this.db.transaction(async (tx) => {
       // Insert first and let the unique index arbitrate. A SELECT-then-INSERT
@@ -60,7 +67,7 @@ export class EventStore {
           e.guildId,
           e.occurredAt,
           e.source,
-          e.metadata ? JSON.stringify(e.metadata) : null,
+          metadata ? JSON.stringify(metadata) : null,
           key,
         );
 
@@ -69,6 +76,16 @@ export class EventStore {
         const existing = await tx
           .prepare(`SELECT id FROM events WHERE idempotency_key = ?`)
           .get<{ id: number }>(key);
+        if (existing && observedAt !== undefined) {
+          // A live redelivery reconfirms presence, not attribution or occurrence.
+          await tx.prepare(
+            `UPDATE events SET metadata =
+               (COALESCE(metadata::jsonb, '{}'::jsonb) || jsonb_build_object('membershipObservedAt', ?::text))::text
+             WHERE id = ? AND (metadata::jsonb ->> 'membershipObservedAt' IS NULL
+               OR (metadata::jsonb ->> 'membershipObservedAt')::timestamptz < ?::timestamptz)`,
+          ).run(observedAt, existing.id, observedAt);
+          await this.project(tx, e);
+        }
         return { inserted: false, eventId: existing ? Number(existing.id) : null };
       }
 
@@ -110,18 +127,8 @@ export class EventStore {
 
     switch (e.eventType) {
       case 'member_join':
-        // Latest join and its attribution move together, even if a later leave
-        // arrived first. Only a join after that leave reopens the member.
-        await db
-          .prepare(
-            `UPDATE members SET joined_at = ?, join_source = ?,
-               left_at = CASE WHEN left_at < ? THEN NULL ELSE left_at END,
-               inactive_flagged_at = CASE WHEN inactive_flagged_at <= ?
-                 THEN NULL ELSE inactive_flagged_at END
-             WHERE guild_id = ? AND member_id = ?
-               AND (joined_at IS NULL OR joined_at < ?)`,
-          )
-          .run(e.occurredAt, e.source, e.occurredAt, e.occurredAt, e.guildId, e.memberId, e.occurredAt);
+      case 'member_leave':
+        await this.projectMembership(db, e.guildId, e.memberId);
         break;
       case 'gate_cleared':
         // Earliest wins. A rejoin re-screens the member and the live listener
@@ -150,18 +157,40 @@ export class EventStore {
       case 'member_inactive':
         await set('inactive_flagged_at', e.occurredAt);
         break;
-      case 'member_leave':
-        await db
-          .prepare(
-            `UPDATE members SET left_at = ? WHERE guild_id = ? AND member_id = ?
-               AND (joined_at IS NULL OR joined_at <= ?)
-               AND (left_at IS NULL OR left_at < ?)`,
-          )
-          .run(e.occurredAt, e.guildId, e.memberId, e.occurredAt, e.occurredAt);
-        break;
       case 'invite_click':
         break;
     }
+  }
+
+  private async projectMembership(db: Db, guildId: string, memberId: string): Promise<void> {
+    // Attribution follows actual join time; presence follows live dispatch order
+    // when supplied, otherwise historical occurrence time. Neither rewrites history.
+    // Read AFTER acquiring the member lock: a competing transaction may have
+    // committed while we waited. A same-statement CTE would retain its old snapshot.
+    await db.prepare(
+      `SELECT member_id FROM members WHERE guild_id = ? AND member_id = ? FOR UPDATE`,
+    ).get(guildId, memberId);
+    await db.prepare(
+      `WITH membership AS (
+         SELECT id, event_type, occurred_at, source,
+           COALESCE((metadata::jsonb ->> 'membershipObservedAt')::timestamptz, occurred_at) AS ordered_at
+         FROM events WHERE guild_id = ? AND member_id = ?
+           AND event_type IN ('member_join', 'member_leave')
+       ), latest_join AS (
+         SELECT occurred_at, source FROM membership WHERE event_type = 'member_join'
+         ORDER BY occurred_at DESC, id ASC LIMIT 1
+       ), latest_presence AS (
+         SELECT event_type, occurred_at, ordered_at FROM membership
+         ORDER BY ordered_at DESC, (event_type = 'member_leave') DESC, id DESC LIMIT 1
+       )
+       UPDATE members SET
+         joined_at = COALESCE((SELECT occurred_at FROM latest_join), joined_at),
+         join_source = COALESCE((SELECT source FROM latest_join), join_source),
+         left_at = CASE WHEN p.event_type = 'member_leave' THEN p.occurred_at ELSE NULL END,
+         inactive_flagged_at = CASE WHEN p.event_type = 'member_join' AND inactive_flagged_at <= p.ordered_at
+           THEN NULL ELSE inactive_flagged_at END
+       FROM latest_presence p WHERE guild_id = ? AND member_id = ?`,
+    ).run(guildId, memberId, guildId, memberId);
   }
 
   /**
