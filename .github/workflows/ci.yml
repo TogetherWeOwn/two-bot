@@ -46,7 +46,7 @@ jobs:
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: ./scripts/ci/refuse-fork-pr.sh
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
       # This lockfile belongs to the trusted policy, not the candidate. The YAML
@@ -118,7 +118,7 @@ jobs:
           echo "PGPORT=$PGPORT" >> "$GITHUB_ENV"
           echo "TWO_TEST_DATABASE_URL=postgres://two:two@127.0.0.1:$PGPORT/two_test" >> "$GITHUB_ENV"
           echo "TWO_DATABASE_URL=postgres://two:two@127.0.0.1:$PGPORT/two_test" >> "$GITHUB_ENV"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: npm
@@ -175,7 +175,7 @@ jobs:
           echo "PGPORT=$PGPORT" >> "$GITHUB_ENV"
           echo "TWO_TEST_DATABASE_URL=postgres://two:two@127.0.0.1:$PGPORT/two_test" >> "$GITHUB_ENV"
           echo "TWO_DATABASE_URL=postgres://two:two@127.0.0.1:$PGPORT/two_test" >> "$GITHUB_ENV"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: npm
