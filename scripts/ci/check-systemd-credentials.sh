@@ -187,7 +187,16 @@ def logical_lines(text):
 
 
 found = set()
-for line in logical_lines(Path(sys.argv[1]).read_text(encoding="utf-8-sig")):
+path = Path(sys.argv[1])
+raw = path.read_bytes()
+if raw.startswith(b"\xef\xbb\xbf"):
+    raw = raw[3:]
+# systemd skips comment contents before parsing (src/shared/conf-parser.c),
+# so never let an ignored comment's bytes abort the audit: decode with a
+# byte-preserving policy and filter comments as text. Active directives still
+# match on exact ASCII keys.
+text = raw.decode("utf-8", errors="surrogateescape")
+for line in logical_lines(text):
     directive = re.match(r"\s*Environment\s*=\s*(.*)$", line)
     if not directive:
         continue

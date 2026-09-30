@@ -109,6 +109,9 @@ expect_r1_literal "R1 quoted value fragment" 'Environment=DISCORD_TOKEN="synthet
 # U+00A0 is not systemd comment indentation: an NBSP-indented "#" line is
 # joined, not skipped, so the continued secret assignment is refused.
 expect_r1_literal "R1 NBSP-indented continuation is not a comment" $'Environment="LABEL=prefix\\\n\xc2\xa0#" DISCORD_TOKEN=synthetic'
+# systemd skips comment contents before parsing, so a non-UTF-8 comment must
+# not abort the audit: the secret after it is still refused as R1.
+expect_r1_literal "R1 secret after non-UTF-8 comment" $'# caf\xe9\nEnvironment="DISCORD_TOKEN=synthetic"'
 
 # These are not secret assignments: match keys, not substrings of values.
 reset_fixture
@@ -131,6 +134,8 @@ Environment=
 EOF
 # U+00A0 is not a systemd separator: this assigns only LABEL, so it stays allowed.
 printf 'Environment=LABEL=prefix\xc2\xa0DISCORD_TOKEN=synthetic\n' >> "$FIXTURE/deploy/two-redirect.service"
+# systemd skips comment contents: a non-UTF-8 comment alone stays allowed.
+printf '# caf\xe9\n' >> "$FIXTURE/deploy/two-redirect.service"
 if ! output="$(run_guard)"; then
   printf 'R1 allowed syntax: guard refused non-secret assignments.\n%s\n' "$output" >&2
   exit 1
