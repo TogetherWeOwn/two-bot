@@ -53,6 +53,11 @@ import {
   stagingGuildId,
 } from '../src/staging/spec.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/levels-reward-role-apply.ts --report <probe-output.json> --member <user-id> [--level <n>] [--apply]');
+  process.exit(0);
+}
+
 const API = process.env.DISCORD_API_BASE ?? 'https://discord.com/api/v10';
 
 function usage(): never {

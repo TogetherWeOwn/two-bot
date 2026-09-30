@@ -32,6 +32,11 @@ import {
   planRewardRoleImport,
 } from '../src/leveling/rewardImport.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/levels-import-rewards-probe.ts --guild <snowflake> --file <export.json> --roles <roles.json> --bot-id <snowflake> [--owner-id <snowflake>] [--report <path>] [--require-all-mapped] [--no-db] [--allow-live-guild]');
+  process.exit(0);
+}
+
 function usage(): never {
   console.error(
     'Usage: node scripts/levels-import-rewards-probe.ts --guild <snowflake> --file <export.json>\n' +

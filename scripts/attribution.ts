@@ -39,6 +39,11 @@ import { ANOMALIES, excludeClause, windowBounds } from '../src/analytics/anomali
 import { collapseCrossSourceDuplicates } from '../src/backfill/dedupe.ts';
 import { rollUp, rate, type JoinRecord, type AttributionRow } from '../src/analytics/attribution.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/attribution.ts [days|all] [--csv]');
+  process.exit(0);
+}
+
 const argv = process.argv.slice(2);
 const csv = argv.includes('--csv');
 const windowArg = argv.find((a) => !a.startsWith('--')) ?? '90';

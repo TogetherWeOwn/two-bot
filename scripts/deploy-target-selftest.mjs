@@ -66,6 +66,11 @@ import {
   parseArgs as smokeParseArgs,
 } from "./smoke-staging-deploy.mjs";
 
+if (process.argv.includes("--help")) {
+  console.log("Usage: node scripts/deploy-target-selftest.mjs");
+  process.exit(0);
+}
+
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const WORKFLOW = join(ROOT, ".github", "workflows", "deploy.yml");
 

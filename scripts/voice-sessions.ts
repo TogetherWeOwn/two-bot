@@ -35,6 +35,11 @@ import {
   summarizeVoiceDurations,
 } from '../src/core/voiceSessions.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/voice-sessions.ts [days] [--offset=<hours>]');
+  process.exit(0);
+}
+
 const args = process.argv.slice(2);
 const days = Number(args.find((a) => /^\d+$/.test(a)) ?? 90);
 const offsetHours = Number(args.find((a) => a.startsWith('--offset='))?.split('=')[1] ?? 0);

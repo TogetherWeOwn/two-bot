@@ -59,6 +59,11 @@ import {
   type PartialRole,
 } from '../src/redesign/wave2.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/wave2-additive.ts [--apply]');
+  process.exit(0);
+}
+
 // WAVE2_API_BASE points the script at a stub in test/e2e.wave2.test.ts. Same
 // hook, and the same reason, as WAVE0_API_BASE: the apply path is the half
 // worth proving, and it cannot be proved by pointing it at the real server.

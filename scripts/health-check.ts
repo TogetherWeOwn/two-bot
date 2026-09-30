@@ -636,6 +636,10 @@ const invokedDirectly =
   process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (invokedDirectly) {
+  if (process.argv.includes('--help')) {
+    console.log('Usage: node scripts/health-check.ts [--timeout-ms=<milliseconds>]');
+    process.exit(0);
+  }
   const timeoutArg = process.argv.find((a) => a.startsWith('--timeout-ms='))?.slice('--timeout-ms='.length);
   const timeoutMs = timeoutArg !== undefined ? Number(timeoutArg) : 90_000;
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {

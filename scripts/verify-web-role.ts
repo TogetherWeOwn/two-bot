@@ -18,6 +18,11 @@ import pg from 'pg';
 import { webSchemaFor } from '../src/store/webContract.ts';
 import { runWebRoleChecks, summarise } from '../src/store/webRoleCheck.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/verify-web-role.ts [--role <name>] [--bot-schema <schema>] [--web-schema <schema>]');
+  process.exit(0);
+}
+
 function flag(name: string, fallback: string): string {
   const i = process.argv.indexOf(`--${name}`);
   return i >= 0 && process.argv[i + 1] ? process.argv[i + 1] : fallback;

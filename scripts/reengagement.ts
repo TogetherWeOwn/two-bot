@@ -29,6 +29,11 @@ import {
 } from '../src/jobs/reengagement.ts';
 import { EventStore } from '../src/store/eventStore.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/reengagement.ts [--names] [--csv] [--all] [--mark]');
+  process.exit(0);
+}
+
 const argv = process.argv.slice(2);
 const withNames = argv.includes('--names');
 const withCsv = argv.includes('--csv');

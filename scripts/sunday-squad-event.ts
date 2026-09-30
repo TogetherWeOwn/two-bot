@@ -26,6 +26,11 @@ import {
   scheduledEventPayload,
 } from '../src/onboarding/anchorEvent.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/sunday-squad-event.ts [--dry-run] [--individual]');
+  process.exit(0);
+}
+
 const API = 'https://discord.com/api/v10';
 const TOKEN = process.env.DISCORD_BOT_TOKEN ?? process.env.DISCORD_TOKEN;
 const GUILD = process.env.DISCORD_GUILD_ID;
