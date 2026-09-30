@@ -221,6 +221,7 @@ describe('PRIVACY.md retention compliance', () => {
         member_ranks: ['member_id'],
         member_exclusions: ['member_id'],
         invite_snapshots: ['inviter_id'],
+        capture_retained_growth: ['inviter_id'],
         community_facts: ['actor_id'],
         automod_violations: ['user_id'],
         automod_processed_messages: ['user_id'],

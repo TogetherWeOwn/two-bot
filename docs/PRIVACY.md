@@ -118,6 +118,7 @@ DELETE FROM members                    WHERE member_id = '<id>';
 DELETE FROM member_ranks               WHERE member_id = '<id>';
 DELETE FROM member_exclusions          WHERE member_id = '<id>';
 DELETE FROM invite_snapshots           WHERE inviter_id = '<id>';
+DELETE FROM capture_retained_growth    WHERE inviter_id = '<id>';
 DELETE FROM community_facts            WHERE actor_id = '<id>';
 DELETE FROM automod_violations         WHERE user_id = '<id>';
 DELETE FROM automod_processed_messages WHERE user_id = '<id>';

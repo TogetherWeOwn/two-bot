@@ -156,6 +156,9 @@ export const BOT_TABLES = [
   'audit_kill_switch',
   // 0040 — observed member arrivals awaiting host-less capture attribution.
   'capture_pending_joins',
+  // 0043 — retained invite reads awaiting the same attribution. Counter
+  // evidence, not member identity, but equally never website data.
+  'capture_retained_growth',
 ];
 
 function ident(schema: string, name: string): string {

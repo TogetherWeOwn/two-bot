@@ -214,7 +214,7 @@ test('pending observations survive another retained run and dry-run cannot consu
   assert.equal(first.pending.length, 2);
   const options = {
     previousRows: first.rows, previousEvents: first.storedEvents,
-    previousPending: first.pending, uses: 7,
+    previousPending: first.pending, previousRetained: first.retained, uses: 7,
     capturedAt: '2026-09-30T10:00:00.500Z', rosterReadAt: lateAt,
   };
   const retained = capture([member('old', since)], options).result;
@@ -232,12 +232,96 @@ test('pending observations survive another retained run and dry-run cannot consu
   assert.equal(dry.pendingWrites, 0);
 
   const next = capture([member('old', since)], {
-    ...options, previousPending: retained.pending,
+    ...options, previousPending: retained.pending, previousRetained: retained.retained,
     capturedAt: nextAt, rosterReadAt: nextAt,
   }).result;
   assert.deepEqual(next.events.map((event) => event.memberId), ['within', 'late']);
   assert.ok(next.events.every((event) => event.source === 'invite:fixture'));
   assert.deepEqual(next.pending, []);
+});
+
+test('an independent snapshot advance cannot discard saved unrecorded joins', () => {
+  // The live bot rewrites invite_snapshots.updated_at on ready and the
+  // backfill seeds it independently; neither path drains pending capture
+  // joins. A departed member cannot be recovered from the roster, so pending
+  // existence is capture-owned processing evidence and the next run must
+  // consume it regardless of the shared watermark.
+  const first = capture([member('late', lateAt)]).result;
+  assert.deepEqual(first.pending, [{ id: 'late', joinedAt: lateAt }]);
+
+  const nextAt = '2026-10-01T10:00:00.000Z';
+  const advancedAt = '2026-09-30T12:00:00.000Z';
+  const advanced = capture([member('old', since)], {
+    previousRows: first.rows.map((row) => ({ ...row, updated_at: advancedAt })),
+    previousEvents: first.storedEvents,
+    previousPending: first.pending, previousRetained: first.retained,
+    capturedAt: nextAt, rosterReadAt: nextAt,
+  }).result;
+  assert.equal(advanced.events.length, 1);
+  assert.equal(advanced.events[0].memberId, 'late');
+  assert.equal(advanced.events[0].source, 'unknown');
+  // The retry attributes with the live baseline's evidence window, even though
+  // an unrelated writer advanced it past the saved observation. The pending
+  // row is what proves the join is unrecorded — not the watermark — so the
+  // event is emitted rather than silently discarded.
+  assert.deepEqual(advanced.events[0].metadata?.window, { from: advancedAt, to: nextAt });
+  assert.deepEqual(advanced.pending, []);
+
+  const replay = capture([member('old', since)], {
+    previousRows: advanced.rows, previousEvents: advanced.storedEvents,
+    previousPending: advanced.pending, previousRetained: advanced.retained,
+    capturedAt: '2026-10-02T10:00:00.000Z', rosterReadAt: nextAt,
+  }).result;
+  assert.deepEqual(replay.events, []);
+  assert.equal(replay.storedEvents.length, 1);
+});
+
+test('a retained window replays after its baseline rows are gone', () => {
+  const first = capture([member('late', lateAt)]).result;
+  assert.deepEqual(first.pending, [{ id: 'late', joinedAt: lateAt }]);
+
+  const nextAt = '2026-10-01T10:00:00.000Z';
+  const replay = capture([member('old', since)], {
+    previousRows: [], previousEvents: first.storedEvents,
+    previousPending: first.pending, previousRetained: first.retained,
+    invites: [], capturedAt: nextAt, rosterReadAt: nextAt,
+  }).result;
+  assert.equal(replay.events.length, 1);
+  assert.equal(replay.events[0].memberId, 'late');
+  assert.equal(replay.events[0].source, 'unknown');
+  assert.deepEqual(replay.pending, []);
+});
+
+test('a retry after a vanished invite keeps the observed growth honest', () => {
+  // Baseline A=5, B=5; the first read sees A=6 with a deferred post-stamp
+  // join, so the window is retained with its observed read. Before retry, A
+  // disappears (deleted/expired/reset) while B climbs to 7. The retained
+  // A+1 survives, so the combined growth is A+1 and B+2 over two observed
+  // joins: the arithmetic does not close on B alone, and both events stay
+  // ambiguous rather than collapsing to a false exact invite:b.
+  const previousRows = ['a', 'b'].map((code) => ({
+    code, uses: 5, inviterId: null, channelId: null, updated_at: since,
+  }));
+  const invites = previousRows.map((row) => ({ ...row, uses: row.code === 'a' ? 6 : 5 }));
+  const first = capture([member('within', capturedAt), member('late', lateAt)], {
+    previousRows, invites,
+  }).result;
+  assert.deepEqual(first.events, []);
+  assert.equal(first.pending.length, 2);
+  assert.ok(first.retained.some((r) => r.code === 'a' && r.uses === 6));
+
+  const nextAt = '2026-10-01T10:00:00.000Z';
+  const next = capture([member('late', lateAt)], {
+    previousRows: first.rows, previousEvents: first.storedEvents,
+    previousPending: first.pending, previousRetained: first.retained,
+    invites: [{ code: 'b', uses: 7, inviterId: null, channelId: null }],
+    capturedAt: nextAt, rosterReadAt: nextAt,
+  }).result;
+  assert.deepEqual(next.events.map((event) => event.memberId), ['within', 'late']);
+  assert.deepEqual(next.events.map((event) => event.source), ['ambiguous:a+b', 'ambiguous:a+b']);
+  assert.ok(next.events.every((event) => event.metadata?.attribution_exact === false));
+  assert.deepEqual(next.pending, []);
+  assert.deepEqual(next.retained, []);
 });
 
 test('pending joins keep distinct arrivals for the same member and dedupe roster overlap', () => {

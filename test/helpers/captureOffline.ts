@@ -16,6 +16,10 @@ export interface PendingCaptureJoin {
   joinedAt: string;
 }
 
+export interface RetainedCaptureGrowth extends InviteState {
+  observed_at: string;
+}
+
 export interface CaptureFixture {
   since: string | null;
   capturedAt: string;
@@ -26,6 +30,7 @@ export interface CaptureFixture {
   previousRows?: CaptureSnapshot[];
   previousEvents?: FunnelEvent[];
   previousPending?: PendingCaptureJoin[];
+  previousRetained?: RetainedCaptureGrowth[];
 }
 
 export interface CaptureResult {
@@ -38,6 +43,7 @@ export interface CaptureResult {
   windowEnds: string[];
   pending: PendingCaptureJoin[];
   pendingWrites: number;
+  retained: RetainedCaptureGrowth[];
 }
 
 const fixture: CaptureFixture = JSON.parse(process.env.CAPTURE_TEST_FIXTURE!);
@@ -49,6 +55,10 @@ const snapshots: InviteState[] = [];
 const windowEnds: string[] = [];
 let pending = [...(fixture.previousPending ?? [])];
 let pendingWrites = 0;
+// Retained invite reads carried across fixture runs, like the real
+// capture_retained_growth rows: already-observed growth that a retry must
+// reconcile rather than recompute from the (preserved) baseline.
+let retained: RetainedCaptureGrowth[] = [...(fixture.previousRetained ?? [])];
 let rows: CaptureSnapshot[] = fixture.previousRows ?? (fixture.since === null ? [] : [{
   code: 'fixture', uses: 5, inviterId: null, channelId: null, updated_at: fixture.since,
 }]);
@@ -86,6 +96,32 @@ mock.method(EventStore.prototype, 'markBot', async (guildId: string, id: string)
 export async function openCaptureTestDb() {
   return {
     prepare(sql: string) {
+      if (sql === 'SELECT code, uses, inviter_id AS "inviterId", channel_id AS "channelId", observed_at AS "observedAt" FROM capture_retained_growth WHERE guild_id = ?') {
+        return {
+          async all(guildId: string) {
+            assert.equal(guildId, 'fixture-guild');
+            return retained.map((r) => ({ ...r }));
+          },
+        };
+      }
+      if (sql.startsWith('INSERT INTO capture_retained_growth')) {
+        return {
+          async run(guildId: string, code: string, uses: number, inviterId: string | null,
+                    channelId: string | null, observedAt: string) {
+            assert.equal(guildId, 'fixture-guild');
+            retained = retained.filter((r) => r.code !== code);
+            retained.push({ code, uses, inviterId, channelId, observed_at: observedAt });
+          },
+        };
+      }
+      if (sql === 'DELETE FROM capture_retained_growth WHERE guild_id = ?') {
+        return {
+          async run(guildId: string) {
+            assert.equal(guildId, 'fixture-guild');
+            retained = [];
+          },
+        };
+      }
       if (sql === 'SELECT member_id AS id, joined_at AS "joinedAt" FROM capture_pending_joins WHERE guild_id = ?') {
         return {
           async all(guildId: string) {
@@ -109,6 +145,17 @@ export async function openCaptureTestDb() {
             assert.equal(guildId, 'fixture-guild');
             pendingWrites++;
             pending = pending.filter((j) => j.joinedAt > at);
+          },
+        };
+      }
+      if (sql.startsWith('DELETE FROM capture_pending_joins WHERE guild_id = ? AND (')) {
+        return {
+          async run(guildId: string, ...keys: string[]) {
+            assert.equal(guildId, 'fixture-guild');
+            pendingWrites++;
+            const handled = new Set<string>();
+            for (let i = 0; i + 1 < keys.length; i += 2) handled.add(JSON.stringify([keys[i], keys[i + 1]]));
+            pending = pending.filter((j) => !handled.has(JSON.stringify([j.id, j.joinedAt])));
           },
         };
       }
@@ -154,7 +201,7 @@ export async function openCaptureTestDb() {
     },
     async close() {
       console.log(`CAPTURE_FIXTURE_RESULT ${JSON.stringify({
-        calls, events, storedEvents, bots, snapshots, rows, windowEnds, pending, pendingWrites,
+        calls, events, storedEvents, bots, snapshots, rows, windowEnds, pending, pendingWrites, retained,
       })}`);
     },
   };
