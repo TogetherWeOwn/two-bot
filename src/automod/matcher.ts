@@ -81,9 +81,14 @@ function normalize(value: string): string {
     .trim();
 }
 
+/** Normalized form of one bad-words entry, shared with the wordlist lint (TOG-10066). */
+export function normalizeBadWord(raw: string): string {
+  return normalize(raw).replace(ZERO_WIDTH, '').replace(/\s+/g, '');
+}
+
 function hasBadWord(content: string, words: string[]): boolean {
   for (const raw of words) {
-    const word = normalize(raw).replace(ZERO_WIDTH, '').replace(/\s+/g, '');
+    const word = normalizeBadWord(raw);
     if (!word) continue;
     // TOG-10049: tolerate residual combining marks between letters so a
     // stray accent that survives normalization cannot split the word.
