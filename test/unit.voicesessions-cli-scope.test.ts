@@ -3,10 +3,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import type { VoiceReportEvent } from './helpers/voiceReportDbFixture.ts';
 
 const run = promisify(execFile);
-const SCRIPT = new URL('../scripts/voice-sessions.ts', import.meta.url).pathname;
+const SCRIPT = fileURLToPath(new URL('../scripts/voice-sessions.ts', import.meta.url));
 const FIXTURE = new URL('./helpers/voiceReportDbFixture.ts', import.meta.url).href;
 const GUILD = 'voice-report-target';
 const FOREIGN = 'voice-report-foreign';

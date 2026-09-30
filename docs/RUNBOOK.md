@@ -556,10 +556,14 @@ Off the voice session log, not off a guess:
 ```bash
 cd /opt/two-bot
 # last 90 days, hours bucketed in UTC
-sudo -u twobot --preserve-env=TWO_DATABASE_URL node scripts/voice-sessions.ts 90
+sudo -u twobot --preserve-env=TWO_DATABASE_URL,DISCORD_GUILD_ID node scripts/voice-sessions.ts 90
 # ...or in the timezone most members are actually in
-sudo -u twobot --preserve-env=TWO_DATABASE_URL node scripts/voice-sessions.ts 90 --offset=-5
+sudo -u twobot --preserve-env=TWO_DATABASE_URL,DISCORD_GUILD_ID node scripts/voice-sessions.ts 90 --offset=-5
 ```
+
+The report is scoped to one guild: `DISCORD_GUILD_ID` must be set (the same
+value the bot runs with) or the script exits before touching the database.
+A plain `sudo` env reset discards it, hence the two-variable preserve list.
 
 Two things to read before the recommendation:
 
