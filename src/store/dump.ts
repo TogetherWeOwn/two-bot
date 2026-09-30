@@ -31,6 +31,8 @@
  * backup at an unpleasant hour.
  */
 import { createReadStream, createWriteStream } from 'node:fs';
+import { rename, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { createGunzip, createGzip } from 'node:zlib';
 import { createInterface } from 'node:readline';
 import { once } from 'node:events';
@@ -293,10 +295,17 @@ function orderFor(table: DumpTable, columns: string[]): string {
  * produce a backup whose projection disagrees with its own event log.
  */
 export async function dump(db: Db, outPath: string): Promise<DumpManifest> {
+  // Same directory makes publication an atomic rename. The trailing .tmp keeps
+  // even an abandoned partial file out of restore-drill and retention selectors.
+  const tempPath = `${outPath}.${randomUUID()}.tmp`;
   const gz = createGzip({ level: 9 });
-  const written = pipeline(gz, createWriteStream(outPath));
+  const written = pipeline(gz, createWriteStream(tempPath, { flags: 'wx' }));
+  // The output can fail while a database read is pending. Observe it immediately;
+  // awaiting the original promise below still propagates the stream failure.
+  void written.catch(() => {});
 
   const write = async (obj: unknown): Promise<void> => {
+    if (gz.destroyed) await written;
     if (!gz.write(JSON.stringify(obj) + '\n')) await once(gz, 'drain');
   };
 
@@ -363,9 +372,15 @@ export async function dump(db: Db, outPath: string): Promise<DumpManifest> {
     });
 
     await write({ kind: 'end', rows });
-  } finally {
     gz.end();
     await written;
+    await rename(tempPath, outPath);
+  } catch (error) {
+    gz.destroy();
+    // Wait for the output to close before removing it, including open failures.
+    await written.catch(() => {});
+    await rm(tempPath, { force: true });
+    throw error;
   }
 
   return manifest;
