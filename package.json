@@ -136,7 +136,7 @@
     "@types/node": "^24.0.0",
     "@types/pg": "^8.23.1",
     "@types/ws": "^8.5.0",
-    "typescript": "^5.9.3",
+    "typescript": "^7.0.2",
     "ws": "^8.21.0"
   }
 }
