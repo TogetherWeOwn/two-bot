@@ -108,13 +108,17 @@ export function normalizeBadWord(raw: string): string {
 
 // Drop mark runs that decorate nothing, keeping required marks across
 // allowed gaps. A maximal run is judged by its origin — the nearest preceding
-// character skipping over gap separators (whitespace, format controls):
+// base character skipping over gap separators (whitespace, format controls)
+// AND preceding mark runs: a chain attached to one base letter may be split
+// by a permitted gap (`عَ ّلَم`, `कि ंत`), and the later run inherits the same
+// base origin rather than becoming punctuation decoration:
 //   - origin is a Latin letter: same fold as directly-attached stacking
 //     (dotted-i keeps its dot, other Latin stacking drops), so `s ́h`
 //     folds exactly like `śh`;
 //   - origin is another word character (non-Latin letter, digit,
 //     underscore): the run is meaningful (Indic/Arabic vowel signs, chained
-//     marks) and stays, so `क ित` still matches `कित`;
+//     marks) and stays, so `क ित` still matches `कित` and `عَ ّلَم` still
+//     matches `عَّلَم`;
 //   - otherwise (string start, punctuation, emoji): standalone decoration,
 //     dropped, so `f*́ck` matches `f*ck`.
 // Single linear pass, so the matcher below needs no mark-skipping of its own.
@@ -128,15 +132,25 @@ function stripStandaloneMarkRuns(value: string): string {
   });
 }
 
-// Nearest character before `offset`, skipping allowed gap separators.
+// Nearest base character before `offset`, skipping allowed gap separators and
+// any intervening mark runs: a chain attached to one base letter may be split
+// by a permitted gap (`عَ ّلَم`, `कि ंत`), and the later run inherits the same
+// base origin rather than becoming standalone decoration. Bare gap separators
+// with no marks on either side still separate neighbouring bases (the origin
+// is then punctuation/string-start, which drops).
 function precedingOrigin(whole: string, offset: number): string {
   let i = offset;
   while (i > 0) {
     let cp = whole.codePointAt(i - 1) ?? 0;
     if (cp >= 0xdc00 && cp <= 0xdfff && i >= 2) cp = whole.codePointAt(i - 2) ?? 0;
     const ch = String.fromCodePoint(cp);
-    if (!/[\s\p{Cf}]/u.test(ch)) return ch;
-    i -= ch.length;
+    // Preceding marks belong to the chain the run extends — carry through
+    // them (and the gap separators around them) to the originating base.
+    if (/\p{M}/u.test(ch) || /[\s\p{Cf}]/u.test(ch)) {
+      i -= ch.length;
+      continue;
+    }
+    return ch;
   }
   return '';
 }

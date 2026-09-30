@@ -151,6 +151,26 @@ test('marks chained after a meaningful mark stay meaningful', () => {
   }
 });
 
+test('gap-split mark chains inherit their base origin', () => {
+  const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
+  // A chain attached to one base letter may be split by a permitted gap; the
+  // later run carries the same base origin as its attached form. The shorter
+  // entry must not catch the split longer chain, and the longer entry must.
+  for (const [name, entry, content, expected] of [
+    ['Arabic split chain misses shorter entry', E('\\u0639\\u064e\\u0644\\u064e\\u0645'), E('\\u0639\\u064e \\u0651\\u0644\\u064e\\u0645'), null],
+    ['Arabic split chain matches longer entry', E('\\u0639\\u064e\\u0651\\u0644\\u064e\\u0645'), E('\\u0639\\u064e \\u0651\\u0644\\u064e\\u0645'), 'bad_words'],
+    ['Devanagari split chain misses shorter entry', E('\\u0915\\u093f\\u0924'), E('\\u0915\\u093f \\u0902\\u0924'), null],
+    ['Devanagari split chain matches longer entry', E('\\u0915\\u093f\\u0902\\u0924'), E('\\u0915\\u093f \\u0902\\u0924'), 'bad_words'],
+  ] as Array<[string, string, string, string | null]>) {
+    assert.equal(match(content, { ...policy, badWords: [entry] }), expected, name);
+  }
+  // A spaced-chain configuration keeps its longer identity: it matches its
+  // own spaced content but not the shorter word.
+  const spacedCfg = loadAutomodConfig({ TWO_AUTOMOD_BAD_WORDS: E('\\u0915\\u093f \\u0902\\u0924') }, null).policy;
+  assert.equal(match(E('\\u0915\\u093f \\u0902\\u0924'), spacedCfg), 'bad_words', 'spaced-chain config matches spaced content');
+  assert.equal(match(E('\\u0915\\u093f\\u0924'), spacedCfg), null, 'spaced-chain config vs shorter word');
+});
+
 test('required marks survive across allowed gaps', () => {
   const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
   // A mark whose origin (skipping gap separators) is a word character is
