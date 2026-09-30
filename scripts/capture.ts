@@ -150,7 +150,9 @@ for (const m of members) {
   const joinedAt = new Date(m.joined_at).toISOString();
   // First ever capture has no `since`; the member list is history, not this
   // window, and backfill.ts owns history. Baseline only, emit nothing.
-  if (since !== null && joinedAt > since) newJoins.push({ id, joinedAt });
+  // Keep the window (since, capturedAt]: joins seen after the stamp belong to
+  // the next capture, not to counters read before they arrived.
+  if (since !== null && joinedAt > since && joinedAt <= capturedAt) newJoins.push({ id, joinedAt });
 }
 newJoins.sort((a, b) => a.joinedAt.localeCompare(b.joinedAt));
 
