@@ -41,22 +41,44 @@ registerHooks({
             fail('open');
             return {
               prepare(sql) {
-                trace('prepare ' + sql);
-                // The probe COUNT must be schema-qualified: an unqualified read
-                // hides schema-USAGE denials behind 42P01 (see pg-restore.ts).
-                const match = /^SELECT COUNT\\(\\*\\) AS n FROM public\\.([a-z_]+)$/.exec(sql);
-                if (!match) return forbidden('unexpected SQL ' + sql);
-                const table = match[1];
-                fail('prepare', table);
-                return {
-                  async get() {
-                    trace('get ' + table);
-                    fail('get', table);
-                    return { n: table === 'events' ? 17 : 3 };
-                  },
-                  all: async () => forbidden('all'),
-                  run: async () => forbidden('write'),
-                };
+                // The probe COUNT is deliberately unqualified: it reads through
+                // the same search_path the --force restore uses. A 42P01 from
+                // it is ambiguous (missing table vs USAGE-denied schema hidden
+                // from name resolution), so the CLI disambiguates with a
+                // catalog visibility query before calling anything missing.
+                const count = /^SELECT COUNT\\(\\*\\) AS n FROM ([a-z_]+)$/.exec(sql);
+                if (count) {
+                  const table = count[1];
+                  trace('prepare ' + sql);
+                  fail('prepare', table);
+                  return {
+                    async get() {
+                      trace('get ' + table);
+                      fail('get', table);
+                      return { n: table === 'events' ? 17 : 3 };
+                    },
+                    all: async () => forbidden('all'),
+                    run: async () => forbidden('write'),
+                  };
+                }
+                if (sql.replace(/\\s+/g, ' ').trim() ===
+                    "SELECT n.nspname AS schema FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace WHERE c.relname = ? AND c.relkind IN ('r', 'p', 'v', 'm', 'f')") {
+                  trace('visibility-prepare');
+                  return {
+                    get: async () => forbidden('visibility-get'),
+                    async all(table) {
+                      trace('visibility ' + table);
+                      fail('visibility', String(table));
+                      const mode = process.env.RESTORE_PROBE_VISIBILITY || 'absent';
+                      if (mode === 'fail') throw new Error('synthetic visibility failure');
+                      if (mode === 'hidden') return [{ schema: 'denied_schema' }];
+                      if (mode === 'off-path') return [{ schema: 'other_schema' }];
+                      return [];
+                    },
+                    run: async () => forbidden('write'),
+                  };
+                }
+                return forbidden('unexpected SQL ' + sql);
               },
               exec: async () => forbidden('exec'),
               transaction: async () => forbidden('transaction'),
