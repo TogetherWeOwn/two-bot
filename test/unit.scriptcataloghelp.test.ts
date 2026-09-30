@@ -65,6 +65,13 @@ function checkHelp(entry: Entry, root = ROOT): void {
   assert.equal(result.error, undefined, `${entry.name}: --help failed: ${result.error?.message}`);
   assert.equal(result.status, 0,
     `${entry.name}: --help exited ${result.status} (${result.signal ?? 'no signal'}): ${(result.stderr ?? '').slice(0, 500)}`);
+  if (!node) {
+    // A restricted-shell refusal is printed to stderr even when the script
+    // catches it (`|| true`) and still exits 0 with valid usage. Refusals
+    // stick: any refusal signature fails the entry by registry name.
+    assert.doesNotMatch(result.stderr ?? '', /restricted:|cannot specify|No such file or directory|command not found/i,
+      `${entry.name}: --help attempted a prohibited command`);
+  }
   assert.match(output, /^usage:[ \t]*\S[^\r\n]*$/im, `${entry.name}: --help printed no non-empty usage line`);
 }
 
@@ -136,6 +143,7 @@ test('help network/subprocess attempts fail even when scripts catch the refusal'
     "import { execSync } from 'node:child_process'; try { execSync('true'); } catch {}",
     "import { resolve4 } from 'node:dns'; if (resolve4.name !== 'refuse') throw new Error('DNS refusal missing'); try { resolve4('localhost', () => {}); } catch {}",
     "import { resolve4 } from 'node:dns/promises'; if (resolve4.name !== 'refuse') throw new Error('DNS refusal missing'); try { await resolve4('localhost'); } catch {}",
+    "import dgram from 'node:dgram'; if (dgram.createSocket.name !== 'refuse' || dgram.Socket.prototype.bind.name !== 'refuse') throw new Error('dgram refusal missing'); try { dgram.createSocket('udp4'); } catch {}",
   ]) {
     fixture(`${body}; console.log('Usage: fixture.mjs');`, (entry, root) => {
       assert.throws(() => checkHelp(entry, root), /fixture:help: --help exited 97/);
@@ -182,6 +190,13 @@ test('Bash help uses only builtins and cannot invoke external clients', () => {
   fixture("/usr/bin/curl https://example.invalid", (entry, root) => {
     assert.throws(() => checkHelp(entry, root), /fixture:help: --help exited/);
   }, 'bash');
+  // A script that swallows the restricted-shell refusal (`|| true`) and still
+  // prints usage must fail by registry name; refusals are sticky.
+  for (const external of ['/usr/bin/curl https://example.invalid || true', 'curl https://example.invalid || true']) {
+    fixture(`${external}\nprintf '%s\\n' 'Usage: bash scripts/fixture.sh [--help]'`, (entry, root) => {
+      assert.throws(() => checkHelp(entry, root), /fixture:help: --help attempted a prohibited command/);
+    }, 'bash');
+  }
 });
 
 test('every catalog entry prints usage on --help offline', async (t) => {

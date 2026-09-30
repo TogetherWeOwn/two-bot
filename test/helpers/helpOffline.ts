@@ -21,6 +21,10 @@ net.Server.prototype.listen = refuse;
 tls.connect = refuse;
 dgram.Socket.prototype.connect = refuse;
 dgram.Socket.prototype.send = refuse;
+// bind() on an owned loopback listener succeeds without connect/send, and
+// createSocket alone hands out a live socket, so refuse both as well.
+dgram.createSocket = refuse;
+dgram.Socket.prototype.bind = refuse;
 // c-ares resolution does not go through the net/dgram JavaScript methods.
 // Cover record-specific APIs and both Resolver classes, not just resolve().
 const dnsQueries = [
