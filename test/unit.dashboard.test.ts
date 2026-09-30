@@ -14,6 +14,7 @@
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { openTestDb, type TestDb } from './helpers/testDb.ts';
+import { EventStore } from '../src/store/eventStore.ts';
 import {
   buildDashboard,
   channelState,
@@ -410,6 +411,46 @@ test('rolling activity includes its lower bounds and excludes generatedAt and fu
   assert.equal(d.active30d, 4, '30-day lower bound, both 7-day boundaries, and now-1ms');
   assert.equal(d.humansInServer, boundaries.length, 'membership state is not reconstructed');
 });
+
+for (const [label, advancedAt] of [
+  ['exactly-now', '2026-09-30T12:00:00.000Z'],
+  ['future', '2026-10-01T12:00:00.000Z'],
+] as const) {
+  test(`${label} last activity does not hide earlier in-window message or voice evidence`, async () => {
+    const now = new Date('2026-09-30T12:00:00.000Z');
+    const recent = '2026-09-29T12:00:00.000Z';
+    const since30 = '2026-08-31T12:00:00.000Z';
+    const stale = '2026-08-31T11:59:59.999Z';
+    const fixtures: Array<Partial<MemberRow> & { member_id: string }> = [
+      { member_id: 'recent-message', first_message_at: recent, last_active_at: recent },
+      { member_id: 'recent-voice', first_voice_at: recent, last_active_at: recent },
+      { member_id: 'both', first_message_at: recent, first_voice_at: recent, last_active_at: recent },
+      { member_id: 'month-message', first_message_at: since30, last_active_at: since30 },
+      { member_id: 'month-voice', first_voice_at: since30, last_active_at: since30 },
+      { member_id: 'stale', first_message_at: stale, first_voice_at: stale, last_active_at: stale },
+      { member_id: 'no-earlier-evidence' },
+      { member_id: 'future-only', first_message_at: advancedAt, first_voice_at: advancedAt },
+      { member_id: 'gone', first_message_at: recent, last_active_at: recent, left_at: recent },
+    ];
+    for (const fixture of fixtures) {
+      await member({ joined_at: '2026-01-01T00:00:00.000Z', ...fixture });
+    }
+    await member({ member_id: 'bot', first_message_at: recent, last_active_at: recent }, 1);
+
+    const before = await buildDashboard(t.db, { now, anomalies: [] });
+    assert.equal(before.active7d, 3);
+    assert.equal(before.active30d, 5);
+
+    const store = new EventStore(t.db);
+    for (const id of [...fixtures.map((m) => m.member_id), 'bot']) {
+      await store.touchActivity(GUILD, id, advancedAt);
+    }
+    const after = await buildDashboard(t.db, { now, anomalies: [] });
+    assert.equal(after.active7d, 3, 'earlier message/voice evidence survives; each human counts once');
+    assert.equal(after.active30d, 5, '30-day lower-bound evidence survives too');
+    assert.equal(after.humansInServer, before.humansInServer, 'membership state stays unchanged');
+  });
+}
 
 test('channel events count [now-30d, generatedAt) for snapshot and live-only channels', async () => {
   const now = new Date('2026-09-30T12:00:00.000Z');
