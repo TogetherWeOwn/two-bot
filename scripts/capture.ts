@@ -158,12 +158,11 @@ const totalGrowth = [...growth.values()].reduce((a, b) => a + b, 0);
 
 // --- 3. who is new in this window? ------------------------------------------
 
-// Per-page observations: a multi-page scan is not an atomic snapshot, so each
-// member carries the instant its own page finished downloading. Stamping every
-// member with scan completion would assert presence "now" for someone on page
-// one who already left before page two finished, reviving them over a later
-// gateway removal. `capturedAt` stays the window watermark from before the
-// reads; presence evidence is "on the roster at this instant", per page.
+// Per-page request bounds: scan/body completion does not prove presence at
+// completion. A member may leave while a page streams. The conservative
+// request-start bound keeps that departure; a newer joined_at in the response
+// still proves a genuine rejoin during the request. `capturedAt` is only the
+// invite-window watermark, not membership observation evidence.
 const observed = await fetchAllMembersObserved(rest, guildId);
 if (!observed || observed.length === 0) {
   console.error(
@@ -190,7 +189,9 @@ for (const { member: m, observedAt } of observed) {
   const joinedAt = new Date(m.joined_at).toISOString();
   // First ever capture has no `since`; the member list is history, not this
   // window, and backfill.ts owns history. Baseline only, emit nothing.
-  if (since !== null && joinedAt > since) newJoins.push({ id, joinedAt, observedAt });
+  if (since !== null && joinedAt > since) {
+    newJoins.push({ id, joinedAt, observedAt: joinedAt > observedAt ? joinedAt : observedAt });
+  }
 }
 newJoins.sort((a, b) => a.joinedAt.localeCompare(b.joinedAt));
 
@@ -228,13 +229,10 @@ const events: FunnelEvent[] = newJoins.map((j, i) => ({
 let written = 0;
 if (!dryRun) {
   for (let i = 0; i < events.length; i++) {
-    // A captured join is live current-member evidence, not a historical log
-    // import: the member was on the roster at its page's observation instant,
-    // so that observation outranks a delayed removal stamped earlier - but
-    // never a removal that landed after the member's own page was read.
-    // Occurrence stays Discord's joined_at; only presence order uses the
-    // per-page roster-observation instant. Backfill member-list
-    // joins stay observation-free on purpose - they are history, not presence.
+    // Request-start evidence beats older removals, never departures while the
+    // response streams. If joined_at is newer than the request, it proves a
+    // new spell after that bound and must not be ordered before its own join.
+    // Occurrence remains Discord's joined_at. Backfill joins stay historical.
     const res = await store.record(events[i], { membershipObservedAt: newJoins[i].observedAt });
     if (res.inserted) written++;
   }

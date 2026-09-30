@@ -123,11 +123,14 @@ export class EventStore {
           // observation overwrite a newer commit. So the UPDATE is a
           // compare-and-swap on the exact metadata string just read - a
           // concurrent commit makes it match zero rows instead of clobbering -
-          // with a bounded re-read retry so a genuinely newer observation
-          // still converges on the max. No FOR UPDATE, no casts, no CTEs, no
-          // UPDATE..FROM: the offline probes run this same code behind the
-          // narrow Db surface.
-          for (let attempt = 0; attempt < 5; attempt++) {
+          // with bounded optimistic retries. On exhaustion, a portable no-op
+          // UPDATE locks the event row before the final read, so contention
+          // cannot silently discard an observation. No FOR UPDATE, casts, or
+          // CTEs: the offline SQLite probes run behind the same Db surface.
+          for (let attempt = 0; attempt <= 5; attempt++) {
+            if (attempt === 5) {
+              await tx.prepare(`UPDATE events SET id = id WHERE id = ?`).run(existing.id);
+            }
             const cur = await tx
               .prepare(`SELECT metadata FROM events WHERE id = ?`)
               .get<{ metadata: string | null }>(existing.id);
@@ -149,6 +152,7 @@ export class EventStore {
                 AND COALESCE(metadata, '') = COALESCE(?, '')`,
             ).run(next, existing.id, cur?.metadata ?? null);
             if (swapped.changes > 0) break;
+            if (attempt === 5) throw new Error('Membership observation update failed while holding its event lock');
             // Someone committed between our read and write; re-read and
             // converge on the max rather than clobbering it.
           }

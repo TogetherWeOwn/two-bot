@@ -203,9 +203,9 @@ test('a captured current member reopens presence after a delayed removal', { tim
  *
  * Race: capture window opens at 10:00, a removal lands at 10:01, the member
  * rejoins at 10:01:30, and the roster is actually read at 10:02. The captured
- * join must carry the roster-observation instant (10:02), not the window
- * watermark (10:00) - otherwise the store selects the earlier removal despite
- * the roster proving a later rejoin. The child's wall clock is pinned at 10:00
+ * join must not be ordered at the request/window start (10:00): the returned
+ * joined_at itself proves a later spell (10:01:30), after the removal. Body
+ * completion alone is not presence evidence. The child's clock is pinned at 10:00
  * and advanced to 10:02 by the stub at the actual roster read, so the race is
  * deterministic. Mirrors the reviewer's child-clock proof.
  */
@@ -292,7 +292,7 @@ test('a rejoin during REST capture keeps roster-observation time, not window sta
     const meta = JSON.parse(captured!.metadata) as {
       membershipObservedAt?: string; window?: { from?: string; to?: string };
     };
-    assert.equal(meta.membershipObservedAt, ROSTER_READ, 'presence carries the roster observation, not the window start');
+    assert.equal(meta.membershipObservedAt, MID_REJOIN, 'the returned join proves a newer spell than request start');
     assert.equal(meta.window?.to, WINDOW_START, 'the window watermark still labels the window start');
   } finally {
     await new Promise<void>((resolve) => timed.close(() => resolve()));
@@ -308,7 +308,7 @@ test('a rejoin during REST capture keeps roster-observation time, not window sta
  * Race: capture window opens at 10:00, page one observes the target at
  * 10:00:30, the target leaves at 10:01 while the scan is still paging, and
  * page two completes at 10:02. The captured join must carry its own page's
- * observation (10:00:30), not scan completion (10:02) - otherwise the store
+ * request bound (10:00), not scan completion (10:02) - otherwise the store
  * orders the stale page-one sighting after the real 10:01 removal and
  * wrongly clears it. A full 1000-row first page forces the second request;
  * the stub commits the actual leave before returning page two, so the race
@@ -419,9 +419,136 @@ test('a leave after its roster page keeps the member departed after scan complet
       `SELECT metadata FROM events WHERE guild_id = ? AND member_id = ? AND event_type = ? AND occurred_at = ?`,
     ).get<{ metadata: string }>(GUILD, MEMBER, 'member_join', REJOIN);
     const meta = JSON.parse(captured!.metadata) as { membershipObservedAt?: string };
-    assert.equal(meta.membershipObservedAt, PAGE_ONE, 'presence carries the page observation, not scan completion');
+    assert.equal(meta.membershipObservedAt, WINDOW_START, 'presence carries its page request bound, not scan completion');
   } finally {
     await new Promise<void>((resolve) => paged.close(() => resolve()));
+    rmSync(clock, { force: true });
+  }
+});
+
+/**
+ * TOG-10212 P2 regression (reviewer CHANGES at c81e6c87): a leave committed
+ * while its roster page is still streaming must not be cleared by that page.
+ *
+ * Race with ONE page request: headers and the first byte arrive at 10:00:30
+ * (the server's snapshot instant), a real gateway leave commits at 10:01
+ * while the body is in flight, and the remainder arrives at 10:02. Stamping
+ * body completion (10:02) asserts presence "now" for someone already gone and
+ * clears the legitimate departure. The stub streams the JSON in two chunks -
+ * headers plus the first half, a pause so the capture child observes
+ * response-start, then the actual leave write, then the rest - so the race is
+ * deterministic. Mirrors the reviewer's single-request proof; the
+ * window-start stamp is only a control, not a proposed rollback.
+ *
+ * REVIEWER: revert the request-start bound in `DiscordRest.getObserved` to a
+ * post-`res.json()` stamp. The projection assert below fails with left_at
+ * cleared to null - exactly the reported P2.
+ */
+test('a leave committed while its roster page streams keeps the member departed', { timeout: 120_000 }, async () => {
+  const WINDOW_START = '2026-09-30T10:00:00.000Z';
+  const HEADERS = '2026-09-30T10:00:30.000Z';
+  const LEFT = '2026-09-30T10:01:00.000Z';
+  const FINISHED = '2026-09-30T10:02:00.000Z';
+  const store = new EventStore(harness.db);
+  await store.record({
+    guildId: GUILD, memberId: MEMBER, eventType: 'member_join',
+    occurredAt: FIRST_JOIN, source: 'invite:first',
+  });
+  await harness.db
+    .prepare(`INSERT INTO invite_snapshots (guild_id, code, uses, updated_at) VALUES (?, ?, ?, ?)`)
+    .run(GUILD, 'stream-invite', 1, FIRST_JOIN);
+
+  const clock = join(tmpdir(), `two-bot-capture-stream-clock-${process.pid}.txt`);
+  writeFileSync(clock, String(Date.parse(WINDOW_START)));
+  const seen: string[] = [];
+  let stubError: unknown;
+  const rosterBody = JSON.stringify([{ user: { id: MEMBER, bot: false }, joined_at: REJOIN }]);
+  const split = Math.floor(rosterBody.length / 2);
+  const streaming = createServer(async (req, res) => {
+    try {
+      const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+      seen.push(`${url.pathname}${url.search}`);
+      const send = (body: unknown) => {
+        const json = JSON.stringify(body);
+        res.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(json) });
+        res.end(json);
+      };
+      if (req.method === 'GET' && url.pathname === `/api/v10/guilds/${GUILD}/invites`) {
+        return send([{ code: 'stream-invite', uses: 2 }]);
+      }
+      if (req.method === 'GET' && url.pathname === `/api/v10/guilds/${GUILD}/members`) {
+        // The server's snapshot starts streaming NOW; the leave lands mid-body.
+        writeFileSync(clock, String(Date.parse(HEADERS)));
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.write(rosterBody.slice(0, split));
+        // Hold the body open so the capture child observes response-start
+        // (headers) while the clock still reads HEADERS.
+        await new Promise((r) => setTimeout(r, 500));
+        // The actual gateway write commits while the page is in flight.
+        await store.record(
+          { guildId: GUILD, memberId: MEMBER, eventType: 'member_leave', occurredAt: LEFT, source: 'gateway' },
+          { membershipObservedAt: LEFT },
+        );
+        writeFileSync(clock, String(Date.parse(FINISHED)));
+        res.write(rosterBody.slice(split));
+        res.end();
+        return;
+      }
+      return send({ vanity_url_code: null });
+    } catch (error) {
+      stubError = error;
+      res.writeHead(500).end();
+    }
+  });
+  await new Promise<void>((resolve) => streaming.listen(0, '127.0.0.1', resolve));
+  try {
+    const port = (streaming.address() as { port: number }).port;
+    const url = new URL(TEST_PG_URL);
+    url.searchParams.set('options', `-c search_path=${harness.schema}`);
+    const pin = fileURLToPath(new URL('./helpers/pinned-clock.mjs', import.meta.url));
+    let code = 0;
+    let stdout = '';
+    let stderr = '';
+    try {
+      const result = await run(process.execPath, ['--import', pin, SCRIPT], {
+        cwd: REPO,
+        env: {
+          ...process.env,
+          TWO_DATABASE_URL: url.toString(),
+          DISCORD_TOKEN: TOKEN,
+          DISCORD_GUILD_ID: GUILD,
+          DISCORD_API_BASE: `http://127.0.0.1:${port}/api/v10`,
+          TWO_TEST_CLOCK_FILE: clock,
+        },
+        timeout: 60_000,
+      });
+      stdout = result.stdout;
+      stderr = result.stderr;
+    } catch (error) {
+      const err = error as { code?: number; stdout?: string; stderr?: string };
+      code = err.code ?? -1;
+      stdout = err.stdout ?? '';
+      stderr = err.stderr ?? '';
+    }
+    assert.equal(code, 0, `capture failed:\n${stdout}\n${stderr}`);
+    assert.equal(stubError, undefined);
+    assert.equal(
+      seen.filter((p) => p.includes('/members?')).length, 1,
+      `expected one roster request: ${JSON.stringify(seen)}`,
+    );
+
+    const projection = await harness.db.prepare(
+      `SELECT joined_at, join_source, left_at FROM members WHERE guild_id = ? AND member_id = ?`,
+    ).get<{ joined_at: string; join_source: string; left_at: string | null }>(GUILD, MEMBER);
+    assert.deepEqual(projection, { joined_at: REJOIN, join_source: 'invite:stream-invite', left_at: LEFT });
+
+    const captured = await harness.db.prepare(
+      `SELECT metadata FROM events WHERE guild_id = ? AND member_id = ? AND event_type = ? AND occurred_at = ?`,
+    ).get<{ metadata: string }>(GUILD, MEMBER, 'member_join', REJOIN);
+    const meta = JSON.parse(captured!.metadata) as { membershipObservedAt?: string };
+    assert.equal(meta.membershipObservedAt, WINDOW_START, 'presence carries request start, not body completion');
+  } finally {
+    await new Promise<void>((resolve) => streaming.close(() => resolve()));
     rmSync(clock, { force: true });
   }
 });

@@ -203,6 +203,81 @@ test('an older concurrent duplicate completing after a newer one keeps the newes
   assert.deepEqual(await projection(), { joined_at: FIRST, join_source: 'invite:original', left_at: null });
 });
 
+/**
+ * TOG-10212 P2 regression (reviewer CHANGES at c81e6c87): five colliding
+ * duplicates exhausting the bounded CAS must still converge on the newest
+ * observation. A writer carrying .000050Z loses five compare-and-swaps to
+ * delayed older observations .000001Z-.000005Z committed by a second pooled
+ * connection between its read and its write. Silently acknowledging then
+ * leaves .000005Z stored, so a .000010Z leave wrongly wins presence. The
+ * exhausted writer must serialize to the maximum, not ack lost evidence.
+ * Mirrors the reviewer's five-collision proof; the no-interference control
+ * (same writer, no collisions) passes on both sides.
+ */
+test('five colliding duplicates exhausting CAS still converge on the newest observation', async () => {
+  const store = new EventStore(harness.db);
+  const join = {
+    guildId: G, memberId: M, eventType: 'member_join' as const,
+    occurredAt: FIRST, source: 'invite:original', metadata: { inviterId: 'i' },
+  };
+  const leave = {
+    guildId: G, memberId: M, eventType: 'member_leave' as const,
+    occurredAt: '2026-09-30T00:45:00.000Z', source: 'gateway', metadata: undefined,
+  };
+  const obs = (n: number) => `2026-09-30T01:00:00.${String(n).padStart(6, '0')}Z`;
+  const seed = await store.record(join, { membershipObservedAt: obs(0) });
+  await store.record(leave, { membershipObservedAt: obs(10) });
+
+  // No-interference control: the same newest observation installs cleanly
+  // with nobody racing it, on a member nobody else touches.
+  const controlMember = `${M}-cas-control`;
+  const controlJoin = { ...join, memberId: controlMember };
+  await store.record(controlJoin, { membershipObservedAt: obs(0) });
+  await store.record(controlJoin, { membershipObservedAt: obs(50) });
+  const controlRow = await harness.db.prepare(
+    `SELECT metadata FROM events WHERE guild_id = ? AND member_id = ? AND event_type = ?`,
+  ).get<{ metadata: string }>(G, controlMember, 'member_join');
+  assert.equal(JSON.parse(controlRow!.metadata).membershipObservedAt, obs(50));
+
+  // Main case: every optimistic CAS loses to a just-committed older duplicate.
+  const peer = new EventStore(harness.db);
+  let collisions = 0;
+  const wrap = (db: Db): Db => ({
+    prepare: (sql) => {
+      const stmt = db.prepare(sql);
+      return {
+        get: (...args) => stmt.get(...args),
+        all: (...args) => stmt.all(...args),
+        async run(...args): Promise<RunResult> {
+          // Only the optimistic compare-and-swap carries COALESCE; the
+          // serialized fallback below must run uninterrupted.
+          if (/UPDATE events SET metadata/.test(sql) && sql.includes('COALESCE') && collisions < 5) {
+            collisions++;
+            await peer.record(join, { membershipObservedAt: obs(collisions) });
+          }
+          return stmt.run(...args);
+        },
+      };
+    },
+    exec: (sql) => db.exec(sql),
+    transaction: (fn) => db.transaction((tx) => fn(wrap(tx))),
+    close: () => db.close(),
+  });
+  const colliding = new EventStore(wrap(harness.db));
+  const res = await colliding.record(join, { membershipObservedAt: obs(50) });
+  assert.equal(collisions, 5, 'expected five lost CAS races');
+  assert.deepEqual(res, { inserted: false, eventId: seed.eventId });
+  const row = await harness.db.prepare(
+    `SELECT metadata FROM events WHERE guild_id = ? AND member_id = ? AND event_type = ?`,
+  ).get<{ metadata: string }>(G, M, 'member_join');
+  assert.equal(
+    JSON.parse(row!.metadata).membershipObservedAt,
+    obs(50),
+    'exhaustion must not lose the newest evidence',
+  );
+  assert.deepEqual(await projection(), { joined_at: FIRST, join_source: 'invite:original', left_at: null });
+});
+
 for (const delayed of ['leave', 'join'] as const) {
   test(`adapter captures membership dispatch order before a delayed ${delayed} finishes`, async () => {
     mock.timers.enable({ apis: ['Date'], now: Date.parse(RESUMED) });
