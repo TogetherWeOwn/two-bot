@@ -25,7 +25,7 @@
 import { Client, GatewayIntentBits } from 'discord.js';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { TWO_STAGING_GUILD_ID } from '../src/staging/spec.ts';
+import { checkStagingToken, TWO_STAGING_GUILD_ID } from '../src/staging/spec.ts';
 
 /**
  * The only guild this script ever addresses: the pinned staging constant,
@@ -168,6 +168,10 @@ if (invokedDirectly) {
 
   const token = process.env.DISCORD_STAGING_BOT_TOKEN;
   if (!token) throw new Error('DISCORD_STAGING_BOT_TOKEN is required; this script is staging-only.');
+  // TOG-10009: refuse a live or unknown bot before opening the gateway, the
+  // same identity check every other staging script applies.
+  const tokenCheck = checkStagingToken(token);
+  if (!tokenCheck.ok) throw new Error(tokenCheck.message);
 
   const client = new Client({
     intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates, GatewayIntentBits.GuildMembers],
