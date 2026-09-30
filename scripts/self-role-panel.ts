@@ -25,6 +25,11 @@ import { buildSelfRoleComponents } from '../src/discord/selfRoles.ts';
 import { reactionEndpointEmoji } from '../src/selfRoles/plan.ts';
 import { proveGrantRevoke } from '../src/selfRoles/proof.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/self-role-panel.ts --panel <id> [--apply]');
+  process.exit(0);
+}
+
 const API = process.env.SELF_ROLE_PANEL_API_BASE ?? 'https://discord.com/api/v10';
 if (API !== 'https://discord.com/api/v10' && !/^http:\/\/(127\.0\.0\.1|\[::1\]|localhost)(:\d+)?(?:\/|$)/.test(API)) {
   console.error('SELF_ROLE_PANEL_API_BASE may only override Discord with a loopback test server');

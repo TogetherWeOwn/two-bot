@@ -36,6 +36,11 @@ npm run deploy:selftest
 # pinned staging app, authenticated triggering, redacted reads, rejection of
 # arbitrary UUIDs and production. Hermetic like the guard above.
 npm run broker:selftest
+# The check job has its own runner: fork-gate's parser install is not shared.
+npm ci --ignore-scripts --prefix scripts/ci
+# Generation-path regression: no network/database; release-please regeneration
+# must not restore a phantom bootstrap tag link or an incomplete PR body.
+node --test scripts/ci/normalize-release.test.mjs
 npm run typecheck
 # Offline and instant: the golden ambiguous-vs-unknown eval (TOG-5849). It
 # scores the fixture split against the real attribution code, so a report or
