@@ -24,6 +24,11 @@ import { readSeries } from '../src/jobs/presenceProbe.ts';
 import { evaluateTrigger } from '../src/analytics/presence.ts';
 import { renderPresenceReport } from '../src/analytics/presenceReport.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/presence-trend.ts [--days <count>] [--json] [--web-live]');
+  process.exit(0);
+}
+
 const argv = process.argv.slice(2);
 const args = new Set(argv);
 const daysArg = argv[argv.indexOf('--days') + 1];

@@ -1,0 +1,15 @@
+# TOG-10547: inspected synthetic redaction fixture, no usable key material.
+# ops/staging-deploy-broker/server.test.mjs:525-527 at this exact commit builds
+# X/Y runs via JS template expressions. The stock private-key rule spans two
+# source lines because the first template body is shorter than its minimum.
+# Bind to commit + path + rule + start line, not a regex/path/commit allowlist:
+# a copied fixture or adjacent PEM in any new commit must still be reported.
+8afbcc916a567b9a459efc77e41e2ac93feddb3d:ops/staging-deploy-broker/server.test.mjs:private-key:525
+
+# Later redaction tests on the same branch, inspected at 407017d:
+# L561-L578: incomplete marker + ordinary-db-password test string, followed by
+# another BEGIN marker; L627-L629 and L640-L644: single X / body-line literals.
+# These spans contain test scaffolding and public placeholders, not key data.
+407017d0481dc806c164121503a770c0d8391f2a:ops/staging-deploy-broker/server.test.mjs:private-key:561
+407017d0481dc806c164121503a770c0d8391f2a:ops/staging-deploy-broker/server.test.mjs:private-key:627
+407017d0481dc806c164121503a770c0d8391f2a:ops/staging-deploy-broker/server.test.mjs:private-key:640

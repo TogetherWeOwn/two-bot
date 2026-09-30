@@ -37,6 +37,11 @@ import { openDb, isPostgresSpec } from '../src/store/db.ts';
 import { restore, inspect, DUMP_TABLES } from '../src/store/dump.ts';
 import { migrate } from '../src/store/migrate.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/pg-restore.ts <backup.ndjson.gz> (--force | --dry-run)');
+  process.exit(0);
+}
+
 const argv = process.argv.slice(2);
 const flags = new Set(argv.filter((a) => a.startsWith('--')));
 const file = argv.find((a) => !a.startsWith('--'));

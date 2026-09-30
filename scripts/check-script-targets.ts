@@ -150,6 +150,10 @@ const invokedDirectly =
   process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (invokedDirectly) {
+  if (process.argv.includes('--help')) {
+    console.log('Usage: node scripts/check-script-targets.ts [--root <directory>]');
+    process.exit(0);
+  }
   let root = ROOT;
   const at = process.argv.indexOf('--root');
   if (at >= 0) {

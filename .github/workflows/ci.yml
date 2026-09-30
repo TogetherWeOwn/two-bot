@@ -17,6 +17,12 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Least privilege (TOG-5054): no job in this workflow writes to the repo,
+# opens PRs, or calls the API - checkout, setup-node, npm and test only -
+# so the GITHUB_TOKEN gets read-only contents and nothing else.
+permissions:
+  contents: read
+
 jobs:
   # An outside contributor's pull request must not execute on our hardware.
   # Every runner here is self-hosted and persistent — five share one host — so
@@ -35,7 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.base.sha || github.sha }}
           persist-credentials: false
@@ -46,7 +52,7 @@ jobs:
           PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
         run: ./scripts/ci/refuse-fork-pr.sh
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
       # This lockfile belongs to the trusted policy, not the candidate. The YAML
@@ -58,7 +64,7 @@ jobs:
       # at the workspace root. No candidate actions/scripts are invoked.
       # https://github.com/actions/checkout/tree/v5#fetch-only-the-root-files-and-github-and-src-folder
       - name: Read candidate workflows
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: candidate
@@ -88,7 +94,7 @@ jobs:
           --health-retries 10
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # Needs neither node nor the database, so it runs before both and a PR
       # that hardcodes a guild id fails in seconds instead of after `npm ci`.
@@ -118,7 +124,7 @@ jobs:
           echo "PGPORT=$PGPORT" >> "$GITHUB_ENV"
           echo "TWO_TEST_DATABASE_URL=postgres://two:two@127.0.0.1:$PGPORT/two_test" >> "$GITHUB_ENV"
           echo "TWO_DATABASE_URL=postgres://two:two@127.0.0.1:$PGPORT/two_test" >> "$GITHUB_ENV"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: npm
@@ -134,6 +140,11 @@ jobs:
       # the service container/ambient database settings never reach its child.
       - name: Run required checks including owned storage
         run: ./scripts/ci/run-check-job.sh
+
+      # Fixed workload and unchanged budgets, three independent samples.
+      # Every failure is retained; only the disposable service DB is reached.
+      - name: Check event-store benchmark budgets
+        run: bash scripts/ci/run-event-store-bench.sh
 
   # Exercise the website views and least-privilege grants end to end after the
   # required check has proved the full Postgres-backed suite.
@@ -163,7 +174,7 @@ jobs:
       TWO_WEB_RO_PASSWORD: ci-throwaway-not-a-secret
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # Five runners share one host, so Docker assigns an unused host port
       # instead of every job fighting over 5432. Set the database URLs at
@@ -175,7 +186,7 @@ jobs:
           echo "PGPORT=$PGPORT" >> "$GITHUB_ENV"
           echo "TWO_TEST_DATABASE_URL=postgres://two:two@127.0.0.1:$PGPORT/two_test" >> "$GITHUB_ENV"
           echo "TWO_DATABASE_URL=postgres://two:two@127.0.0.1:$PGPORT/two_test" >> "$GITHUB_ENV"
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: npm

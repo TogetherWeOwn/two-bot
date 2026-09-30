@@ -40,6 +40,11 @@ import type { RawMessage } from '../src/discord/rest.ts';
 import { parseVoiceMessage, dateToSnowflake } from '../src/backfill/parse.ts';
 import { GUILD_ID } from '../src/onboarding/catalog.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/wave0-export.ts [--out <directory>]');
+  process.exit(0);
+}
+
 const TOKEN = process.env.DISCORD_TOKEN ?? process.env.DISCORD_BOT_TOKEN;
 const GUILD = process.env.DISCORD_GUILD_ID ?? GUILD_ID;
 if (!TOKEN) {

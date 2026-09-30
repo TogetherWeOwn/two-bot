@@ -111,10 +111,11 @@ export interface ClassifyResult {
 
 /** True when the instant falls inside a raid-kind anomaly window. */
 function inRaidWindow(at: string, anomalies: Anomaly[]): boolean {
+  const ms = Date.parse(at);
   return anomalies.some((a) => {
     if (a.kind !== 'raid') return false;
     const { from, to } = windowBounds(a);
-    return at >= from && at < to;
+    return ms >= Date.parse(from) && ms < Date.parse(to);
   });
 }
 
@@ -219,7 +220,8 @@ export function classifyLeaveGaps(
       result.present++;
       continue;
     }
-    const times = [...entry.at].sort();
+    // Compare instants, but retain the source spelling in reports and proposed fills.
+    const times = [...entry.at].sort((a, b) => Date.parse(a) - Date.parse(b));
     const lastJoin = times[times.length - 1];
     let kind: GapKind;
     let detail: string;
@@ -234,7 +236,7 @@ export function classifyLeaveGaps(
         `joined inside a raid window (${lastJoin}) and never recorded leaving: ` +
         `likely removed in a cleanup the logs do not show. Confirm against the ` +
         `cleanup before counting this as churn - never auto-fill as organic.`;
-    } else if (floor && lastJoin < floor) {
+    } else if (floor && Date.parse(lastJoin) < Date.parse(floor)) {
       kind = 'pre-coverage';
       detail =
         `last join ${lastJoin} predates the oldest scanned log message (${floor}): ` +
@@ -257,7 +259,7 @@ export function classifyLeaveGaps(
     });
   }
 
-  result.gaps.sort((a, b) => a.lastJoinAt.localeCompare(b.lastJoinAt) || a.memberId.localeCompare(b.memberId));
+  result.gaps.sort((a, b) => Date.parse(a.lastJoinAt) - Date.parse(b.lastJoinAt) || a.memberId.localeCompare(b.memberId));
   return result;
 }
 

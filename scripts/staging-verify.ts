@@ -63,6 +63,11 @@ import { requestDiscordJson } from '../src/discord/rateLimit.ts';
 import { openDb } from '../src/store/db.ts';
 import { hasAuditEventIdentity } from '../src/audit/events.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/staging-verify.ts [--case=goodbye|temp-voice|announcements] [--proof=<report.json>]');
+  process.exit(0);
+}
+
 // Staging-only mock seam (TOG-8295), same shape as scripts/staging-session-demo.ts.
 // Default-off: unset means discord.com. Accepts the base with or without the
 // /v10 suffix; every request below appends its own path to API.

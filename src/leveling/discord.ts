@@ -126,6 +126,7 @@ export async function removeLevelRoles(member: GuildMember, service: LevelingSer
 export function registerLeveling(client: Client, deps: LevelingDiscordDeps): void {
   client.on(Events.InteractionCreate, async (interaction) => {
     if (!interaction.isChatInputCommand() || !interaction.guildId) return;
+    if (deps.guildId && interaction.guildId !== deps.guildId) return;
     if (interaction.commandName === 'rank') await handleRank(interaction, deps.service);
     if (interaction.commandName === 'leaderboard') await handleLeaderboard(interaction, deps.service);
   });

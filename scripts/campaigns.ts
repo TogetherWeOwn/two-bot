@@ -17,6 +17,11 @@
 import { openDb } from '../src/store/db.ts';
 import { CampaignStore, isValidSlug } from '../src/redirect/campaigns.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/campaigns.ts [--add <slug> <invite-code> "<label>" | --retire <slug>]');
+  process.exit(0);
+}
+
 const argv = process.argv.slice(2);
 const flagAt = (name: string) => argv.indexOf(`--${name}`);
 
