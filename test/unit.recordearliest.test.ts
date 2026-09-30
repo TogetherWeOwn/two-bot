@@ -112,6 +112,52 @@ test('recordEarliest on a fresh member inserts normally', async () => {
   assert.equal(await memberFirstVoice(), TRUE_FIRST);
 });
 
+for (const eventType of ['first_message', 'first_voice_session'] as const) {
+  const milestoneColumn = eventType === 'first_message' ? 'first_message_at' : 'first_voice_at';
+  for (const method of ['record', 'recordEarliest'] as const) {
+    for (const activityFirst of [true, false]) {
+      test(`${method}: ${eventType} preserves recency with ${activityFirst ? 'activity' : 'milestone'} first and duplicate delivery`, async () => {
+        const milestone: FunnelEvent = {
+          guildId: G,
+          memberId: M,
+          eventType,
+          occurredAt: TRUE_FIRST,
+          source: 'manual:anchor-event',
+        };
+        const projection = () =>
+          harness.db
+            .prepare(
+              `SELECT ${milestoneColumn} AS milestone_at, last_active_at FROM members
+                WHERE guild_id = ? AND member_id = ?`,
+            )
+            .get<{ milestone_at: string | null; last_active_at: string | null }>(G, M);
+
+        if (activityFirst) {
+          await store.touchActivity(G, M, TUESDAY);
+          assert.deepEqual(await projection(), { milestone_at: null, last_active_at: TUESDAY });
+        }
+        const first = await store[method](milestone);
+        assert.equal(first.inserted, true);
+        assert.deepEqual(await projection(), {
+          milestone_at: TRUE_FIRST,
+          last_active_at: activityFirst ? TUESDAY : TRUE_FIRST,
+        });
+        if (!activityFirst) await store.touchActivity(G, M, TUESDAY);
+
+        const duplicate = await store[method](milestone);
+        assert.equal(duplicate.inserted, false);
+        assert.equal(duplicate.eventId, first.eventId);
+        assert.equal(await store.countByType(eventType, G), 1);
+        const event = await harness.db
+          .prepare(`SELECT occurred_at FROM events WHERE id = ?`)
+          .get<{ occurred_at: string }>(first.eventId);
+        assert.equal(event?.occurred_at, TRUE_FIRST);
+        assert.deepEqual(await projection(), { milestone_at: TRUE_FIRST, last_active_at: TUESDAY });
+      });
+    }
+  }
+}
+
 test('an equal timestamp is a no-op, not a rewrite', async () => {
   await store.record(voice(TRUE_FIRST, 'channel:v1'));
   await store.recordEarliest(voice(TRUE_FIRST, 'manual:anchor-event'));
