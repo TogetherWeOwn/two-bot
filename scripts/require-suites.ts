@@ -136,6 +136,18 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     why: 'the staging reward-role apply writing only the staging guild, proved by a database that refuses the rest',
   },
   {
+    // TOG-10002. The levels probe/apply double-run idempotency proof: the
+    // probe prints byte-identical reports twice with an unchanged store, and
+    // the apply performs the same grant-then-revoke twice leaving the member
+    // as found. Without this floor a future probe write path, unstable
+    // output, or an apply that grants without revoking would stay green while
+    // every re-run drifted. Counted from the 4 top-level test() blocks; CI's
+    // postgres job confirms the count on the first run after this commit.
+    file: 'test/e2e.levelrewardidempotency.test.ts',
+    minTests: 4,
+    why: 'the levels probe/apply double-run idempotency proof itself - without this floor a silent skip re-opens the re-run drift gap',
+  },
+  {
     file: 'test/e2e.stagingrestart.test.ts',
     minTests: 1,
     why: 'real entrypoint containment across three restarts, zero Discord mutations and pre-persistence actor filtering',
