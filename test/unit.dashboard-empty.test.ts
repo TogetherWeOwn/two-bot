@@ -109,10 +109,8 @@ describe('dashboard empty-state (fresh database)', () => {
     assert.ok(html.startsWith('<!doctype html>'));
     assertNoLeaks(html);
     assertSelfContained(html);
-    // Every section says it is empty and what fills it - the zeros read as
-    // "nothing recorded yet", never as "a dead server". Each string below is
-    // present on main and on the branch, so this file stays green on both.
-    assert.ok(html.includes('nobody joined'), 'headline tile reads as no intake');
+    // Empty sections describe missing records, not a dead server.
+    assert.ok(html.includes('No joins recorded this week. Last week: 0'));
     assert.ok(html.includes('No joins on record'), 'sources section names the empty log');
     assert.ok(html.includes('No cohort'), 'cohort table says nobody joined');
     assert.ok(html.includes('not measured'), 'gate tile says unmeasured, never 0%');
@@ -122,6 +120,54 @@ describe('dashboard empty-state (fresh database)', () => {
       d.caveats.some((c) => c.includes('No join has an invite source yet')),
       'the invite caveat fires on empty',
     );
+  });
+
+  test('empty-state copy explains missing data and names each next command', async () => {
+    const d = await buildDashboard(fakeDb(), { now: NOW, weeks: 4, anomalies: [] });
+    const html = renderHtml(d);
+    const notice = html.match(/<div class="notice" role="status">([\s\S]*?)<\/div>/)?.[1];
+    assert.ok(notice, 'the empty page has an accessible guidance banner');
+    const text = (markup: string) => markup.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+    assert.equal(
+      text(notice),
+      'Fresh database — no community data recorded yet. ' +
+        'Zeros mean no activity has been recorded; dashes mean a metric is not available yet. ' +
+        'They do not mean the server is empty. Keep the bot running to collect activity, ' +
+        'or run npm run backfill to import member history. Run ' +
+        'npm run audit:collect for a channel snapshot, then ' +
+        'npm run dashboard to refresh this page.',
+    );
+    assert.deepEqual(
+      [...html.matchAll(/<p class="empty" role="status">([\s\S]*?)<\/p>/g)].map((m) => text(m[1])),
+      [
+        'No joins on record yet. Keep the bot running to record new joins, or run ' +
+          'npm run backfill to import join history. Then run npm run dashboard to refresh this section.',
+        'No cohorts to show — no member joins are recorded for this 4-week window.',
+        'No channel activity data yet. Run npm run audit:collect to collect a server snapshot, ' +
+          'then npm run dashboard to refresh this section.',
+      ],
+    );
+    assert.ok(html.includes('not measured yet — check the rules gate with npm run backfill'));
+    assert.doesNotMatch(html, /Run the bot once|Every section below reads zero|nobody joined/);
+  });
+
+  test('snapshot census does not show the fresh-database banner', async () => {
+    const d = await buildDashboard(fakeDb(), {
+      now: NOW,
+      weeks: 4,
+      anomalies: [],
+      channelSnapshot: {
+        collected_at: NOW.toISOString(),
+        channels: [],
+        members: { human_members: 5, stuck_at_rules_screening: 1 },
+      },
+    });
+    assert.equal(d.memberCountSource, 'snapshot');
+    assert.equal(d.realHumans, 4);
+    const html = renderHtml(d);
+    assert.ok(!html.includes('Fresh database'));
+    assert.ok(html.includes('snapshot 2026-03-02, not live'));
+    assertNoLeaks(html);
   });
 
   test('new guild: members on file but no events yet still renders clean', async () => {
