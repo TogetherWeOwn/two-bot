@@ -11,6 +11,7 @@ import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 import { openTestDb, type TestDb } from './helpers/testDb.ts';
 import { EventStore } from '../src/store/eventStore.ts';
 import { FunnelHandlers } from '../src/core/handlers.ts';
@@ -152,8 +153,10 @@ test('two campaigns on one invite code are told apart by campaign', async () => 
 });
 
 const run = promisify(execFile);
-const REPO = new URL('..', import.meta.url).pathname;
-const SCRIPT = new URL('../scripts/funnel.ts', import.meta.url).pathname;
+// fileURLToPath, not .pathname: a checkout path containing spaces produces a
+// percent-escaped %20 that execFile/cwd would choke on (ENOENT).
+const REPO = fileURLToPath(new URL('..', import.meta.url));
+const SCRIPT = fileURLToPath(new URL('../scripts/funnel.ts', import.meta.url));
 
 interface FunnelAccuracyJson {
   schema: number;
