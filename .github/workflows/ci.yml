@@ -17,6 +17,12 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# Least privilege (TOG-5054): no job in this workflow writes to the repo,
+# opens PRs, or calls the API - checkout, setup-node, npm and test only -
+# so the GITHUB_TOKEN gets read-only contents and nothing else.
+permissions:
+  contents: read
+
 jobs:
   # An outside contributor's pull request must not execute on our hardware.
   # Every runner here is self-hosted and persistent — five share one host — so
