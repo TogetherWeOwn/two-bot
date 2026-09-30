@@ -138,25 +138,41 @@ export function jsonCandidates(text) {
   return out;
 }
 
+// The broker deliberately retains shaped objects as JSON message text. A
+// prefixed record inside a supported text wrapper is consequently escaped;
+// decode that wrapper before scanning its text, rather than brace-matching the
+// encoded string alone. Bound decoding to the broker's shaping depth limit.
+function findBotRecord(text, depth = 0) {
+  for (const candidate of jsonCandidates(text)) {
+    let record = null;
+    try {
+      record = JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+    if (record === null || typeof record !== "object") continue;
+    if (typeof record.msg === "string") return record;
+    if (depth >= 10) continue;
+    for (const key of TEXT_KEYS) {
+      if (typeof record[key] !== "string") continue;
+      const nested = findBotRecord(record[key], depth + 1);
+      if (nested !== null) return nested;
+    }
+  }
+  return null;
+}
+
 /**
  * Find bot log records in normalized lines. Returns [{ record, tsMs }].
  */
 export function findBotRecords(lines) {
   const found = [];
   for (const { text, ts } of lines) {
-    for (const candidate of jsonCandidates(text)) {
-      let record = null;
-      try {
-        record = JSON.parse(candidate);
-      } catch {
-        continue;
-      }
-      if (record === null || typeof record !== "object" || typeof record.msg !== "string") continue;
-      const tsRaw = typeof record.ts === "string" ? record.ts : ts;
-      const tsMs = typeof tsRaw === "string" ? Date.parse(tsRaw) : NaN;
-      found.push({ record, tsMs: Number.isFinite(tsMs) ? tsMs : NaN });
-      break;
-    }
+    const record = findBotRecord(text);
+    if (record === null) continue;
+    const tsRaw = typeof record.ts === "string" ? record.ts : ts;
+    const tsMs = typeof tsRaw === "string" ? Date.parse(tsRaw) : NaN;
+    found.push({ record, tsMs: Number.isFinite(tsMs) ? tsMs : NaN });
   }
   return found;
 }

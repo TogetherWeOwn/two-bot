@@ -33,7 +33,7 @@ an installation instruction, or a successful staging deployment receipt.
    fixtures are unchanged. A new same-path synthetic base64-shaped private-key
    fixture remains detectable with the ignore file installed.
 
-## Verification
+## Verification of the preceding correction (`443e1be1`)
 
 - Published pre-fix broker, exercised with the new tests: all seven residual
   leak scenarios and the deep-wrapper regression reproduce. No live panel,
@@ -49,6 +49,50 @@ an installation instruction, or a successful staging deployment receipt.
   current-directory scan pass. Before the exceptions, the history scan returned
   exactly the four reviewed synthetic private-key fingerprints. Calibration
   with the exceptions enabled still reports a new private-key-shaped fixture.
+
+## Follow-up review of `443e1be1`
+
+The [independent review](https://github.com/TogetherWeOwn/two-bot/pull/291#issuecomment-5917431042)
+confirmed the seven prior leak cases and both 12,000-level deep inputs closed,
+but returned **CHANGES** for four additional cases: known panel credentials in
+status responses, incomplete JSON-like prefixes suppressing shaping of later
+records, structured database URL passwords, and wrapped prefixed ready records
+that the smoke parser failed to recognize. All eleven CI checks were green on
+that head; green CI was not approval and no merge or installation followed.
+
+Eight new hermetic regressions first ran against the published `443e1be1` broker
+and smoke modules loaded into temporary scratch: all eight failed. This includes
+the four exact review reproductions and exercises real handler responses against
+a stub panel, not live services or databases.
+
+The follow-up correction:
+
+- Allows only exact deployment/container status vocabulary, then refuses known
+  host-credential substrings. Both app and issued-deployment routes use this
+  policy. Unknown status text becomes an empty status, never a truncated echo.
+- Redacts from an unfinished JSON-like opener to the end of the entry; malformed
+  complete containers also fail closed. A valid record before that opener and
+  ready records in subsequent entries survive. This deliberately sacrifices
+  ambiguous suffixes rather than treating them as safe plaintext.
+- Scrubs URI userinfo regardless of scheme or property name, including database
+  URLs in structured, prefixed, nested and raw messages. Credential-free URLs
+  are preserved.
+- Decodes supported string wrappers before finding embedded bot records, with
+  a depth limit and timestamp fallback. Handler-to-smoke-parser tests cover all
+  six text-wrapper keys and nested wrappers.
+
+Validation of the follow-up tree:
+
+- `node --test ops/staging-deploy-broker/server.test.mjs scripts/deploy-target-selftest.mjs test/unit.tokenleak.test.ts test/unit.restartstorageci.test.ts` — **103/103**
+  (57 broker, 32 deploy/client contracts, 14 tokenleak/CI-contract tests).
+- `npm run typecheck`, `npm run check:script-targets`, `git diff --check` and
+  `bash -n ops/staging-deploy-broker/install.sh` pass.
+- No local gitleaks binary was available for this follow-up. The prior head's
+  green scanner result does not certify the new head; fresh required CI remains
+  a merge gate.
+- The installed broker remains self-contained, using only Node standard-library
+  imports. No install-packet, workflow, credential or target changes accompany
+  this follow-up, and no live deploy or host command was run.
 
 ## Remaining gates and limits
 

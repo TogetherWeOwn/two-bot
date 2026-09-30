@@ -177,9 +177,18 @@ export function validateDeployBody(body) {
   return { sha: body.sha.trim().toLowerCase(), repo: PINNED_REPO };
 }
 
-/** Shape panel deployment/app reads down to a redacted {status}. */
-export function shapeStatus(panelJson) {
-  return { status: String(panelJson?.status ?? "").slice(0, 64) };
+// Exact deployment states and container-state/health vocabulary only. Unknown
+// panel text is not a status and must never be echoed or truncated into one.
+const PANEL_STATUS_RE = /^(?:queued|in_progress|finished|failed|cancelled|(?:running|restarting|starting|exited|stopped|unknown)(?::(?:healthy|unhealthy|unknown))?)$/;
+
+/** Shape panel reads to {status}; reject host credentials even if allowlisted. */
+export function shapeStatus(panelJson, secrets = []) {
+  const status = panelJson?.status;
+  if (typeof status !== "string" || status.trim() !== status || !PANEL_STATUS_RE.test(status)) return { status: "" };
+  if (Array.isArray(secrets) && secrets.some((secret) => typeof secret === "string" && secret !== "" && status.includes(secret))) {
+    return { status: "" };
+  }
+  return { status };
 }
 
 // Panel log payloads are credential-adjacent: the container's own log lines
@@ -230,6 +239,10 @@ const GENERIC_SECRET_RES = [
   /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g,
   /https:\/\/(?:canary\.|ptb\.)?discord(?:app)?\.com\/api\/webhooks\/[0-9]{10,}\/[A-Za-z0-9_-]{20,}/g,
   /Bearer [A-Za-z0-9._~+/=-]{8,}/g,
+  // URI userinfo is a credential regardless of scheme or property name (e.g.
+  // TWO_DATABASE_URL). Redact the whole URL, including percent-encoded values;
+  // credential-free URLs retain their text. This also covers raw log prose.
+  /\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s/?#"'<>]+@[^\s"'<>]*/g,
 ];
 
 // Object keys whose VALUE is sensitive regardless of shape (matched
@@ -303,7 +316,7 @@ export function scrubSecrets(text, secrets) {
  * empty stack always starts a fresh candidate (a `{`/`[` inside a real JSON
  * string necessarily has a non-empty stack). Never throws.
  */
-export function extractJsonCandidates(text) {
+function scanJsonCandidates(text) {
   const out = [];
   const stack = []; // { index, closer }
   const s = String(text ?? "");
@@ -329,7 +342,11 @@ export function extractJsonCandidates(text) {
     }
   }
   out.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
-  return out;
+  return { spans: out, incompleteAt: stack[0]?.index ?? null };
+}
+
+export function extractJsonCandidates(text) {
+  return scanJsonCandidates(text).spans;
 }
 
 /**
@@ -341,21 +358,28 @@ export function extractJsonCandidates(text) {
  */
 export function shapeEmbeddedText(value, secrets, depth = 0) {
   const secretList = Array.isArray(secrets) ? secrets : [];
-  const spans = extractJsonCandidates(value);
+  const { spans, incompleteAt } = scanJsonCandidates(value);
+  // An unfinished JSON-like prefix can own quote state and hide every later
+  // record. Fail closed from its opener; only the balanced prefix is shaped.
+  // That prefix has no unfinished candidate, so this adds at most one scan.
+  if (incompleteAt !== null) {
+    return (shapeEmbeddedText(value.slice(0, incompleteAt), secretList, depth) + SECRET_PLACEHOLDER).slice(0, MAX_LOG_MESSAGE_CHARS);
+  }
   let out = "";
   let pos = 0;
   let changed = false;
   for (const [start, end] of spans) {
     if (start < pos) continue; // inside an already-replaced outer span
     const original = value.slice(start, end);
-    let decoded = null;
+    let shaped = SECRET_PLACEHOLDER;
     try {
-      decoded = JSON.parse(original);
+      const decoded = JSON.parse(original);
+      shaped = shapeLogValue(decoded, secretList, depth + 1);
     } catch {
-      continue;
+      // Complete but malformed containers may also hide quoted secrets. They
+      // redact as a unit, except our own fixed placeholder (idempotent).
+      if (original === SECRET_PLACEHOLDER) continue;
     }
-    if (decoded === null || typeof decoded !== "object") continue;
-    const shaped = shapeLogValue(decoded, secretList, depth + 1);
     // Always emit the bounded shaped value. Comparing with the decoded input
     // loses duplicate-key evidence (JSON.parse keeps only the last value),
     // and stringifying the unbounded input can overflow the stack before the
@@ -769,7 +793,7 @@ export function createHandler(config, panel = panelRequest) {
           timeoutMs: PANEL_TIMEOUT_MS,
           maxBytes: MAX_PANEL_BYTES,
         });
-        send(res, 200, shapeStatus(panelJson));
+        send(res, 200, shapeStatus(panelJson, hostSecrets()));
         return;
       }
 
@@ -791,7 +815,7 @@ export function createHandler(config, panel = panelRequest) {
           timeoutMs: PANEL_TIMEOUT_MS,
           maxBytes: MAX_PANEL_BYTES,
         });
-        send(res, 200, shapeStatus(panelJson));
+        send(res, 200, shapeStatus(panelJson, hostSecrets()));
         return;
       }
 

@@ -832,6 +832,142 @@ test("logs-redaction residual: canonicalized benign records preserve smoke times
   assert.ok(!JSON.stringify(logs).includes('"a":1'), "duplicate-key original bytes do not cross");
 });
 
+// --- PR291 exact-head review at 443e1be1 ------------------------------------
+// All inputs are synthetic. HTTP cases use only the real handler + stub panel;
+// smoke assertions call the actual parser, not a regex approximation.
+
+test("exact-head status: allowlisted values survive, credential-bearing and unknown values do not", () => {
+  for (const status of ["queued", "in_progress", "finished", "failed", "cancelled", "running", "running:healthy", "running:unhealthy", "exited:unhealthy"]) {
+    assert.deepEqual(shapeStatus({ status }, [PANEL_TOKEN]), { status });
+  }
+  for (const status of [PANEL_TOKEN, BROKER_TOKEN, PANEL_URL, "running:healthy arbitrary suffix", "finished\n", "x".repeat(100), 42, {}, ["finished"]]) {
+    assert.deepEqual(shapeStatus({ status }, [PANEL_TOKEN, BROKER_TOKEN, PANEL_URL]), { status: "" });
+  }
+  // A host credential can itself look like a legitimate status, including a
+  // short credential substring: check secrets BEFORE admitting the value.
+  assert.deepEqual(shapeStatus({ status: "finished" }, ["finished"]), { status: "" });
+  assert.deepEqual(shapeStatus({ status: "running:healthy" }, ["run"]), { status: "" });
+});
+
+test("exact-head status: app and issued-deployment responses never return host credentials", async (t) => {
+  let panelStatus = "running:healthy";
+  const srv = await boot(({ method }) => method === "POST"
+    ? { deployments: [{ deployment_uuid: "dep-exact-head-status" }] }
+    : { status: panelStatus });
+  t.after(srv.close);
+  const queued = await req(srv.base, "/v1/staging/deploy", {
+    method: "POST", body: { repo: PINNED_REPO, sha: GOOD_SHA },
+  });
+  assert.equal(queued.status, 200);
+  const paths = ["/v1/staging/app", `/v1/staging/deployments/${queued.json.deployment_uuid}`];
+  for (const value of [PANEL_TOKEN, BROKER_TOKEN, PANEL_URL, `running:healthy ${PANEL_TOKEN}`, `finished ${"x".repeat(100)} ${PANEL_TOKEN}`]) {
+    panelStatus = value;
+    for (const path of paths) {
+      const out = assertRedacted(t, await req(srv.base, path));
+      assert.equal(out.status, 200);
+      assert.deepEqual(out.json, { status: "" }, "untrusted status is rejected whole, never truncated");
+    }
+  }
+  for (const value of ["running:healthy", "finished", "failed", "cancelled"]) {
+    panelStatus = value;
+    for (const path of paths) assert.deepEqual((await req(srv.base, path)).json, { status: value });
+  }
+});
+
+test("exact-head logs: unfinished JSON-like prefixes cannot hide later password records", async (t) => {
+  const fixtures = [
+    'INFO { " then {"password":"ordinary-db-password"}',
+    'INFO [ " then {"password":"ordinary-db-password"}',
+    'INFO { then {"password":"ordinary-db-password"}',
+    'INFO {invalid "password":"ordinary-db-password"}',
+  ];
+  for (const fixture of fixtures) {
+    for (const item of [fixture, { message: fixture }]) {
+      const srv = await boot(() => ({ logs: [item, JSON.stringify(READY_RECORD)] }));
+      t.after(srv.close);
+      const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+      assert.equal(out.status, 200);
+      assert.ok(!out.text.includes("ordinary-db-password"), "ambiguous fragments fail closed, not raw fallback");
+      assert.ok(out.text.includes(SECRET_PLACEHOLDER));
+      assert.equal(findReadyLines(findBotRecords(normalizeLogPayload(out.json))).length, 1);
+    }
+  }
+});
+
+test("exact-head logs: fail-closed fragments preserve preceding valid smoke records and ordinary quotes", () => {
+  const ready = `INFO ${JSON.stringify(READY_RECORD)}`;
+  const shaped = shapeEmbeddedText(`${ready} then { " then {"password":"ordinary-db-password"}`, []);
+  assert.equal(shaped, `${ready} then ${SECRET_PLACEHOLDER}`);
+  assert.equal(findReadyLines(findBotRecords(normalizeLogPayload(shaped))).length, 1);
+  assert.equal(shapeEmbeddedText('ordinary prose with an unfinished " quote', []), 'ordinary prose with an unfinished " quote');
+  assert.equal(shapeEmbeddedText(`pre ${SECRET_PLACEHOLDER} post`, []), `pre ${SECRET_PLACEHOLDER} post`);
+});
+
+test("exact-head logs: structured database URLs never expose userinfo through the handler", async (t) => {
+  const url = "postgresql://bot:ordinary-db-password@dbhost.invalid/db";
+  const structured = { TWO_DATABASE_URL: url };
+  const srv = await boot(() => ({ logs: [
+    structured,
+    JSON.stringify(structured),
+    `INFO ${JSON.stringify(structured)}`,
+    { message: `INFO ${JSON.stringify(structured)}` },
+    { nested: { connection: url }, other: ["redis://:ordinary-db-password@dbhost.invalid/0"] },
+    { message: "mysql://bot:ordinary%2Ddb%2Dpassword@dbhost.invalid/db" },
+    JSON.stringify(READY_RECORD),
+  ] }));
+  t.after(srv.close);
+  const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+  assert.equal(out.status, 200);
+  assert.ok(!out.text.includes("ordinary-db-password"));
+  assert.ok(!out.text.includes("ordinary%2Ddb%2Dpassword"));
+  assert.equal(JSON.parse(out.json.logs[0].message).TWO_DATABASE_URL, SECRET_PLACEHOLDER);
+  assert.equal(findReadyLines(findBotRecords(normalizeLogPayload(out.json))).length, 1);
+});
+
+test("exact-head logs: credential URL scrubbing is scheme-independent and keeps credential-free URLs", () => {
+  for (const url of [
+    "postgresql://bot:ordinary-db-password@dbhost.invalid/db",
+    "postgres://bot:ordinary%2Ddb%2Dpassword@dbhost.invalid/db",
+    "redis://:ordinary-db-password@dbhost.invalid/0",
+    "mysql://bot:ordinary-db-password@[::1]:3306/db",
+    "https://bot:ordinary-db-password@dbhost.invalid/",
+    "custom+db://ordinary-db-password@dbhost.invalid/db",
+  ]) {
+    assert.equal(scrubSecrets(`pre ${url} post`, []), `pre ${SECRET_PLACEHOLDER} post`);
+  }
+  assert.equal(scrubSecrets("postgresql://dbhost.invalid/db", []), "postgresql://dbhost.invalid/db");
+  assert.equal(scrubSecrets("https://docs.example.invalid/guide", []), "https://docs.example.invalid/guide");
+});
+
+test("exact-head smoke: raw and supported prefixed text wrappers yield the same ready record", async (t) => {
+  const line = `INFO ${JSON.stringify(READY_RECORD)}`;
+  const items = [line, ...["message", "output", "log", "line", "text", "content"].map((key) => ({
+    [key]: line, password: "ordinary-db-password",
+  })), { message: JSON.stringify({ output: line }) }];
+  const srv = await boot(() => ({ logs: items }));
+  t.after(srv.close);
+  const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+  assert.equal(out.status, 200);
+  assert.ok(!out.text.includes("ordinary-db-password"));
+  for (const pair of out.json.logs) {
+    const records = findReadyLines(findBotRecords(normalizeLogPayload({ logs: [pair] })));
+    assert.equal(records.length, 1, "actual smoke parser must find wrapped prefixed ready records");
+    assert.deepEqual(records[0].record, READY_RECORD);
+    assert.equal(records[0].tsMs, Date.parse(READY_RECORD.ts));
+  }
+});
+
+test("exact-head smoke: wrapper decoding retains fallback timestamps and has a depth limit", () => {
+  const timestamp = READY_RECORD.ts;
+  const message = JSON.stringify({ output: 'INFO {"msg":"ready","guilds":1}' });
+  const records = findReadyLines(findBotRecords(normalizeLogPayload({ logs: [{ message, timestamp }] })));
+  assert.equal(records.length, 1);
+  assert.equal(records[0].tsMs, Date.parse(timestamp));
+  let deep = `INFO ${JSON.stringify(READY_RECORD)}`;
+  for (let i = 0; i < 12; i += 1) deep = JSON.stringify({ message: deep });
+  assert.deepEqual(findBotRecords(normalizeLogPayload(deep)), [], "over-depth wrappers are not unboundedly decoded");
+});
+
 test("logs-bounded unit: parseLogLines clamps to 1..500", () => {
   assert.equal(parseLogLines(new URLSearchParams("")), 200);
   assert.equal(parseLogLines(new URLSearchParams("lines=50")), 50);
