@@ -105,6 +105,26 @@ Reference the issue in the body when there is one (`TWO-9`).
 A red PR does not merge. If CI is wrong, fix CI in its own PR rather than
 routing around it.
 
+## Releases
+
+Releases are automated with [release-please](https://github.com/googleapis/release-please)
+(`release-please-config.json` + `.release-please-manifest.json`, release-type
+`node`). Merge a conventional commit to `main` and release-please opens or
+updates a release PR; merging that PR writes `CHANGELOG.md`, tags `vX.Y.Z`
+and publishes a GitHub Release. Never tag or release by hand.
+
+`CHANGELOG.md` uses the [Common Changelog](https://common-changelog.org/)
+categories, in its order: **Changed** (`perf`, `revert`), **Added** (`feat`),
+**Fixed** (`fix`). `chore`, `docs`, `test`, `ci`, `build`, `refactor` and `style`
+stay out of the changelog. Each squash-merged PR title becomes one entry, so
+write it for a reader of the changelog: imperative mood, one user-facing change.
+
+Versioning is SemVer, starting at `0.1.0`; `1.0.0` marks the production
+cutover. `feat!` / `BREAKING CHANGE` bumps major (minor while `0.x`).
+
+This repo is in maintenance mode (bug and security fixes only), so releases
+are normally patch bumps off `fix:` commits.
+
 ## Things that will get a PR sent back
 
 - A secret in the diff. Rotate it, do not just delete the line — it is in the
