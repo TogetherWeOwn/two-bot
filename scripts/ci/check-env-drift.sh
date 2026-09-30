@@ -74,6 +74,8 @@ unit_keys() {
 
 # --- R1: every service literal is documented ---------------------------------
 
+# Consume the full input: grep -q can close the pipe early and make printf
+# fail with SIGPIPE under pipefail, falsely reporting a documented/consumed key.
 documented="$(example_keys)"
 for unit in "$DEPLOY"/*.service; do
   [ -e "$unit" ] || continue
@@ -94,8 +96,6 @@ done
 
 tokens="$(grep -rhoE --exclude-dir=node_modules --exclude-dir=.git --exclude='check-env-drift*' '[A-Z_][A-Z0-9_]*' \
   "$ROOT/src" "$ROOT/scripts" "$ROOT/deploy" "$ROOT/test" 2>/dev/null | sort -u || true)"
-# Drain the whole input: grep -q can exit on an early match, giving printf a
-# SIGPIPE that pipefail would mistake for an absent key.
 for key in $documented; do
   if ! printf '%s\n' "$tokens" | grep -xF "$key" > /dev/null; then
     annotate ".env.example" "R2: .env.example defines $key but nothing under src/, scripts/, deploy/ or test/ references it. Remove the paragraph or land its consumer; an example key nothing reads teaches operators to set dead variables."

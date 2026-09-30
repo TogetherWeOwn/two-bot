@@ -41,6 +41,47 @@ test('block mapping, scalar, inline array and inline map PR triggers are checked
   assert.deepEqual(checkWorkflow(fixture), { checked: true, problems: [] });
 });
 
+for (const checkoutVersion of ['v5', 'v7']) {
+  for (const nodeVersion of ['v4', 'v7']) {
+    test(`accepts reviewed checkout ${checkoutVersion} and setup-node ${nodeVersion} without changing gate shape`, () => {
+      const workflow = parseWorkflow(fixture);
+      workflow.jobs['fork-gate'].steps[0].uses = `actions/checkout@${checkoutVersion}`;
+      workflow.jobs['fork-gate'].steps[2].uses = `actions/setup-node@${nodeVersion}`;
+      workflow.jobs['fork-gate'].steps[4].uses = `actions/checkout@${checkoutVersion}`;
+      assert.deepEqual(checkWorkflow(stringify(workflow)).problems, []);
+    });
+  }
+}
+
+for (const index of [0, 2, 4]) {
+  test(`rejects unreviewed action identities at gate step ${index + 1}`, () => {
+    for (const version of ['v99', 'main', '${{ github.ref }}', 'v7-malicious']) {
+      const workflow = parseWorkflow(fixture);
+      const step = workflow.jobs['fork-gate'].steps[index];
+      step.uses = step.uses.replace(/@v\d+$/, `@${version}`);
+      rejected(stringify(workflow), index === 0 ? /trusted base/ : /candidate-coverage step/);
+    }
+  });
+}
+
+test('reviewed v7 actions do not admit gate step overrides', () => {
+  for (const index of [0, 2, 4]) {
+    for (const override of [
+      { if: 'always()' }, { 'continue-on-error': true },
+      { env: { NODE_OPTIONS: '--import ./candidate/preload.mjs' } },
+      { with: { ref: 'main', 'persist-credentials': true } },
+    ]) {
+      const workflow = parseWorkflow(fixture);
+      const steps = workflow.jobs['fork-gate'].steps;
+      steps[0].uses = 'actions/checkout@v7';
+      steps[2].uses = 'actions/setup-node@v7';
+      steps[4].uses = 'actions/checkout@v7';
+      Object.assign(steps[index], override);
+      rejected(stringify(workflow), index === 0 ? /trusted base/ : /candidate-coverage step/);
+    }
+  }
+});
+
 test('push-only workflows are not required to have a fork gate', () => {
   assert.deepEqual(checkWorkflow('on: [push, schedule]\njobs: {}'), { checked: false, problems: [] });
 });
