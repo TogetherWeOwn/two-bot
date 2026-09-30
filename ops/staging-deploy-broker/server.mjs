@@ -262,15 +262,18 @@ export function scrubSecrets(text, secrets) {
 
 /**
  * Recursively shape one JSON-decoded value from a log line: objects keep
- * their keys (sensitive names redacted, every string scrubbed), arrays are
- * mapped, strings are scrubbed and capped, scalars pass through (the caller
- * drops message-less top-level scalars). Depth-capped so a hostile nested
- * payload cannot recurse the broker into a stack overflow: anything deeper
- * than the cap crosses as the placeholder, never verbatim — returning the
- * raw subtree would bypass key redaction and credential scrubbing for deeply
+ * their keys (key names scrubbed, sensitive names redacted, every string
+ * scrubbed), arrays are mapped, strings are scrubbed and capped, scalars
+ * pass through (the caller drops message-less top-level scalars).
+ * Depth-capped so a hostile nested payload cannot recurse the broker into a
+ * stack overflow: the cutoff applies BEFORE any type-specific handling, so
+ * over-depth JSON-in-string leaves and arrays cross as the placeholder, never
+ * verbatim — a late cutoff after the string branch would return over-depth
+ * leaves raw, bypassing key redaction and credential scrubbing for deeply
  * nested secrets (TOG-9053 finding 2).
  */
 export function shapeLogValue(value, secrets, depth = 0) {
+  if (depth > 10) return SECRET_PLACEHOLDER;
   if (typeof value === "string") {
     // JSON-in-strings decodes before shaping: a log message carrying the
     // bot's ready-line record as escaped JSON must come out as a redacted
@@ -278,8 +281,10 @@ export function shapeLogValue(value, secrets, depth = 0) {
     // a stringified blob here would double-encode when nested inside a
     // {message} wrapper and hide the ready line from the smoke's
     // jsonCandidates parser. Unparseable text falls through to scrubbed raw.
+    // (Depth is already bounded above, so decoding here cannot recurse past
+    // the cap: shapeLogValue re-checks depth on entry.)
     const trimmed = value.trim();
-    if ((trimmed.startsWith("{") || trimmed.startsWith("[")) && depth <= 10) {
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
       try {
         const decoded = JSON.parse(trimmed);
         if (decoded !== null && typeof decoded === "object") {
@@ -292,16 +297,20 @@ export function shapeLogValue(value, secrets, depth = 0) {
     return scrubSecrets(value, secrets).slice(0, MAX_LOG_MESSAGE_CHARS);
   }
   if (value === null || typeof value !== "object") return value;
-  if (depth > 10) return SECRET_PLACEHOLDER;
   if (Array.isArray(value)) {
     return value.map((entry) => shapeLogValue(entry, secrets, depth + 1));
   }
   const shaped = {};
   for (const [key, entry] of Object.entries(value)) {
+    // Keys are untrusted panel text, not trusted schema: a credential
+    // smuggled in as a property NAME would otherwise cross verbatim, since
+    // both branches below used to emit `key` as-is (TOG-9053 finding 2).
+    // Sensitivity is judged on the raw key; the emitted name is scrubbed.
+    const safeKey = scrubSecrets(key, secrets);
     if (SENSITIVE_KEY_RES.some((re) => re.test(key))) {
-      shaped[key] = SECRET_PLACEHOLDER;
+      shaped[safeKey] = SECRET_PLACEHOLDER;
     } else {
-      shaped[key] = shapeLogValue(entry, secrets, depth + 1);
+      shaped[safeKey] = shapeLogValue(entry, secrets, depth + 1);
     }
   }
   return shaped;
@@ -342,18 +351,26 @@ export function shapeLogItem(item, secrets) {
  * findBotRecords) and must not carry credential text. Anything else — a panel
  * token smuggled into a timestamp field, a non-date string — is dropped by
  * returning null, so the pair ships without a timestamp (TOG-9053 finding 2).
- * Genuine ISO timestamps pass through, since the smoke's
- * advancing-timestamps check needs them. Never throws.
+ * Genuine timestamps are re-emitted in canonical ISO form, since the smoke's
+ * advancing-timestamps check only needs a parseable date. Never throws.
+ *
+ * Order matters (TOG-9053 finding 2): the length cap and the credential check
+ * both run on the FULL original value, before parsing and before any slicing.
+ * Truncating first would let `Date.parse` accept a date prefix with a
+ * credential smuggled in a trailing comment, then slice the suffix off before
+ * the secret check — leaking the credential's prefix in the emitted
+ * timestamp. Overlong metadata is rejected, not truncated.
  */
 export function shapeTimestamp(value, secrets) {
   // Numeric epochs carry no text by construction: pass finite values through
   // (the smoke normalizes them to strings itself).
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
   if (typeof value !== "string") return null;
-  const text = value.slice(0, 64);
-  if (!Number.isFinite(Date.parse(text))) return null;
-  if (scrubSecrets(text, secrets) !== text) return null;
-  return text;
+  if (value.length > 64) return null;
+  if (scrubSecrets(value, secrets) !== value) return null;
+  const ms = Date.parse(value);
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms).toISOString();
 }
 
 /**

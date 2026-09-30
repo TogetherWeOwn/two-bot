@@ -431,6 +431,66 @@ test("logs-redaction: over-depth nested secret never crosses verbatim", async (t
   assert.ok(!text.includes(FAKE_SENSITIVE_PANEL_TOKEN), "over-depth nested secret must not cross verbatim");
 });
 
+test("logs-redaction: credential-bearing object keys never cross", async (t) => {
+  // The configured panel credential smuggled in as a PROPERTY NAME must not
+  // survive in the wire response: both shaping branches used to emit `key`
+  // verbatim, so the whole bearer crossed as JSON text (TOG-9053 finding 2).
+  const srv = await boot(() => ({
+    logs: [{ message: "key probe", [PANEL_TOKEN]: "ordinary value" }],
+  }));
+  t.after(srv.close);
+  const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+  assert.equal(out.status, 200);
+  const text = JSON.stringify(out.json);
+  assert.ok(!text.includes(PANEL_TOKEN), "credential text in a property name must not cross");
+  assert.ok(!text.includes("PANEL-BEARER-FAKE-abcdef"), "credential prefix in a property name must not cross");
+});
+
+test("logs-redaction: over-depth JSON-in-string leaves and arrays cross redacted", async (t) => {
+  // The depth cutoff applies BEFORE type-specific handling: 11 wrappers put
+  // the leaf at depth 11, where the old string branch returned raw scrubbed
+  // text before the cutoff — and an arbitrary password is no known token
+  // shape, so it crossed unchanged (TOG-9053 finding 2).
+  const leaf = '{"password":"ordinary-db-password"}';
+  const srv = await boot(() => ({
+    logs: [nestWrappers(leaf, 11), nestWrappers(["ordinary-db-password-array"], 11)],
+  }));
+  t.after(srv.close);
+  const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+  assert.equal(out.status, 200);
+  const text = JSON.stringify(out.json);
+  assert.ok(!text.includes("ordinary-db-password"), "over-depth JSON-in-string leaf must not cross raw");
+  assert.ok(!text.includes("ordinary-db-password-array"), "over-depth array leaf must not cross raw");
+  assert.ok(text.includes("[redacted]"), "over-depth leaves cross as the placeholder");
+});
+
+test("logs-redaction: credential-bearing timestamp metadata is rejected whole", async (t) => {
+  // Date.parse accepts a date prefix with a credential smuggled in a trailing
+  // comment; truncating BEFORE the secret check then sliced the suffix off and
+  // leaked the credential's prefix in the emitted timestamp (TOG-9053
+  // finding 2). Length and secret checks now run on the full original value.
+  const leakyTs = `Wed, 30 Sep 2026 03:00:00 GMT (${PANEL_TOKEN})`;
+  const srv = await boot(() => ({ logs: [{ message: "ts probe", timestamp: leakyTs }] }));
+  t.after(srv.close);
+  const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+  assert.equal(out.status, 200);
+  const text = JSON.stringify(out.json);
+  assert.ok(!text.includes(PANEL_TOKEN), "credential in timestamp metadata must not cross");
+  assert.ok(!text.includes("PANEL-BEARER-FAKE-abcdef"), "credential prefix in timestamp metadata must not cross");
+  // Object items cross as one JSON message: the leaky timestamp survives
+  // inside it ONLY scrubbed (message-text pattern), while the pair-level
+  // metadata field — the reviewer's actual leak path — is dropped whole.
+  const pair = out.json.logs[0];
+  assert.ok(!("timestamp" in pair), "leaky timestamp metadata is dropped from the pair");
+  const embedded = JSON.parse(pair.message);
+  assert.equal(embedded.message, "ts probe", "benign message text survives timestamp rejection");
+  assert.equal(
+    embedded.timestamp,
+    `Wed, 30 Sep 2026 03:00:00 GMT (${SECRET_PLACEHOLDER})`,
+    "embedded timestamp survives only scrubbed, never with credential text",
+  );
+});
+
 test("logs-redaction unit: shapeTimestamp validates dates, drops leaky values", () => {
   assert.equal(shapeTimestamp("2026-09-30T03:00:00.000Z", []), "2026-09-30T03:00:00.000Z");
   assert.equal(shapeTimestamp(1759200000000, []), 1759200000000);
