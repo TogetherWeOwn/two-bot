@@ -302,16 +302,20 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
   // Only the read-modify-write is serialized, in dispatch order (TOG-8306).
   // REST counters are still best-effort, not atomic per-member evidence.
   const inviteChains = new Map<string, Promise<void>>();
-  const chainedSnapshotInvites = (guild: Guild): Promise<string[]> => {
+  const chainedSnapshotInvites = (guild: Guild): Promise<{ grew: string[]; inviterId: string | null }> => {
     const fetched = fetchInvites(guild);
     return enqueue(inviteChains, guild.id, async () => {
       const states = await fetched;
-      if (states === null) return [];
+      if (states === null) return { grew: [], inviterId: null };
       try {
-        return await invites.diffAndStore(guild.id, states);
+        const grew = await invites.diffAndStore(guild.id, states);
+        // Carry the inviter with this delta before another refresh can replace
+        // its row while the join waits for earlier member persistence.
+        const inviterId = grew.length === 1 ? await invites.inviterFor(guild.id, grew[0]) : null;
+        return { grew, inviterId };
       } catch (err) {
         log.error('invite_snapshot_failed', { guildId: guild.id, err: String(err) });
-        return [];
+        return { grew: [], inviterId: null };
       }
     });
   };
@@ -334,18 +338,17 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     const observedAt = nowIso();
     // Consume the short-lived web note at receipt, before any queue can expire it.
     const expected = contained ? null : expectedJoins?.consume(member.guild.id, member.id) ?? null;
-    const snapshot = contained ? Promise.resolve([]) : chainedSnapshotInvites(member.guild);
+    const snapshot = contained ? Promise.resolve({ grew: [], inviterId: null }) : chainedSnapshotInvites(member.guild);
     const occurredAt = member.joinedAt?.toISOString();
     const gateCleared = !member.pending;
     const joining = enqueue(memberChains, `${member.guild.id}:${member.id}`, async () => {
       // Keep the snapshot even for one-click joins so counters stay current.
-      const grew = await snapshot;
+      const { grew, inviterId: observedInviterId } = await snapshot;
 
       // Web evidence beats the invite diff. Contained runs have no invitation
       // evidence: do not read real inviter rows or invent a cohort.
       const source = contained ? 'unknown' : expected ?? invites.attribute(grew, !!member.guild.vanityURLCode);
-      const inviterId =
-        !expected && grew.length === 1 ? await invites.inviterFor(member.guild.id, grew[0]) : null;
+      const inviterId = !expected ? observedInviterId : null;
       await handlers.onJoin({
         guildId: member.guild.id,
         memberId: member.id,
