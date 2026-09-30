@@ -27,8 +27,16 @@ All database tests used only `postgres://agent_test@agent-testdb:5432/two_bot_te
 - Current main `96777468472f23a02a1e97a43ffab3912fe5df2a`: CI run `36763523187` **success**. Deploy run `36765295550` fails at the existing missing-target provisioning gate; [TOG-8272](/TOG/issues/TOG-8272) already owns that provisioning. No deploy rerun or credential action taken.
 - Full suite and new-head GitHub CI were **not run**; no new PR head exists yet.
 
+## Published continuation — 2026-09-30
+
+The next reconciliation established that current `main` has neither the shared branch's pending-join retention machinery nor its observed-roster helper. Those sibling features are unmerged, so importing them into this maintenance PR would unnecessarily expand its scope. Shared pending-only retries will still need to preserve original evidence if those separate features are later integrated; that is not required to publish this six-file correction.
+
+Published the tested candidate to the SAME PR #387 by fast-forwarding its existing remote branch from `c81e6c87562529aab9a776c24fc65cd13c3eea28` to `ddb8218f48978b4ac3bcc82c0110aaab813b00a1`. The remote commit changes exactly the six candidate source/test files, whose SHA-256 hashes were verified against the preserved candidate. GitHub's PR head briefly lagged the successful ref-update receipt; read-only reconciliation confirmed both remote ref and PR head. The publication was not repeated. The shared execution branch was neither switched nor repointed, and sibling source files were not touched.
+
+Fresh combined proof: the nine focused suites listed above ran together with **57 passed, 0 failed, 0 skipped**, on the same isolated card-scoped database. Typecheck and diff-check both exited 0. This is one non-overlapping test count, unlike summing the earlier overlapping invocations.
+
+At publication, exact-head PR lint was green, CI `36776484882` and secret scan `36776484861` were running. No new approval or merge is claimed. Full local suite was not run.
+
 ## Immediate author continuation
 
-Integrate without replacing sibling capture-window work in the shared execution branch. Its capture code persists/de-duplicates pending joins and enforces `(since, capturedAt]`; the preserved PR capture does not yet include that machinery. A pending-only retry must retain its original presence evidence, never gain a fabricated retry-time observation. Current pending schema has no observation column. Preserve the existing retain-snapshot, dry-run, attribution, occurrence sorting, and cleanup behavior while integrating.
-
-Then update the SAME PR #387 with only the membership slice, run focused tests/typecheck on the integrated exact tree, push, and record exact-head CI. Reopen the SAME [TOG-10284](/TOG/issues/TOG-10284) only after required checks pass. Only the independently approving reviewer may squash-merge. The author task is not done and is not waiting on review while publication/integration remains outstanding.
+Check required CI against unchanged head `ddb8218f48978b4ac3bcc82c0110aaab813b00a1` through the persisted issue-monitor path. If red, inspect and fix the concrete failure on this SAME PR. If all required checks are green, reopen the SAME [TOG-10284](/TOG/issues/TOG-10284) with this head and the new regression evidence, then block the author task on that real review edge. Only the independently approving reviewer may squash-merge. The author task is not done before verified merge.
