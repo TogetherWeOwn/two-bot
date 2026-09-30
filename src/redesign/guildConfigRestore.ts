@@ -149,6 +149,7 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
   const channelIds = new Map<string, string>();
   const emojiIds = new Map<string, string>();
   const roleOperations: RestoreOperation[] = [];
+  const everyoneOperations: RestoreOperation[] = [];
   const rolePositionOperations: RestoreOperation[] = [];
   const categoryOperations: RestoreOperation[] = [];
   const channelOperations: RestoreOperation[] = [];
@@ -168,6 +169,19 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
   }
   const snapshotRolesById = new Map(snapshot.roles.map((role) => [role.id, role]));
   const overwriteRoleIds = new Set<string>();
+
+  const sourceEveryone = snapshot.roles.find((role) => role.id === snapshot.guildId);
+  const currentEveryone = current.roles.find((role) => role.id === current.guildId);
+  if (sourceEveryone && currentEveryone && !same(sourceEveryone.permissions, currentEveryone.permissions)) {
+    // @everyone supports permission edits, not recreation, renaming or positioning.
+    everyoneOperations.push({
+      label: 'restore @everyone permissions',
+      method: 'PATCH',
+      path: `/guilds/${current.guildId}/roles/${current.guildId}`,
+      body: { permissions: sourceEveryone.permissions },
+    });
+    roleWrites++;
+  }
 
   const sourceRoles = snapshot.roles.filter((item) => !item.managed && item.id !== snapshot.guildId).sort((a, b) => a.position - b.position);
   const matchRole = resourceMatcher(sourceRoles, current.roles.filter((role) => !role.managed && role.id !== current.guildId));
@@ -417,6 +431,8 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
     ...overwriteOperations,
     ...settingsOperations,
     ...emojiOperations,
+    // Revoking inherited @everyone permissions must not interrupt earlier writes.
+    ...everyoneOperations,
   ];
   return {
     counts: {
