@@ -208,13 +208,15 @@ const alwaysShow = codes.map((c) => `invite:${c.code}`);
 // if the newest voice signal is far behind the newest signal of any kind, the
 // gap is missing voice capture rather than a quiet server. Comparing the two
 // avoids the false alarm from reading voice alone on a quiet server. Repeat
-// session starts measure ongoing capture; first-ever events also cover older
-// history, but alone only tell us when someone first entered voice.
+// session starts and ends measure ongoing capture; first-ever events also
+// cover older history, but alone only tell us when someone first entered
+// voice. Ends count because a leave proves presence even when the start row
+// is missing (bot-down unknown-start sessions still advance activity).
 const VOICE_LAG_DAYS = 30;
 const lastVoiceAt =
   (
     await db
-      .prepare(`SELECT MAX(occurred_at) AS t FROM events WHERE event_type IN ('first_voice_session', 'voice_session_start') AND guild_id = ?`)
+      .prepare(`SELECT MAX(occurred_at) AS t FROM events WHERE event_type IN ('first_voice_session', 'voice_session_start', 'voice_session_end') AND guild_id = ?`)
       .get<{ t: string | null }>(guildId)
   )?.t ?? null;
 const lastAnyActivityAt =
