@@ -88,6 +88,8 @@ class FakeGateway implements TempVoiceGateway {
   deleteCalls: Array<{ channelId: string; reason: string }> = [];
   moves: Array<{ userId: string; channelId: string | null }> = [];
   createCalls = 0;
+  renameCalls: Array<{ channelId: string; name: string }> = [];
+  failRename: Error | null = null;
   failCreate: TempVoiceGatewayError | null = null;
   unmovable = new Set<string>();
   private seq = 0;
@@ -144,6 +146,8 @@ class FakeGateway implements TempVoiceGateway {
   }
 
   async renameChannel(channelId: string, name: string): Promise<void> {
+    this.renameCalls.push({ channelId, name });
+    if (this.failRename) throw this.failRename;
     const channel = this.channels.get(channelId);
     if (!channel) throw new TempVoiceGatewayError('gone', 10003);
     channel.name = name;
@@ -456,6 +460,30 @@ describe('rename throttling', () => {
     const throttle = new RenameThrottle();
     throttle.seed('c', 1000);
     assert.equal(throttle.request('c', 'one', 2000).apply, false);
+  });
+
+  test('a rejected reservation restores the previous persisted window', () => {
+    const throttle = new RenameThrottle();
+    throttle.seed('c', 1000);
+    const at = 1000 + RENAME_MIN_INTERVAL_MS;
+    throttle.request('c', 'rejected', at);
+    throttle.rejected('c', 'rejected', at);
+    assert.equal(throttle.pending('c', 'original'), null);
+    assert.equal(throttle.ready('c', at), true);
+    assert.equal(throttle.ready('c', at - 1), false, 'rejection must not forget the earlier rename');
+  });
+
+  test('rejection preserves a newer queue and ignores a stale attempt', () => {
+    const throttle = new RenameThrottle();
+    throttle.request('c', 'rejected', 1000);
+    throttle.request('c', 'newer', 2000);
+    throttle.rejected('c', 'rejected', 1000);
+    assert.equal(throttle.pending('c', 'original'), 'newer');
+    assert.equal(throttle.ready('c', 2000), true);
+    throttle.request('c', 'another attempt', 3000);
+    throttle.rejected('c', 'rejected', 1000);
+    assert.equal(throttle.pending('c', 'original'), 'another attempt');
+    assert.equal(throttle.ready('c', 3001), false);
   });
 
   test('opens again once the window passes', () => {
@@ -981,6 +1009,114 @@ describe('owner controls', () => {
     clock += RENAME_MIN_INTERVAL_MS;
     await svc.sweep(GUILD);
     assert.equal(gateway.channels.get(channelId)!.name, 'second', 'the queued name lands once the window opens');
+  });
+
+  test('a definitively rejected rename is never applied by later sweeps', async () => {
+    await setup();
+    const before = await store.getByChannel(GUILD, channelId);
+    gateway.failRename = new TempVoiceGatewayError('Missing Permissions', MISSING_PERMISSIONS_CODE);
+    await assert.rejects(svc.rename(ctx(OWNER, channelId), 'rejected'), gateway.failRename);
+    assert.equal((await store.getByChannel(GUILD, channelId))?.name, before?.name);
+    assert.equal((await store.getByChannel(GUILD, channelId))?.lastRenamedAt, null);
+
+    gateway.failRename = null;
+    for (let i = 0; i < 3; i++) {
+      clock += RENAME_MIN_INTERVAL_MS;
+      await svc.sweep(GUILD);
+    }
+    assert.equal(gateway.channels.get(channelId)!.name, before?.name);
+    assert.deepEqual(gateway.renameCalls, [{ channelId, name: 'rejected' }], 'a failed request is not queued');
+  });
+
+  test('a definitively rejected rename spends no throttle budget after permissions recover', async () => {
+    await setup();
+    gateway.failRename = new TempVoiceGatewayError('Missing Permissions', MISSING_PERMISSIONS_CODE);
+    await assert.rejects(svc.rename(ctx(OWNER, channelId), 'rejected'), gateway.failRename);
+    gateway.failRename = null;
+
+    const valid = await svc.rename(ctx(OWNER, channelId), 'valid');
+    assert.match(valid.message, /Renamed to/);
+    assert.equal(gateway.channels.get(channelId)!.name, 'valid');
+    assert.equal((await store.getByChannel(GUILD, channelId))?.lastRenamedAt, new Date(clock).toISOString());
+    assert.match((await svc.rename(ctx(OWNER, channelId), 'next')).message, /queued/, 'the successful rename still spends its window');
+  });
+
+  test('a definitively rejected queued rename is discarded when the sweep flush fails', async () => {
+    await setup();
+    await svc.rename(ctx(OWNER, channelId), 'first');
+    const before = await store.getByChannel(GUILD, channelId);
+    clock += 60_000;
+    assert.match((await svc.rename(ctx(OWNER, channelId), 'rejected')).message, /queued/);
+    gateway.failRename = new TempVoiceGatewayError('Missing Permissions', MISSING_PERMISSIONS_CODE);
+    clock += RENAME_MIN_INTERVAL_MS;
+    await svc.sweep(GUILD);
+    assert.equal((await store.getByChannel(GUILD, channelId))?.lastRenamedAt, before?.lastRenamedAt);
+    gateway.failRename = null;
+    clock += RENAME_MIN_INTERVAL_MS;
+    await svc.sweep(GUILD);
+    assert.equal(gateway.channels.get(channelId)!.name, 'first');
+    assert.equal(gateway.renameCalls.length, 2, 'a definitive flush failure is never retried');
+    assert.match((await svc.rename(ctx(OWNER, channelId), 'valid')).message, /Renamed to/);
+  });
+
+  test('other definitive Discord rename refusals also discard intent', async () => {
+    await setup();
+    for (const code of [10003, 50001, 50035]) {
+      gateway.failRename = new TempVoiceGatewayError('definitive refusal', code);
+      await assert.rejects(svc.rename(ctx(OWNER, channelId), 'rejected'), gateway.failRename);
+      gateway.failRename = null;
+      clock += RENAME_MIN_INTERVAL_MS;
+      await svc.sweep(GUILD);
+      assert.equal(gateway.channels.get(channelId)!.name, "owen's channel");
+    }
+    assert.equal(gateway.renameCalls.length, 3);
+  });
+
+  test('an unclassified Discord rename error is conservatively throttled', async () => {
+    await setup();
+    gateway.failRename = new TempVoiceGatewayError('rate limited', 429);
+    await assert.rejects(svc.rename(ctx(OWNER, channelId), 'uncertain'), gateway.failRename);
+    gateway.failRename = null;
+    assert.match((await svc.rename(ctx(OWNER, channelId), 'latest')).message, /queued/);
+    await svc.sweep(GUILD);
+    assert.equal(gateway.renameCalls.length, 1);
+    clock += RENAME_MIN_INTERVAL_MS;
+    await svc.sweep(GUILD);
+    assert.equal(gateway.channels.get(channelId)!.name, 'latest');
+  });
+
+  test('an ambiguous direct rename failure retains conservative throttling and latest intent', async () => {
+    await setup();
+    gateway.failRename = new TempVoiceGatewayError('connection reset after sending', null);
+    await assert.rejects(svc.rename(ctx(OWNER, channelId), 'uncertain'), gateway.failRename);
+    gateway.failRename = null;
+    clock += 60_000;
+    await svc.sweep(GUILD);
+    assert.equal(gateway.renameCalls.length, 1);
+    assert.match((await svc.rename(ctx(OWNER, channelId), 'latest')).message, /queued/);
+    clock += RENAME_MIN_INTERVAL_MS - 60_000;
+    await svc.sweep(GUILD);
+    assert.equal(gateway.channels.get(channelId)!.name, 'latest');
+    assert.deepEqual(gateway.renameCalls.map((call) => call.name), ['uncertain', 'latest']);
+  });
+
+  test('an ambiguous sweep rename failure reserves a window before another retry', async () => {
+    await setup();
+    await svc.rename(ctx(OWNER, channelId), 'first');
+    clock += 60_000;
+    await svc.rename(ctx(OWNER, channelId), 'queued');
+    clock += RENAME_MIN_INTERVAL_MS - 60_000;
+    gateway.failRename = new Error('connection reset after sending');
+    await svc.sweep(GUILD);
+    assert.equal(gateway.renameCalls.length, 2);
+    clock += RENAME_MIN_INTERVAL_MS - 1;
+    await svc.sweep(GUILD);
+    assert.equal(gateway.renameCalls.length, 2, 'an ambiguous failure may have spent a Discord rename');
+    gateway.failRename = null;
+    clock += 1;
+    await svc.sweep(GUILD);
+    assert.equal(gateway.channels.get(channelId)!.name, 'queued');
+    assert.equal(gateway.renameCalls.length, 3);
   });
 
   test('a filtered name never reaches Discord', async () => {

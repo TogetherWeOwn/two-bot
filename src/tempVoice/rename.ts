@@ -29,6 +29,8 @@ export interface RenameDecision {
 interface Pending {
   name: string;
   lastAppliedAt: number;
+  /** Window before the latest attempt reserved a slot, for definitive rejection. */
+  previousAppliedAt: number;
 }
 
 export class RenameThrottle {
@@ -46,19 +48,22 @@ export class RenameThrottle {
   seed(channelId: string, lastAppliedAt: number): void {
     const existing = this.state.get(channelId);
     if (existing && existing.lastAppliedAt >= lastAppliedAt) return;
-    this.state.set(channelId, { name: existing?.name ?? '', lastAppliedAt });
+    this.state.set(channelId, { name: existing?.name ?? '', lastAppliedAt, previousAppliedAt: lastAppliedAt });
   }
 
   request(channelId: string, name: string, now: number): RenameDecision {
     const existing = this.state.get(channelId);
     const elapsed = existing === undefined ? Number.POSITIVE_INFINITY : now - existing.lastAppliedAt;
     if (elapsed >= this.minIntervalMs) {
-      this.state.set(channelId, { name, lastAppliedAt: now });
+      this.state.set(channelId, {
+        name, lastAppliedAt: now,
+        previousAppliedAt: existing?.lastAppliedAt ?? Number.NEGATIVE_INFINITY,
+      });
       return { apply: true, name, retryAfterMs: 0 };
     }
     // Window closed: keep only the newest name. The previous pending one is
     // dropped on the floor deliberately - it was never sent to Discord.
-    this.state.set(channelId, { name, lastAppliedAt: existing!.lastAppliedAt });
+    this.state.set(channelId, { ...existing!, name });
     return { apply: false, name, retryAfterMs: this.minIntervalMs - elapsed };
   }
 
@@ -81,7 +86,20 @@ export class RenameThrottle {
 
   /** Mark a rename as having landed, starting a fresh window. */
   applied(channelId: string, name: string, now: number): void {
-    this.state.set(channelId, { name, lastAppliedAt: now });
+    this.state.set(channelId, { name, lastAppliedAt: now, previousAppliedAt: now });
+  }
+
+  /** Discard a definitively rejected attempt without erasing an earlier window. */
+  rejected(channelId: string, name: string, attemptedAt: number): void {
+    const existing = this.state.get(channelId);
+    if (!existing || existing.lastAppliedAt !== attemptedAt) return;
+    // A newer name queued while Discord was answering is not the failed intent.
+    const pending = existing.name === name ? '' : existing.name;
+    if (!pending && existing.previousAppliedAt === Number.NEGATIVE_INFINITY) {
+      this.state.delete(channelId);
+    } else {
+      this.state.set(channelId, { ...existing, name: pending, lastAppliedAt: existing.previousAppliedAt });
+    }
   }
 
   forget(channelId: string): void {
