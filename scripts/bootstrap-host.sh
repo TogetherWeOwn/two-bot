@@ -205,13 +205,16 @@ STAGING_TOKEN_FILE="$CRED_DIR/discord_staging_token"
 install -d -o root -g root -m 700 "$CRED_DIR"
 new_secrets=0
 for cred_file in "$TOKEN_FILE" "$DATABASE_URL_FILE" "$INTERNAL_KEYS_FILE"; do
-  if [ -s "$cred_file" ]; then
+  if [ -e "$cred_file" ]; then
     echo "$cred_file present - left alone"
   else
     install -o root -g root -m 600 /dev/null "$cred_file"
     new_secrets=1
   fi
 done
+# database_url may use the env fallback; internal_keys stays empty until actions
+# are enabled. Only the bot token must be nonempty on every run.
+[ -s "$TOKEN_FILE" ] || new_secrets=1
 if [ -s "$STAGING_TOKEN_FILE" ]; then
   echo "$STAGING_TOKEN_FILE present - left alone"
 else
