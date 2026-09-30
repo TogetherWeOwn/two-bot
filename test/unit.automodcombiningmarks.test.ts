@@ -171,6 +171,42 @@ test('gap-split mark chains inherit their base origin', () => {
   assert.equal(match(E('\\u0915\\u093f\\u0924'), spacedCfg), null, 'spaced-chain config vs shorter word');
 });
 
+test('reverse-order mark chains meet their canonical form', () => {
+  const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
+  const revAttached = `ع${String.fromCodePoint(0x651, 0x64e)}ل${String.fromCodePoint(0x64e)}م`;
+  const revSplit = `ع${String.fromCodePoint(0x651)} ${String.fromCodePoint(0x64e)}ل${String.fromCodePoint(0x64e)}م`;
+  const fwdSplit = E('\\u0639\\u064e \\u0651\\u0644\\u064e\\u0645');
+  const entry = E('\\u0639\\u064e\\u0651\\u0644\\u064e\\u0645');
+  const short = E('\\u0639\\u064e\\u0644\\u064e\\u0645');
+  // A gap-split chain is rejoined before canonical ordering, so the split
+  // form meets the attached form whatever mark order the author used.
+  for (const [name, cfgEntry, content] of [
+    ['reverse-order attached matches', entry, revAttached],
+    ['reverse-order split matches', entry, revSplit],
+    ['reverse-spaced config matches attached canonical', revSplit, entry],
+  ] as Array<[string, string, string]>) {
+    assert.equal(match(content, { ...policy, badWords: [cfgEntry] }), 'bad_words', name);
+  }
+  // Shorter/longer identity is preserved: the short entry still misses the
+  // reverse split, and the spaced chain config still misses the short word.
+  assert.equal(match(revSplit, { ...policy, badWords: [short] }), null, 'short entry vs reverse split');
+  const spacedCfg = loadAutomodConfig({ TWO_AUTOMOD_BAD_WORDS: revSplit }, null).policy;
+  assert.equal(match(entry, spacedCfg), 'bad_words', 'reverse-spaced config self shape via entry form');
+  assert.equal(match(short, spacedCfg), null, 'reverse-spaced config vs shorter word');
+  assert.equal(match(fwdSplit, { ...policy, badWords: [entry] }), 'bad_words', 'forward-order split control');
+});
+
+test('repeated separator-plus-mark runs stay linear', () => {
+  const probe = { ...policy, badWords: ['shit'] };
+  const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
+  // Each space+acute pair must cost O(1): 2000 pairs (~4000 UTF-16 units)
+  // stay well under the old 81–83 ms quadratic timing on this machine.
+  const content = `s${E(' \\u0301').repeat(2000)}hik`;
+  const started = Date.now();
+  assert.equal(match(content, probe), null);
+  assert.ok(Date.now() - started < 1000, '2000-pair near-miss stays bounded');
+});
+
 test('required marks survive across allowed gaps', () => {
   const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
   // A mark whose origin (skipping gap separators) is a word character is
