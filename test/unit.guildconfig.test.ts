@@ -223,6 +223,118 @@ for (const resource of ['role', 'category', 'emoji'] as const) {
   }
 }
 
+for (const resource of ['role', 'category', 'emoji'] as const) {
+  for (const stableFirst of [true, false]) {
+    test(`restore reserves stable ${resource} ids before deleted-namesake fallback (${stableFirst ? 'stable first' : 'deleted first'})`, async () => {
+      const source = acceptedSnapshot();
+      source.roles = [source.roles[0]!,
+        { ...source.roles[1]!, name: 'Original', permissions: '0', position: 1 },
+        { ...source.roles[2]!, name: 'Member', permissions: '8', position: 2 }];
+      const [firstRole, secondRole] = source.roles.slice(1);
+      source.channels = [
+        { id: id(20), name: 'Original', type: 4, parent_id: null, position: 1, permission_overwrites: [{ id: firstRole!.id, type: 0, allow: '1', deny: '0' }] },
+        { id: id(21), name: 'Member', type: 4, parent_id: null, position: 2, permission_overwrites: [{ id: secondRole!.id, type: 0, allow: '0', deny: '2' }] },
+        { id: id(22), name: 'first-child', type: 0, parent_id: id(20), position: 0, permission_overwrites: [] },
+        { id: id(23), name: 'second-child', type: 0, parent_id: id(21), position: 0, permission_overwrites: [] },
+      ];
+      source.guild.system_channel_id = id(23);
+      source.emojis = [
+        { ...source.emojis[0]!, name: 'original', roles: [firstRole!.id] },
+        { ...source.emojis[0]!, id: id(91), name: 'member', roles: [secondRole!.id] },
+      ];
+      const key = resource === 'role' ? 'roles' : resource === 'category' ? 'channels' : 'emojis';
+      const [surviving, deleted] = resource === 'role' ? source.roles.slice(1)
+        : resource === 'category' ? source.channels.filter((channel) => channel.type === 4) : source.emojis;
+      if (!stableFirst) {
+        source.roles.reverse();
+        source.channels.reverse();
+        source.emojis.reverse();
+        // Roles and categories are planned in position order, not array order.
+        if ('position' in surviving! && 'position' in deleted!) {
+          [surviving!.position, deleted!.position] = [deleted!.position, surviving!.position];
+        }
+      }
+      const current = structuredClone(source);
+      if (resource === 'role') current.roles = current.roles.filter((role) => role.id !== deleted!.id);
+      else if (resource === 'category') {
+        current.channels = current.channels.filter((channel) => channel.id !== deleted!.id);
+        current.channels.find((channel) => channel.parent_id === deleted!.id)!.parent_id = null;
+      } else current.emojis = current.emojis.filter((emoji) => emoji.id !== deleted!.id);
+      current[key].find((item) => item.id === surviving!.id)!.name = deleted!.name;
+
+      const plan = planRestore(source, current);
+      assert.equal(plan.knownIds[key][surviving!.id], surviving!.id);
+      assert.equal(plan.knownIds[key][deleted!.id], undefined);
+      assert.equal(plan.operations.filter((operation) => operation.captureId).length, 1);
+      const calls: Array<{ method: string; path: string; body: unknown }> = [];
+      const createdId = id(999);
+      const api = {
+        async write(method: string, path: string, body: unknown) {
+          calls.push({ method, path, body });
+          if (method === 'POST') {
+            assert.equal(path, `/guilds/${GUILD}/${key}`);
+            if (resource === 'role') current.roles.push({ id: createdId, name: '', managed: false, color: 0, hoist: false, permissions: '0', mentionable: false, position: 0, ...body as object });
+            else if (resource === 'category') current.channels.push({ id: createdId, name: '', type: 4, parent_id: null, position: 0, permission_overwrites: [], ...body as object });
+            else current.emojis.push({ id: createdId, name: null, roles: [], require_colons: true, managed: false, animated: false, available: true, ...body as object });
+            return { id: createdId };
+          }
+          assert.equal(method, 'PATCH');
+          if (Array.isArray(body)) {
+            const items = path === `/guilds/${GUILD}/roles` ? current.roles : current.channels;
+            for (const entry of body as Array<{ id: string; position: number }>) {
+              items.find((item) => item.id === entry.id)!.position = entry.position;
+            }
+          } else if (path === `/guilds/${GUILD}`) Object.assign(current.guild, body);
+          else {
+            const items = path.startsWith('/channels/') ? current.channels
+              : path.includes('/roles/') ? current.roles : current.emojis;
+            const item = items.find((entry) => entry.id === path.split('/').at(-1));
+            assert.ok(item, `unknown target ${path}`);
+            Object.assign(item, body);
+          }
+          return {};
+        },
+      } as GuildConfigDiscordApi;
+
+      const ids = await applyRestorePlan(api, plan);
+      assert.equal(ids[key][surviving!.id], surviving!.id);
+      assert.equal(ids[key][deleted!.id], createdId);
+      assert.equal(new Set(Object.values(ids[key])).size, source[key].length);
+      assert.equal(calls.filter((call) => call.method === 'POST').length, 1);
+      if (resource === 'role') {
+        assert.deepEqual(current.channels.find((channel) => channel.id === id(21))!.permission_overwrites, [{ id: createdId, type: 0, allow: '0', deny: '2' }]);
+        assert.deepEqual(current.emojis.find((emoji) => emoji.id === id(91))!.roles, [createdId]);
+      } else if (resource === 'category') {
+        assert.equal(current.channels.find((channel) => channel.id === id(22))!.parent_id, surviving!.id);
+        assert.equal(current.channels.find((channel) => channel.id === id(23))!.parent_id, createdId);
+      }
+      const remapped = remapSnapshotIds(source, ids);
+      assert.equal(configHash(canonicalSnapshot(current)), configHash(canonicalSnapshot(remapped)));
+      assert.equal(snapshotsEqual(remapped, current), true);
+      assert.equal(planRestore(source, current).counts.operations, 0);
+    });
+  }
+
+  test(`restore consumes each ${resource} name fallback target only once`, () => {
+    const source = acceptedSnapshot();
+    const key = resource === 'role' ? 'roles' : resource === 'category' ? 'channels' : 'emojis';
+    if (resource === 'role') source.roles = source.roles.filter((role) => role.id === GUILD || role.name === 'Moderator');
+    else if (resource === 'category') source.channels = source.channels.filter((channel) => channel.type === 4).slice(0, 1);
+    const item = source[key].find((entry) => entry.id !== GUILD)!;
+    if (resource === 'role') source.roles.push({ ...source.roles[1]!, id: id(998) });
+    else if (resource === 'category') source.channels.push({ ...source.channels[0]!, id: id(998) });
+    else source.emojis.push({ ...source.emojis[0]!, id: id(998) });
+    const current = structuredClone(source);
+    if (resource === 'role') current.roles = current.roles.filter((role) => role.id !== id(998));
+    else if (resource === 'category') current.channels = current.channels.filter((channel) => channel.id !== id(998));
+    else current.emojis = current.emojis.filter((emoji) => emoji.id !== id(998));
+    current[key].find((entry) => entry.id === item.id)!.id = id(999);
+    const plan = planRestore(source, current);
+    assert.equal(Object.values(plan.knownIds[key]).filter((targetId) => targetId === id(999)).length, 1);
+    assert.equal(plan.operations.filter((operation) => operation.captureId?.sourceId === id(998)).length, 1);
+  });
+}
+
 test('restore still matches by name and remaps references when the snapshot ids are absent', () => {
   const source = acceptedSnapshot();
   const moderator = source.roles.find((role) => role.name === 'Moderator')!;

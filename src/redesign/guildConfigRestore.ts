@@ -111,6 +111,21 @@ function resolvedPath(path: RestorePath, channelIds: Map<string, string>): strin
   return `/channels/${channelId}`;
 }
 
+function resourceMatcher<T extends { id: string; name: string | null }>(source: T[], current: T[]): (item: T) => T | undefined {
+  const byId = new Map(current.map((item) => [item.id, item]));
+  // Reserve every surviving source ID before fallback, regardless of source order.
+  const sourceIds = new Set(source.map((item) => item.id));
+  const byName = new Map(current.filter((item) => !sourceIds.has(item.id)).map((item) => [item.name, item]));
+  return (item) => {
+    const byStableId = byId.get(item.id);
+    if (byStableId) return byStableId;
+    const byFallbackName = byName.get(item.name);
+    // A name fallback may be assigned to only one source resource.
+    if (byFallbackName) byName.delete(item.name);
+    return byFallbackName;
+  };
+}
+
 function existingCandidate(channel: GuildConfigChannel, parent: GuildConfigChannel | null, current: GuildConfigSnapshot, actualParentId: string | null): GuildConfigChannel | undefined {
   const candidates = current.channels.filter((item) => item.type === channel.type && item.name === channel.name);
   const exact = candidates.filter((item) => item.parent_id === actualParentId);
@@ -154,12 +169,11 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
   const snapshotRolesById = new Map(snapshot.roles.map((role) => [role.id, role]));
   const overwriteRoleIds = new Set<string>();
 
-  const currentRolesById = new Map(current.roles.filter((role) => !role.managed).map((role) => [role.id, role]));
-  const currentRolesByName = new Map([...currentRolesById.values()].map((role) => [role.name, role]));
   const sourceRoles = snapshot.roles.filter((item) => !item.managed && item.id !== snapshot.guildId).sort((a, b) => a.position - b.position);
+  const matchRole = resourceMatcher(sourceRoles, current.roles.filter((role) => !role.managed && role.id !== current.guildId));
   let rolePositionsDiffer = false;
   for (const role of sourceRoles) {
-    const actual = currentRolesById.get(role.id) ?? currentRolesByName.get(role.name);
+    const actual = matchRole(role);
     if (!actual) {
       roleOperations.push({
         label: `create role ${role.name}`,
@@ -189,12 +203,12 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
     roleWrites++;
   }
 
-  const currentCategoriesById = new Map(current.channels.filter((channel) => channel.type === 4).map((channel) => [channel.id, channel]));
-  const currentCategories = new Map([...currentCategoriesById.values()].map((channel) => [channel.name, channel]));
+  const sourceCategories = snapshot.channels.filter((channel) => channel.type === 4).sort((a, b) => a.position - b.position);
+  const matchCategory = resourceMatcher(sourceCategories, current.channels.filter((channel) => channel.type === 4));
   let channelPositionsDiffer = false;
   const sourceChannelPositions: RestoreValue[] = [];
-  for (const category of snapshot.channels.filter((channel) => channel.type === 4).sort((a, b) => a.position - b.position)) {
-    const actual = currentCategoriesById.get(category.id) ?? currentCategories.get(category.name);
+  for (const category of sourceCategories) {
+    const actual = matchCategory(category);
     if (actual) {
       channelIds.set(category.id, actual.id);
       channelPositionsDiffer ||= category.position !== actual.position;
@@ -329,13 +343,12 @@ export function planRestore(snapshot: GuildConfigSnapshot, current: GuildConfigS
     settingsWrites++;
   }
 
-  const currentEmojisById = new Map(current.emojis.map((emoji) => [emoji.id, emoji]));
-  const currentEmojis = new Map(current.emojis.filter((emoji) => emoji.name).map((emoji) => [emoji.name!, emoji]));
+  const matchEmoji = resourceMatcher(snapshot.emojis, current.emojis);
   for (const emoji of snapshot.emojis.filter((item) => !item.managed && item.name)) {
     const roles = emoji.roles.map((roleId) => reference('role', roleId));
     const knownRoles = emoji.roles.map((roleId) => roleIds.get(roleId) ?? roleId);
     const hasCreatedRoleReference = emoji.roles.some((roleId) => !roleIds.has(roleId));
-    const actual = currentEmojisById.get(emoji.id) ?? currentEmojis.get(emoji.name!);
+    const actual = matchEmoji(emoji);
     if (!actual) {
       emojiOperations.push({
         label: `create emoji ${emoji.name}`,
