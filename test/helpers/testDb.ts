@@ -50,6 +50,7 @@ const TABLES = [
   'events',
   'members',
   'invite_snapshots',
+  'capture_pending_joins',
   'guild_counters',
   'rank_snapshots',
   'member_ranks',
