@@ -17,7 +17,11 @@
  * not run migrations and does not open a transaction, so it is safe to point at
  * a database you care about. TWO_RESTORE_URL is optional for a dry run - with
  * it you also get the target's current row counts, without it you still get a
- * full check of the file:
+ * full check of the file. A missing target table (SQLSTATE 42P01 on the
+ * probe COUNT, confirmed absent by the catalog visibility check) is
+ * information; any other target-probe failure exits 1 with
+ * `DRY RUN TARGET PROBE FAILED`, while still reporting
+ * that the backup file was verified:
  *
  *   node scripts/pg-restore.ts /var/backups/two-bot/two-funnel-<stamp>.ndjson.gz --dry-run
  *
@@ -33,7 +37,7 @@
  * to say so twice, on purpose. See docs/RUNBOOK.md.
  */
 import { existsSync } from 'node:fs';
-import { openDb, isPostgresSpec } from '../src/store/db.ts';
+import { openDb, isPostgresSpec, type Db } from '../src/store/db.ts';
 import { restore, inspect, DUMP_TABLES } from '../src/store/dump.ts';
 import { migrate } from '../src/store/migrate.ts';
 
@@ -94,6 +98,43 @@ if (!haveUrl && !dryRun) {
   process.exit(1);
 }
 
+// 42P01 can hide a schema-USAGE denial. Only diagnose absence if no
+// same-named table-like relation exists anywhere in the database; otherwise
+// fail conservatively (inaccessible or off-path), without promising a migration.
+// Source: https://www.postgresql.org/docs/17/catalog-pg-class.html
+async function classifyUndefinedTable(
+  probe: Db,
+  table: string,
+  countErr: unknown,
+): Promise<{ text: string; failed: boolean; detail: string }> {
+  const countDetail = String(countErr);
+  let relations: Array<{ schema: string }>;
+  try {
+    relations = await probe
+      .prepare(
+        `SELECT n.nspname AS schema
+           FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+          WHERE c.relname = ? AND c.relkind IN ('r', 'p', 'v', 'm', 'f')`,
+      )
+      .all<{ schema: string }>(table);
+  } catch (catalogErr) {
+    return {
+      text: '(target probe failed)',
+      failed: true,
+      detail: `${countDetail} (visibility check failed: ${String(catalogErr)})`,
+    };
+  }
+  if (relations.length > 0) {
+    const schemas = [...new Set(relations.map((row) => row.schema))].sort().join(', ');
+    return {
+      text: '(target probe failed)',
+      failed: true,
+      detail: `${countDetail} (same-named relation exists but is not visible through the target search_path: ${schemas})`,
+    };
+  }
+  return { text: '(no such table - the restore would migrate first)', failed: false, detail: '' };
+}
+
 if (dryRun) {
   // Nothing in this branch writes: no migrate(), no transaction, and the
   // database is opened read-only-in-practice and only if we were given one.
@@ -120,24 +161,48 @@ if (dryRun) {
   // Read the target's current rows where we can, but do not create them. A
   // table that is not there yet is information, not an error: it tells the
   // operator the real restore will have migrations to apply first.
+  //
+  // Match --force's search_path, not a hardcoded public schema. Inaccessible
+  // schemas can be skipped during resolution, so check the catalog before
+  // treating 42P01 as absence. Other codes (including 42501) fail the probe.
+  // https://www.postgresql.org/docs/17/ddl-schemas.html#DDL-SCHEMAS-PATH
+  // https://www.postgresql.org/docs/17/errcodes-appendix.html
   const before: Record<string, string> = {};
+  for (const t of DUMP_TABLES) before[t] = '(not checked)';
+  let probeFailed = false;
   if (haveUrl) {
     console.log('restore: checking configured target');
-    const probe = await openDb(url!, { skipMigrations: true, applicationName: 'two-bot-restore' });
     try {
-      for (const t of DUMP_TABLES) {
-        before[t] = await probe
-          .prepare(`SELECT COUNT(*) AS n FROM ${t}`)
-          .get<{ n: number }>()
-          .then((r) => String(Number(r?.n ?? 0)))
-          .catch(() => '(no such table - the restore would migrate first)');
+      const probe = await openDb(url!, { skipMigrations: true, applicationName: 'two-bot-restore' });
+      try {
+        for (const t of DUMP_TABLES) {
+          try {
+            const r = await probe.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get<{ n: number }>();
+            before[t] = String(Number(r?.n ?? 0));
+          } catch (err) {
+            if (typeof err === 'object' && err !== null && 'code' in err && err.code === '42P01') {
+              const verdict = await classifyUndefinedTable(probe, t, err);
+              before[t] = verdict.text;
+              if (verdict.failed) {
+                probeFailed = true;
+                console.error(`restore: target probe failed for ${t}: ${verdict.detail}`);
+              }
+            } else {
+              before[t] = '(target probe failed)';
+              probeFailed = true;
+              console.error(`restore: target probe failed for ${t}: ${String(err)}`);
+            }
+          }
+        }
+      } finally {
+        await probe.close();
       }
-    } finally {
-      await probe.close();
+    } catch (err) {
+      probeFailed = true;
+      console.error(`restore: target probe failed: ${String(err)}`);
     }
   } else {
     console.log('restore: no TWO_RESTORE_URL - checking the file only.');
-    for (const t of DUMP_TABLES) before[t] = '(not checked)';
   }
 
   let short = false;
@@ -156,6 +221,10 @@ if (dryRun) {
     process.exit(1);
   }
   console.log(`\nrestore: ${contents.rows} rows read and verified. Nothing was written.`);
+  if (probeFailed) {
+    console.error('DRY RUN TARGET PROBE FAILED - the backup file was verified; target counts could not be fully checked.');
+    process.exit(1);
+  }
   console.log('DRY RUN VERIFIED');
   process.exit(0);
 }
