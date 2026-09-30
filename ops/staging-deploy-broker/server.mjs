@@ -265,7 +265,10 @@ export function scrubSecrets(text, secrets) {
  * their keys (sensitive names redacted, every string scrubbed), arrays are
  * mapped, strings are scrubbed and capped, scalars pass through (the caller
  * drops message-less top-level scalars). Depth-capped so a hostile nested
- * payload cannot recurse the broker into a stack overflow.
+ * payload cannot recurse the broker into a stack overflow: anything deeper
+ * than the cap crosses as the placeholder, never verbatim — returning the
+ * raw subtree would bypass key redaction and credential scrubbing for deeply
+ * nested secrets (TOG-9053 finding 2).
  */
 export function shapeLogValue(value, secrets, depth = 0) {
   if (typeof value === "string") {
@@ -288,7 +291,8 @@ export function shapeLogValue(value, secrets, depth = 0) {
     }
     return scrubSecrets(value, secrets).slice(0, MAX_LOG_MESSAGE_CHARS);
   }
-  if (value === null || typeof value !== "object" || depth > 10) return value;
+  if (value === null || typeof value !== "object") return value;
+  if (depth > 10) return SECRET_PLACEHOLDER;
   if (Array.isArray(value)) {
     return value.map((entry) => shapeLogValue(entry, secrets, depth + 1));
   }
@@ -332,10 +336,31 @@ export function shapeLogItem(item, secrets) {
 }
 
 /**
+ * Validate a line-level timestamp before it crosses the boundary. A timestamp
+ * is metadata, not message text: it must parse as an actual date (the smoke's
+ * own definition of a usable timestamp is Date.parse-finite, broker-smoke.mjs
+ * findBotRecords) and must not carry credential text. Anything else — a panel
+ * token smuggled into a timestamp field, a non-date string — is dropped by
+ * returning null, so the pair ships without a timestamp (TOG-9053 finding 2).
+ * Genuine ISO timestamps pass through, since the smoke's
+ * advancing-timestamps check needs them. Never throws.
+ */
+export function shapeTimestamp(value, secrets) {
+  // Numeric epochs carry no text by construction: pass finite values through
+  // (the smoke normalizes them to strings itself).
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string") return null;
+  const text = value.slice(0, 64);
+  if (!Number.isFinite(Date.parse(text))) return null;
+  if (scrubSecrets(text, secrets) !== text) return null;
+  return text;
+}
+
+/**
  * Shape a panel logs payload into { logs: [{message}, ...] }. Top-level
  * timestamp metadata (Coolify's per-line ts wrappers) is preserved on the
- * pair when the item carries it alongside the message — the smoke falls back
- * to embedded record timestamps first. Output is capped at
+ * pair ONLY when it validates as a real timestamp via shapeTimestamp — the
+ * smoke falls back to embedded record timestamps first. Output is capped at
  * MAX_SHAPED_LOG_BYTES. Never throws.
  */
 export function shapeLogs(panelJson, secrets) {
@@ -362,8 +387,9 @@ export function shapeLogs(panelJson, secrets) {
     let timestamp = null;
     if (item !== null && typeof item === "object" && !Array.isArray(item)) {
       for (const key of LOG_TS_KEYS) {
-        if (typeof item[key] === "string" || typeof item[key] === "number") {
-          timestamp = String(item[key]).slice(0, 64);
+        const shaped = shapeTimestamp(item[key], secretList);
+        if (shaped !== null) {
+          timestamp = shaped;
           break;
         }
       }

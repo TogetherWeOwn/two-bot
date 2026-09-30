@@ -51,6 +51,7 @@ import {
   shapeLogItem,
   shapeLogValue,
   shapeStatus,
+  shapeTimestamp,
   validateDeployBody,
 } from "./server.mjs";
 
@@ -110,7 +111,9 @@ function assertRedacted(t, { status, json, text }) {
   assert.ok(json !== null, "every broker response is JSON");
   assert.doesNotMatch(text, /PANEL-BEARER-FAKE/, "panel bearer never appears in a broker response");
   assert.doesNotMatch(text, /panel\.example\.invalid/, "panel URL never appears in a broker response");
-  assert.doesNotMatch(text, new RegExp(BROKER_TOKEN), "broker token never appears in a broker response");
+  // Literal inclusion, never a built-from-value RegExp: partial manual
+  // escaping (e.g. dots only) trips the incomplete-escaping check (TOG-9053).
+  assert.ok(!text.includes(BROKER_TOKEN), "broker token never appears in a broker response");
   return { status, json };
 }
 
@@ -366,8 +369,11 @@ test("logs-redaction: fake bot-token text and sensitive panel fields never cross
   assert.equal(out.status, 200);
   const text = JSON.stringify(out.json);
   // The exact sensitive values are gone, everywhere in the response.
-  assert.doesNotMatch(text, new RegExp(FAKE_BOT_TOKEN_TEXT.replace(/\./g, "\\.")), "fake bot token text must be scrubbed");
-  assert.doesNotMatch(text, new RegExp(FAKE_SENSITIVE_PANEL_TOKEN), "panel bearer value must be scrubbed");
+  // Literal inclusion, never a built-from-value RegExp: FAKE values are
+  // constant but arbitrary text, so only complete escaping (via a literal)
+  // satisfies the CodeQL incomplete-escaping check (TOG-9053).
+  assert.ok(!text.includes(FAKE_BOT_TOKEN_TEXT), "fake bot token text must be scrubbed");
+  assert.ok(!text.includes(FAKE_SENSITIVE_PANEL_TOKEN), "panel bearer value must be scrubbed");
   assert.doesNotMatch(text, /internal_secret/, "sensitive panel field name must not cross");
   assert.doesNotMatch(text, /panel-field-should-never-leave/, "sensitive panel field value must not cross");
   assert.doesNotMatch(text, /coolify_token_echo/, "echoed credential field name must not cross");
@@ -380,6 +386,57 @@ test("logs-redaction: fake bot-token text and sensitive panel fields never cross
   assert.match(messages, /"msg":"ready"/, "ready-line structure must survive shaping");
   assert.match(messages, /"guilds":1/, "ready-line guilds must survive shaping");
   assert.match(messages, /plain line, no secrets/, "plain text lines pass through scrubbed");
+});
+
+// --- TOG-9053 re-review: over-depth + timestamp bypass regressions ---------
+// Both fixtures go through the REAL handler with a STUB panel (fake values
+// only, nothing live). The gitleaks allowlist names this file's fake-token
+// shapes; the calibration above keeps the scrub assertions non-vacuous.
+
+function nestWrappers(inner, levels) {
+  let out = inner;
+  for (let i = 0; i < levels; i += 1) out = { wrap: out };
+  return out;
+}
+
+test("logs-redaction: panel token in a timestamp field never crosses", async (t) => {
+  const secretTimestamp = `config.panelToken is ${PANEL_TOKEN}`;
+  const srv = await boot(() => ({
+    logs: [
+      { message: "plain line", timestamp: secretTimestamp },
+      { message: "other line", ts: 1759200000000 },
+    ],
+  }));
+  t.after(srv.close);
+  const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+  assert.equal(out.status, 200);
+  const text = JSON.stringify(out.json);
+  assert.ok(!text.includes(PANEL_TOKEN), "panel token smuggled into a timestamp field must not cross");
+  const [first, second] = out.json.logs;
+  assert.ok(!("timestamp" in first), "non-timestamp value in a timestamp field is dropped from the pair");
+  // Object items cross as one JSON message (the smoke's parser shape); the
+  // smuggled timestamp text survives inside it ONLY scrubbed.
+  assert.equal(JSON.parse(first.message).timestamp, "config.panelToken is [redacted]");
+  assert.equal(JSON.parse(first.message).message, "plain line", "benign message text survives timestamp rejection");
+  assert.equal(second.timestamp, 1759200000000, "numeric epochs are credential-free and pass through");
+});
+
+test("logs-redaction: over-depth nested secret never crosses verbatim", async (t) => {
+  const nested = nestWrappers({ password: FAKE_SENSITIVE_PANEL_TOKEN }, 12);
+  const srv = await boot(() => ({ logs: [nested] }));
+  t.after(srv.close);
+  const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+  assert.equal(out.status, 200);
+  const text = JSON.stringify(out.json);
+  assert.ok(!text.includes(FAKE_SENSITIVE_PANEL_TOKEN), "over-depth nested secret must not cross verbatim");
+});
+
+test("logs-redaction unit: shapeTimestamp validates dates, drops leaky values", () => {
+  assert.equal(shapeTimestamp("2026-09-30T03:00:00.000Z", []), "2026-09-30T03:00:00.000Z");
+  assert.equal(shapeTimestamp(1759200000000, []), 1759200000000);
+  assert.equal(shapeTimestamp(`token ${PANEL_TOKEN}`, [PANEL_TOKEN]), null);
+  assert.equal(shapeTimestamp("not a date", []), null);
+  assert.equal(shapeTimestamp(null, []), null);
 });
 
 test("logs-redaction unit: shapeLogValue redacts sensitive keys, scrubs strings", () => {
