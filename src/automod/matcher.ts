@@ -114,10 +114,13 @@ export function normalizeBadWord(raw: string): string {
 // allowed gaps. One forward pass carrying the last base character as the
 // chain origin — each character is visited once, so repeated
 // `space + mark` pairs stay linear (no backward rescan per run).
+// The input is NFD-decomposed up front so a precomposed initial (ά) exposes
+// its mark run to the same chain logic as a decomposed one (α + acute).
 // A gap between a base and a following mark run stays a separator (the word
 // pattern tolerates it), so `क ित` still matches `कित`.
 // A gap between two mark runs belongs to one split chain (`عَ ّلَم`,
-// `कि ंत`, `i̇ ̇stanbul`): the later run folds against the carried origin —
+// `कि ंत`, `i̇ ̇stanbul`, `ά ̣λφα`): the later runs fold against the carried
+// origin —
 //   - origin is a Latin letter: same fold as directly-attached stacking
 //     (dotted-i keeps its one dot per chain, other Latin stacking drops),
 //     so `s ́h` folds exactly like `śh`;
@@ -127,25 +130,35 @@ export function normalizeBadWord(raw: string): string {
 //     matches `عَّلَم`;
 //   - otherwise (string start, punctuation, emoji): standalone decoration,
 //     dropped, so `f*́ck` matches `f*ck`.
-// The folded link is emitted BEFORE the gap: the real input separator
-// survives as a word boundary (`İ ́shit` still reads as two tokens) while
-// the runs sit side by side for canonical ordering at the call sites, so a
-// reverse-order split chain meets the same form as attached content. The
-// matcher below needs no mark-skipping of its own.
+// Combining overlays (U+0334–U+0338, e.g. the negation slash NFD exposes in
+// ≠ → = + U+0338) are meaningful under every origin: they change the
+// symbol's identity, so they are never dropped as decoration.
+// A whole split chain is canonicalized together: the attached run plus every
+// absorbed link are reordered as one mark sequence before the retained gaps,
+// so a reverse-order multi-link chain (`عّ ُ َل`) meets the same form as the
+// attached entry (`عَُّل`). The real input separators survive after the
+// flushed chain as word boundaries (`İ ́shit` still reads as two tokens).
+// The matcher below needs no mark-skipping of its own.
 function stripStandaloneMarkRuns(value: string): string {
   const dotAbove = String.fromCodePoint(0x0307);
+  // NFD first: a precomposed initial must expose its marks before scanning.
+  value = value.normalize('NFD');
   const at = (i: number): string => String.fromCodePoint(value.codePointAt(i) ?? 0);
   const isMark = (ch: string): boolean => /\p{M}/u.test(ch);
   const isGap = (ch: string): boolean => /[\s\p{Cf}]/u.test(ch);
+  // Overlay marks (codepoints as escapes, per corpus discipline) in a run
+  // survive regardless of origin (see above).
+  const keepOverlays = (run: string): string => run.replace(/[^\u{334}-\u{338}]/gu, '');
   // Fold one run against its chain origin. A Latin `i` chain keeps a single
   // dot across all its links (attached run plus gap-split continuations);
   // other Latin stacking drops; non-Latin runs stay meaningful.
   const foldRun = (origin: string, run: string, chainHasDot: boolean): { text: string; hasDot: boolean } => {
-    if (!origin || !/[\p{L}\p{N}_]/u.test(origin)) return { text: '', hasDot: false };
+    const overlays = keepOverlays(run);
+    if (!origin || !/[\p{L}\p{N}_]/u.test(origin)) return { text: overlays, hasDot: false };
     if (!/\p{Script=Latin}/u.test(origin)) return { text: run, hasDot: false };
-    if (origin !== 'i') return { text: '', hasDot: false };
+    if (origin !== 'i') return { text: overlays, hasDot: false };
     const hasDot = chainHasDot || run.includes(dotAbove);
-    return { text: !chainHasDot && run.includes(dotAbove) ? dotAbove : '', hasDot };
+    return { text: (!chainHasDot && run.includes(dotAbove) ? dotAbove : '') + overlays, hasDot };
   };
   let out = '';
   let origin = '';
@@ -162,16 +175,19 @@ function stripStandaloneMarkRuns(value: string): string {
         i += c.length;
       }
       const folded = foldRun(origin, run, chainHasDot);
-      out += folded.text;
       chainHasDot = folded.hasDot;
       // Absorb further chain links: each gap run followed by another mark
-      // run extends the same chain. The link is emitted before the gap so
-      // the separator survives; the scan only moves forward.
+      // run extends the same chain. The links are buffered and canonicalized
+      // with the attached run as one sequence; the retained gaps are emitted
+      // after, so separators survive while the whole chain meets one form.
+      // The scan only moves forward.
+      const links: string[] = [];
+      const gaps: string[] = [];
       for (;;) {
         let g = i;
         while (g < value.length && isGap(at(g))) g += at(g).length;
         if (g > i && g < value.length && isMark(at(g))) {
-          const gap = value.slice(i, g);
+          gaps.push(value.slice(i, g));
           let next = '';
           while (g < value.length && isMark(at(g))) {
             const c = at(g);
@@ -179,11 +195,16 @@ function stripStandaloneMarkRuns(value: string): string {
             g += c.length;
           }
           const link = foldRun(origin, next, chainHasDot);
-          out += link.text;
           chainHasDot = link.hasDot;
-          out += gap;
+          links.push(link.text);
           i = g;
         } else break;
+      }
+      if (links.length === 0) {
+        out += folded.text;
+      } else {
+        out += (folded.text + links.join('')).normalize('NFD');
+        out += gaps.join('');
       }
       continue;
     }
@@ -212,19 +233,38 @@ function hasBadWord(content: string, words: string[]): boolean {
   for (const raw of words) {
     const word = normalizeBadWord(raw);
     if (!word) continue;
+    // One atom per entry character. The category lookahead is case-SENSITIVE
+    // (`(?-i:...)`, supported by V8): without it, the NFD-exposed combining
+    // iota-subscript (U+0345, the only mark in all of Unicode that
+    // case-folds to a letter — enumerated, not assumed) also satisfies a
+    // case-insensitive `[\p{L}\p{N}_]`, so it would match an iota letter
+    // under the `iu` flag below. A letter atom only matches letter-like
+    // content; a mark atom only matches a mark, blocking the same collapse
+    // in reverse. Letter case behaviour itself is unchanged (the literals
+    // still carry `iu`), and `αι`/`ᾳ` self-matches plus the canonical `ᾳ`
+    // form still catch.
     const escaped = [...word]
-      .map((char) => char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+      .map((char) => {
+        const literal = char.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        if (/[\p{L}\p{N}]/u.test(char)) return `(?-i:(?=[\\p{L}\\p{N}_]))${literal}`;
+        if (/\p{M}/u.test(char)) return `(?-i:(?=\\p{M}))${literal}`;
+        return literal;
+      })
       .join('(?:[\\s\\p{Cf}])*');
     // Marks extending a letter stay part of its word. Skip leading marks only
     // after a real boundary (start/punctuation), never after a word character.
-    const leading = `(^|[^\\p{L}\\p{N}\\p{M}_])\\p{M}*`;
+    // Combining overlays (U+0334–U+0338, escapes per corpus discipline) are
+    // never skipped: NFD exposes them in negated operators (≠ → `=` plus
+    // U+0338), where they change the symbol's identity instead of decorating
+    // it — while a genuine acute on `x=` is still tolerated.
+    const leading = `(^|[^\\p{L}\\p{N}\\p{M}_])(?:(?![\\u0334-\\u0338])\\p{M})*`;
     // A mark after a punctuation-ended entry is standalone decoration (the
     // entry cannot extend it). After a letter-ended word it may be meaningful
     // (Devanagari/Arabic vowel signs extend the word), so keep the strict
     // boundary there.
     const trailing = /[\p{L}\p{N}\p{M}_]$/u.test(word)
       ? '([^\\p{L}\\p{N}\\p{M}_]|$)'
-      : '\\p{M}*([^\\p{L}\\p{N}\\p{M}_]|$)';
+      : '(?:(?![\\u0334-\\u0338])\\p{M})*([^\\p{L}\\p{N}\\p{M}_]|$)';
     if (new RegExp(`${leading}${escaped}${trailing}`, 'iu').test(plain)) return true;
   }
   return false;

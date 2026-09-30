@@ -223,8 +223,8 @@ test('mark-chain gaps keep real word boundaries', () => {
 
 test('composable clusters meet one form across permitted gaps', () => {
   const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
-  const attached = E('\\u03acl\\u03c6\\u03b1');
-  const spaced = E('\\u03b1 \\u0301l\\u03c6\\u03b1');
+  const attached = E('\\u03ac\\u03bb\\u03c6\\u03b1');
+  const spaced = E('\\u03b1 \\u0301\\u03bb\\u03c6\\u03b1');
   const spacedCfg = loadAutomodConfig({ TWO_AUTOMOD_BAD_WORDS: spaced }, null).policy;
   // NFD decomposes the precomposed first letter on both sides, so a gap
   // inside the cluster meets the attached cluster, and a spaced entry
@@ -234,8 +234,9 @@ test('composable clusters meet one form across permitted gaps', () => {
   assert.equal(match(attached, spacedCfg), 'bad_words', 'spaced config vs attached content');
   // Accented-vs-unaccented identity is preserved: the marks are part of the
   // letter, so stripping them still differs.
-  assert.equal(match('αλφα', { ...policy, badWords: [attached] }), null, 'unaccented content still differs');
-  assert.equal(match(attached, { ...policy, badWords: ['αλφα'] }), null, 'unaccented config still differs');
+  const unaccented = E('\\u03b1\\u03bb\\u03c6\\u03b1');
+  assert.equal(match(unaccented, { ...policy, badWords: [attached] }), null, 'unaccented content still differs');
+  assert.equal(match(attached, { ...policy, badWords: [unaccented] }), null, 'unaccented config still differs');
 });
 
 test('dotted-i chains keep one dot across gap splits', () => {
@@ -314,6 +315,86 @@ test('nonempty mark-only content still counts toward repeats', () => {
     assert.deepEqual(repeat([content, content, content]), [null, null, 'repeated_message'], content);
   }
   assert.deepEqual(repeat(['कल', 'कला', 'कल']), [null, null, null]);
+});
+
+test('multi-link split chains canonicalize as one sequence', () => {
+  const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
+  const attached = E('\\u0639\\u064e\\u064f\\u0651\\u0644');
+  const reverseSplit = E('\\u0639\\u0651 \\u064f \\u064e\\u0644');
+  const forwardSplit = E('\\u0639\\u064e \\u064f \\u0651\\u0644');
+  const attachedReverse = E('\\u0639\\u0651\\u064f\\u064e\\u0644');
+  const short = E('\\u0639\\u064e\\u0644');
+  // Every link of one logical chain is canonicalized together, so a
+  // reverse-order multi-link split meets the attached entry — while an
+  // earlier link-before-gap emission left a barrier between the links.
+  for (const [name, cfgEntry, content] of [
+    ['reverse split matches attached entry', attached, reverseSplit],
+    ['reverse spaced config matches itself', reverseSplit, reverseSplit],
+    ['reverse spaced config matches attached entry', reverseSplit, attached],
+    ['forward split control', attached, forwardSplit],
+    ['attached reverse control', attached, attachedReverse],
+  ] as Array<[string, string, string]>) {
+    assert.equal(match(content, { ...policy, badWords: [cfgEntry] }), 'bad_words', name);
+  }
+  assert.equal(match(reverseSplit, { ...policy, badWords: [short] }), null, 'shorter entry vs multi-link split');
+});
+
+test('precomposed initials expose their marks to chain scanning', () => {
+  const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
+  const spaced = E('\\u03ac \\u0323\\u03bb\\u03c6\\u03b1');
+  const attached = E('\\u03b1\\u0323\\u0301\\u03bb\\u03c6\\u03b1');
+  const decomposed = E('\\u03b1\\u0301 \\u0323\\u03bb\\u03c6\\u03b1');
+  const unaccented = E('\\u03b1\\u03bb\\u03c6\\u03b1');
+  const acuteOnly = E('\\u03ac\\u03bb\\u03c6\\u03b1');
+  // The strip pass NFD-decomposes first, so a precomposed initial meets the
+  // same chain form as a decomposed one — NFC at the fold step hid it before.
+  for (const [name, cfgEntry, content] of [
+    ['precomposed spaced self', spaced, spaced],
+    ['attached lower-dot+acute config vs spaced content', attached, spaced],
+    ['spaced config vs attached content', spaced, attached],
+    ['decomposed spaced self', decomposed, decomposed],
+  ] as Array<[string, string, string]>) {
+    assert.equal(match(content, { ...policy, badWords: [cfgEntry] }), 'bad_words', name);
+  }
+  // Accent identity is preserved: the marks are part of the letters.
+  assert.equal(match(unaccented, { ...policy, badWords: [acuteOnly] }), null, 'unaccented content still differs');
+  assert.equal(match(acuteOnly, { ...policy, badWords: [unaccented] }), null, 'unaccented config still differs');
+});
+
+test('decomposed iota-subscript stays distinct from an iota letter', () => {
+  const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
+  const letters = E('\\u03b1\\u03b9');
+  const subscript = E('\\u1fb3');
+  const canonical = E('\\u03b1\\u0345');
+  // NFD exposes U+0345, which a case-insensitive letter class equates with
+  // U+03B9; the per-atom category guard keeps the mark/letter boundary.
+  assert.equal(match(subscript, { ...policy, badWords: [letters] }), null, 'subscript content vs letter entry');
+  assert.equal(match(letters, { ...policy, badWords: [subscript] }), null, 'letter content vs subscript entry');
+  assert.notEqual(normalizeBadWord(letters), normalizeBadWord(subscript), 'distinct entry keys');
+  for (const [name, cfgEntry, content] of [
+    ['letter self', letters, letters],
+    ['subscript self', subscript, subscript],
+    ['canonical subscript decomposition', subscript, canonical],
+  ] as Array<[string, string, string]>) {
+    assert.equal(match(content, { ...policy, badWords: [cfgEntry] }), 'bad_words', name);
+  }
+});
+
+test('decomposed operator overlays keep their symbol identity', () => {
+  const E = (asciiWithEscapes: string): string => JSON.parse(`"${asciiWithEscapes}"`);
+  // NFD exposes the negation overlay (U+0338) in negated operators; the
+  // punctuation trailing tolerance must not consume it as decoration, while
+  // a genuine acute on the same entry stays tolerated.
+  for (const [name, cfgEntry, content, expected] of [
+    ['not-equal vs equal', 'x=', E('x\\u2260'), null],
+    ['not-equivalent vs equivalent', E('x\\u2261'), E('x\\u2262'), null],
+    ['not-less-than vs less-than', 'x<', E('x\\u226e'), null],
+    ['equal self', 'x=', 'x=', 'bad_words'],
+    ['not-equal self', E('x\\u2260'), E('x\\u2260'), 'bad_words'],
+    ['genuine acute decoration', 'x=', E('x=\\u0301'), 'bad_words'],
+  ] as Array<[string, string, string, string | null]>) {
+    assert.equal(match(content, { ...policy, badWords: [cfgEntry] }), expected, name);
+  }
 });
 
 test('configured accented attachment extensions retain their identity', () => {
