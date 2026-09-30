@@ -432,8 +432,8 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
     .all<{ member_id: string | null; occurred_at: string; source: string }>();
 
   const leaveEvents = await db
-    .prepare(`SELECT occurred_at FROM events WHERE event_type = 'member_leave'`)
-    .all<{ occurred_at: string }>();
+    .prepare(`SELECT member_id, occurred_at FROM events WHERE event_type = 'member_leave'`)
+    .all<{ member_id: string | null; occurred_at: string }>();
 
   // Average voice session length, over known-start sessions only (TOG-5684).
   // Raw rows in, one tested code path out: the shared helper parses each
@@ -481,10 +481,11 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
     .prepare(`SELECT guild_id FROM events ORDER BY id DESC LIMIT 1`)
     .get<{ guild_id: string }>();
 
-  // Bots are excluded from members above; joinEvents still carries them, so
-  // filter by the member set we kept.
+  // Bots are excluded from members above; join and leave events still carry
+  // them, so filter both by the member set we kept (including departed humans).
   const humanIds = new Set(members.map((m) => m.member_id));
   const humanJoins = joinEvents.filter((e) => e.member_id && humanIds.has(e.member_id));
+  const humanLeaves = leaveEvents.filter((e) => e.member_id && humanIds.has(e.member_id));
 
   // -- weekly joins / leaves ------------------------------------------------
   const wanted = recentWeeks(now, weekCount);
@@ -499,7 +500,7 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
     if (isExcluded(e.occurred_at, 'member_join', anomalies)) bucket.setAside++;
     else bucket.joins.push(e.source);
   }
-  for (const e of leaveEvents) {
+  for (const e of humanLeaves) {
     const w = weekStart(e.occurred_at);
     if (!wantedSet.has(w)) continue;
     if (isExcluded(e.occurred_at, 'member_leave', anomalies)) continue;

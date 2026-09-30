@@ -104,7 +104,7 @@ const JOINS = [
   { member_id: 'e', occurred_at: '2026-03-02T08:00:00.000Z', source: 'vanity' },
 ];
 
-const LEAVES = [{ occurred_at: '2026-02-26T00:00:00.000Z' }];
+const LEAVES = [{ member_id: 'd', occurred_at: '2026-02-26T00:00:00.000Z' }];
 
 const VOICE_ENDS = [
   { metadata: JSON.stringify({ startKnown: true, durationSeconds: 120 }) },
