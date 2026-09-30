@@ -85,6 +85,20 @@ const TEXT_KEYS = ["message", "output", "log", "line", "text", "content"];
 const TS_KEYS = ["timestamp", "ts", "time", "_ts", "created_at"];
 const PAYLOAD_KEYS = ["logs", "data", "output", "lines", "result"];
 
+// Match the broker's numeric epoch-millisecond contract without converting
+// numbers to strings for Date.parse. Out-of-range epochs cannot prove freshness.
+function timestampMs(value) {
+  const ms = typeof value === "number" ? value : typeof value === "string" ? Date.parse(value) : NaN;
+  return Number.isFinite(ms) && Number.isFinite(new Date(ms).getTime()) ? ms : NaN;
+}
+
+function usableTimestamp(item) {
+  for (const key of TS_KEYS) {
+    if (Number.isFinite(timestampMs(item[key]))) return item[key];
+  }
+  return null;
+}
+
 /** Normalize one raw log item into { text, ts } candidates. Never throws. */
 export function normalizeItem(item) {
   if (typeof item === "string") return [{ text: item, ts: null }];
@@ -96,14 +110,7 @@ export function normalizeItem(item) {
         break;
       }
     }
-    let ts = null;
-    for (const key of TS_KEYS) {
-      if (typeof item[key] === "string" || typeof item[key] === "number") {
-        ts = String(item[key]);
-        break;
-      }
-    }
-    return text === null ? [] : [{ text, ts }];
+    return text === null ? [] : [{ text, ts: usableTimestamp(item) }];
   }
   return [];
 }
@@ -124,25 +131,40 @@ export function normalizeLogPayload(payload) {
   return [];
 }
 
-/** Yield each {...} JSON substring candidate in a line, innermost-first. */
+/** Yield outer JSON objects, ignoring delimiters inside escaped strings. */
 export function jsonCandidates(text) {
   const out = [];
-  const stack = [];
+  let start = -1;
+  let depth = 0;
+  let quoted = false;
+  let escaped = false;
   for (let i = 0; i < text.length; i++) {
-    if (text[i] === "{") stack.push(i);
-    else if (text[i] === "}" && stack.length > 0) {
-      const start = stack.pop();
-      out.push(text.slice(start, i + 1));
+    const char = text[i];
+    if (depth === 0) {
+      if (char === "{") {
+        start = i;
+        depth = 1;
+        quoted = false;
+        escaped = false;
+      }
+      continue;
     }
+    if (quoted) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === '"') quoted = false;
+    } else if (char === '"') quoted = true;
+    else if (char === "{") depth++;
+    else if (char === "}" && --depth === 0) out.push(text.slice(start, i + 1));
   }
   return out;
 }
 
-// The broker deliberately retains shaped objects as JSON message text. A
-// prefixed record inside a supported text wrapper is consequently escaped;
-// decode that wrapper before scanning its text, rather than brace-matching the
-// encoded string alone. Bound decoding to the broker's shaping depth limit.
-function findBotRecord(text, depth = 0) {
+// Decode outer wrappers first so their nearest usable timestamp accompanies
+// the bot record. Traversal and text decoding share a depth/node budget; nested
+// objects and escaped text wrappers never need separate brace-based guesses.
+function findBotRecord(text, fallbackMs = NaN, depth = 0, budget = { nodes: 10000 }) {
+  if (depth > 10 || budget.nodes <= 0) return null;
   for (const candidate of jsonCandidates(text)) {
     let record = null;
     try {
@@ -150,14 +172,29 @@ function findBotRecord(text, depth = 0) {
     } catch {
       continue;
     }
-    if (record === null || typeof record !== "object") continue;
-    if (typeof record.msg === "string") return record;
-    if (depth >= 10) continue;
-    for (const key of TEXT_KEYS) {
-      if (typeof record[key] !== "string") continue;
-      const nested = findBotRecord(record[key], depth + 1);
-      if (nested !== null) return nested;
-    }
+    const found = visitBotRecord(record, fallbackMs, depth, budget);
+    if (found !== null) return found;
+    if (budget.nodes <= 0) break;
+  }
+  return null;
+}
+
+function visitBotRecord(record, fallbackMs, depth, budget) {
+  if (depth > 10 || --budget.nodes < 0 || record === null || typeof record !== "object") return null;
+  const ownMs = timestampMs(usableTimestamp(record));
+  const tsMs = Number.isFinite(ownMs) ? ownMs : fallbackMs;
+  if (typeof record.msg === "string") return { record, tsMs };
+  if (depth >= 10) return null;
+  for (const key of TEXT_KEYS) {
+    if (typeof record[key] !== "string") continue;
+    const nested = findBotRecord(record[key], tsMs, depth + 1, budget);
+    if (nested !== null) return nested;
+  }
+  for (const value of Object.values(record)) {
+    if (value === null || typeof value !== "object") continue;
+    const nested = visitBotRecord(value, tsMs, depth + 1, budget);
+    if (nested !== null) return nested;
+    if (budget.nodes <= 0) break;
   }
   return null;
 }
@@ -168,11 +205,8 @@ function findBotRecord(text, depth = 0) {
 export function findBotRecords(lines) {
   const found = [];
   for (const { text, ts } of lines) {
-    const record = findBotRecord(text);
-    if (record === null) continue;
-    const tsRaw = typeof record.ts === "string" ? record.ts : ts;
-    const tsMs = typeof tsRaw === "string" ? Date.parse(tsRaw) : NaN;
-    found.push({ record, tsMs: Number.isFinite(tsMs) ? tsMs : NaN });
+    const record = findBotRecord(text, timestampMs(ts));
+    if (record !== null) found.push(record);
   }
   return found;
 }

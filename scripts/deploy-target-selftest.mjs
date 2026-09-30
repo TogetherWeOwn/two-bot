@@ -19,10 +19,10 @@
 // production broker path but are NOT wired into any job: deploy.yml must
 // reference no panel bearer and no caller-supplied app UUID in staging.
 //
-// Nothing here needs the network, a token, GitHub, or a deploy target. The
-// interesting cases are precisely the ones where no target exists. Pure
-// functions are imported and asserted in-process; CLI exit codes go through
-// spawned node with scrubbed env (every STAGING_BROKER_* value is fake).
+// No external network, live token, GitHub, or deploy target is needed. Pure
+// functions are asserted in-process; CLI exit codes use spawned node with
+// scrubbed env (every STAGING_BROKER_* value is fake). Handler-to-smoke
+// contracts use only an ephemeral loopback server and a synthetic panel stub.
 //
 // What is pinned:
 //
@@ -47,6 +47,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { createHandler, PINNED_STAGING_APP_UUID } from "../ops/staging-deploy-broker/server.mjs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -373,6 +375,99 @@ test("smoke unit: parseArgs requires --since and valid env", () => {
     /Missing STAGING_BROKER_TOKEN/,
   );
   assert.throws(() => brokerSmokeParseArgs(["--env-name", "production", "--since", "2026-09-28T09:40:00.000Z"], lookup), /staging only/);
+});
+
+// --- handler-to-smoke contracts (synthetic panel, loopback only) -------------
+
+async function smokeRecordsFromPanel(t, items) {
+  const server = createServer(createHandler({
+    brokerToken: FAKE.STAGING_BROKER_TOKEN,
+    panelUrl: "https://panel.example.invalid",
+    panelToken: "synthetic-panel-credential",
+    appUuid: PINNED_STAGING_APP_UUID,
+  }, async () => ({ logs: items })));
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/v1/staging/logs`, {
+    headers: { Authorization: `Bearer ${FAKE.STAGING_BROKER_TOKEN}` },
+  });
+  assert.equal(response.status, 200);
+  return findBotRecords(normalizeLogPayload(await response.json()));
+}
+
+const SMOKE_TS = "2026-09-30T19:01:00.000Z";
+const SMOKE_READY = { msg: "ready", guilds: 1 };
+
+test("smoke regression: quoted braces and escapes survive raw and wrapped handler records", async (t) => {
+  for (const user of ["Fake}Bot", "Fake{Bot", 'Fake\\"}Bot', 'Fake\\\\{Bot', 'Fake} [\\"{]Bot']) {
+    const record = { ...SMOKE_READY, user, ts: SMOKE_TS };
+    const line = `INFO ${JSON.stringify(record)}`;
+    const records = findReadyLines(await smokeRecordsFromPanel(t, [line, { message: line }]));
+    assert.equal(records.length, 2, user);
+    for (const found of records) {
+      assert.equal(found.record.msg, record.msg);
+      assert.equal(found.record.guilds, record.guilds);
+      assert.equal(found.tsMs, Date.parse(SMOKE_TS));
+      // The broker intentionally redacts unfinished JSON-like text in user
+      // fields; the closing-brace reproduction must remain unchanged.
+      if (user === "Fake}Bot") assert.equal(found.record.user, user);
+    }
+    // Independent scanner control: every valid escaped username parses before
+    // any server redaction, including braces, quotes and escaped backslashes.
+    const direct = findReadyLines(findBotRecords(normalizeLogPayload(line)));
+    assert.equal(direct.length, 1);
+    assert.deepEqual(direct[0].record, record);
+  }
+});
+
+test("smoke regression: raw string wrappers retain their timestamps through decoding", async (t) => {
+  const line = `INFO ${JSON.stringify(SMOKE_READY)}`;
+  const items = [
+    JSON.stringify({ output: line, timestamp: SMOKE_TS }),
+    JSON.stringify({ message: JSON.stringify({ content: line, time: SMOKE_TS }) }),
+    JSON.stringify({ timestamp: SMOKE_TS, wrapper: { output: line } }),
+  ];
+  const records = findReadyLines(await smokeRecordsFromPanel(t, items));
+  assert.equal(records.length, items.length);
+  for (const found of records) assert.equal(found.tsMs, Date.parse(SMOKE_TS));
+});
+
+test("smoke regression: nearest usable timestamp wins and invalid nested timestamps fall back", () => {
+  const old = "2026-09-30T18:00:00.000Z";
+  const record = { ...SMOKE_READY, ts: "not-a-timestamp" };
+  const line = { message: JSON.stringify({
+    timestamp: old, output: JSON.stringify({ timestamp: SMOKE_TS, output: `INFO ${JSON.stringify(record)}` }),
+  }), timestamp: "2026-09-30T17:00:00.000Z" };
+  const records = findReadyLines(findBotRecords(normalizeLogPayload({ logs: [line] })));
+  assert.equal(records.length, 1);
+  assert.equal(records[0].tsMs, Date.parse(SMOKE_TS));
+  const own = { ...SMOKE_READY, ts: old };
+  const ownRecords = findBotRecords(normalizeLogPayload(JSON.stringify({ timestamp: SMOKE_TS, inner: own })));
+  assert.equal(ownRecords[0].tsMs, Date.parse(old));
+});
+
+test("smoke regression: numeric epochs survive handler pairs and decoded wrappers", async (t) => {
+  const epoch = Date.parse(SMOKE_TS);
+  const line = `INFO ${JSON.stringify(SMOKE_READY)}`;
+  const items = [
+    { message: line, timestamp: epoch },
+    JSON.stringify({ output: line, timestamp: epoch }),
+    `INFO ${JSON.stringify({ ...SMOKE_READY, ts: epoch })}`,
+    { message: line, timestamp: epoch + 1000 },
+  ];
+  const records = findReadyLines(await smokeRecordsFromPanel(t, items));
+  assert.equal(records.length, items.length);
+  assert.deepEqual(records.map(({ tsMs }) => tsMs), [epoch, epoch, epoch, epoch + 1000]);
+  assert.equal(maxTimestampMs(records), epoch + 1000);
+  assert.ok(maxTimestampMs(records.slice(-1)) > maxTimestampMs(records.slice(0, 3)));
+});
+
+test("smoke regression: invalid numeric timestamps never establish freshness", () => {
+  for (const timestamp of [NaN, Infinity, -Infinity, 9e18]) {
+    const records = findBotRecords([{ text: JSON.stringify(SMOKE_READY), ts: timestamp }]);
+    assert.equal(records.length, 1);
+    assert.ok(Number.isNaN(records[0].tsMs));
+  }
 });
 
 // --- deploy.yml wiring (the TOG-913 shape) -----------------------------------
