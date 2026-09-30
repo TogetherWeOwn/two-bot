@@ -1179,6 +1179,7 @@ back to them instead of repeating.
 | `check:script-targets` | Every `node scripts/<file>` target in package.json exists on disk (TOG-6810), and every `scripts/<path>` / `npm run <name>` in RUNBOOK.md/DEPLOY.md resolves (TOG-10007). | All references resolve, exit `0`. |
 | `check:snowflakes`, `check:snowflakes:selftest` | No hardcoded Discord snowflakes in `src/` (selftest proves the check). | No hits, exit `0`. |
 | `check:credentials`, `check:credentials:selftest` | Systemd credential wiring documented (selftest proves the check). | Checks pass, exit `0`. |
+| `check:env-drift`, `check:env-drift:selftest` | Every `Environment=` key in `deploy/*.service` is defined in `.env.example`, and every example key is consumed (TOG-9986; selftest proves the check). | Checks pass, exit `0`. |
 | `hooks:install`, `prepare` | Install git hooks (prepare runs on `npm install`, failures swallowed). | Hooks present, exit `0`. |
 
 ## Common problems
