@@ -100,7 +100,12 @@ function hasExternalLink(content: string, allowedDomains: string[]): boolean {
 function hasBlockedAttachment(names: string[], blocked: string[]): boolean {
   const blockedSet = new Set(blocked.map((value) => value.toLowerCase().replace(/^\./, '')));
   return names.some((name) => {
-    const part = name.toLowerCase().split('.').pop();
+    // NFKC folds lookalike separators (e.g. fullwidth dot U+FF0E) to ASCII
+    // dots; strip trailing dots/spaces Discord preserves in download names.
+    const cleaned = normalize(name).replace(/[.\s]+$/u, '');
+    // Strip invisible format chars (SHY, bidi overrides, zero-width, …)
+    // from the extension so `e\xADxe` still reads as `exe`.
+    const part = cleaned.split('.').pop()?.replace(/\p{Cf}/gu, '');
     return part ? blockedSet.has(part) : false;
   });
 }

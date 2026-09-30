@@ -204,7 +204,7 @@ test('bypass fuzz: bare-domain TLD gaps miss scheme-less links (TOG-10050)', () 
 });
 
 test('bypass fuzz: attachment extension evasions (TOG-10051)', () => {
-  // Every row SHOULD be 'attachment_type'. Each returns null today.
+  // Fixed: every row is now caught as 'attachment_type'.
   const bypasses: Array<[string, string[]]> = [
     ['trailing dot', ['payload.exe.']],
     ['trailing space', ['payload.exe ']],
@@ -216,8 +216,8 @@ test('bypass fuzz: attachment extension evasions (TOG-10051)', () => {
   for (const [name, attachmentNames] of bypasses) {
     assert.equal(
       match({ content: 'ordinary message', attachmentNames }),
-      null,
-      `${name}: still bypasses (TOG-10051)`,
+      'attachment_type',
+      `${name}: caught (TOG-10051)`,
     );
   }
   // Controls that must keep working after any fix.
