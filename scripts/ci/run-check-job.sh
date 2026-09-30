@@ -32,6 +32,8 @@ npm run check:env-drift:selftest
 # token, no target — the interesting cases are the ones where none exists
 # (TOG-913). Runs before the slow suites so a broken guard fails in seconds.
 npm run deploy:selftest
+# The check job has its own runner: fork-gate's parser install is not shared.
+npm ci --ignore-scripts --prefix scripts/ci
 # Generation-path regression: no network/database; release-please regeneration
 # must not restore a phantom bootstrap tag link or an incomplete PR body.
 node --test scripts/ci/normalize-release.test.mjs

@@ -170,5 +170,7 @@ test('workflow runs main-owned normalization before dispatch, with immutable act
   assert.equal(workflow.jobs['dispatch-checks'].if, "needs.release-please.outputs.prs_created == 'true'");
   assert.ok(workflow.jobs['dispatch-checks'].steps[0].run.includes('gh workflow run ci.yml --ref "$HEAD_BRANCH"'));
   const ci = readFileSync(new URL('./run-check-job.sh', import.meta.url), 'utf8');
-  assert.ok(ci.includes('node --test scripts/ci/normalize-release.test.mjs'));
+  const install = ci.indexOf('npm ci --ignore-scripts --prefix scripts/ci');
+  const regression = ci.indexOf('node --test scripts/ci/normalize-release.test.mjs');
+  assert.ok(install >= 0 && regression > install); // This job cannot reuse fork-gate's runner.
 });
