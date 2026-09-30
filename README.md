@@ -1,5 +1,7 @@
 # two-bot
 
+[![Release](https://img.shields.io/github/v/release/TogetherWeOwn/two-bot)](https://github.com/TogetherWeOwn/two-bot/releases)
+
 > **Maintenance mode (2026-09-29, TOG-9788):** bug and security fixes only — new
 > development continues in two-bot-next.
 

@@ -481,10 +481,12 @@ test('a non-GET method is refused', async () => {
 
 // --- abuse bursts -----------------------------------------------------------
 
-// Per-caller (IP), not per-campaign: this bucket is keyed by socket address,
-// so a burst from many addresses against one campaign is NOT throttled today.
-// Throttling that would need cross-IP campaign counters; the gap is tracked
-// as TOG-5895 and documented in docs/INVITE_TRACKING.md (Design notes).
+// Per-caller, not per-campaign: the bucket is keyed by the resolved client IP
+// (the socket address, or the leftmost untrusted X-Forwarded-For hop behind a
+// trusted proxy - TOG-9924), so a burst from many callers against one campaign
+// is NOT throttled today. Throttling that would need cross-caller campaign
+// counters; the gap is tracked as TOG-5895 and documented in
+// docs/INVITE_TRACKING.md (Design notes).
 
 test('an abuse burst from one caller is throttled at 429 and never recorded', async () => {
   await addCampaign('reddit');

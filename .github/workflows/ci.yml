@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Dispatched by the release workflow (TOG-9865) on release-please branches:
+  # PRs opened with GITHUB_TOKEN trigger no workflows, so the required `check`
+  # would never run on the release PR without this path.
+  workflow_dispatch:
 
 # A second push to the same PR cancels the first in-flight run. Mirrors
 # two-web/two-design's ci.yml — never cancel main, since nothing downstream
