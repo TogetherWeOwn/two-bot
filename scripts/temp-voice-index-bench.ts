@@ -121,7 +121,7 @@ try {
 
   // --- report ----------------------------------------------------------------
   console.log(`\ntemp-voice index bench - ${GUILDS} guilds x ${PER_GUILD} rows, ${channels} live channels, ${reservations} reservations, ${interruptedTransitions} interrupted transitions, ${audits} audit rows, schema ${schema}\n`);
-  console.log(`  write path  ${String(channels + reservations + audits).padStart(7)} rows in ${(writeMs / 1000).toFixed(1)}s`);
+  console.log(`  write path  ${String(channels + reservations + audits).padStart(7)} channel-and-audit rows (cooldowns excluded) in ${(writeMs / 1000).toFixed(1)}s`);
   console.log(`  reads:`);
   for (const r of reads) console.log(`    ${r.label.padEnd(33)} ${String(r.ms).padStart(6)}ms  (${r.rows} rows)`);
   console.log(`  plans:`);
