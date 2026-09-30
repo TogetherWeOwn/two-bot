@@ -129,7 +129,7 @@ export interface DashboardData {
   /** Window the "this week" numbers cover: [weekStart, generatedAt). */
   thisWeek: { start: string; joins: number; leaves: number; net: number };
   lastWeek: { start: string; joins: number; leaves: number; net: number };
-  /** Members with a recorded message or voice session in the last 7 / 30 days. */
+  /** Members active in [generatedAt - 7 / 30 days, generatedAt). */
   active7d: number;
   active30d: number;
   /** Non-bot members who have not left. */
@@ -411,6 +411,7 @@ export function channelState(row: {
 
 export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<DashboardData> {
   const now = opts.now ?? new Date();
+  const generatedAt = now.toISOString();
   const weekCount = opts.weeks ?? 12;
   const anomalies = opts.anomalies ?? ANOMALIES;
   const snapshot = opts.channelSnapshot ?? null;
@@ -450,9 +451,9 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
   const channelEvents = await db
     .prepare(
       `SELECT source, occurred_at FROM events
-        WHERE source LIKE 'channel:%' AND occurred_at >= ?`,
+        WHERE source LIKE 'channel:%' AND occurred_at >= ? AND occurred_at < ?`,
     )
-    .all<{ source: string; occurred_at: string }>(iso(now.getTime() - 30 * DAY_MS));
+    .all<{ source: string; occurred_at: string }>(iso(now.getTime() - 30 * DAY_MS), generatedAt);
 
   // What we know about the rules gate, and from when. Two different things:
   // the first clearing we watched happen live (after which a member who never
@@ -494,14 +495,14 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
 
   for (const e of humanJoins) {
     const w = weekStart(e.occurred_at);
-    if (!wantedSet.has(w)) continue;
+    if (!wantedSet.has(w) || e.occurred_at >= generatedAt) continue;
     const bucket = perWeek.get(w)!;
     if (isExcluded(e.occurred_at, 'member_join', anomalies)) bucket.setAside++;
     else bucket.joins.push(e.source);
   }
   for (const e of leaveEvents) {
     const w = weekStart(e.occurred_at);
-    if (!wantedSet.has(w)) continue;
+    if (!wantedSet.has(w) || e.occurred_at >= generatedAt) continue;
     if (isExcluded(e.occurred_at, 'member_leave', anomalies)) continue;
     perWeek.get(w)!.leaves++;
   }
@@ -570,8 +571,12 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
   ).length;
   const since7 = iso(now.getTime() - 7 * DAY_MS);
   const since30 = iso(now.getTime() - 30 * DAY_MS);
-  const active7d = stillHere.filter((m) => m.last_active_at && m.last_active_at >= since7).length;
-  const active30d = stillHere.filter((m) => m.last_active_at && m.last_active_at >= since30).length;
+  const active7d = stillHere.filter(
+    (m) => m.last_active_at && m.last_active_at >= since7 && m.last_active_at < generatedAt,
+  ).length;
+  const active30d = stillHere.filter(
+    (m) => m.last_active_at && m.last_active_at >= since30 && m.last_active_at < generatedAt,
+  ).length;
   const joinedNeverSpoke = stillHere.filter(
     (m) => m.joined_at && !m.first_message_at && !m.first_voice_at,
   ).length;
@@ -725,7 +730,7 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
   );
 
   return {
-    generatedAt: now.toISOString(),
+    generatedAt,
     guildId: guildRow?.guild_id ?? null,
     thisWeek: slim(thisWeekRow),
     lastWeek: slim(lastWeekRow),

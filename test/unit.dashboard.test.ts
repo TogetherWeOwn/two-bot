@@ -355,6 +355,98 @@ test('active means the last 7 days, and leavers do not count as active', async (
   assert.equal(d.joinedNeverSpoke, 2, '"stale" has no first message/voice recorded, and "lurker"');
 });
 
+test('this week counts [weekStart, generatedAt), never exactly-now or future events', async () => {
+  const now = new Date('2026-09-30T12:00:00.000Z'); // Wednesday: tomorrow is in the same week.
+  const boundaries = [
+    ['previous-week', '2026-09-27T23:59:59.999Z'],
+    ['week-start', '2026-09-28T00:00:00.000Z'],
+    ['just-before-now', '2026-09-30T11:59:59.999Z'],
+    ['exactly-now', now.toISOString()],
+    ['future', '2026-10-01T12:00:00.000Z'],
+  ] as const;
+  for (const [id, at] of boundaries) {
+    await member({ member_id: id, joined_at: at });
+    await join(id, at, `invite:${id}`);
+    await t.db
+      .prepare(
+        `INSERT INTO events (event_type, member_id, guild_id, occurred_at, recorded_at, source, idempotency_key)
+         VALUES ('member_leave', ?, ?, ?, ?, 'gateway', ?)`,
+      )
+      .run(id, GUILD, at, at, `k${seq++}`);
+  }
+
+  const d = await buildDashboard(t.db, {
+    now,
+    weeks: 2,
+    anomalies: [{ ...TEST_ANOMALIES[0], start: '2026-10-01', end: '2026-10-01' }],
+  });
+  assert.equal(d.generatedAt, now.toISOString());
+  assert.deepEqual(d.thisWeek, { start: '2026-09-28', joins: 2, leaves: 2, net: 0 });
+  assert.deepEqual(d.lastWeek, { start: '2026-09-21', joins: 1, leaves: 1, net: 0 });
+  assert.equal(d.weeks[1].setAside, 0, 'future raid joins are not observations yet either');
+  assert.deepEqual(
+    d.weeks[1].bySource.map((s) => s.source).sort(),
+    ['invite:just-before-now', 'invite:week-start'],
+  );
+});
+
+test('rolling activity includes its lower bounds and excludes generatedAt and future rows', async () => {
+  const now = new Date('2026-09-30T12:00:00.000Z');
+  const boundaries = [
+    '2026-08-31T11:59:59.999Z', // before the 30-day window
+    '2026-08-31T12:00:00.000Z', // 30-day lower bound
+    '2026-09-23T11:59:59.999Z', // before the 7-day window, within 30 days
+    '2026-09-23T12:00:00.000Z', // 7-day lower bound
+    '2026-09-30T11:59:59.999Z',
+    now.toISOString(),
+    '2026-10-01T12:00:00.000Z',
+  ];
+  for (const [i, at] of boundaries.entries()) {
+    await member({ member_id: `active-${i}`, joined_at: '2026-01-01T00:00:00.000Z', last_active_at: at });
+  }
+
+  const d = await buildDashboard(t.db, { now, anomalies: [] });
+  assert.equal(d.active7d, 2, '7-day lower bound and now-1ms');
+  assert.equal(d.active30d, 4, '30-day lower bound, both 7-day boundaries, and now-1ms');
+  assert.equal(d.humansInServer, boundaries.length, 'membership state is not reconstructed');
+});
+
+test('channel events count [now-30d, generatedAt) for snapshot and live-only channels', async () => {
+  const now = new Date('2026-09-30T12:00:00.000Z');
+  for (const at of [
+    '2026-08-31T11:59:59.999Z',
+    '2026-08-31T12:00:00.000Z',
+    '2026-09-30T11:59:59.999Z',
+    now.toISOString(),
+    '2026-10-01T12:00:00.000Z',
+  ]) {
+    await gateCleared('channel-member', at, 'channel:tracked');
+  }
+  for (const at of [now.toISOString(), '2026-10-01T12:00:00.000Z']) {
+    await gateCleared('channel-member', at, 'channel:future-snapshot');
+    await gateCleared('channel-member', at, 'channel:future-only');
+  }
+  await gateCleared('channel-member', '2026-09-30T11:59:59.999Z', 'channel:live-only');
+
+  const d = await buildDashboard(t.db, {
+    now,
+    anomalies: [],
+    channelSnapshot: {
+      collected_at: now.toISOString(),
+      channels: [
+        { id: 'tracked', name: 'tracked', human_msgs_30d: 0, human_msgs_90d: 0 },
+        { id: 'future-snapshot', name: 'future-snapshot', human_msgs_30d: 0, human_msgs_90d: 0 },
+      ],
+    },
+  });
+  assert.equal(d.channels.find((c) => c.channelId === 'tracked')!.events30d, 2);
+  const futureSnapshot = d.channels.find((c) => c.channelId === 'future-snapshot')!;
+  assert.equal(futureSnapshot.events30d, 0);
+  assert.equal(futureSnapshot.state, 'silent', 'future events cannot make a quiet channel alive');
+  assert.equal(d.channels.find((c) => c.channelId === 'live-only')!.events30d, 1);
+  assert.equal(d.channels.some((c) => c.channelId === 'future-only'), false);
+});
+
 test('with no joins at all the page still renders, and says nothing rather than zero', async () => {
   const d = await buildDashboard(t.db, { now: NOW, weeks: 4, anomalies: TEST_ANOMALIES });
   assert.equal(d.thisWeek.joins, 0);
