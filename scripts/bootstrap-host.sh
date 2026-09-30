@@ -212,8 +212,8 @@ for cred_file in "$TOKEN_FILE" "$DATABASE_URL_FILE" "$INTERNAL_KEYS_FILE"; do
     new_secrets=1
   fi
 done
-# The DB URL may use the env fallback; signing keys stay empty until actions
-# are enabled. Only the bot token must be nonempty on every run.
+# Only the bot token must be nonempty on every run. Optional credentials are
+# checked against the service's effective configuration below.
 [ -s "$TOKEN_FILE" ] || new_secrets=1
 if [ -s "$STAGING_TOKEN_FILE" ]; then
   echo "$STAGING_TOKEN_FILE present - left alone"
@@ -271,6 +271,28 @@ EOF
 EOF
   fi
   exit 6
+fi
+
+# An empty DB credential requires the env fallback; empty signing keys are
+# allowed only while actions are disabled or their fallback is set. Let systemd
+# read EnvironmentFile (quoting, escapes and last assignment win), never source
+# it as root or print its values. This transient check only reads configuration:
+# no Discord preflight, database connection or bot service is started here.
+if [ "$new_secrets" -eq 0 ]; then
+  if ! systemd-run --quiet --pipe --wait --collect \
+    --uid="$APP_USER" \
+    --property=LoadCredential="${DATABASE_URL_FILE##*/}:$DATABASE_URL_FILE" \
+    --property=LoadCredential="${INTERNAL_KEYS_FILE##*/}:$INTERNAL_KEYS_FILE" \
+    --property=EnvironmentFile="$ENV_DIR/two-bot.env" \
+    --working-directory="$APP_DIR" \
+    /usr/bin/node --input-type=module -e '
+      import { readSecret } from "./src/core/credentials.ts";
+      if (!readSecret(process.argv[1], ["TWO_DATABASE_URL"])) process.exit(3);
+      if (process.env.TWO_INTERNAL_ACTIONS === "1" &&
+          !readSecret(process.argv[2], ["TWO_INTERNAL_KEYS"])?.trim()) process.exit(3);
+    ' "${DATABASE_URL_FILE##*/}" "${INTERNAL_KEYS_FILE##*/}"; then
+    new_secrets=1
+  fi
 fi
 
 if [ "$new_secrets" -eq 1 ]; then

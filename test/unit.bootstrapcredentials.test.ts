@@ -13,18 +13,55 @@ const databaseUrl = 'postgres://agent_test@agent-testdb:5432/two_bot_test_tog102
 // ownership change, systemd write or Discord preflight can reach the host.
 const commandStub = `#!${process.execPath}
 import { appendFileSync, chmodSync, copyFileSync, mkdirSync, writeFileSync } from 'node:fs';
-import { basename, resolve, sep } from 'node:path';
+import { basename, join, resolve, sep } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { parseEnv } from 'node:util';
 const command = basename(process.argv[1]);
 const args = process.argv.slice(2);
 appendFileSync(process.env.BOOTSTRAP_CALLS, JSON.stringify({ command, args }) + '\\n');
 switch (command) {
   case 'id': console.log('0'); break;
   case 'node': console.log(args[1].includes('split') ? '24' : '24.0.0'); break;
-  case 'rsync': case 'chown': case 'sudo': break;
+  case 'rsync': {
+    const source = args.at(-2);
+    const destination = resolve(args.at(-1), 'src', 'core');
+    if (!destination.startsWith(resolve(process.env.BOOTSTRAP_ROOT) + sep)) process.exit(98);
+    mkdirSync(destination, { recursive: true });
+    copyFileSync(join(source, 'src', 'core', 'credentials.ts'), join(destination, 'credentials.ts'));
+    break;
+  }
+  case 'chown': case 'sudo': break;
   case 'systemctl':
     if (args.join(' ') !== 'daemon-reload') process.exit(98);
     break;
-  case 'systemd-run': process.exit(79); // Intentional offline preflight sentinel.
+  case 'systemd-run': {
+    if (!args.includes('--input-type=module')) process.exit(79); // Offline Discord preflight sentinel.
+    const root = resolve(process.env.BOOTSTRAP_ROOT);
+    const envFile = join(root, 'env', 'two-bot.env');
+    const credentials = join(root, 'env', 'credentials');
+    const app = join(root, 'app');
+    for (const required of [
+      '--uid=offline-fixture',
+      '--property=EnvironmentFile=' + envFile,
+      '--property=LoadCredential=database_url:' + join(credentials, 'database_url'),
+      '--property=LoadCredential=internal_keys:' + join(credentials, 'internal_keys'),
+      '--working-directory=' + app,
+    ]) {
+      if (!args.includes(required)) process.exit(98);
+    }
+    // Inject the literal fixture assignments only. This is not a systemd parser;
+    // the production command delegates EnvironmentFile parsing to systemd itself.
+    const result = spawnSync(process.execPath, args.slice(args.indexOf('--input-type=module')), {
+      cwd: app,
+      env: { ...parseEnv(readFileSync(envFile, 'utf8')), CREDENTIALS_DIRECTORY: credentials },
+      encoding: 'utf8',
+    });
+    if (result.error) process.exit(98);
+    process.stdout.write(result.stdout);
+    process.stderr.write(result.stderr);
+    process.exit(result.status ?? 98);
+  }
   case 'install': {
     let directory = false;
     let mode = 0o755;
@@ -120,7 +157,8 @@ function pastSecrets(result: BootstrapResult) {
   assert.match(result.stdout, /== Preflight/);
   assert.match(result.stderr, /preflight failed \(exit 79\)/);
   assert.doesNotMatch(result.stdout, /Secrets files are empty/);
-  assert.equal(result.calls.filter((call) => call.command === 'systemd-run').length, 1);
+  assert.equal(result.calls.filter((call) => call.command === 'systemd-run' &&
+    !call.args.includes('--input-type=module')).length, 1);
   assert.ok(result.calls.filter((call) => call.command === 'systemctl').every((call) =>
     call.args.join(' ') === 'daemon-reload'), 'no service should be started');
 }
@@ -128,7 +166,9 @@ function pastSecrets(result: BootstrapResult) {
 function stoppedAtSecrets(result: BootstrapResult) {
   assert.equal(result.status, 3, result.stdout + result.stderr);
   assert.match(result.stdout, /Secrets files are empty/);
-  assert.ok(!result.calls.some((call) => call.command === 'systemd-run' || call.command === 'systemctl'));
+  assert.ok(!result.calls.some((call) => call.command === 'systemctl' ||
+    (call.command === 'systemd-run' && !call.args.includes('--input-type=module'))));
+  assert.doesNotMatch(result.stdout, /== Preflight/);
 }
 
 describe('bootstrap optional credentials (offline command harness)', () => {
@@ -157,6 +197,68 @@ describe('bootstrap optional credentials (offline command harness)', () => {
       const envBefore = readFileSync(f.files.env);
       pastSecrets(f.run());
       assert.deepEqual(readFileSync(f.files.env), envBefore);
+    } finally { f.close(); }
+  });
+
+  test('empty database credential without an env fallback still stops before preflight', () => {
+    const f = fixture();
+    try {
+      writeFileSync(f.files.database, '');
+      writeFileSync(f.files.env, 'TWO_INTERNAL_ACTIONS=0\n');
+      stoppedAtSecrets(f.run());
+      stoppedAtSecrets(f.run());
+      assert.equal(readFileSync(f.files.database, 'utf8'), '');
+    } finally { f.close(); }
+  });
+
+  test('empty signing credential with internal actions enabled and no fallback still stops before preflight', () => {
+    const f = fixture();
+    try {
+      writeFileSync(f.files.internal, '');
+      writeFileSync(f.files.env, `TWO_INTERNAL_ACTIONS=1\nTWO_DATABASE_URL=${databaseUrl}\n`);
+      stoppedAtSecrets(f.run());
+      stoppedAtSecrets(f.run());
+      assert.equal(readFileSync(f.files.internal, 'utf8'), '');
+    } finally { f.close(); }
+  });
+
+  test('empty signing credential can use signing-key fallback when actions are enabled', () => {
+    const f = fixture();
+    try {
+      writeFileSync(f.files.internal, '');
+      writeFileSync(f.files.env, `TWO_INTERNAL_ACTIONS=1\nTWO_INTERNAL_KEYS=offline:${'x'.repeat(32)}\n`);
+      pastSecrets(f.run());
+      pastSecrets(f.run());
+      assert.equal(readFileSync(f.files.internal, 'utf8'), '');
+    } finally { f.close(); }
+  });
+
+  test('populated credentials do not require env fallbacks when actions are enabled', () => {
+    const f = fixture();
+    try {
+      writeFileSync(f.files.internal, `offline:${'x'.repeat(32)}\n`);
+      writeFileSync(f.files.env, 'TWO_INTERNAL_ACTIONS=1\n');
+      const before = readFileSync(f.files.internal);
+      pastSecrets(f.run());
+      assert.deepEqual(readFileSync(f.files.internal), before);
+    } finally { f.close(); }
+  });
+
+  test('a quoted empty database fallback still stops before preflight', () => {
+    const f = fixture();
+    try {
+      writeFileSync(f.files.database, '');
+      writeFileSync(f.files.env, 'TWO_INTERNAL_ACTIONS=0\nTWO_DATABASE_URL=""\n');
+      stoppedAtSecrets(f.run());
+    } finally { f.close(); }
+  });
+
+  test('a quoted enabled flag with empty signing-key fallback still stops before preflight', () => {
+    const f = fixture();
+    try {
+      writeFileSync(f.files.internal, '');
+      writeFileSync(f.files.env, 'TWO_INTERNAL_ACTIONS="1"\nTWO_INTERNAL_KEYS=""\n');
+      stoppedAtSecrets(f.run());
     } finally { f.close(); }
   });
 
