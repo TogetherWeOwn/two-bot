@@ -439,32 +439,16 @@ async function closeTicket(interaction: ButtonInteraction, deps: TicketDeps, sto
     await store.reopenAfterCloseFailure(ticket.id);
     throw new Error(`ticket ${ticket.id} channel is unavailable for transcript export`);
   }
+  const createdAt = new Date().toISOString();
+  let data: Awaited<ReturnType<typeof fetchTranscript>>;
+  let saved: boolean;
   try {
-    const createdAt = new Date().toISOString();
     await (channel as TextChannel).permissionOverwrites.edit(ticket.openerId, { SendMessages: false });
-    const data = await fetchTranscript(channel as TextChannel);
-    const saved = await store.saveTranscript(
+    data = await fetchTranscript(channel as TextChannel);
+    saved = await store.saveTranscript(
       { ...data, ticketId: ticket.id, guildId: ticket.guildId, channelId: ticket.channelId, openerId: ticket.openerId, claimedBy: ticket.claimedBy, createdAt, purgeAfter: purgeAfter(createdAt) },
       ticket.closingStartedAt,
     );
-    if (!saved) {
-      await interaction.editReply({ content: 'This ticket close was already recovered or completed.' });
-      return;
-    }
-    await store.markCleanupPending(ticket.id, createdAt);
-    await interaction.editReply({ content: 'Ticket transcript saved. Cleaning up the private channel.' });
-    try {
-      await channel.delete('ticket closed');
-      await store.markClosed(ticket.id, createdAt);
-      log.info('ticket_closed', { ticketId: ticket.id, guildId: ticket.guildId, messageCount: data.messageCount });
-    } catch (err) {
-      if (isUnknownChannel(err)) {
-        await store.markClosed(ticket.id, createdAt);
-        log.info('ticket_cleanup_already_absent', { ticketId: ticket.id, channelId: ticket.channelId });
-      } else {
-        log.error('ticket_cleanup_failed', { ticketId: ticket.id, channelId: ticket.channelId, err: String(err) });
-      }
-    }
   } catch (err) {
     await (channel as TextChannel).permissionOverwrites.edit(ticket.openerId, {
       ViewChannel: true,
@@ -477,6 +461,25 @@ async function closeTicket(interaction: ButtonInteraction, deps: TicketDeps, sto
     }));
     await store.reopenAfterCloseFailure(ticket.id);
     throw err;
+  }
+  // Once the transcript is final (or this closer lost ownership), never restore writing.
+  if (!saved) {
+    await interaction.editReply({ content: 'This ticket close was already recovered or completed.' });
+    return;
+  }
+  await store.markCleanupPending(ticket.id, createdAt);
+  await interaction.editReply({ content: 'Ticket transcript saved. Cleaning up the private channel.' });
+  try {
+    await channel.delete('ticket closed');
+    await store.markClosed(ticket.id, createdAt);
+    log.info('ticket_closed', { ticketId: ticket.id, guildId: ticket.guildId, messageCount: data.messageCount });
+  } catch (err) {
+    if (isUnknownChannel(err)) {
+      await store.markClosed(ticket.id, createdAt);
+      log.info('ticket_cleanup_already_absent', { ticketId: ticket.id, channelId: ticket.channelId });
+    } else {
+      log.error('ticket_cleanup_failed', { ticketId: ticket.id, channelId: ticket.channelId, err: String(err) });
+    }
   }
 }
 
@@ -632,4 +635,4 @@ export function registerTickets(client: Client, deps: TicketDeps): void {
   });
 }
 
-export const ticketTestHelpers = { withinCooldown, purgeAfter, isUnknownChannel, openTicket };
+export const ticketTestHelpers = { withinCooldown, purgeAfter, isUnknownChannel, openTicket, closeTicket, recoverClosing, retryCleanup };
