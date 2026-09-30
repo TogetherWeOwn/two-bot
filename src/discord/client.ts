@@ -572,6 +572,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
   // onLeave closes any open voice session. Reserve them on one subject chain
   // at receipt so a delayed leave cannot close a rejoined member's new session.
   // Other members remain independent; failed work cannot poison the queue.
+  let voiceEpoch = 0;
   const chainVoice = (guildId: string, memberId: string, work: () => Promise<void>): void => {
     void enqueue(memberChains, `${guildId}:${memberId}`, work).catch(() => {
       // Error strings can contain SQL binds or Discord payloads. Never log them.
@@ -596,7 +597,10 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     // One receipt timestamp for both halves of a move, on the same clock as
     // GuildMemberRemove. Queue latency must not place a start after its leave.
     const at = nowIso();
+    const epoch = voiceEpoch;
     chainVoice(guildId, memberId, async () => {
+      // A reconnect invalidates frames still waiting behind membership I/O.
+      if (epoch !== voiceEpoch) return;
       const voiceKind = oldChannelId
         ? newChannelId
           ? 'voice_move'
@@ -625,7 +629,8 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
           onLevelUp: levelUpRoleHook(member),
         });
       }
-      if (newChannelId) {
+      // A move may have awaited its end write while the gateway recovered.
+      if (newChannelId && epoch === voiceEpoch) {
         await handlers.onVoiceJoin({
           guildId,
           memberId,
@@ -649,6 +654,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
   // double-drop; on first-ever connect the tracker is empty and this is a
   // no-op.
   const dropSessionsOnReconnect = (event: string) => {
+    voiceEpoch++;
     const dropped = handlers.voiceSessions.openCount;
     handlers.voiceSessions.clear();
     if (dropped) log.info(event, { dropped });
