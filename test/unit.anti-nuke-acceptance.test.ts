@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import {
   ANTI_NUKE_ACCEPTANCE_TARGET_SHA,
@@ -10,7 +13,12 @@ import {
   selectFixtureAuditEntries,
 } from '../src/staging/antiNukeAcceptance.ts';
 import { STAGING_BOT_APPLICATION_ID, TWO_STAGING_GUILD_ID } from '../src/staging/spec.ts';
-import { validateStagingDatabaseIdentity } from '../scripts/staging-anti-nuke-acceptance.ts';
+import {
+  SnapshotIntegrityError,
+  sealSnapshot,
+  type GuildConfigSnapshot,
+} from '../src/redesign/guildConfig.ts';
+import { acceptedSnapshot, runDrive, validateStagingDatabaseIdentity, type DriveContext } from '../scripts/staging-anti-nuke-acceptance.ts';
 
 const ACTOR = '111111111111111111';
 const CAPABILITY = '222222222222222222';
@@ -212,3 +220,154 @@ test('bot joins cannot be mislabeled as real join-risk gateway evidence', () => 
   assert.equal(verdict.ok, false);
   assert.match(verdict.errors.join('\n'), /intentionally ignores bot joins/);
 });
+
+function stagingSnapshotFixture(): GuildConfigSnapshot {
+  return {
+    version: 1,
+    generatedAt: '2026-09-27T00:00:00.000Z',
+    applicationId: STAGING_BOT_APPLICATION_ID,
+    guildId: TWO_STAGING_GUILD_ID,
+    guild: { description: 'TWO Staging' },
+    roles: [],
+    channels: [],
+    emojis: [],
+  };
+}
+
+test('accepted snapshot verifies the tamper seal: tampered sealed refuses, legacy warns', () => {
+  const dir = mkdtempSync(join(process.env.PAPERCLIP_RUN_SCRATCH_DIR ?? tmpdir(), 'tog-7678-'));
+  try {
+    // Sealed snapshot matching guild state passes.
+    const sealed = sealSnapshot(stagingSnapshotFixture());
+    const sealedPath = join(dir, 'sealed.json');
+    writeFileSync(sealedPath, JSON.stringify(sealed));
+    assert.equal(acceptedSnapshot(sealedPath, structuredClone(sealed)).hash.length, 64);
+
+    // Tampered sealed snapshot whose content matches guild state still refuses.
+    const tampered = structuredClone(sealed);
+    tampered.guild = { ...tampered.guild, description: 'evil' };
+    const tamperedPath = join(dir, 'tampered.json');
+    writeFileSync(tamperedPath, JSON.stringify(tampered));
+    assert.throws(() => acceptedSnapshot(tamperedPath, structuredClone(tampered)), SnapshotIntegrityError);
+
+    // Legacy pre-seal snapshot warns and proceeds, matching restore semantics.
+    const legacy = stagingSnapshotFixture();
+    const legacyPath = join(dir, 'legacy.json');
+    writeFileSync(legacyPath, JSON.stringify(legacy));
+    const warnings: string[] = [];
+    const originalError = console.error;
+    console.error = (...args: unknown[]) => { warnings.push(args.map(String).join(' ')); };
+    try {
+      assert.equal(acceptedSnapshot(legacyPath, structuredClone(legacy)).hash.length, 64);
+    } finally {
+      console.error = originalError;
+    }
+    assert.match(warnings.join('\n'), /no integrity seal/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+for (const scenario of ['invalid-seal', 'existing-fixture', 'lost-first-response', 'partial-create'] as const) {
+  test(`drive cleanup respects the mutation boundary: ${scenario}`, async (t) => {
+    const dir = mkdtempSync(join(process.env.PAPERCLIP_RUN_SCRATCH_DIR ?? tmpdir(), 'anti-nuke-drive-'));
+    const originalExitCode = process.exitCode;
+    t.after(() => {
+      process.exitCode = originalExitCode;
+      rmSync(dir, { recursive: true, force: true });
+    });
+    t.mock.method(console, 'log', () => {});
+    t.mock.method(globalThis, 'fetch', () => { throw new Error('Offline test forbids network access'); });
+    const runId = 'offline-drive';
+    const names = fixtureRoleNames(runId);
+    const preMutationFailure = scenario === 'invalid-seal' || scenario === 'existing-fixture';
+    const role = (name: string, index: number) => ({
+      id: snowflakeAt(new Date().toISOString(), BigInt(index)),
+      name, managed: false, permissions: '0', position: 1,
+      color: 0, hoist: false, mentionable: false,
+    });
+    // A recent, exact-name leftover is eligible for crash recovery, but must
+    // not be touched when this attempt has not reached fixture creation.
+    let roles = preMutationFailure ? [role(names.targets[0], 0)] : [];
+    const snapshot = sealSnapshot({ ...stagingSnapshotFixture(), roles: structuredClone(roles) });
+    if (scenario === 'invalid-seal') snapshot.guild.description = 'tampered';
+    const snapshotPath = join(dir, 'snapshot.json');
+    const manifestPath = join(dir, 'manifest.json');
+    const outputPath = join(dir, 'evidence.json');
+    writeFileSync(snapshotPath, JSON.stringify(snapshot));
+    const writes: string[] = [];
+    const createdIds: string[] = [];
+    let dbClosed = false;
+    const api = {
+      writes,
+      async read(path: string) {
+        if (path === `/guilds/${TWO_STAGING_GUILD_ID}/roles`) return structuredClone(roles);
+        if (path === `/guilds/${TWO_STAGING_GUILD_ID}/members/${STAGING_BOT_APPLICATION_ID}`
+          || path === `/guilds/${TWO_STAGING_GUILD_ID}/members/${ACTOR}`) return { roles: [] };
+        throw new Error(`Unexpected read: ${path}`);
+      },
+      async write(method: string, path: string, body: { name: string } | undefined) {
+        writes.push(`${method} ${path}`);
+        if (method === 'POST' && path === `/guilds/${TWO_STAGING_GUILD_ID}/roles`) {
+          const created = role(body!.name, createdIds.length);
+          roles.push(created);
+          createdIds.push(created.id);
+          // Discord accepted the role, but the driver cannot persist its ID.
+          if (scenario === 'lost-first-response' || createdIds.length === 2) {
+            throw new Error('Lost create response');
+          }
+          return created;
+        }
+        assert.equal(method, 'DELETE');
+        const id = path.split('/').at(-1);
+        assert.ok(createdIds.includes(id!), 'cleanup may only delete roles created by this attempt');
+        roles = roles.filter((existing) => existing.id !== id);
+        return null;
+      },
+    };
+    const context = {
+      runId, guildId: TWO_STAGING_GUILD_ID, actorApplicationId: ACTOR,
+      targetSha: ANTI_NUKE_ACCEPTANCE_TARGET_SHA, owen: api,
+      actor: {
+        writes: [],
+        async read(path: string) {
+          if (path === '/users/@me') return { id: ACTOR, bot: true };
+          assert.equal(path, '/users/@me/guilds');
+          return [{ id: TWO_STAGING_GUILD_ID }];
+        },
+        async write() { throw new Error('Actor must not write before fixture setup completes'); },
+      },
+      verifierConfig: { ready: true, missing: [] },
+      guildConfig: { async capture() { return { ...structuredClone(snapshot), roles: structuredClone(roles) }; } },
+      db: {
+        prepare() { return { async get() { return { count: 0 }; } }; },
+        async close() { dbClosed = true; },
+      },
+    } as unknown as DriveContext;
+    await runDrive(new Map<string, string | true>([
+      ['apply', true], ['expect', 'dry_run'], ['snapshot', snapshotPath],
+      ['manifest', manifestPath], ['output', outputPath],
+    ]), async () => context);
+    const evidence = JSON.parse(readFileSync(outputPath, 'utf8'));
+    assert.equal(evidence.success, false);
+    assert.equal(process.exitCode, 1);
+    assert.equal(dbClosed, true);
+    assert.equal(evidence.cleanup.error, null);
+    if (preMutationFailure) {
+      assert.match(evidence.error, scenario === 'invalid-seal' ? /Snapshot integrity check failed/ : /fixture name already exists/);
+      assert.deepEqual(writes, []);
+      assert.deepEqual(createdIds, []);
+      assert.deepEqual(evidence.fixtures.discordWrites, []);
+      assert.equal(roles.length, 1, 'pre-existing fixture remains untouched');
+      assert.equal(evidence.fixtures.cleanup, undefined);
+    } else {
+      assert.match(evidence.error, /Lost create response/);
+      assert.equal(createdIds.length, scenario === 'partial-create' ? 2 : 1);
+      assert.equal(roles.length, 0, 'both recorded and unpersisted partial fixtures are cleaned up');
+      assert.deepEqual(evidence.fixtures.cleanup.recoveredRoleIds, [createdIds.at(-1)]);
+      assert.deepEqual(writes.filter((write) => write.startsWith('DELETE')), createdIds.map((id) => `DELETE /guilds/${TWO_STAGING_GUILD_ID}/roles/${id}`));
+      const persisted = JSON.parse(readFileSync(manifestPath, 'utf8'));
+      assert.deepEqual(persisted.cleanup, evidence.fixtures.cleanup);
+    }
+  });
+}
