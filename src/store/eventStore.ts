@@ -165,6 +165,7 @@ export class EventStore {
   private async projectMembership(db: Db, guildId: string, memberId: string): Promise<void> {
     // Attribution follows actual join time; presence follows live dispatch order
     // when supplied, otherwise historical occurrence time. Neither rewrites history.
+    // Only actual join time resets inactivity; reconfirming presence is not activity.
     // Read AFTER acquiring the member lock: a competing transaction may have
     // committed while we waited. A same-statement CTE would retain its old snapshot.
     await db.prepare(
@@ -187,7 +188,7 @@ export class EventStore {
          joined_at = COALESCE((SELECT occurred_at FROM latest_join), joined_at),
          join_source = COALESCE((SELECT source FROM latest_join), join_source),
          left_at = CASE WHEN p.event_type = 'member_leave' THEN p.occurred_at ELSE NULL END,
-         inactive_flagged_at = CASE WHEN p.event_type = 'member_join' AND inactive_flagged_at <= p.ordered_at
+         inactive_flagged_at = CASE WHEN p.event_type = 'member_join' AND inactive_flagged_at <= p.occurred_at
            THEN NULL ELSE inactive_flagged_at END
        FROM latest_presence p WHERE guild_id = ? AND member_id = ?`,
     ).run(guildId, memberId, guildId, memberId);

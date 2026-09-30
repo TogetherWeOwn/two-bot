@@ -77,6 +77,46 @@ test('same-tick handler replay reopens a member without rewriting join attributi
   } finally { mock.timers.reset(); }
 });
 
+test('live join reconfirmation preserves inactivity while a genuine rejoin clears it', async () => {
+  const store = new EventStore(harness.db);
+  const h = new FunnelHandlers(store);
+  const joinedAt = '2026-09-01T00:00:00.000Z';
+  const inactiveAt = '2026-09-20T00:00:00.000Z';
+  const join = {
+    guildId: G, memberId: M, eventType: 'member_join' as const,
+    occurredAt: joinedAt, source: 'invite:first', metadata: { inviterId: 'original-inviter' },
+  };
+  const first = await store.record(join, { membershipObservedAt: joinedAt });
+  await store.record({ guildId: G, memberId: M, eventType: 'member_inactive', occurredAt: inactiveAt, source: 'job:inactive' });
+  await h.onLeave(G, M, '2026-09-25T00:00:00.000Z', { observedAt: '2026-09-25T00:00:00.000Z' });
+  const replay = await store.record({ ...join, source: 'unknown', metadata: undefined }, {
+    membershipObservedAt: '2026-09-30T00:00:00.000Z',
+  });
+  assert.deepEqual(replay, { inserted: false, eventId: first.eventId });
+  assert.deepEqual(await projection(), { joined_at: joinedAt, join_source: 'invite:first', left_at: null });
+  const inactivity = () => harness.db.prepare(
+    `SELECT inactive_flagged_at FROM members WHERE guild_id = ? AND member_id = ?`,
+  ).get<{ inactive_flagged_at: string | null }>(G, M);
+  assert.equal((await inactivity())?.inactive_flagged_at, inactiveAt, 'presence reconfirmation is not a new join or activity');
+  assert.equal(await store.countByType('member_join', G), 1);
+  const original = await harness.db.prepare(
+    `SELECT occurred_at, source, metadata FROM events WHERE id = ?`,
+  ).get<{ occurred_at: string; source: string; metadata: string }>(first.eventId);
+  assert.equal(original?.occurred_at, joinedAt);
+  assert.equal(original?.source, 'invite:first');
+  assert.deepEqual(JSON.parse(original!.metadata), {
+    inviterId: 'original-inviter', membershipObservedAt: '2026-09-30T00:00:00.000Z',
+  });
+
+  await h.onJoin({
+    guildId: G, memberId: M, isBot: false, source: 'invite:latest',
+    occurredAt: REJOIN, observedAt: RESUMED,
+  });
+  assert.deepEqual(await projection(), { joined_at: REJOIN, join_source: 'invite:latest', left_at: null });
+  assert.equal((await inactivity())?.inactive_flagged_at, null, 'a genuinely newer join resets older inactivity');
+  assert.equal(await store.countByType('member_join', G), 2);
+});
+
 test('concurrent live writes and stale duplicates preserve the newest observation and original metadata', async () => {
   const store = new EventStore(harness.db);
   const join = {
