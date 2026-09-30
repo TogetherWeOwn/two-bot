@@ -27,6 +27,16 @@ function normalizeIso(s: string): string {
   return `${m[1]}.${(m[2] ?? '').padEnd(6, '0').slice(0, 6)}Z`;
 }
 
+/** Canonicalize a text-cast occurrence without losing its sub-millisecond digits. */
+function membershipOccurrenceIso(s: string): string {
+  // PostgreSQL text includes a space and session offset; SQLite stores ISO UTC.
+  // Date converts the offset, but only the original text retains microseconds.
+  const iso = new Date(s).toISOString();
+  const fraction = /[T ]\d{2}:\d{2}:\d{2}\.(\d+)/.exec(s)?.[1] ?? '';
+  const micros = fraction.padEnd(6, '0').slice(3, 6);
+  return /[1-9]/.test(micros) ? iso.replace('Z', `${micros}Z`) : iso;
+}
+
 /** Chronological comparison of ISO-8601 UTC timestamps; see normalizeIso. */
 function compareIso(a: string, b: string): number {
   const na = normalizeIso(a);
@@ -253,13 +263,15 @@ export class EventStore {
     await db.prepare(
       `UPDATE members SET member_id = member_id WHERE guild_id = ? AND member_id = ?`,
     ).run(guildId, memberId);
-    const rows = await db.prepare(
-      `SELECT id, event_type, occurred_at, source, metadata FROM events
+    // Standard text casts work on both backends and bypass the Postgres driver's
+    // millisecond-only timestamptz parser. Keep the precision local to membership.
+    const rows = (await db.prepare(
+      `SELECT id, event_type, CAST(occurred_at AS TEXT) AS occurred_at, source, metadata FROM events
         WHERE guild_id = ? AND member_id = ?
           AND event_type IN ('member_join', 'member_leave')`,
     ).all<{
       id: number; event_type: string; occurred_at: string; source: string; metadata: string | null;
-    }>(guildId, memberId);
+    }>(guildId, memberId)).map((r) => ({ ...r, occurred_at: membershipOccurrenceIso(r.occurred_at) }));
     if (rows.length === 0) return;
     let latestJoin: (typeof rows)[number] | undefined;
     let latestPresence: (typeof rows)[number] | undefined;
@@ -286,9 +298,10 @@ export class EventStore {
       }
     }
     const current = await db.prepare(
-      `SELECT inactive_flagged_at FROM members WHERE guild_id = ? AND member_id = ?`,
+      `SELECT CAST(inactive_flagged_at AS TEXT) AS inactive_flagged_at FROM members
+        WHERE guild_id = ? AND member_id = ?`,
     ).get<{ inactive_flagged_at: string | null }>(guildId, memberId);
-    const flag = current?.inactive_flagged_at ?? null;
+    const flag = current?.inactive_flagged_at == null ? null : membershipOccurrenceIso(current.inactive_flagged_at);
     const cleared =
       flag !== null && latestJoin && compareIso(flag, latestJoin.occurred_at) <= 0 ? null : flag;
     await db.prepare(
