@@ -104,14 +104,9 @@ function usableTimestamp(item) {
 export function normalizeItem(item) {
   if (typeof item === "string") return [{ text: item, ts: null }];
   if (item !== null && typeof item === "object" && !Array.isArray(item)) {
-    let text = null;
-    for (const key of TEXT_KEYS) {
-      if (typeof item[key] === "string") {
-        text = item[key];
-        break;
-      }
-    }
-    return text === null ? [] : [{ text, ts: usableTimestamp(item) }];
+    const key = TEXT_KEYS.find((key) => Object.hasOwn(item, key));
+    return key === undefined || typeof item[key] !== "string"
+      ? [] : [{ text: item[key], ts: usableTimestamp(item) }];
   }
   return [];
 }
@@ -126,7 +121,7 @@ export function normalizeLogPayload(payload) {
   }
   if (payload !== null && typeof payload === "object") {
     for (const key of PAYLOAD_KEYS) {
-      if (payload[key] !== undefined) return normalizeLogPayload(payload[key]);
+      if (Object.hasOwn(payload, key)) return normalizeLogPayload(payload[key]);
     }
   }
   return [];
@@ -205,8 +200,9 @@ function visitBotRecords(record, fallbackMs, depth, budget) {
   // payload. Never discover events by walking arbitrary metadata trees. Like
   // normalization, a wrapper has one primary payload: a terminal message must
   // not acquire independent siblings from another field on the same wrapper.
-  const key = RECORD_PAYLOAD_KEYS.find((key) =>
-    typeof record[key] === "string" || (record[key] !== null && typeof record[key] === "object"));
+  // Presence fixes authority before type validation: a malformed primary must
+  // fail closed, not promote a competing sibling to replace it.
+  const key = RECORD_PAYLOAD_KEYS.find((key) => Object.hasOwn(record, key));
   const values = Array.isArray(record) ? record : key === undefined ? [] : [record[key]];
   const found = [];
   for (const value of values) {

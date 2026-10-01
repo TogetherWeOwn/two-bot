@@ -387,8 +387,13 @@ function scanJsonCandidates(text) {
       inString = true;
       continue;
     }
-    if (stack.length > 0 && (c === ":" || c === ",")) hasValueBoundary = true;
-    if (stack.length > 0 && (c === ":" || c === "," || c === "\\" || c === "}" || c === "]")) syntaxEnd = i + 1;
+    // Malformed assignments are framing evidence too: complete `{password=x}`
+    // containers redact as a unit, so an omitted closer must not expose `x`
+    // after a credential masks `{password=`. Track the same ORIGINAL boundary
+    // in both extent and value ownership; quoted punctuation remains content.
+    const valueBoundary = stack.length > 0 && (c === ":" || c === "," || c === "=");
+    if (valueBoundary) hasValueBoundary = true;
+    if (valueBoundary || (stack.length > 0 && (c === "\\" || c === "}" || c === "]"))) syntaxEnd = i + 1;
     if (c === "{" || c === "[") {
       if (stack.length === 0) hasValueBoundary = false;
       syntaxEnd = i + 1;
@@ -447,10 +452,11 @@ export function shapeEmbeddedText(value, secrets, depth = 0) {
     const covering = coveringSpan(credentials, source.incompleteAt);
     // Original syntax beyond the opener's merged credential span proves the
     // unfinished container is not wholly opaque. A covered member/value boundary
-    // also owns any exposed tail: `prefix{"password":"` + `db-value`
-    // remains sensitive even without a closing quote. Masking must not erase
-    // that context, regardless of where the credential began. An opaque opener
-    // with no value boundary may still be followed by ordinary prose.
+    // also owns any exposed tail: `prefix{"password":"` + `db-value` or
+    // `{password=` + `db-value` remains sensitive without a closing quote/brace.
+    // Masking must not erase that context, regardless of where the credential
+    // began. An opaque opener with no value boundary may still be followed by
+    // ordinary prose.
     if (covering && (covering[1] < source.incompleteSyntaxEnd
       || (source.incompleteHasValueBoundary && covering[1] < value.length))) return SECRET_PLACEHOLDER;
   }
@@ -607,6 +613,19 @@ export function applyPemContext(items) {
   });
 }
 
+// These ORIGINAL field identities define the smoke's source authority. A lossy
+// transformation must redact the source object, never leave siblings available
+// for reinterpretation under different payload/timestamp/terminal precedence.
+const LOG_AUTHORITY_KEYS = new Set([
+  "msg", "guilds", ...LOG_TS_KEYS,
+  "message", "output", "log", "line", "text", "content", ...LOG_PAYLOAD_KEYS,
+]);
+
+function logTimestampMs(value) {
+  const ms = typeof value === "number" ? value : typeof value === "string" ? Date.parse(value) : NaN;
+  return Number.isFinite(ms) && Number.isFinite(new Date(ms).getTime()) ? ms : NaN;
+}
+
 export function shapeLogValue(value, secrets, depth = 0) {
   if (depth > 10) return SECRET_PLACEHOLDER;
   if (typeof value === "string") {
@@ -656,11 +675,19 @@ export function shapeLogValue(value, secrets, depth = 0) {
     // both branches below used to emit `key` as-is (TOG-9053 finding 2).
     // Sensitivity is judged on the raw key; the emitted name is scrubbed.
     const safeKey = scrubSecrets(key, secrets);
-    if (SENSITIVE_KEY_RES.some((re) => re.test(key))) {
-      shaped[safeKey] = SECRET_PLACEHOLDER;
-    } else {
-      shaped[safeKey] = shapeLogValue(entry, secrets, depth + 1);
+    if (LOG_AUTHORITY_KEYS.has(key) && safeKey !== key) return SECRET_PLACEHOLDER;
+    const safeValue = SENSITIVE_KEY_RES.some((re) => re.test(key))
+      ? SECRET_PLACEHOLDER : shapeLogValue(entry, secrets, depth + 1);
+    // Classify on the source, before JSON-in-string decoding or redaction. A
+    // terminal msg becoming an object (or a transport label changing) cannot
+    // turn its metadata into evidence. Preserve timestamp usability AND value:
+    // valid-to-invalid cannot inherit newer enclosing time; invalid-to-valid
+    // (e.g. a truncated invalid suffix) cannot override an older source time.
+    if (key === "msg" && typeof entry === "string" && safeValue !== entry) return SECRET_PLACEHOLDER;
+    if (LOG_TS_KEYS.includes(key) && !Object.is(logTimestampMs(entry), logTimestampMs(safeValue))) {
+      return SECRET_PLACEHOLDER;
     }
+    shaped[safeKey] = safeValue;
   }
   return shaped;
 }
@@ -735,7 +762,7 @@ export function shapeLogs(panelJson, secrets) {
     items = panelJson;
   } else if (panelJson !== null && typeof panelJson === "object") {
     for (const key of LOG_PAYLOAD_KEYS) {
-      if (panelJson[key] !== undefined) {
+      if (Object.hasOwn(panelJson, key)) {
         const inner = panelJson[key];
         items = Array.isArray(inner) ? inner : String(inner ?? "").split("\n");
         break;

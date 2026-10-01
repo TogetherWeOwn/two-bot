@@ -311,7 +311,15 @@ Each staging deploy runs the same six gates in order:
    the log root or on that selected path retain all object/JSON/prefixed-text
    siblings and inherit the nearest usable timestamp. Other fields are not
    searched for events; ambiguous/unsupported wrapper shapes cannot prove
-   readiness. A terminal bot `ts` outranks transport timestamp fields.
+   readiness. Selection uses the first present field, not the first supported
+   value: a null, boolean or numeric primary cannot fall through to another
+   sibling. A terminal bot `ts` outranks transport timestamp fields. Before
+   emitting shaped logs, the broker rejects a source object whose authority
+   field name is scrubbed, whose string `msg` changes through decoding or
+   redaction, or whose timestamp changes value or usable/unusable classification
+   (including an invalid suffix lost to truncation). Such lossy records redact
+   as a unit; they cannot acquire a newer enclosing time
+   or promote diagnostic metadata. Independent intact records still survive.
 
 The retired panel-bearer clients (`scripts/wait-for-coolify-deploy.mjs`,
 `scripts/smoke-staging-deploy.mjs`) remain in the tree for the post-TOG-6903

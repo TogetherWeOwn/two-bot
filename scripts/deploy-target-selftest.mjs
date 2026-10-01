@@ -379,11 +379,11 @@ test("smoke unit: parseArgs requires --since and valid env", () => {
 
 // --- handler-to-smoke contracts (synthetic panel, loopback only) -------------
 
-async function smokeRecordsFromPanel(t, items) {
+async function smokeRecordsFromPanel(t, items, panelToken = "synthetic-panel-credential") {
   const server = createServer(createHandler({
     brokerToken: FAKE.STAGING_BROKER_TOKEN,
     panelUrl: "https://panel.example.invalid",
-    panelToken: "synthetic-panel-credential",
+    panelToken,
     appUuid: PINNED_STAGING_APP_UUID,
   }, async () => ({ logs: items })));
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -684,11 +684,11 @@ test("smoke review-d883a973: incomplete parents cannot promote locally timestamp
 
 // --- PR291 payload-provenance finding at 1194ab33 ---------------------------
 
-async function smokeCliFromPanel(t, makeItem) {
+async function smokeCliFromPanel(t, makeItem, panelToken = "synthetic-panel-credential") {
   let reads = 0;
   const server = createServer(createHandler({
     brokerToken: FAKE.STAGING_BROKER_TOKEN,
-    panelUrl: "https://panel.example.invalid", panelToken: "synthetic-panel-credential",
+    panelUrl: "https://panel.example.invalid", panelToken,
     appUuid: PINNED_STAGING_APP_UUID,
   }, async ({ path }) => {
     if (!path.includes("/logs")) return { status: "running:healthy" };
@@ -798,6 +798,138 @@ test("smoke review-1194ab33: selected payload retains ready siblings but exclude
     assert.deepEqual(records.map(({ tsMs }) => tsMs), [Date.parse(SMOKE_TS), Date.parse(SMOKE_TS)], key);
     assert.equal(maxTimestampMs(records), Date.parse(SMOKE_TS), "metadata cannot prove advancing log timestamps");
   }
+});
+
+// --- PR291 source-authority findings at 3260ad79 ----------------------------
+
+const STALE_SMOKE_TS = "2026-09-30T18:01:00.000Z";
+
+for (const [name, makeItem, panelToken] of [
+  ["decoded terminal msg", (timestamp) => ({ timestamp, msg: '{"kind":"diagnostic"}', data: [SMOKE_READY] })],
+  ...[0, false, null].map((message) => [`unsupported primary ${JSON.stringify(message)}`,
+    (timestamp) => ({ timestamp, message, data: [SMOKE_READY] })]),
+  ["scrubbed primary name", (timestamp) => ({ timestamp, message: 'INFO {"msg":"diagnostic"}', data: [SMOKE_READY] }), "message"],
+  ["scrubbed terminal ts name", (timestamp) => ({ timestamp, message: JSON.stringify({ ...SMOKE_READY, ts: STALE_SMOKE_TS }) }), "ts"],
+]) {
+  test(`smoke review-3260ad79: real CLI rejects ${name}`, async (t) => {
+    const result = await smokeCliFromPanel(t, makeItem, panelToken);
+    assert.equal(result.code, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /no fresh/);
+    assert.doesNotMatch(result.stdout, /PASS/);
+  });
+}
+
+test("smoke review-3260ad79: every present unsupported primary excludes later siblings", async (t) => {
+  const keys = ["message", "output", "log", "line", "text", "content", "logs", "data", "lines", "result"];
+  for (const [i, key] of keys.slice(0, -1).entries()) {
+    for (const value of [0, false, null]) {
+      const item = { timestamp: SMOKE_TS, [key]: value, [keys[i + 1]]: [SMOKE_READY] };
+      assert.deepEqual(findBotRecords([{ text: JSON.stringify(item), ts: SMOKE_TS }]), [], `${key}:${value}`);
+      assert.deepEqual(await smokeRecordsFromPanel(t, [item]), [], `${key}:${value} through broker`);
+    }
+  }
+  assert.deepEqual(normalizeLogPayload({ logs: [{ message: null, output: JSON.stringify(SMOKE_READY) }] }), []);
+  assert.deepEqual(normalizeLogPayload({ logs: null, data: [JSON.stringify(SMOKE_READY)] }), []);
+});
+
+test("smoke review-3260ad79: erased field identities cannot create readiness or newer time", async (t) => {
+  for (const key of ["message", "output", "log", "line", "text", "content", "logs", "data", "lines", "result"]) {
+    const item = { timestamp: SMOKE_TS, [key]: 'INFO {"msg":"diagnostic"}', result: [SMOKE_READY] };
+    if (key === "result") item[key] = 'INFO {"msg":"diagnostic"}';
+    assert.equal(findReadyLines(await smokeRecordsFromPanel(t, [item, JSON.stringify(item), `INFO ${JSON.stringify(item)}`], key)).length, 0, key);
+  }
+  for (const key of ["ts", "timestamp", "time", "_ts", "created_at"]) {
+    const ready = { ...SMOKE_READY, [key]: STALE_SMOKE_TS };
+    const item = { timestamp: SMOKE_TS, data: ready };
+    const records = await smokeRecordsFromPanel(t, [item, JSON.stringify(item), `INFO ${JSON.stringify(item)}`], key);
+    assert.equal(findReadyLines(records).filter(({ tsMs }) => tsMs >= Date.parse(SMOKE_TS)).length, 0, key);
+  }
+  const diagnostic = { timestamp: SMOKE_TS, msg: "diagnostic", data: [SMOKE_READY] };
+  assert.equal(findReadyLines(await smokeRecordsFromPanel(t, [diagnostic], "msg")).length, 0);
+});
+
+test("smoke review-3260ad79: redacted usable timestamp values cannot acquire enclosing time", async (t) => {
+  for (const key of ["ts", "timestamp", "time", "_ts", "created_at"]) {
+    const item = { timestamp: SMOKE_TS, data: { ...SMOKE_READY, [key]: STALE_SMOKE_TS } };
+    const records = await smokeRecordsFromPanel(t, [item], STALE_SMOKE_TS);
+    assert.equal(findReadyLines(records).filter(({ tsMs }) => tsMs >= Date.parse(SMOKE_TS)).length, 0, key);
+  }
+  const result = await smokeCliFromPanel(t, (timestamp) => ({ timestamp,
+    data: { ...SMOKE_READY, ts: STALE_SMOKE_TS },
+  }), STALE_SMOKE_TS);
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /no fresh/);
+});
+
+function cappedInvalidTimestamp(timestamp) {
+  const date = new Date(timestamp).toUTCString();
+  return date + " ".repeat(4096 - date.length) + "invalid-tail";
+}
+
+for (const wrapped of [false, true]) {
+  test(`smoke source-authority: real CLI rejects invalid-to-usable truncation (${wrapped ? "wrapped" : "raw"})`, async (t) => {
+    const result = await smokeCliFromPanel(t, (timestamp) => {
+      const message = JSON.stringify({ ...SMOKE_READY, timestamp: STALE_SMOKE_TS, ts: cappedInvalidTimestamp(timestamp) });
+      return wrapped ? { timestamp: STALE_SMOKE_TS, message } : message;
+    });
+    assert.equal(result.code, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /no fresh/);
+    assert.doesNotMatch(result.stdout, /PASS/);
+  });
+}
+
+test("smoke source-authority: every timestamp alias retains unusable classification", async (t) => {
+  for (const key of ["ts", "timestamp", "time", "_ts", "created_at"]) {
+    const event = { ...SMOKE_READY, [key]: cappedInvalidTimestamp(SMOKE_TS) };
+    assert.ok(Number.isNaN(Date.parse(event[key])));
+    const message = JSON.stringify({ data: event, timestamp: STALE_SMOKE_TS });
+    const original = findReadyLines(findBotRecords([{ text: message, ts: SMOKE_TS }]));
+    assert.equal(original[0].tsMs, Date.parse(STALE_SMOKE_TS), key);
+    const records = await smokeRecordsFromPanel(t, [message, { message, timestamp: SMOKE_TS }]);
+    assert.equal(findReadyLines(records).filter(({ tsMs }) => tsMs >= Date.parse(SMOKE_TS)).length, 0, key);
+  }
+});
+
+test("smoke review-3260ad79: JSON-valued terminal labels never become envelopes", async (t) => {
+  for (const msg of ['{"kind":"diagnostic"}', '[{"msg":"ready","guilds":1}]', 'INFO {"kind":"diagnostic"}', '{"password":"synthetic-db-value"}']) {
+    const item = { timestamp: SMOKE_TS, msg, data: [SMOKE_READY] };
+    const records = await smokeRecordsFromPanel(t, [item, JSON.stringify(item), `INFO ${JSON.stringify(item)}`]);
+    assert.equal(findReadyLines(records).length, 0, msg);
+  }
+});
+
+for (const [name, makeSuspect, panelToken] of [
+  ["decoded terminal label", (timestamp) => ({ msg: '{"kind":"diagnostic"}', ts: timestamp,
+    data: [{ msg: "heartbeat", ts: timestamp }] })],
+  ["redacted transport label", (timestamp) => ({ msg: "stdout", ts: timestamp, metadata: SMOKE_READY }), "stdout"],
+  ["redacted heartbeat time", (timestamp) => ({ timestamp,
+    data: { msg: "heartbeat", ts: STALE_SMOKE_TS } }), STALE_SMOKE_TS],
+]) {
+  test(`smoke review-3260ad79: real CLI rejects lossy-only advancement (${name})`, async (t) => {
+    const result = await smokeCliFromPanel(t, (timestamp) => [
+      { ...SMOKE_READY, ts: SMOKE_TS }, makeSuspect(timestamp),
+    ], panelToken);
+    assert.equal(result.code, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /timestamps did not advance/);
+    assert.doesNotMatch(result.stdout, /PASS/);
+  });
+}
+
+test("smoke review-3260ad79: source-authority rejection keeps genuine independent siblings", async (t) => {
+  const stale = { ...SMOKE_READY, ts: STALE_SMOKE_TS };
+  const ready = { ...SMOKE_READY, time: SMOKE_TS };
+  const heartbeat = { msg: "heartbeat", time: "2026-09-30T19:02:00.000Z" };
+  for (const items of [[stale, ready, heartbeat], [JSON.stringify([stale, ready, heartbeat])],
+    [`INFO ${JSON.stringify(stale)} INFO ${JSON.stringify(ready)} INFO ${JSON.stringify(heartbeat)}`]]) {
+    const records = await smokeRecordsFromPanel(t, items, "ts");
+    assert.deepEqual(records.map(({ record }) => record), [ready, heartbeat]);
+    assert.equal(maxTimestampMs(records), Date.parse(heartbeat.time));
+  }
+  const result = await smokeCliFromPanel(t, (timestamp) => ({ msg: "stdout", time: timestamp,
+    data: [stale, SMOKE_READY, { msg: "heartbeat" }],
+  }), "ts");
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /PASS/);
 });
 
 // --- deploy.yml wiring (the TOG-913 shape) -----------------------------------

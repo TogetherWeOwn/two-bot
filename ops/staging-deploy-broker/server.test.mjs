@@ -1334,6 +1334,63 @@ test("review-1194ab33 logs: covered value boundaries use original credential cov
   }
 });
 
+// --- PR291 exact-head 3260ad79 finding 4 -------------------------------------
+
+// Malformed assignments must retain their ORIGINAL member/value boundary even
+// if the credential scan view masks the opener and the entire assignment key.
+// A complete malformed container already redacts; an omitted closer must not
+// turn the same exposed value into prose. All credentials and values are fake.
+for (const [name, panelToken, raw, expected] of [
+  ["covered assignment boundary", "{password=", "INFO {password=ordinary-database-value", SECRET_PLACEHOLDER],
+  ["assignment outside credential", "{password", "INFO {password=ordinary-database-value", SECRET_PLACEHOLDER],
+  ["spaced assignment boundary", "{ password =", "INFO { password =   ordinary-database-value", SECRET_PLACEHOLDER],
+  ["assignment after opaque opener", "prefix{", "INFO prefix{ password = ordinary-database-value", SECRET_PLACEHOLDER],
+  ["nested assignment boundary", "{outer={password=", "INFO {outer={password=ordinary-database-value", SECRET_PLACEHOLDER],
+  ["nested assignment with inner closer", "{outer={password=", "INFO {outer={password=ordinary-database-value}", SECRET_PLACEHOLDER],
+  ["array assignment boundary", "[password=", "INFO [password=ordinary-database-value", SECRET_PLACEHOLDER],
+  ["complete covered assignment", "{password=", "INFO {password=ordinary-database-value}", SECRET_PLACEHOLDER],
+  ["complete covered nested assignment", "{outer={password=", "INFO {outer={password=ordinary-database-value}}", SECRET_PLACEHOLDER],
+  ["incomplete uncovered assignment", "not-in-source", "INFO {password=ordinary-database-value", `INFO ${SECRET_PLACEHOLDER}`],
+  ["complete uncovered assignment", "not-in-source", "INFO {password=ordinary-database-value}", `INFO ${SECRET_PLACEHOLDER}`],
+  ["whitespace exposed assignment tail", "{password=", "INFO {password=   ", SECRET_PLACEHOLDER],
+  ["wholly covered assignment control", "{password=", "INFO {password=", `INFO ${SECRET_PLACEHOLDER}`],
+  ["opaque unmatched opener prose control", "{password", "INFO {password ordinary prose", `INFO ${SECRET_PLACEHOLDER} ordinary prose`],
+  ["opaque matched opener control", "{password", "INFO {password ordinary prose}", SECRET_PLACEHOLDER],
+]) {
+  for (const wrap of ["raw", "message"]) {
+    test(`review-3260ad79 finding-4 logs: ${name} (${wrap})`, async (t) => {
+      const config = parseConfig({
+        STAGING_BROKER_TOKEN: BROKER_TOKEN, COOLIFY_URL: PANEL_URL, COOLIFY_TOKEN: panelToken,
+      });
+      assert.equal(config.panelToken, panelToken, "synthetic assignment credential is accepted");
+      const item = wrap === "raw" ? raw : { message: raw };
+      const srv = await boot(() => ({ logs: [item, JSON.stringify(READY_RECORD)] }), config);
+      t.after(srv.close);
+      const out = await req(srv.base, "/v1/staging/logs");
+      assert.equal(out.status, 200, "authenticated handler serves the synthetic stub response");
+      assert.equal(out.json.logs.length, 2);
+      assert.ok(!out.text.includes("ordinary-database-value"), "masked assignment framing cannot expose its value as prose");
+      assert.equal(out.json.logs[0].message, wrap === "raw" ? expected : JSON.stringify({ message: expected }));
+      assert.equal(findReadyLines(findBotRecords(normalizeLogPayload(out.json))).length, 1, "independent valid record survives");
+    });
+  }
+}
+
+test("review-3260ad79 finding-4 logs: assignment framing uses original overlapping coverage in either order", () => {
+  const credentials = ["prefix{password", "password="];
+  for (const secrets of [credentials, [...credentials].reverse()]) {
+    assert.equal(shapeEmbeddedText("INFO prefix{password=ordinary-database-value", secrets), SECRET_PLACEHOLDER);
+    assert.equal(shapeEmbeddedText("INFO prefix{password=ordinary-database-value}", secrets), SECRET_PLACEHOLDER);
+    assert.equal(shapeEmbeddedText("INFO prefix{password=   ", secrets), SECRET_PLACEHOLDER, "exposed whitespace is still an assignment value tail");
+    assert.equal(shapeEmbeddedText("INFO prefix{password=", secrets), `INFO ${SECRET_PLACEHOLDER}`, "a wholly covered candidate remains opaque");
+  }
+  const opaqueCredentials = ["prefix{pass", "password"];
+  for (const secrets of [opaqueCredentials, [...opaqueCredentials].reverse()]) {
+    assert.equal(shapeEmbeddedText("INFO prefix{password ordinary prose", secrets), `INFO ${SECRET_PLACEHOLDER} ordinary prose`, "opaque unmatched opener without assignment evidence preserves prose");
+    assert.equal(shapeEmbeddedText("INFO prefix{password=ordinary-database-value", secrets), SECRET_PLACEHOLDER, "an assignment outside merged credential coverage is still original syntax");
+  }
+});
+
 test("logs-bounded unit: parseLogLines clamps to 1..500", () => {
   assert.equal(parseLogLines(new URLSearchParams("")), 200);
   assert.equal(parseLogLines(new URLSearchParams("lines=50")), 50);
