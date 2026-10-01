@@ -1,15 +1,16 @@
 // TOG-8306: real invite diffs and membership projections with in-memory DB
 // doubles. Explicit barriers expose the races without network or timer sleeps.
-import { test } from 'node:test';
+import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
+import { DatabaseSync } from 'node:sqlite';
 import { Events, type Client } from 'discord.js';
 import { registerHandlers, type BotDeps } from '../src/discord/client.ts';
 import { FunnelHandlers, type JoinInput } from '../src/core/handlers.ts';
 import { InviteTracker } from '../src/core/inviteTracker.ts';
 import { ExpectedJoins, WEB_ONE_CLICK_SOURCE } from '../src/core/expectedJoins.ts';
 import { EventStore } from '../src/store/eventStore.ts';
-import type { Db } from '../src/store/db.ts';
+import type { Db, Statement } from '../src/store/db.ts';
 
 const GUILD = '326474832151838730';
 const CODE_A = 'aaa111';
@@ -129,42 +130,51 @@ test('a prompt one-click receipt survives queue delay beyond the note TTL', asyn
   assert.equal(f.reads(), 2, 'one-click joins still update the invite snapshot');
 });
 
-function projection() {
-  const rows = new Map<string, Record<string, unknown>>();
-  const recorded: { type: string; member: string; at: string; metadata: Record<string, unknown> | null }[] = [];
-  const db = {
-    transaction: async (fn: (db: Db) => Promise<unknown>) => fn(db),
-    prepare(sql: string) {
-      if (sql.includes('INSERT INTO events')) {
-        return { get: async (
-          type: string, member: string, _guild: string, at: string, _source: string, metadata: string | null,
-        ) => {
-          recorded.push({ type, member, at, metadata: metadata ? JSON.parse(metadata) : null });
-          return { id: recorded.length };
-        } };
-      }
-      if (sql.includes('SELECT 1 AS x FROM events')) {
-        return { get: async () => null };
-      }
-      if (sql.includes('INSERT INTO members')) {
-        return { run: async (_guild: string, member: string) => {
-          if (!rows.has(member)) rows.set(member, {});
-        } };
-      }
-      const column = sql.match(/UPDATE members SET ([a-z_]+) = \?/);
-      if (column) {
-        return { run: async (value: unknown, _guild: string, member: string) => {
-          rows.get(member)![column[1]] = value;
-        } };
-      }
-      throw new Error(`Unexpected event SQL: ${sql}`);
+function projection(t: TestContext) {
+  const sqlite = new DatabaseSync(':memory:');
+  sqlite.exec(`CREATE TABLE events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_type TEXT NOT NULL, member_id TEXT, guild_id TEXT NOT NULL,
+    occurred_at TEXT NOT NULL, source TEXT NOT NULL, metadata TEXT,
+    idempotency_key TEXT NOT NULL UNIQUE
+  ); CREATE TABLE members (
+    guild_id TEXT NOT NULL, member_id TEXT NOT NULL,
+    joined_at TEXT, join_source TEXT, gate_cleared_at TEXT, first_message_at TEXT,
+    first_voice_at TEXT, last_active_at TEXT, left_at TEXT,
+    inactive_flagged_at TEXT, is_bot INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (guild_id, member_id)
+  )`);
+  t.after(() => sqlite.close());
+  const db: Db = {
+    prepare(sql): Statement {
+      const stmt = sqlite.prepare(sql);
+      return {
+        get: async <T>(...args: unknown[]) => stmt.get(...args as never[]) as T | undefined,
+        all: async <T>(...args: unknown[]) => stmt.all(...args as never[]) as T[],
+        run: async (...args: unknown[]) => ({ changes: Number(stmt.run(...args as never[]).changes) }),
+      };
     },
-  } as unknown as Db;
-  return { rows, recorded, handlers: new FunnelHandlers(new EventStore(db)) };
+    exec: async (sql) => { sqlite.exec(sql); },
+    transaction: async (fn) => fn(db),
+    close: async () => { sqlite.close(); },
+  };
+  return {
+    get rows() {
+      return new Map(sqlite.prepare('SELECT * FROM members').all()
+        .map((r) => [String(r.member_id), r]));
+    },
+    get recorded() {
+      return sqlite.prepare('SELECT * FROM events ORDER BY id').all().map((r) => ({
+        type: r.event_type, member: r.member_id, at: String(r.occurred_at),
+        metadata: r.metadata ? JSON.parse(String(r.metadata)) : null,
+      }));
+    },
+    handlers: new FunnelHandlers(new EventStore(db)),
+  };
 }
 
-test('slow invite I/O cannot persist an older join after a leave', async () => {
-  const p = projection();
+test('slow invite I/O cannot persist an older join after a leave', async (t) => {
+  const p = projection(t);
   const f = fixture({ handlers: p.handlers });
   f.bus.emit(Events.InviteCreate, { guild: f.guild });
   await f.started.promise;
@@ -179,8 +189,8 @@ test('slow invite I/O cannot persist an older join after a leave', async () => {
   assert.equal(typeof p.rows.get('brief')?.left_at, 'string');
 });
 
-test('gate, leave and rejoin preserve dispatch order and observation timestamps', async () => {
-  const p = projection();
+test('gate, leave and rejoin preserve dispatch order and observation timestamps', async (t) => {
+  const p = projection(t);
   const f = fixture({ handlers: p.handlers });
   f.bus.emit(Events.InviteCreate, { guild: f.guild });
   await f.started.promise;
@@ -210,8 +220,8 @@ function voiceFrame(f: ReturnType<typeof fixture>, id: string, from: string | nu
   f.bus.emit(Events.VoiceStateUpdate, { ...state, channelId: from }, { ...state, channelId: to });
 }
 
-test('a queued membership leave cannot close a rejoined member’s newer voice session', async () => {
-  const p = projection();
+test('a queued membership leave cannot close a rejoined member’s newer voice session', async (t) => {
+  const p = projection(t);
   const f = fixture({ handlers: p.handlers });
   f.bus.emit(Events.InviteCreate, { guild: f.guild });
   await f.started.promise;
@@ -234,7 +244,7 @@ test('a queued membership leave cannot close a rejoined member’s newer voice s
 test('queued voice start, server leave and rejoin retain receipt times and the new session', async (t) => {
   const start = Date.parse('2026-09-30T14:00:00Z');
   t.mock.timers.enable({ apis: ['Date'], now: start });
-  const p = projection();
+  const p = projection(t);
   const f = fixture({ handlers: p.handlers });
   f.bus.emit(Events.InviteCreate, { guild: f.guild });
   await f.started.promise;

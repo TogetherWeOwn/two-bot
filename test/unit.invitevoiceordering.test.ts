@@ -8,7 +8,7 @@ import { Events, type Client } from 'discord.js';
 import { registerHandlers } from '../src/discord/client.ts';
 import { EventStore } from '../src/store/eventStore.ts';
 import { FunnelHandlers } from '../src/core/handlers.ts';
-import type { InviteTracker } from '../src/core/inviteTracker.ts';
+import { InviteTracker } from '../src/core/inviteTracker.ts';
 import type { Db, Statement } from '../src/store/db.ts';
 
 const GUILD = '612300000000000001';
@@ -35,6 +35,10 @@ function fixture() {
     first_voice_at TEXT, last_active_at TEXT, left_at TEXT,
     inactive_flagged_at TEXT, is_bot INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (guild_id, member_id)
+  ); CREATE TABLE invite_snapshots (
+    guild_id TEXT NOT NULL, code TEXT NOT NULL, uses INTEGER NOT NULL,
+    inviter_id TEXT, channel_id TEXT, updated_at TEXT NOT NULL,
+    PRIMARY KEY (guild_id, code)
   )`);
   const db: Db = {
     prepare(sql): Statement {
@@ -52,15 +56,15 @@ function fixture() {
   const store = new EventStore(db);
   const handlers = new FunnelHandlers(store);
   const bus = new EventEmitter();
-  const invites = {
-    diffAndStore: async () => [], attribute: () => 'unknown', inviterFor: async () => null,
-  } as unknown as InviteTracker;
+  const invites = new InviteTracker(db);
   registerHandlers(bus as unknown as Client, { handlers, invites });
   const release = deferred();
   const started = deferred();
   const guild = {
     id: GUILD, vanityURLCode: null,
-    invites: { fetch: async () => { started.resolve(); await release.promise; return []; } },
+    invites: { fetch: async (): Promise<{
+      code: string; uses: number; inviter: { id: string } | null; channel: null;
+    }[]> => { started.resolve(); await release.promise; return []; } },
   };
   const member = { id: MEMBER, guild, user: { bot: false }, pending: true, joinedAt: new Date(START) };
   const voice = (from: string | null, to: string | null) => {
@@ -73,6 +77,60 @@ function fixture() {
     return rows.map((r) => JSON.parse(r.metadata));
   };
   return { db, store, handlers, bus, member, voice, ends, started, release };
+}
+
+for (const refresh of ['delete', 'replace-inviter'] as const) {
+  test(`queued rejoin retains its observed inviter after a later ${refresh} refresh`, async () => {
+    const f = fixture();
+    const blocked = deferred();
+    const releaseLeave = deferred();
+    const inviterId = '612300000000000008';
+    const invite = { code: 'invite-A', uses: 0, inviter: { id: inviterId }, channel: null };
+    let current = [invite];
+    f.member.guild.invites.fetch = async () => current.map((i) => ({ ...i }));
+    const refreshInvites = f.bus.listeners(Events.InviteCreate)[0];
+    const onLeave = f.handlers.onLeave.bind(f.handlers);
+    f.handlers.onLeave = async (...args) => {
+      blocked.resolve();
+      await releaseLeave.promise;
+      return onLeave(...args);
+    };
+    try {
+      await refreshInvites({ guild: f.member.guild });
+      f.bus.emit(Events.GuildMemberRemove, f.member);
+      await blocked.promise;
+      current = [{ ...invite, uses: 1 }];
+      f.bus.emit(Events.GuildMemberAdd, f.member);
+      await flush();
+      const captured = await f.db.prepare('SELECT uses, inviter_id FROM invite_snapshots WHERE code = ?')
+        .get<{ uses: number; inviter_id: string }>(invite.code);
+      assert.equal(captured?.uses, 1);
+      assert.equal(captured?.inviter_id, inviterId);
+      assert.equal(await f.store.hasEvent(GUILD, MEMBER, 'member_join'), false,
+        'join persistence still waits for the earlier leave');
+      current = refresh === 'delete'
+        ? [{ ...invite, code: 'invite-B', uses: 0 }]
+        : [{ ...invite, uses: 1, inviter: { id: '612300000000000007' } }];
+      await refreshInvites({ guild: f.member.guild });
+      const changed = await f.db.prepare('SELECT inviter_id FROM invite_snapshots WHERE code = ?')
+        .get<{ inviter_id: string }>(invite.code);
+      assert.equal(changed?.inviter_id, refresh === 'delete' ? undefined : '612300000000000007');
+      releaseLeave.resolve();
+      await flush();
+      const row = await f.db.prepare("SELECT source, metadata FROM events WHERE event_type = 'member_join'")
+        .get<{ source: string; metadata: string }>();
+      assert.equal(row?.source, `invite:${invite.code}`);
+      assert.equal(row?.metadata ? JSON.parse(row.metadata).inviterId : null, inviterId);
+      const events = await f.db.prepare('SELECT event_type FROM events ORDER BY id')
+        .all<{ event_type: string }>();
+      assert.deepEqual(events.map((e) => e.event_type), ['member_leave', 'member_join']);
+    } finally {
+      releaseLeave.resolve();
+      f.release.resolve();
+      await flush();
+      await f.db.close();
+    }
+  });
 }
 
 for (const event of [Events.ShardResume, Events.ShardReady]) {

@@ -40,9 +40,12 @@ export function rankText(profile: LevelProfile, displayName: string): string {
   const progress = profile.xp - currentFloor;
   const levelSpan = profile.nextLevelXp - currentFloor;
   const next = profile.nextLevelXp - profile.xp;
+  const rank = profile.rank === null
+    ? '**Unranked** (no XP recorded)'
+    : `**#${profile.rank}** of **${profile.memberCount}**`;
   return [
     `**${displayName}**`,
-    `Level **${profile.level}** · Rank **#${profile.rank}** of **${profile.memberCount}**`,
+    `Level **${profile.level}** · Rank ${rank}`,
     `XP **${profile.xp.toLocaleString()}** · ${progress.toLocaleString()}/${levelSpan.toLocaleString()} this level · **${next.toLocaleString()}** to level ${profile.level + 1}`,
   ].join('\n');
 }
