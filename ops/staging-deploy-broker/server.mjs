@@ -363,9 +363,19 @@ function scanJsonCandidates(text) {
   const s = String(text ?? "");
   let inString = false;
   let escaped = false;
+  // Unlike the unfinished candidate's text tail, syntax has a bounded extent:
+  // an opaque credential containing an unmatched opener may be followed by
+  // ordinary prose. Quotes/escapes still count while inside a JSON string;
+  // punctuation there is content, not a container boundary.
+  let syntaxEnd = null;
+  // A covered key/value opener can own an exposed value tail even if that tail
+  // contains no more syntax. Retain separators from the ORIGINAL candidate;
+  // an unmatched opaque opener alone supplies no such structural evidence.
+  let hasValueBoundary = false;
   for (let i = 0; i < s.length; i += 1) {
     const c = s[i];
     if (inString) {
+      if (c === '"' || c === "\\") syntaxEnd = i + 1;
       if (escaped) escaped = false;
       else if (c === "\\") escaped = true;
       else if (c === '"') inString = false;
@@ -373,17 +383,28 @@ function scanJsonCandidates(text) {
     }
     // Prose quotes outside a candidate never affect JSON quote state.
     if (c === '"' && stack.length > 0) {
+      syntaxEnd = i + 1;
       inString = true;
       continue;
     }
-    if (c === "{" || c === "[") stack.push({ index: i, closer: c === "{" ? "}" : "]" });
-    else if ((c === "}" || c === "]") && stack.length > 0 && stack[stack.length - 1].closer === c) {
+    if (stack.length > 0 && (c === ":" || c === ",")) hasValueBoundary = true;
+    if (stack.length > 0 && (c === ":" || c === "," || c === "\\" || c === "}" || c === "]")) syntaxEnd = i + 1;
+    if (c === "{" || c === "[") {
+      if (stack.length === 0) hasValueBoundary = false;
+      syntaxEnd = i + 1;
+      stack.push({ index: i, closer: c === "{" ? "}" : "]" });
+    } else if ((c === "}" || c === "]") && stack.length > 0 && stack[stack.length - 1].closer === c) {
       const { index: start } = stack.pop();
       out.push([start, i + 1]);
     }
   }
   out.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
-  return { spans: out, incompleteAt: stack[0]?.index ?? null };
+  return {
+    spans: out,
+    incompleteAt: stack[0]?.index ?? null,
+    incompleteSyntaxEnd: stack.length > 0 ? syntaxEnd : null,
+    incompleteHasValueBoundary: stack.length > 0 && hasValueBoundary,
+  };
 }
 
 export function extractJsonCandidates(text) {
@@ -424,7 +445,14 @@ export function shapeEmbeddedText(value, secrets, depth = 0) {
   }
   if (source.incompleteAt !== null) {
     const covering = coveringSpan(credentials, source.incompleteAt);
-    if (covering && covering[0] === source.incompleteAt && covering[1] < value.length) return SECRET_PLACEHOLDER;
+    // Original syntax beyond the opener's merged credential span proves the
+    // unfinished container is not wholly opaque. A covered member/value boundary
+    // also owns any exposed tail: `prefix{"password":"` + `db-value`
+    // remains sensitive even without a closing quote. Masking must not erase
+    // that context, regardless of where the credential began. An opaque opener
+    // with no value boundary may still be followed by ordinary prose.
+    if (covering && (covering[1] < source.incompleteSyntaxEnd
+      || (source.incompleteHasValueBoundary && covering[1] < value.length))) return SECRET_PLACEHOLDER;
   }
   let scanView = "";
   let offset = 0;

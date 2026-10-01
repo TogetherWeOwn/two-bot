@@ -84,6 +84,7 @@ export function resolveBrokerUrl(raw) {
 const TEXT_KEYS = ["message", "output", "log", "line", "text", "content"];
 const TS_KEYS = ["timestamp", "ts", "time", "_ts", "created_at"];
 const PAYLOAD_KEYS = ["logs", "data", "output", "lines", "result"];
+const RECORD_PAYLOAD_KEYS = [...new Set([...TEXT_KEYS, ...PAYLOAD_KEYS])];
 
 // Match the broker's numeric epoch-millisecond contract without converting
 // numbers to strings for Date.parse. Out-of-range epochs cannot prove freshness.
@@ -199,16 +200,22 @@ function visitBotRecords(record, fallbackMs, depth, budget) {
     const botMs = timestampMs(record.ts);
     return [{ record, tsMs: Number.isFinite(botMs) ? botMs : wrapperMs }];
   }
+  if (depth >= 10) return [];
+  // A batch is valid only at the log root or through a selected transport
+  // payload. Never discover events by walking arbitrary metadata trees. Like
+  // normalization, a wrapper has one primary payload: a terminal message must
+  // not acquire independent siblings from another field on the same wrapper.
+  const key = RECORD_PAYLOAD_KEYS.find((key) =>
+    typeof record[key] === "string" || (record[key] !== null && typeof record[key] === "object"));
+  const values = Array.isArray(record) ? record : key === undefined ? [] : [record[key]];
   const found = [];
-  if (depth < 10) {
-    for (const [key, value] of Object.entries(record)) {
-      if ((Array.isArray(record) || TEXT_KEYS.includes(key)) && typeof value === "string") {
-        found.push(...findRecordsInText(value, wrapperMs, depth + 1, budget));
-      } else if (value !== null && typeof value === "object") {
-        found.push(...visitBotRecords(value, wrapperMs, depth + 1, budget));
-      }
-      if (budget.nodes <= 0) break;
+  for (const value of values) {
+    if (typeof value === "string") {
+      found.push(...findRecordsInText(value, wrapperMs, depth + 1, budget));
+    } else if (value !== null && typeof value === "object") {
+      found.push(...visitBotRecords(value, wrapperMs, depth + 1, budget));
     }
+    if (budget.nodes <= 0) break;
   }
   return found;
 }

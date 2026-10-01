@@ -1282,6 +1282,58 @@ for (const [name, panelToken, password] of [
   });
 }
 
+// --- PR291 finding 2 at 1194ab33 --------------------------------------------
+
+// A covered opener is opaque only while its framing stays inside credential
+// coverage. Inspect original syntax, not a masked scan that has lost the opener.
+for (const [name, panelToken, raw, expected] of [
+  ["covered quoted object", 'prefix{"', 'INFO prefix{"password":"db-value","note":"unfinished', SECRET_PLACEHOLDER],
+  ["covered bare object opener", "prefix{", 'INFO prefix{"password":"db-value","note":"unfinished', SECRET_PLACEHOLDER],
+  ["covered array", 'prefix[{"', 'INFO prefix[{"password":"db-value","note":"unfinished', SECRET_PLACEHOLDER],
+  ["credential starts at opener", '{"', 'INFO {"password":"db-value","note":"unfinished', SECRET_PLACEHOLDER],
+  ["covered entire quoted value opener", 'prefix{"password":"', 'INFO prefix{"password":"db-value', SECRET_PLACEHOLDER],
+  ["covered entire malformed value opener", "prefix{password:", "INFO prefix{password:db-value", SECRET_PLACEHOLDER],
+  ["complete quoted value opener control", 'prefix{"password":"', 'INFO prefix{"password":"db-value"}', SECRET_PLACEHOLDER],
+  ["complete malformed value opener control", "prefix{password:", "INFO prefix{password:db-value}", SECRET_PLACEHOLDER],
+  ["covered malformed object", "prefix{", "INFO prefix{password:db-value,note:unfinished", SECRET_PLACEHOLDER],
+  ["complete covered control", 'prefix{"', 'INFO prefix{"password":"db-value","note":"finished"}', SECRET_PLACEHOLDER],
+  ["incomplete uncovered control", "prefix", 'INFO prefix{"password":"db-value","note":"unfinished', `INFO ${SECRET_PLACEHOLDER}${SECRET_PLACEHOLDER}`],
+  ["opaque delimiter control", 'prefix{"', 'INFO prefix{" post', `INFO ${SECRET_PLACEHOLDER} post`],
+]) {
+  for (const wrap of ["raw", "message"]) {
+    test(`review-1194ab33 logs: ${name} (${wrap})`, async (t) => {
+      const config = parseConfig({
+        STAGING_BROKER_TOKEN: BROKER_TOKEN, COOLIFY_URL: PANEL_URL, COOLIFY_TOKEN: panelToken,
+      });
+      assert.equal(config.panelToken, panelToken, "synthetic framing credential is accepted");
+      const item = wrap === "raw" ? raw : { message: raw };
+      const srv = await boot(() => ({ logs: [item, JSON.stringify(READY_RECORD)] }), config);
+      t.after(srv.close);
+      const out = await req(srv.base, "/v1/staging/logs");
+      assert.equal(out.status, 200);
+      assert.equal(out.json.logs.length, 2);
+      assert.ok(!out.text.includes("db-value"), "sensitive content cannot become prose after masking a covered opener");
+      assert.equal(out.json.logs[0].message, wrap === "raw" ? expected : JSON.stringify({ message: expected }));
+      assert.equal(findReadyLines(findBotRecords(normalizeLogPayload(out.json))).length, 1, "independent valid record survives");
+    });
+  }
+}
+
+test("review-1194ab33 logs: incomplete framing uses original credential coverage unions", () => {
+  for (const secrets of [["prefix{", '{"'], ['{"', "prefix{"]]) {
+    assert.equal(shapeEmbeddedText('INFO prefix{"password":"db-value","note":"unfinished', secrets), SECRET_PLACEHOLDER);
+    assert.equal(shapeEmbeddedText('INFO prefix{" post', secrets), `INFO ${SECRET_PLACEHOLDER} post`, "overlapping opaque credentials remain one original-byte span");
+  }
+});
+
+test("review-1194ab33 logs: covered value boundaries use original credential coverage unions", () => {
+  for (const secrets of [['prefix{"password', 'password":"'], ['password":"', 'prefix{"password']]) {
+    assert.equal(shapeEmbeddedText('INFO prefix{"password":"db-value', secrets), SECRET_PLACEHOLDER);
+    assert.equal(shapeEmbeddedText('INFO prefix{"password":"   ', secrets), SECRET_PLACEHOLDER, "whitespace inside an unfinished sensitive string is still value content");
+    assert.equal(shapeEmbeddedText('INFO prefix{"password":"', secrets), `INFO ${SECRET_PLACEHOLDER}`, "a wholly credential-covered candidate with no exposed tail remains opaque");
+  }
+});
+
 test("logs-bounded unit: parseLogLines clamps to 1..500", () => {
   assert.equal(parseLogLines(new URLSearchParams("")), 200);
   assert.equal(parseLogLines(new URLSearchParams("lines=50")), 50);

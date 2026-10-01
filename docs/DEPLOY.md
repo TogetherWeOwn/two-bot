@@ -303,7 +303,15 @@ Each staging deploy runs the same six gates in order:
    design (§6.1). Three checks: `running:healthy`; a FRESH
    `{"msg":"ready","guilds":N>=1}` log line timestamped at or after the deploy
    start; and log timestamps advancing between two reads a minute apart. Any of
-   them missing fails.
+   them missing fails. Evidence must come from complete terminal bot records,
+   not diagnostic metadata or children recovered from a capped parent. The
+   explicit transport labels are `container_output`, `stdout`, and `stderr`.
+   A wrapper selects one primary payload, in order: `message`, `output`, `log`,
+   `line`, `text`, `content`, then `logs`, `data`, `lines`, `result`. Arrays at
+   the log root or on that selected path retain all object/JSON/prefixed-text
+   siblings and inherit the nearest usable timestamp. Other fields are not
+   searched for events; ambiguous/unsupported wrapper shapes cannot prove
+   readiness. A terminal bot `ts` outranks transport timestamp fields.
 
 The retired panel-bearer clients (`scripts/wait-for-coolify-deploy.mjs`,
 `scripts/smoke-staging-deploy.mjs`) remain in the tree for the post-TOG-6903

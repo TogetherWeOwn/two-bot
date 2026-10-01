@@ -425,7 +425,7 @@ test("smoke regression: raw string wrappers retain their timestamps through deco
   const items = [
     JSON.stringify({ output: line, timestamp: SMOKE_TS }),
     JSON.stringify({ message: JSON.stringify({ content: line, time: SMOKE_TS }) }),
-    JSON.stringify({ timestamp: SMOKE_TS, wrapper: { output: line } }),
+    JSON.stringify({ timestamp: SMOKE_TS, data: { output: line } }),
   ];
   const records = findReadyLines(await smokeRecordsFromPanel(t, items));
   assert.equal(records.length, items.length);
@@ -442,7 +442,7 @@ test("smoke regression: nearest usable timestamp wins and invalid nested timesta
   assert.equal(records.length, 1);
   assert.equal(records[0].tsMs, Date.parse(SMOKE_TS));
   const own = { ...SMOKE_READY, ts: old };
-  const ownRecords = findBotRecords(normalizeLogPayload(JSON.stringify({ timestamp: SMOKE_TS, inner: own })));
+  const ownRecords = findBotRecords(normalizeLogPayload(JSON.stringify({ timestamp: SMOKE_TS, data: own })));
   assert.equal(ownRecords[0].tsMs, Date.parse(old));
 });
 
@@ -680,6 +680,124 @@ test("smoke review-d883a973: incomplete parents cannot promote locally timestamp
   const incomplete = `INFO {"msg":"diagnostic","metadata":${JSON.stringify(ready)},"padding":"unfinished`;
   const records = findBotRecords([{ text: `${complete} ${incomplete}`, ts: SMOKE_TS }]);
   assert.deepEqual(records.map(({ record }) => record), [ready], "complete independent records survive; context-lost children do not");
+});
+
+// --- PR291 payload-provenance finding at 1194ab33 ---------------------------
+
+async function smokeCliFromPanel(t, makeItem) {
+  let reads = 0;
+  const server = createServer(createHandler({
+    brokerToken: FAKE.STAGING_BROKER_TOKEN,
+    panelUrl: "https://panel.example.invalid", panelToken: "synthetic-panel-credential",
+    appUuid: PINNED_STAGING_APP_UUID,
+  }, async ({ path }) => {
+    if (!path.includes("/logs")) return { status: "running:healthy" };
+    const timestamp = new Date(Date.parse(SMOKE_TS) + reads++ * 1000).toISOString();
+    return { logs: [makeItem(timestamp)] };
+  }));
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const child = spawn(process.execPath, [join(ROOT, "scripts", "broker-smoke.mjs"),
+    "--env-name", "staging", "--since", SMOKE_TS, "--interval-seconds", "1", "--timeout-seconds", "2",
+  ], { env: scrubbedEnv({
+    STAGING_BROKER_TOKEN: FAKE.STAGING_BROKER_TOKEN,
+    STAGING_BROKER_URL: `http://127.0.0.1:${server.address().port}`,
+  }), stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const timer = setTimeout(() => child.kill(), 8000);
+  let result;
+  try {
+    result = await new Promise((resolve, reject) => {
+      child.on("error", reject);
+      child.on("close", (code, signal) => resolve({ code, signal }));
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+  assert.equal(result.signal, null, "CLI must finish without the test timeout killing it");
+  assert.equal(reads, 2);
+  return { ...result, stdout, stderr };
+}
+
+for (const [name, makeItem] of [
+  ["textual metadata array", (timestamp) => ({ timestamp, message: 'INFO {"msg":"diagnostic"}',
+    metadata: ['INFO {"msg":"ready","guilds":1}'] })],
+  ["object metadata", (timestamp) => ({ timestamp, message: 'INFO {"msg":"diagnostic"}',
+    metadata: SMOKE_READY })],
+  ["explicit terminal diagnostic", (timestamp) => ({ timestamp, msg: "diagnostic",
+    message: 'INFO {"msg":"diagnostic"}', metadata: ['INFO {"msg":"ready","guilds":1}'] })],
+  ["competing sibling payload", (timestamp) => ({ timestamp, message: 'INFO {"msg":"diagnostic"}',
+    data: ['INFO {"msg":"ready","guilds":1}'] })],
+]) {
+  test(`smoke review-1194ab33: ${name} cannot promote readiness`, async (t) => {
+    const records = await smokeRecordsFromPanel(t, [makeItem(SMOKE_TS)]);
+    assert.equal(records.length, 1, "only the primary terminal payload is an event");
+    assert.equal(records[0].record.msg, "diagnostic");
+    assert.equal(findReadyLines(records).length, 0);
+  });
+  test(`smoke review-1194ab33: real CLI rejects ${name}`, async (t) => {
+    const result = await smokeCliFromPanel(t, makeItem);
+    assert.equal(result.code, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /no fresh/);
+    assert.doesNotMatch(result.stdout, /PASS/);
+  });
+}
+
+test("smoke review-1194ab33: unknown tree paths do not establish payload provenance", () => {
+  for (const key of ["metadata", "wrapper", "inner"]) {
+    for (const value of [SMOKE_READY, [SMOKE_READY], ['INFO {"msg":"ready","guilds":1}'],
+      { output: JSON.stringify(SMOKE_READY) }]) {
+      const text = JSON.stringify({ timestamp: SMOKE_TS, [key]: value });
+      assert.deepEqual(findBotRecords([{ text, ts: SMOKE_TS }]), [], key);
+    }
+  }
+});
+
+test("smoke review-1194ab33: valid transport batches pass handler-to-CLI smoke", async (t) => {
+  for (const format of [(record) => record, (record) => JSON.stringify(record), (record) => `INFO ${JSON.stringify(record)}`]) {
+    const result = await smokeCliFromPanel(t, (timestamp) => ({ msg: "stdout", timestamp,
+      data: [SMOKE_READY, { msg: "heartbeat" }].map(format),
+      metadata: ['INFO {"msg":"diagnostic"}'],
+    }));
+    assert.equal(result.code, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /PASS/);
+  }
+});
+
+test("smoke review-1194ab33: real CLI rejects metadata-only timestamp advancement", async (t) => {
+  const result = await smokeCliFromPanel(t, (timestamp) => ({ timestamp: SMOKE_TS,
+    message: JSON.stringify({ ...SMOKE_READY, ts: SMOKE_TS }),
+    metadata: [{ msg: "heartbeat", ts: timestamp }],
+  }));
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /timestamps did not advance/);
+  assert.doesNotMatch(result.stdout, /PASS/);
+});
+
+test("smoke review-1194ab33: root textual batches retain complete siblings", async (t) => {
+  const events = [{ ...SMOKE_READY, ts: SMOKE_TS }, { msg: "heartbeat", ts: "2026-09-30T19:02:00.000Z" }];
+  for (const format of [(record) => record, (record) => JSON.stringify(record), (record) => `INFO ${JSON.stringify(record)}`]) {
+    const text = JSON.stringify(events.map(format));
+    const records = await smokeRecordsFromPanel(t, [text]);
+    assert.deepEqual(records.map(({ record }) => record), events);
+    assert.equal(maxTimestampMs(records), Date.parse(events[1].ts));
+  }
+});
+
+test("smoke review-1194ab33: selected payload retains ready siblings but excludes metadata", async (t) => {
+  const events = [SMOKE_READY, { msg: "heartbeat" }];
+  for (const key of ["logs", "data", "output", "lines", "result", "message", "log", "line", "text", "content"]) {
+    const records = await smokeRecordsFromPanel(t, [{ timestamp: SMOKE_TS,
+      [key]: events.map((record) => `INFO ${JSON.stringify(record)}`),
+      metadata: [{ msg: "diagnostic", ts: "2026-09-30T19:02:00.000Z" }],
+    }]);
+    assert.deepEqual(records.map(({ record }) => record), events, key);
+    assert.deepEqual(records.map(({ tsMs }) => tsMs), [Date.parse(SMOKE_TS), Date.parse(SMOKE_TS)], key);
+    assert.equal(maxTimestampMs(records), Date.parse(SMOKE_TS), "metadata cannot prove advancing log timestamps");
+  }
 });
 
 // --- deploy.yml wiring (the TOG-913 shape) -----------------------------------
