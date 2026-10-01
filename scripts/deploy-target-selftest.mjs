@@ -498,11 +498,11 @@ test("smoke review-8f2dac86: envelope messages cannot shadow nested bot records"
   for (const found of records) assert.equal(found.tsMs, Date.parse(SMOKE_TS));
 });
 
-test("smoke review-8f2dac86: complete inner records survive broker-capped outer wrappers", async (t) => {
+test("smoke review-8f2dac86: inner records need intact outer-wrapper provenance", async (t) => {
   const ready = { ...SMOKE_READY, ts: SMOKE_TS, user: 'Fake}Bot\\"' };
   const items = [10, 5000].map((length) => `INFO ${JSON.stringify({ data: ready, padding: "x".repeat(length) })}`);
   const records = findReadyLines(await smokeRecordsFromPanel(t, items));
-  assert.equal(records.length, items.length);
+  assert.equal(records.length, 1, "capped wrappers no longer establish terminal-event provenance");
   for (const found of records) {
     assert.deepEqual(found.record, ready);
     assert.equal(found.tsMs, Date.parse(SMOKE_TS));
@@ -522,9 +522,8 @@ test("smoke review-617910d9: recovered children never inherit newer delivery tim
       timestamp: SMOKE_TS,
       message: `INFO ${JSON.stringify({ timestamp: old, data: SMOKE_READY, padding: "x".repeat(length) })}`,
     }]));
-    assert.equal(records.length, 1);
+    assert.equal(records.length, length === 10 ? 1 : 0, "lost parent provenance cannot be restored by delivery time");
     if (length === 10) assert.equal(records[0].tsMs, Date.parse(old));
-    else assert.ok(Number.isNaN(records[0].tsMs), "lost nearest timestamp cannot fall back to delivery time");
     assert.equal(records.filter(({ tsMs }) => tsMs >= Date.parse(SMOKE_TS)).length, 0);
   }
 });
@@ -598,6 +597,89 @@ test("smoke review-617910d9: top-level arrays and adjacent complete records keep
   for (const text of [JSON.stringify(records), records.map((record) => `INFO ${JSON.stringify(record)}`).join(" ")]) {
     assert.deepEqual(findBotRecords([{ text, ts: null }]).map(({ record }) => record), records);
   }
+});
+
+// --- PR291 findings 1 and 3 at d883a973 --------------------------------------
+
+for (const length of [10, 5000]) {
+  test(`smoke review-d883a973: diagnostic metadata never proves readiness (${length} padding)`, async (t) => {
+    const diagnostic = {
+      msg: "diagnostic", ts: "2026-09-30T18:01:00.000Z",
+      metadata: { ...SMOKE_READY, ts: SMOKE_TS }, padding: "A".repeat(length),
+    };
+    const records = await smokeRecordsFromPanel(t, [{ timestamp: SMOKE_TS, message: `INFO ${JSON.stringify(diagnostic)}` }]);
+    assert.equal(findReadyLines(records).length, 0, "losing terminal-parent provenance must not promote metadata");
+  });
+
+  test(`smoke review-d883a973: real CLI rejects metadata-only readiness (${length} padding)`, async (t) => {
+    let reads = 0;
+    const server = createServer(createHandler({
+      brokerToken: FAKE.STAGING_BROKER_TOKEN,
+      panelUrl: "https://panel.example.invalid", panelToken: "synthetic-panel-credential",
+      appUuid: PINNED_STAGING_APP_UUID,
+    }, async ({ path }) => {
+      if (!path.includes("/logs")) return { status: "running:healthy" };
+      const timestamp = new Date(Date.parse(SMOKE_TS) + reads++ * 1000).toISOString();
+      return { logs: [{ timestamp, message: `INFO ${JSON.stringify({
+        msg: "diagnostic", ts: "2026-09-30T18:01:00.000Z",
+        metadata: { ...SMOKE_READY, ts: timestamp }, padding: "A".repeat(length),
+      })}` }] };
+    }));
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    t.after(() => new Promise((resolve) => server.close(resolve)));
+    const child = spawn(process.execPath, [join(ROOT, "scripts", "broker-smoke.mjs"),
+      "--env-name", "staging", "--since", SMOKE_TS, "--interval-seconds", "1", "--timeout-seconds", "2",
+    ], { env: scrubbedEnv({
+      STAGING_BROKER_TOKEN: FAKE.STAGING_BROKER_TOKEN,
+      STAGING_BROKER_URL: `http://127.0.0.1:${server.address().port}`,
+    }), stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    const timer = setTimeout(() => child.kill(), 8000);
+    let result;
+    try {
+      result = await new Promise((resolve, reject) => {
+        child.on("error", reject);
+        child.on("close", (code, signal) => resolve({ code, signal }));
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    assert.equal(result.signal, null, "CLI must finish without the test timeout killing it");
+    assert.equal(result.code, 1, stdout + stderr);
+    assert.equal(reads, 2);
+    assert.match(stderr, /no fresh/);
+    assert.doesNotMatch(stdout, /PASS/);
+  });
+}
+
+test("smoke review-d883a973: textual batch entries retain siblings and wrapper timestamps", async (t) => {
+  const ready = { ...SMOKE_READY, ts: SMOKE_TS };
+  const newest = { msg: "heartbeat", ts: "2026-09-30T19:02:00.000Z" };
+  for (const format of [
+    (record) => record,
+    (record) => JSON.stringify(record),
+    (record) => `INFO ${JSON.stringify(record)}`,
+  ]) {
+    const records = await smokeRecordsFromPanel(t, [{ msg: "stdout", timestamp: SMOKE_TS, data: [ready, newest].map(format) }]);
+    assert.deepEqual(records.map(({ record }) => record), [ready, newest]);
+    assert.equal(findReadyLines(records).length, 1);
+    assert.equal(maxTimestampMs(records), Date.parse(newest.ts));
+    const fallback = await smokeRecordsFromPanel(t, [{ msg: "stdout", timestamp: SMOKE_TS,
+      data: [format(SMOKE_READY), format({ msg: "heartbeat" })],
+    }]);
+    assert.deepEqual(fallback.map(({ tsMs }) => tsMs), [Date.parse(SMOKE_TS), Date.parse(SMOKE_TS)]);
+  }
+});
+
+test("smoke review-d883a973: incomplete parents cannot promote locally timestamped children", () => {
+  const ready = { ...SMOKE_READY, ts: SMOKE_TS };
+  const complete = `INFO ${JSON.stringify(ready)}`;
+  const incomplete = `INFO {"msg":"diagnostic","metadata":${JSON.stringify(ready)},"padding":"unfinished`;
+  const records = findBotRecords([{ text: `${complete} ${incomplete}`, ts: SMOKE_TS }]);
+  assert.deepEqual(records.map(({ record }) => record), [ready], "complete independent records survive; context-lost children do not");
 });
 
 // --- deploy.yml wiring (the TOG-913 shape) -----------------------------------

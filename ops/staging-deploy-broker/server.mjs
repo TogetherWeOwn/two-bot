@@ -409,6 +409,15 @@ export function shapeEmbeddedText(value, secrets, depth = 0) {
   // collapse the text rather than lose its classification. Containers wholly
   // inside an opaque credential remain safe to mask as part of that credential.
   const source = scanJsonCandidates(value);
+  // Masking a quote or escape changes subsequent JSON lexical state even
+  // when no opener is covered. A closer inside a sensitive string can then
+  // look like a record boundary and expose its suffix as prose. Fail closed
+  // on such ambiguous framing instead of classifying a modified scan view.
+  const exposedContainer = source.spans.some(([start]) => !coveringSpan(credentials, start))
+    || (source.incompleteAt !== null && !coveringSpan(credentials, source.incompleteAt));
+  if (exposedContainer && credentials.some(([start, end]) => /["\\]/.test(value.slice(start, end)))) {
+    return SECRET_PLACEHOLDER;
+  }
   for (const [start, end] of source.spans) {
     const covering = coveringSpan(credentials, start);
     if (covering && covering[1] < end) return SECRET_PLACEHOLDER;

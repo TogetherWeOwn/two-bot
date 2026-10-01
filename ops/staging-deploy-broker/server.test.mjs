@@ -1255,6 +1255,33 @@ test("review-617910d9 scrubber: dot-free known credentials have bounded matching
   assert.equal(run.status, 0, run.stdout + run.stderr);
 });
 
+// --- PR291 finding 2 at d883a973 --------------------------------------------
+
+for (const [name, panelToken, password] of [
+  ["quote", '"', "db-value}credential-tail"],
+  ["escape", "\\", 'db-value"}credential-tail'],
+]) {
+  test(`review-d883a973 logs: masked ${name} cannot expose quoted password suffixes`, async (t) => {
+    const config = parseConfig({
+      STAGING_BROKER_TOKEN: BROKER_TOKEN, COOLIFY_URL: PANEL_URL, COOLIFY_TOKEN: panelToken,
+    });
+    const object = { password, note: "ordinary" };
+    const json = JSON.stringify(object);
+    const srv = await boot(() => ({ logs: [
+      object, json, `INFO ${json}`, { message: `INFO ${json}` },
+      `INFO ${JSON.stringify([object])}`,
+      `INFO ${json.slice(0, -1)}`,
+    ] }), config);
+    t.after(srv.close);
+    const out = await req(srv.base, "/v1/staging/logs");
+    assert.equal(out.status, 200);
+    assert.equal(out.json.logs.length, 6);
+    assert.ok(!out.text.includes("db-value"), "no sensitive prefix crosses any representation");
+    assert.ok(!out.text.includes("credential-tail"), "no sensitive suffix crosses masked quote/escape framing");
+    assert.ok(out.json.logs.every(({ message }) => message.includes(SECRET_PLACEHOLDER)));
+  });
+}
+
 test("logs-bounded unit: parseLogLines clamps to 1..500", () => {
   assert.equal(parseLogLines(new URLSearchParams("")), 200);
   assert.equal(parseLogLines(new URLSearchParams("lines=50")), 50);

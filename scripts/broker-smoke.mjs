@@ -151,8 +151,9 @@ function scanCandidates(text) {
     else if (stack.length > 0 && char === stack[stack.length - 1].closer) spans.push([stack.pop().start, i + 1]);
   }
   // Prefer complete parents so traversal retains their timestamp/record type.
-  // A recovered child has LOST an enclosing context. Never give it the fresh
-  // delivery timestamp as a fallback; only surviving local timestamps count.
+  // A recovered child has LOST enclosing record provenance, not just its
+  // timestamp. Even a fresh local ts cannot prove it was a terminal event
+  // rather than diagnostic metadata; release evidence must reject it.
   spans.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
   const out = [];
   let end = 0;
@@ -176,13 +177,14 @@ function findRecordsInText(text, fallbackMs = NaN, depth = 0, budget = { nodes: 
   const found = [];
   if (depth > 10 || budget.nodes <= 0) return found;
   for (const candidate of scanCandidates(text)) {
+    if (candidate.recovered) continue;
     let record = null;
     try {
       record = JSON.parse(candidate.text);
     } catch {
       continue;
     }
-    found.push(...visitBotRecords(record, candidate.recovered ? NaN : fallbackMs, depth, budget));
+    found.push(...visitBotRecords(record, fallbackMs, depth, budget));
     if (budget.nodes <= 0) break;
   }
   return found;
@@ -200,7 +202,7 @@ function visitBotRecords(record, fallbackMs, depth, budget) {
   const found = [];
   if (depth < 10) {
     for (const [key, value] of Object.entries(record)) {
-      if (TEXT_KEYS.includes(key) && typeof value === "string") {
+      if ((Array.isArray(record) || TEXT_KEYS.includes(key)) && typeof value === "string") {
         found.push(...findRecordsInText(value, wrapperMs, depth + 1, budget));
       } else if (value !== null && typeof value === "object") {
         found.push(...visitBotRecords(value, wrapperMs, depth + 1, budget));
