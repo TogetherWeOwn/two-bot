@@ -35,6 +35,7 @@
 // Exit: 0 all green, 1 a case failed. Stdlib only.
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createServer } from "node:http";
 import test from "node:test";
 
@@ -1197,6 +1198,61 @@ test("review-8f2dac86 logs: configured credentials redact as unions of original 
   assert.equal(scrubSecrets("aaaaa", ["aaa"]), SECRET_PLACEHOLDER, "self-overlapping matches merge");
   const generic = "gh" + "p_" + "A".repeat(24);
   assert.equal(scrubSecrets(generic, ["AAAA"]), SECRET_PLACEHOLDER, "known-secret matches cannot break a generic match");
+});
+
+// --- PR291 findings 1, 3 and 6 at 617910d9 -----------------------------------
+
+for (const wrap of ["raw", "message", "connection"]) {
+  test(`review-617910d9 logs: generic credential coverage survives delimiters (${wrap})`, async (t) => {
+    const uri = "postgresql://bot:pa[ss]word@dbhost.invalid/db";
+    assert.equal(decodeURIComponent(new URL(uri).password), "pa[ss]word");
+    assert.equal(scrubSecrets(uri, []), SECRET_PLACEHOLDER);
+    const item = wrap === "raw" ? uri : { [wrap]: uri };
+    const srv = await boot(() => ({ logs: [item, JSON.stringify(READY_RECORD)] }));
+    t.after(srv.close);
+    const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+    assert.equal(out.status, 200);
+    const expected = wrap === "raw" ? SECRET_PLACEHOLDER : JSON.stringify({ [wrap]: SECRET_PLACEHOLDER });
+    assert.equal(out.json.logs[0].message, expected, "no username/password fragments cross the handler");
+    assert.equal(findReadyLines(findBotRecords(normalizeLogPayload(out.json))).length, 1);
+  });
+}
+
+for (const panelToken of ["{", "[", '"', ":", "}", "]"]) {
+  test(`review-617910d9 logs: framing credentials cannot hide sensitive-key policy (${panelToken})`, async (t) => {
+    const config = parseConfig({
+      STAGING_BROKER_TOKEN: BROKER_TOKEN, COOLIFY_URL: PANEL_URL, COOLIFY_TOKEN: panelToken,
+    });
+    const object = { password: "ordinary-db-value" };
+    const srv = await boot(() => ({ logs: [
+      object, JSON.stringify(object), `INFO ${JSON.stringify(object)}`,
+      { message: `INFO ${JSON.stringify(object)}` }, `INFO ${JSON.stringify([object])}`,
+      `INFO ${JSON.stringify(object).slice(0, -1)}`,
+    ] }), config);
+    t.after(srv.close);
+    const out = await req(srv.base, "/v1/staging/logs");
+    assert.equal(out.status, 200);
+    assert.ok(!out.text.includes("ordinary-db-value"));
+    assert.ok(out.json.logs.every(({ message }) => message.includes(SECRET_PLACEHOLDER)));
+  });
+}
+
+test("review-617910d9 scrubber: dot-free known credentials have bounded matching cost", () => {
+  // Isolate the synchronous scan; a regression must fail within a timeout,
+  // not hang the suite. Synthetic, 64 KiB input; no live-service load probe.
+  const run = spawnSync(process.execPath, ["--input-type=module", "--eval", `
+    import assert from "node:assert/strict";
+    import { scrubSecrets, SECRET_PLACEHOLDER } from ${JSON.stringify(new URL("./server.mjs", import.meta.url).href)};
+    const secret = "A".repeat(32);
+    scrubSecrets(secret, [secret]);
+    const start = performance.now();
+    assert.equal(scrubSecrets(secret.repeat(2048), [secret]), SECRET_PLACEHOLDER);
+    const elapsedMs = performance.now() - start;
+    console.log(JSON.stringify({ elapsedMs }));
+    assert.ok(elapsedMs < 1000, "64 KiB scan must complete under one second");
+  `], { encoding: "utf8", timeout: 5000 });
+  assert.equal(run.error, undefined, "isolated scan must not time out");
+  assert.equal(run.status, 0, run.stdout + run.stderr);
 });
 
 test("logs-bounded unit: parseLogLines clamps to 1..500", () => {

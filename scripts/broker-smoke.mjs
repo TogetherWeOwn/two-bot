@@ -131,8 +131,11 @@ export function normalizeLogPayload(payload) {
   return [];
 }
 
-/** Yield outermost COMPLETE objects; a capped wrapper may still contain one. */
-export function jsonCandidates(text) {
+// Only these msg labels denote transport rather than a terminal bot event.
+// A terminal event's metadata must neither hide it nor become readiness proof.
+const TRANSPORT_MESSAGES = new Set(["container_output", "stdout", "stderr"]);
+
+function scanCandidates(text) {
   const spans = [];
   const stack = [];
   let quoted = false;
@@ -144,75 +147,75 @@ export function jsonCandidates(text) {
       else if (char === "\\") escaped = true;
       else if (char === '"') quoted = false;
     } else if (char === '"' && stack.length > 0) quoted = true;
-    else if (char === "{") stack.push(i);
-    else if (char === "}" && stack.length > 0) spans.push([stack.pop(), i + 1]);
+    else if (char === "{" || char === "[") stack.push({ start: i, closer: char === "{" ? "}" : "]" });
+    else if (stack.length > 0 && char === stack[stack.length - 1].closer) spans.push([stack.pop().start, i + 1]);
   }
-  // Prefer a complete parent so traversal retains its timestamp. Only use a
-  // completed child on its own when its parent was truncated by the broker.
+  // Prefer complete parents so traversal retains their timestamp/record type.
+  // A recovered child has LOST an enclosing context. Never give it the fresh
+  // delivery timestamp as a fallback; only surviving local timestamps count.
   spans.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
   const out = [];
   let end = 0;
+  const incompleteAt = stack[0]?.start ?? Infinity;
   for (const [start, stop] of spans) {
     if (start < end) continue;
-    out.push(text.slice(start, stop));
+    out.push({ text: text.slice(start, stop), recovered: incompleteAt < start });
     end = stop;
   }
   return out;
 }
 
-// Decode outer wrappers first so their nearest usable timestamp accompanies
-// the bot record. Traversal and text decoding share a depth/node budget; nested
-// objects and escaped text wrappers never need separate brace-based guesses.
-function findBotRecord(text, fallbackMs = NaN, depth = 0, budget = { nodes: 10000 }) {
-  if (depth > 10 || budget.nodes <= 0) return null;
-  for (const candidate of jsonCandidates(text)) {
+/** Yield outermost COMPLETE containers; a capped wrapper may still contain one. */
+export function jsonCandidates(text) {
+  return scanCandidates(text).map((candidate) => candidate.text);
+}
+
+// Every complete sibling shares a depth/node budget. A batch is not just its
+// first record, and a terminal msg is not an envelope around arbitrary metadata.
+function findRecordsInText(text, fallbackMs = NaN, depth = 0, budget = { nodes: 10000 }) {
+  const found = [];
+  if (depth > 10 || budget.nodes <= 0) return found;
+  for (const candidate of scanCandidates(text)) {
     let record = null;
     try {
-      record = JSON.parse(candidate);
+      record = JSON.parse(candidate.text);
     } catch {
       continue;
     }
-    const found = visitBotRecord(record, fallbackMs, depth, budget);
-    if (found !== null) return found;
+    found.push(...visitBotRecords(record, candidate.recovered ? NaN : fallbackMs, depth, budget));
     if (budget.nodes <= 0) break;
   }
-  return null;
+  return found;
 }
 
-function visitBotRecord(record, fallbackMs, depth, budget) {
-  if (depth > 10 || --budget.nodes < 0 || record === null || typeof record !== "object") return null;
+function visitBotRecords(record, fallbackMs, depth, budget) {
+  if (depth > 10 || --budget.nodes < 0 || record === null || typeof record !== "object") return [];
   const ownMs = timestampMs(usableTimestamp(record));
   const wrapperMs = Number.isFinite(ownMs) ? ownMs : fallbackMs;
+  if (typeof record.msg === "string" && !TRANSPORT_MESSAGES.has(record.msg)) {
+    // Terminal bot ts outranks transport-style fields on the same event.
+    const botMs = timestampMs(record.ts);
+    return [{ record, tsMs: Number.isFinite(botMs) ? botMs : wrapperMs }];
+  }
+  const found = [];
   if (depth < 10) {
-    // Container envelopes can have their own msg. A nested bot record must
-    // not be hidden by that transport label (e.g. msg: container_output).
-    for (const key of TEXT_KEYS) {
-      if (typeof record[key] !== "string") continue;
-      const nested = findBotRecord(record[key], wrapperMs, depth + 1, budget);
-      if (nested !== null) return nested;
-    }
-    for (const value of Object.values(record)) {
-      if (value === null || typeof value !== "object") continue;
-      const nested = visitBotRecord(value, wrapperMs, depth + 1, budget);
-      if (nested !== null) return nested;
+    for (const [key, value] of Object.entries(record)) {
+      if (TEXT_KEYS.includes(key) && typeof value === "string") {
+        found.push(...findRecordsInText(value, wrapperMs, depth + 1, budget));
+      } else if (value !== null && typeof value === "object") {
+        found.push(...visitBotRecords(value, wrapperMs, depth + 1, budget));
+      }
       if (budget.nodes <= 0) break;
     }
   }
-  if (typeof record.msg !== "string") return null;
-  // Terminal bot ts is authoritative even if the record also carries newer
-  // transport metadata. Replaying an old ready event must not make it fresh.
-  const botMs = timestampMs(record.ts);
-  return { record, tsMs: Number.isFinite(botMs) ? botMs : wrapperMs };
+  return found;
 }
 
-/**
- * Find bot log records in normalized lines. Returns [{ record, tsMs }].
- */
+/** Find all terminal bot records in normalized lines. Returns [{ record, tsMs }]. */
 export function findBotRecords(lines) {
   const found = [];
   for (const { text, ts } of lines) {
-    const record = findBotRecord(text, timestampMs(ts));
-    if (record !== null) found.push(record);
+    found.push(...findRecordsInText(text, timestampMs(ts)));
   }
   return found;
 }

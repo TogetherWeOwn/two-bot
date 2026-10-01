@@ -223,7 +223,9 @@ export const MAX_SHAPED_LOG_BYTES = 64 * 1024;
 export const SECRET_PLACEHOLDER = "[redacted]";
 
 const GENERIC_SECRET_RES = [
-  /[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}/g,
+  // Try only the start of each token run. Retrying a greedy, dot-free run at
+  // every character is quadratic before the log/output bounds can apply.
+  /(?<![A-Za-z0-9_-])[A-Za-z0-9_-]{24,}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}/g,
   /mfa\.[A-Za-z0-9_-]{20,}/g,
   /xox[bpas]-[A-Za-z0-9-]{10,}/g,
   /gh[pousr]_[A-Za-z0-9]{20,}/g,
@@ -244,7 +246,7 @@ const GENERIC_SECRET_RES = [
   // credential-free URLs retain their text. This also covers raw log prose.
   // Apostrophes are valid userinfo sub-delimiters (RFC 3986), not a boundary
   // before the @. After userinfo, quotes can still delimit surrounding prose.
-  /\b[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s/?#"<>]+@[^\s"'<>]*/g,
+  /(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s/?#"<>]+@[^\s"'<>]*/g,
 ];
 
 // Object keys whose VALUE is sensitive regardless of shape (matched
@@ -293,15 +295,34 @@ function mergeSpans(spans) {
   return merged;
 }
 
+// A single original-byte coverage map drives both delimiter scanning and text
+// redaction. Splitting text before generic matching can expose URI/token pieces.
+function credentialSpans(text, secrets) {
+  const spans = knownSecretSpans(text, secrets);
+  for (const re of GENERIC_SECRET_RES) {
+    re.lastIndex = 0;
+    for (const match of text.matchAll(re)) spans.push([match.index, match.index + match[0].length]);
+  }
+  return mergeSpans(spans);
+}
+
 /** Scrub all credential spans together; one replacement must not hide another. */
 export function scrubSecrets(text, secrets) {
   const original = String(text ?? "");
-  const spans = knownSecretSpans(original, secrets);
-  for (const re of GENERIC_SECRET_RES) {
-    re.lastIndex = 0;
-    for (const match of original.matchAll(re)) spans.push([match.index, match.index + match[0].length]);
+  return redactSpans(original, credentialSpans(original, secrets));
+}
+
+// Binary search avoids rescanning every credential for every JSON candidate.
+function coveringSpan(spans, index) {
+  let low = 0;
+  let high = spans.length;
+  while (low < high) {
+    const mid = (low + high) >>> 1;
+    if (spans[mid][0] <= index) low = mid + 1;
+    else high = mid;
   }
-  return redactSpans(original, mergeSpans(spans));
+  const span = spans[low - 1];
+  return span && index < span[1] ? span : null;
 }
 
 /**
@@ -378,13 +399,27 @@ export function extractJsonCandidates(text) {
  */
 export function shapeEmbeddedText(value, secrets, depth = 0) {
   const secretList = Array.isArray(secrets) ? secrets : [];
-  // Hide credential delimiters from the scanner WITHOUT changing source bytes
-  // or offsets. Decoding must still see original keys to classify sensitivity:
-  // replacing a token-shaped password key first would erase that classification.
+  // Hide complete credentials from delimiter scanning, but classify decoded
+  // keys on original bytes. Configured AND generic spans share this coverage.
   value = String(value ?? "");
+  const credentials = credentialSpans(value, secretList);
+  // A short credential can also be real JSON framing (e.g. the accepted
+  // panel token "{"). Masking that opener would silently turn sensitive-key
+  // JSON into prose. If a covered opener belongs to a larger source container,
+  // collapse the text rather than lose its classification. Containers wholly
+  // inside an opaque credential remain safe to mask as part of that credential.
+  const source = scanJsonCandidates(value);
+  for (const [start, end] of source.spans) {
+    const covering = coveringSpan(credentials, start);
+    if (covering && covering[1] < end) return SECRET_PLACEHOLDER;
+  }
+  if (source.incompleteAt !== null) {
+    const covering = coveringSpan(credentials, source.incompleteAt);
+    if (covering && covering[0] === source.incompleteAt && covering[1] < value.length) return SECRET_PLACEHOLDER;
+  }
   let scanView = "";
   let offset = 0;
-  for (const [start, end] of mergeSpans(knownSecretSpans(value, secretList))) {
+  for (const [start, end] of credentials) {
     scanView += value.slice(offset, start) + "x".repeat(end - start);
     offset = end;
   }

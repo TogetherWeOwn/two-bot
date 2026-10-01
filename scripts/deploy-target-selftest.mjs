@@ -45,7 +45,7 @@
 // Exit: 0 all green, 1 a case failed. Stdlib only.
 
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { createHandler, PINNED_STAGING_APP_UUID } from "../ops/staging-deploy-broker/server.mjs";
@@ -511,6 +511,93 @@ test("smoke review-8f2dac86: complete inner records survive broker-capped outer 
   assert.deepEqual(jsonCandidates(incomplete), [JSON.stringify(ready)]);
   const quoted = JSON.stringify({ padding: JSON.stringify(ready) }).slice(0, -1);
   assert.deepEqual(jsonCandidates(quoted), [], "escaped string contents are not independent JSON records");
+});
+
+// --- PR291 findings 2, 4 and 5 at 617910d9 -----------------------------------
+
+test("smoke review-617910d9: recovered children never inherit newer delivery timestamps", async (t) => {
+  const old = "2026-09-30T18:01:00.000Z";
+  for (const length of [10, 5000]) {
+    const records = findReadyLines(await smokeRecordsFromPanel(t, [{
+      timestamp: SMOKE_TS,
+      message: `INFO ${JSON.stringify({ timestamp: old, data: SMOKE_READY, padding: "x".repeat(length) })}`,
+    }]));
+    assert.equal(records.length, 1);
+    if (length === 10) assert.equal(records[0].tsMs, Date.parse(old));
+    else assert.ok(Number.isNaN(records[0].tsMs), "lost nearest timestamp cannot fall back to delivery time");
+    assert.equal(records.filter(({ tsMs }) => tsMs >= Date.parse(SMOKE_TS)).length, 0);
+  }
+});
+
+test("smoke review-617910d9: CLI rejects capped stale ready events despite advancing delivery times", async (t) => {
+  let reads = 0;
+  const server = createServer(createHandler({
+    brokerToken: FAKE.STAGING_BROKER_TOKEN,
+    panelUrl: "https://panel.example.invalid",
+    panelToken: "synthetic-panel-credential",
+    appUuid: PINNED_STAGING_APP_UUID,
+  }, async ({ path }) => {
+    if (!path.includes("/logs")) return { status: "running:healthy" };
+    const timestamp = new Date(Date.parse(SMOKE_TS) + reads++ * 1000).toISOString();
+    return { logs: [{ timestamp, message: `INFO ${JSON.stringify({
+      timestamp: "2026-09-30T18:01:00.000Z", data: SMOKE_READY, padding: "x".repeat(5000),
+    })}` }] };
+  }));
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const child = spawn(process.execPath, [join(ROOT, "scripts", "broker-smoke.mjs"),
+    "--env-name", "staging", "--since", SMOKE_TS, "--interval-seconds", "1", "--timeout-seconds", "2",
+  ], { env: scrubbedEnv({
+    STAGING_BROKER_TOKEN: FAKE.STAGING_BROKER_TOKEN,
+    STAGING_BROKER_URL: `http://127.0.0.1:${server.address().port}`,
+  }), stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const timer = setTimeout(() => child.kill(), 8000);
+  let result;
+  try {
+    result = await new Promise((resolve, reject) => {
+      child.on("error", reject);
+      child.on("close", (code, signal) => resolve({ code, signal }));
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+  assert.equal(result.signal, null, "CLI must finish without the test timeout killing it");
+  assert.equal(result.code, 1, stdout + stderr);
+  assert.equal(reads, 2);
+  assert.match(stderr, /no fresh/);
+  assert.doesNotMatch(stdout, /PASS/);
+});
+
+test("smoke review-617910d9: terminal events outrank diagnostic metadata, never the reverse", async (t) => {
+  const ready = { ...SMOKE_READY, ts: SMOKE_TS, metadata: { msg: "cache_loaded" } };
+  const diagnostic = { msg: "diagnostic", ts: SMOKE_TS, metadata: SMOKE_READY };
+  const records = await smokeRecordsFromPanel(t, [ready, diagnostic]);
+  assert.deepEqual(records.map(({ record }) => record), [ready, diagnostic]);
+  assert.deepEqual(findReadyLines(records).map(({ record }) => record), [ready]);
+});
+
+test("smoke review-617910d9: batched envelopes retain every sibling and the newest timestamp", async (t) => {
+  const older = { msg: "health_listening", ts: "2026-09-30T18:01:00.000Z" };
+  const ready = { ...SMOKE_READY, ts: SMOKE_TS };
+  const newest = { msg: "heartbeat", ts: "2026-09-30T19:02:00.000Z" };
+  for (const data of [[older, ready, newest], [older, { msg: "stdout", data: [ready, newest] }]]) {
+    const records = await smokeRecordsFromPanel(t, [{ msg: "container_output", data }]);
+    assert.deepEqual(records.map(({ record }) => record), [older, ready, newest]);
+    assert.equal(findReadyLines(records).length, 1);
+    assert.equal(findReadyLines(records)[0].tsMs, Date.parse(SMOKE_TS));
+    assert.equal(maxTimestampMs(records), Date.parse(newest.ts));
+  }
+});
+
+test("smoke review-617910d9: top-level arrays and adjacent complete records keep all events", () => {
+  const records = [{ msg: "health_listening", ts: "2026-09-30T18:01:00.000Z" }, { ...SMOKE_READY, ts: SMOKE_TS }];
+  for (const text of [JSON.stringify(records), records.map((record) => `INFO ${JSON.stringify(record)}`).join(" ")]) {
+    assert.deepEqual(findBotRecords([{ text, ts: null }]).map(({ record }) => record), records);
+  }
 });
 
 // --- deploy.yml wiring (the TOG-913 shape) -----------------------------------
