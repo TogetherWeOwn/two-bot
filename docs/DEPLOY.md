@@ -316,10 +316,24 @@ Each staging deploy runs the same six gates in order:
    sibling. A terminal bot `ts` outranks transport timestamp fields. Before
    emitting shaped logs, the broker rejects a source object whose authority
    field name is scrubbed, whose string `msg` changes through decoding or
-   redaction, or whose timestamp changes value or usable/unusable classification
+   redaction, whose non-string `msg` becomes a string (including at the depth
+   cutoff), or whose timestamp changes value or usable/unusable classification
    (including an invalid suffix lost to truncation). Such lossy records redact
    as a unit; they cannot acquire a newer enclosing time
    or promote diagnostic metadata. Independent intact records still survive.
+   Scalar JSON wire representations, including numeric epochs, are checked
+   against host credentials too; clean numeric epochs remain milliseconds.
+   Root/selected multiline text is split only outside its original container
+   framing. A container spanning separate panel entries is rejected, not joined
+   into newly timestamp-bearing evidence. Bounded inspection follows nested
+   and JSON-encoded selected wrappers without emitting its inspection text;
+   internal batches retain independent complete siblings through recursive
+   shaping. Orphaned sensitive members at the start of a bounded tail own their
+   following value fragments, even if a key spans entries. JSON and PEM batch
+   context inspect original entries before redaction or output truncation can
+   erase the other context. PEM removal that would repair original JSON quote
+   or escape framing rejects the source entry, not reparses it as new evidence.
+   Independent complete records and plain prose retain their normal policy.
 
 The retired panel-bearer clients (`scripts/wait-for-coolify-deploy.mjs`,
 `scripts/smoke-staging-deploy.mjs`) remain in the tree for the post-TOG-6903

@@ -684,7 +684,7 @@ test("smoke review-d883a973: incomplete parents cannot promote locally timestamp
 
 // --- PR291 payload-provenance finding at 1194ab33 ---------------------------
 
-async function smokeCliFromPanel(t, makeItem, panelToken = "synthetic-panel-credential") {
+async function smokeCliFromPanel(t, makeItem, panelToken = "synthetic-panel-credential", batch = false) {
   let reads = 0;
   const server = createServer(createHandler({
     brokerToken: FAKE.STAGING_BROKER_TOKEN,
@@ -693,7 +693,7 @@ async function smokeCliFromPanel(t, makeItem, panelToken = "synthetic-panel-cred
   }, async ({ path }) => {
     if (!path.includes("/logs")) return { status: "running:healthy" };
     const timestamp = new Date(Date.parse(SMOKE_TS) + reads++ * 1000).toISOString();
-    return { logs: [makeItem(timestamp)] };
+    return { logs: batch ? makeItem(timestamp) : [makeItem(timestamp)] };
   }));
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   t.after(() => new Promise((resolve) => server.close(resolve)));
@@ -928,6 +928,77 @@ test("smoke review-3260ad79: source-authority rejection keeps genuine independen
   const result = await smokeCliFromPanel(t, (timestamp) => ({ msg: "stdout", time: timestamp,
     data: [stale, SMOKE_READY, { msg: "heartbeat" }],
   }), "ts");
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /PASS/);
+});
+
+// --- PR291 depth-classification finding at 765569d2 -------------------------
+
+function deepSmokeEnvelope(timestamp, msg, links = 10) {
+  let data = { msg };
+  for (let i = 1; i < links; i++) data = { data };
+  return { timestamp, data };
+}
+
+test("smoke review-765569d2: depth shaping cannot fabricate terminal records", async (t) => {
+  const ready = { ...SMOKE_READY, ts: SMOKE_TS };
+  for (const msg of [{}, [], null, false, true, 0, 314]) {
+    for (const links of [9, 10, 11]) {
+      const envelope = deepSmokeEnvelope("2026-09-30T19:02:00.000Z", msg, links);
+      for (const format of [(value) => value, (value) => JSON.stringify(value), (value) => `INFO ${JSON.stringify(value)}`]) {
+        const source = findBotRecords([{ text: JSON.stringify(envelope), ts: null }]);
+        assert.deepEqual(source, [], "the source has no terminal event");
+        const records = await smokeRecordsFromPanel(t, [ready, format(envelope)]);
+        assert.deepEqual(records.map(({ record }) => record), [ready], `${links} links, ${JSON.stringify(msg)}`);
+        assert.equal(maxTimestampMs(records), Date.parse(SMOKE_TS), "only original terminal events carry advancement");
+      }
+    }
+  }
+});
+
+for (const [name, msg] of [["object", {}], ["array", []], ["null", null], ["boolean", false], ["number", 0]]) {
+  test(`smoke review-765569d2: real CLI rejects depth-promoted ${name} msg`, async (t) => {
+    const result = await smokeCliFromPanel(t, (timestamp) => [
+      { ...SMOKE_READY, ts: SMOKE_TS }, deepSmokeEnvelope(timestamp, msg),
+    ], "synthetic-panel-credential", true);
+    assert.equal(result.code, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /timestamps did not advance/);
+    assert.doesNotMatch(result.stdout, /PASS/);
+  });
+}
+
+test("smoke review-765569d2: depth rejection preserves genuine independent advancement", async (t) => {
+  const result = await smokeCliFromPanel(t, (timestamp) => [
+    { ...SMOKE_READY, ts: SMOKE_TS }, deepSmokeEnvelope(timestamp, {}),
+    { msg: "heartbeat", ts: timestamp },
+  ], "synthetic-panel-credential", true);
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /PASS/);
+});
+
+for (const [name, body] of [["paired quotes", '"evil"'], ["escape", "\\"], ["unmatched quote", '"']]) {
+  for (const [formatName, format] of [
+    ["raw", (message) => message], ["wrapped", (message, timestamp) => ({ message, timestamp })],
+    ["prefixed", (message) => `INFO ${message}`],
+  ]) {
+    test(`smoke source-framing: real CLI rejects PEM-repaired JSON (${name}, ${formatName})`, async (t) => {
+      const result = await smokeCliFromPanel(t, (timestamp) => {
+        const message = `{"data":${JSON.stringify({ ...SMOKE_READY, ts: timestamp })},"note":"-----BEGIN PRIVATE KEY-----${body}-----END PRIVATE KEY-----"}`;
+        assert.deepEqual(findBotRecords([{ text: message, ts: timestamp }]), [], "original malformed source has no terminal event");
+        return format(message, timestamp);
+      });
+      assert.equal(result.code, 1, result.stdout + result.stderr);
+      assert.match(result.stderr, /no fresh/);
+      assert.doesNotMatch(result.stdout, /PASS/);
+    });
+  }
+}
+
+test("smoke source-framing: PEM rejection preserves independent ready and heartbeat records", async (t) => {
+  const result = await smokeCliFromPanel(t, (timestamp) => [
+    { ...SMOKE_READY, ts: SMOKE_TS }, { msg: "heartbeat", ts: timestamp },
+    `{"data":${JSON.stringify({ ...SMOKE_READY, ts: timestamp })},"note":"-----BEGIN PRIVATE KEY-----"evil"-----END PRIVATE KEY-----"}`,
+  ], "synthetic-panel-credential", true);
   assert.equal(result.code, 0, result.stdout + result.stderr);
   assert.match(result.stdout, /PASS/);
 });

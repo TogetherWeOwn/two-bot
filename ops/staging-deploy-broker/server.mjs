@@ -328,8 +328,8 @@ function coveringSpan(spans, index) {
 /**
  * Recursively shape one JSON-decoded value from a log line: objects keep
  * their keys (key names scrubbed, sensitive names redacted, every string
- * scrubbed), arrays are mapped, strings are scrubbed and capped, scalars
- * pass through (the caller drops message-less top-level scalars).
+ * scrubbed), arrays are context-checked, strings are scrubbed and capped,
+ * scalar wire representations are scrubbed too (top-level scalars are dropped).
  * Depth-capped so a hostile nested payload cannot recurse the broker into a
  * stack overflow: the cutoff applies BEFORE any type-specific handling, so
  * over-depth JSON-in-string leaves and arrays cross as the placeholder, never
@@ -359,6 +359,8 @@ function coveringSpan(spans, index) {
  */
 function scanJsonCandidates(text) {
   const out = [];
+  const orphanSpans = [];
+  let lastBoundary = 0;
   const stack = []; // { index, closer }
   const s = String(text ?? "");
   let inString = false;
@@ -401,11 +403,18 @@ function scanJsonCandidates(text) {
     } else if ((c === "}" || c === "]") && stack.length > 0 && stack[stack.length - 1].closer === c) {
       const { index: start } = stack.pop();
       out.push([start, i + 1]);
+      if (stack.length === 0) lastBoundary = i + 1;
+    } else if ((c === "}" || c === "]") && stack.length === 0) {
+      // A bounded tail may begin inside a container. Its unmatched closer
+      // owns the preceding fragment, but not an earlier complete record.
+      orphanSpans.push([lastBoundary, i + 1]);
+      lastBoundary = i + 1;
     }
   }
   out.sort((a, b) => a[0] - b[0] || b[1] - a[1]);
   return {
     spans: out,
+    orphanSpans,
     incompleteAt: stack[0]?.index ?? null,
     incompleteSyntaxEnd: stack.length > 0 ? syntaxEnd : null,
     incompleteHasValueBoundary: stack.length > 0 && hasValueBoundary,
@@ -414,6 +423,69 @@ function scanJsonCandidates(text) {
 
 export function extractJsonCandidates(text) {
   return scanJsonCandidates(text).spans;
+}
+
+// A member at the start of a bounded tail has lost its container/key policy.
+// Inspect raw (including escaped) names before scrubbing; never forward the
+// value of an orphaned sensitive member as ordinary prose.
+function orphanMemberSpans(text) {
+  const spans = [];
+  const members = /^[^"{}\n]*"((?:\\.|[^"\\])*)"[\t\r\n ]*[:=]/gms;
+  let ownedEnd = 0;
+  for (const member of text.matchAll(members)) {
+    if (member.index < ownedEnd) continue;
+    let sensitive = true;
+    try { sensitive = SENSITIVE_KEY_RES.some((re) => re.test(JSON.parse(`"${member[1]}"`))); } catch {
+      // A key split across entries may no longer be valid JSON. Its uncertain
+      // original member/value ownership still cannot be discarded as prose.
+    }
+    if (!sensitive) continue;
+    let quoted = false;
+    let escaped = false;
+    let depth = 0;
+    let end = text.length;
+    for (let i = member.index + member[0].length; i < text.length; i++) {
+      const c = text[i];
+      if (quoted) {
+        if (escaped) escaped = false;
+        else if (c === "\\") escaped = true;
+        else if (c === '"') quoted = false;
+      } else if (c === '"') quoted = true;
+      else if (c === "{" || c === "[") depth++;
+      else if (c === "}" || c === "]") {
+        if (depth === 0) { end = i + 1; break; }
+        depth--;
+      }
+    }
+    spans.push([member.index, end]);
+    ownedEnd = end;
+  }
+  return spans;
+}
+
+function scrubLogProse(text, secrets) {
+  return redactSpans(text, mergeSpans([...credentialSpans(text, secrets), ...orphanMemberSpans(text)]));
+}
+
+// Split only at ORIGINAL record boundaries. A newline inside a complete or
+// unfinished container is not a new log record, even before the value is
+// parsed; grouping retains quote/key context for shaping and truncation.
+function splitLogText(text) {
+  const source = scanJsonCandidates(text);
+  const ranges = mergeSpans([...source.spans,
+    ...(source.incompleteAt === null ? [] : [[source.incompleteAt, text.length]])]);
+  const items = [];
+  let start = 0;
+  let range = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== "\n") continue;
+    while (range < ranges.length && ranges[range][1] <= i) range++;
+    if (range < ranges.length && ranges[range][0] <= i) continue;
+    items.push(text.slice(start, i));
+    start = i + 1;
+  }
+  items.push(text.slice(start));
+  return items;
 }
 
 /**
@@ -496,12 +568,12 @@ export function shapeEmbeddedText(value, secrets, depth = 0) {
     // not a reason to return the original bytes (TOG-9053).
     const encoded = typeof shaped === "string" ? shaped : JSON.stringify(shaped);
     if (encoded === original) continue;
-    out += scrubSecrets(value.slice(pos, start), secretList) + encoded;
+    out += scrubLogProse(value.slice(pos, start), secretList) + encoded;
     pos = end;
     changed = true;
   }
-  if (!changed) return scrubSecrets(value, secretList).slice(0, MAX_LOG_MESSAGE_CHARS);
-  out += scrubSecrets(value.slice(pos), secretList);
+  if (!changed) return scrubLogProse(value, secretList).slice(0, MAX_LOG_MESSAGE_CHARS);
+  out += scrubLogProse(value.slice(pos), secretList);
   return out.slice(0, MAX_LOG_MESSAGE_CHARS);
 }
 
@@ -609,8 +681,108 @@ export function applyPemContext(items) {
     // Changed offsets or object structure cannot be spliced safely: collapse
     // the entry, never reinterpret an inspection view as the original payload.
     if (typeof item !== "string" || view !== item) return SECRET_PLACEHOLDER;
+    const source = scanJsonCandidates(item);
+    if ((source.spans.length > 0 || source.incompleteAt !== null)
+      && local.some(([from, to]) => /["\\]/.test(item.slice(from, to)))) return SECRET_PLACEHOLDER;
     return redactSpans(item, local);
   });
+}
+
+const LOG_RECORD_PAYLOAD_KEYS = [...new Set([
+  "message", "output", "log", "line", "text", "content", ...LOG_PAYLOAD_KEYS,
+])];
+
+function logItemParts(item, secrets, budget, depth = 0) {
+  if (--budget.nodes < 0) return null;
+  if (depth > 10) return [null];
+  if (typeof item === "string") {
+    budget.chars -= item.length + 1;
+    if (budget.chars < 0) return null;
+    const source = scanJsonCandidates(item);
+    // Decode only intact original transport containers for inspection. Terminal
+    // records (including encoded/prefixed ones) are independent barriers. Bare
+    // quoted scalars and orphaned member/value lines remain fragments.
+    if (source.incompleteAt === null && source.orphanSpans.length === 0 && source.spans.length > 0) {
+      const [from, to] = source.spans[0];
+      if (!/["{}:=]/.test(item.slice(0, from) + item.slice(to))) {
+        try { return logItemParts(JSON.parse(item.slice(from, to)), secrets, budget, depth + 1); } catch {
+          return [null]; // complete malformed container shapes as a unit
+        }
+      }
+    }
+    const credentials = credentialSpans(item, secrets);
+    const opaque = source.incompleteAt === null ? null : coveringSpan(credentials, source.incompleteAt);
+    if (opaque && opaque[1] >= source.incompleteSyntaxEnd && !source.incompleteHasValueBoundary) {
+      // A wholly credential-owned opaque opener cannot carry JSON state into
+      // the next entry. Covered member/value boundaries are never discarded.
+      return [item.slice(0, opaque[0]) + "x".repeat(opaque[1] - opaque[0]) + item.slice(opaque[1])];
+    }
+    return [item];
+  }
+  if (Array.isArray(item)) {
+    const parts = [];
+    for (const entry of item) {
+      const inner = logItemParts(entry, secrets, budget, depth + 1);
+      if (inner === null) return null;
+      for (const part of inner) parts.push(part);
+    }
+    return parts;
+  }
+  if (item !== null && typeof item === "object") {
+    if (typeof item.msg === "string" && !["container_output", "stdout", "stderr"].includes(item.msg)) return [null];
+    const key = LOG_RECORD_PAYLOAD_KEYS.find((key) => Object.hasOwn(item, key));
+    if (key !== undefined) return logItemParts(item[key], secrets, budget, depth + 1);
+  }
+  return [null];
+}
+
+// Separate entries must not be joined into a newly timestamp-bearing record.
+// Decode/select only for bounded inspection, map every fragment back to its
+// ORIGINAL entry, and reject ownership crossed by container/credential/member
+// framing. Independent complete records are barriers. No inspection text ships.
+function applyJsonContext(items, secrets) {
+  const safe = [...items];
+  const budget = { nodes: MAX_PANEL_BYTES, chars: MAX_PANEL_BYTES };
+  let parts = [];
+  const flush = () => {
+    if (parts.length === 0) return;
+    const text = parts.map(({ text }) => text).join("\n");
+    const source = scanJsonCandidates(text);
+    const containers = mergeSpans([...source.spans,
+      ...(source.incompleteAt === null ? [] : [[source.incompleteAt, text.length]])]);
+    const members = [];
+    let pos = 0;
+    for (const [from, to] of [...containers, [text.length, text.length]]) {
+      members.push(...orphanMemberSpans(text.slice(pos, from)).map(([a, b]) => [pos + a, pos + b]));
+      pos = to;
+    }
+    const orphans = source.orphanSpans.map(([from, to]) => {
+      const member = members.find(([a]) => a >= from && a < to);
+      return [member ? member[0] : from, to];
+    });
+    const ranges = mergeSpans([...containers, ...members, ...orphans, ...credentialSpans(text, secrets)]);
+    let first = 0;
+    for (const [from, to] of ranges) {
+      while (first < parts.length && parts[first].offset + parts[first].text.length <= from) first++;
+      let last = first;
+      while (last + 1 < parts.length && parts[last + 1].offset < to) last++;
+      if (last > first && parts[first].owner !== parts[last].owner) {
+        for (let i = first; i <= last; i++) safe[parts[i].owner] = SECRET_PLACEHOLDER;
+      }
+    }
+    parts = [];
+  };
+  for (let owner = 0; owner < items.length; owner++) {
+    const views = logItemParts(items[owner], secrets, budget);
+    if (views === null) return items.map(() => SECRET_PLACEHOLDER);
+    for (const text of views) {
+      if (text === null) { flush(); continue; }
+      const previous = parts[parts.length - 1];
+      parts.push({ text, owner, offset: previous ? previous.offset + previous.text.length + 1 : 0 });
+    }
+  }
+  flush();
+  return safe;
 }
 
 // These ORIGINAL field identities define the smoke's source authority. A lossy
@@ -629,12 +801,9 @@ function logTimestampMs(value) {
 export function shapeLogValue(value, secrets, depth = 0) {
   if (depth > 10) return SECRET_PLACEHOLDER;
   if (typeof value === "string") {
-    // PEM redacts FIRST, before any JSON parsing: a block whose END marker
-    // is beyond this string (or absent) still dies to end-of-string, so JSON
-    // embedded in an incomplete PEM suffix never survives to be shaped and
-    // re-emitted (TOG-9053 finding 2). Idempotent on clean text.
-    const pemSafe = redactPemBlock(value);
-    if (pemSafe !== value) return shapeEmbeddedText(pemSafe, secrets, depth);
+    // Parse ORIGINAL JSON only. Removing a PEM body first could repair bad
+    // quote/escape syntax and fabricate a ready record. Embedded text uses the
+    // original credential/framing spans below; incomplete PEM tails still die.
     // JSON-in-strings decodes before shaping: a log message carrying the
     // bot's ready-line record as escaped JSON must come out as a redacted
     // OBJECT the caller's single JSON.stringify can encode once — returning
@@ -664,9 +833,14 @@ export function shapeLogValue(value, secrets, depth = 0) {
     }
     return shapeEmbeddedText(value, secrets, depth);
   }
-  if (value === null || typeof value !== "object") return value;
+  if (value === null || typeof value !== "object") {
+    // Scalars can carry an accepted credential too. Judge the exact JSON wire
+    // representation before forwarding numbers/booleans/null, not just strings.
+    const encoded = JSON.stringify(value);
+    return typeof encoded === "string" && scrubSecrets(encoded, secrets) !== encoded ? SECRET_PLACEHOLDER : value;
+  }
   if (Array.isArray(value)) {
-    return value.map((entry) => shapeLogValue(entry, secrets, depth + 1));
+    return applyJsonContext(value, secrets).map((entry) => shapeLogValue(entry, secrets, depth + 1));
   }
   const shaped = {};
   for (const [key, entry] of Object.entries(value)) {
@@ -679,11 +853,14 @@ export function shapeLogValue(value, secrets, depth = 0) {
     const safeValue = SENSITIVE_KEY_RES.some((re) => re.test(key))
       ? SECRET_PLACEHOLDER : shapeLogValue(entry, secrets, depth + 1);
     // Classify on the source, before JSON-in-string decoding or redaction. A
+    // non-string msg becoming a depth placeholder cannot create an event; a
     // terminal msg becoming an object (or a transport label changing) cannot
     // turn its metadata into evidence. Preserve timestamp usability AND value:
     // valid-to-invalid cannot inherit newer enclosing time; invalid-to-valid
     // (e.g. a truncated invalid suffix) cannot override an older source time.
-    if (key === "msg" && typeof entry === "string" && safeValue !== entry) return SECRET_PLACEHOLDER;
+    if (key === "msg" && (typeof entry === "string" || typeof safeValue === "string") && safeValue !== entry) {
+      return SECRET_PLACEHOLDER;
+    }
     if (LOG_TS_KEYS.includes(key) && !Object.is(logTimestampMs(entry), logTimestampMs(safeValue))) {
       return SECRET_PLACEHOLDER;
     }
@@ -735,9 +912,12 @@ export function shapeLogItem(item, secrets) {
  * timestamp. Overlong metadata is rejected, not truncated.
  */
 export function shapeTimestamp(value, secrets) {
-  // Numeric epochs carry no text by construction: pass finite values through
-  // (the smoke normalizes them to strings itself).
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  // Numeric wire text can equal a host credential. Apply the same original
+  // representation check as message scalars; keep clean epoch milliseconds.
+  if (typeof value === "number") {
+    const encoded = JSON.stringify(value);
+    return Number.isFinite(logTimestampMs(value)) && scrubSecrets(encoded, secrets) === encoded ? value : null;
+  }
   if (typeof value !== "string") return null;
   if (value.length > 64) return null;
   if (scrubSecrets(value, secrets) !== value) return null;
@@ -757,22 +937,24 @@ export function shapeLogs(panelJson, secrets) {
   const secretList = Array.isArray(secrets) ? secrets : [];
   let items = [];
   if (typeof panelJson === "string") {
-    items = panelJson.split("\n");
+    items = splitLogText(panelJson);
   } else if (Array.isArray(panelJson)) {
     items = panelJson;
   } else if (panelJson !== null && typeof panelJson === "object") {
     for (const key of LOG_PAYLOAD_KEYS) {
       if (Object.hasOwn(panelJson, key)) {
         const inner = panelJson[key];
-        items = Array.isArray(inner) ? inner : String(inner ?? "").split("\n");
+        items = Array.isArray(inner) ? inner : splitLogText(String(inner ?? ""));
         break;
       }
     }
   }
-  // PEM context BEFORE per-line shaping: a multiline key block split across
-  // lines (or across BEGIN/body/END entries) must die as one block — shaping
-  // lines in isolation orphans the body from its marker (TOG-9053 finding 2).
-  items = applyPemContext(items);
+  // Both context checks inspect ORIGINAL entries before per-item shaping.
+  // One redaction must not erase framing needed by the other. Cross-entry
+  // JSON cannot acquire a new timestamp; PEM bodies cannot become bare prose.
+  const jsonSafe = applyJsonContext(items, secretList);
+  const pemSafe = applyPemContext(items);
+  items = items.map((item, i) => jsonSafe[i] === SECRET_PLACEHOLDER ? SECRET_PLACEHOLDER : pemSafe[i]);
   const shaped = [];
   let bytes = 0;
   for (const item of items) {

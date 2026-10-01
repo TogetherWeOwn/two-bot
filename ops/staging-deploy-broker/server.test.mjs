@@ -1391,6 +1391,350 @@ test("review-3260ad79 finding-4 logs: assignment framing uses original overlappi
   }
 });
 
+// --- PR291 findings 2 and 3 at 765569d2 -------------------------------------
+// Reviewer probes asserted the leaks to establish their existence. These are
+// the inverse acceptance contracts, through both shaping and authenticated HTTP.
+// All values/configuration are synthetic; the panel remains a loopback stub.
+
+const MULTILINE_SECRET = "ordinary-multiline-db-value";
+const MULTILINE_PROSE = "ordinary prose before structured log output";
+const MULTILINE_AFTER = "ordinary prose after structured log output";
+const MULTILINE_LATER_READY = { ...READY_RECORD, ts: "2026-09-30T03:02:00.000Z" };
+const multilineRepresentations = [
+  ["root string", (lines) => lines.join("\n")],
+  ["selected logs string", (lines) => ({ logs: lines.join("\n") })],
+  ["selected data string", (lines) => ({ data: lines.join("\n") })],
+  ["root array entries", (lines) => lines],
+  ["selected array entries", (lines) => ({ logs: lines })],
+  ["message wrappers across entries", (lines) => ({ logs: lines.map((message) => ({ message })) })],
+];
+const multilineFixtures = [
+  { name: "complete object", lines: ["{", `  "password": "${MULTILINE_SECRET}"`, "}"], complete: true },
+  { name: "INFO-prefixed object", lines: ["INFO {", `  "password": "${MULTILINE_SECRET}"`, "}"], complete: true },
+  {
+    name: "quoted braces and escaped quotes",
+    lines: JSON.stringify({ note: 'literal } [ { and escaped "quote"', password: MULTILINE_SECRET }, null, 2).split("\n"),
+    complete: true,
+  },
+  {
+    name: "escaped nested JSON strings",
+    lines: JSON.stringify({ details: JSON.stringify({ password: MULTILINE_SECRET, note: 'nested } and "quote"' }) }, null, 2).split("\n"),
+    complete: true,
+  },
+  {
+    name: "array with structured and escaped string members",
+    lines: JSON.stringify([{ password: MULTILINE_SECRET }, JSON.stringify({ password: MULTILINE_SECRET })], null, 2).split("\n"),
+    complete: true,
+  },
+  { name: "malformed trailing comma", lines: ["{", `  "password": "${MULTILINE_SECRET}",`, "}"], complete: true },
+  { name: "unfinished object", lines: ["{", `  "password": "${MULTILINE_SECRET}",`, '  "note": "unfinished'], complete: false },
+  { name: "orphan member at bounded tail", lines: [`  "password": "${MULTILINE_SECRET}",`, "}"], complete: true },
+];
+
+function assertMultilineContract(shaped, fixture) {
+  assert.ok(Array.isArray(shaped.logs), "the supported response remains a logs array");
+  assert.ok(shaped.logs.every(({ message }) => typeof message === "string"), "every emitted log message is text");
+  const wire = JSON.stringify(shaped);
+  assert.ok(!wire.includes(MULTILINE_SECRET), "a structured sensitive value cannot become ordinary prose at a line boundary");
+  assert.ok(wire.includes(SECRET_PLACEHOLDER), "sensitive framing is redacted, not silently omitted from the entire response");
+  const ready = findReadyLines(findBotRecords(normalizeLogPayload(shaped)));
+  assert.deepEqual(ready.map(({ record }) => record.ts), fixture.complete
+    ? [READY_RECORD.ts, MULTILINE_LATER_READY.ts] : [READY_RECORD.ts], "independent complete ready records retain their source timestamps");
+  assert.ok(wire.includes(MULTILINE_PROSE), "independent preceding prose survives");
+  if (fixture.complete) assert.ok(wire.includes(MULTILINE_AFTER), "independent prose after a closed record survives");
+}
+
+for (const fixture of multilineFixtures) {
+  for (const [representation, encode] of multilineRepresentations) {
+    test(`review-765569d2 finding-2 logs: ${fixture.name} (${representation})`, async (t) => {
+      // Unknown unfinished quote/container context owns the remaining tail;
+      // only closed records have an independently bounded following control.
+      const lines = [JSON.stringify(READY_RECORD), MULTILINE_PROSE, ...fixture.lines];
+      if (fixture.complete) lines.push(MULTILINE_AFTER, JSON.stringify(MULTILINE_LATER_READY));
+      const input = encode(lines);
+      const secrets = [PANEL_TOKEN, BROKER_TOKEN, PANEL_URL];
+      const shaped = shapeLogs(input, secrets);
+      const srv = await boot(() => input);
+      t.after(srv.close);
+      const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs?lines=2"));
+      assert.equal(out.status, 200);
+      assertMultilineContract(out.json, fixture);
+      assertMultilineContract(shaped, fixture);
+      assert.equal(srv.calls.length, 1, "one authenticated read reaches only the stub panel");
+    });
+  }
+}
+
+for (const [representation, encode] of multilineRepresentations) {
+  test(`review-765569d2 finding-2 logs: bounded tail begins with an orphan member (${representation})`, async (t) => {
+    for (const orphan of [
+      `  "password": "${MULTILINE_SECRET}",`,
+      `  "\\u0070assword": "${MULTILINE_SECRET}"`,
+      `  "password": "${MULTILINE_SECRET}`,
+    ]) {
+      // The omitted opener may be outside the panel's bounded tail. Do not
+      // depend on a preceding entry in this response to classify the member.
+      const input = encode([orphan]);
+      const srv = await boot(() => input);
+      t.after(srv.close);
+      const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs?lines=1"));
+      assert.equal(out.status, 200);
+      assert.ok(!out.text.includes(MULTILINE_SECRET), "orphan member values never cross even without an observed opener/closer");
+      assert.ok(!JSON.stringify(shapeLogs(input, [PANEL_TOKEN, BROKER_TOKEN, PANEL_URL])).includes(MULTILINE_SECRET));
+      assert.equal(findBotRecords(normalizeLogPayload(out.json)).length, 0);
+    }
+  });
+}
+
+for (const field of ["message", "output", "log", "line", "text", "content"]) {
+  test(`review-765569d2 finding-2 logs: wrapped selected ${field} carries multiline context`, async (t) => {
+    const fixture = multilineFixtures[3];
+    // A container-per-line panel format must not lose payload context because
+    // each line also has wrapper metadata. Escaped text is source text, never
+    // flattened metadata or a decoded inspection view returned to the client.
+    const input = { logs: [
+      JSON.stringify(READY_RECORD),
+      ...fixture.lines.map((line) => ({ [field]: line, timestamp: "2026-09-30T03:00:00.000Z", stream: "stdout" })),
+      MULTILINE_AFTER,
+      JSON.stringify(MULTILINE_LATER_READY),
+    ] };
+    const srv = await boot(() => input);
+    t.after(srv.close);
+    const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+    assert.equal(out.status, 200);
+    assert.ok(!out.text.includes(MULTILINE_SECRET), "selected wrapper lines share the original JSON container");
+    assert.equal(findReadyLines(findBotRecords(normalizeLogPayload(out.json))).length, 2);
+    assert.ok(out.text.includes(MULTILINE_AFTER), "known-complete boundaries do not consume independent prose");
+  });
+}
+
+for (const field of ["logs", "data", "output", "lines", "result"]) {
+  test(`review-765569d2 finding-2 logs: ordinary multiline controls (${field})`, async (t) => {
+    const prose = ["plain first line", "password rotation completed successfully", 'operator typed "quoted prose"', "plain last line"];
+    const input = { [field]: [...prose, JSON.stringify(READY_RECORD), JSON.stringify(MULTILINE_LATER_READY)].join("\n") };
+    const srv = await boot(() => input);
+    t.after(srv.close);
+    const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+    assert.equal(out.status, 200);
+    assert.deepEqual(out.json.logs.slice(0, prose.length).map(({ message }) => message), prose, "ordinary prose is not an orphan JSON member");
+    assert.equal(findReadyLines(findBotRecords(normalizeLogPayload(out.json))).length, 2, "independent complete JSON records are not one multiline container");
+  });
+}
+
+test("review-765569d2 finding-2 logs: one complete multiline item still shapes nested strings", async (t) => {
+  const input = { logs: [multilineFixtures[3].lines.join("\n"), JSON.stringify(READY_RECORD)] };
+  const srv = await boot(() => input);
+  t.after(srv.close);
+  const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+  assert.equal(out.status, 200);
+  assert.ok(!out.text.includes(MULTILINE_SECRET), "the reviewer's complete-item positive control remains redacted");
+  assert.equal(findReadyLines(findBotRecords(normalizeLogPayload(out.json))).length, 1);
+});
+
+for (const [representation, encode] of multilineRepresentations.slice(0, 2)) {
+  test(`review-765569d2 finding-2 logs: complete multiline ready text remains supported (${representation})`, async (t) => {
+    const lines = [...JSON.stringify(READY_RECORD, null, 2).split("\n"), MULTILINE_AFTER, JSON.stringify(MULTILINE_LATER_READY)];
+    const input = encode(lines);
+    const srv = await boot(() => input);
+    t.after(srv.close);
+    const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+    assert.equal(out.status, 200);
+    assert.deepEqual(findReadyLines(findBotRecords(normalizeLogPayload(out.json))).map(({ record }) => record.ts), [READY_RECORD.ts, MULTILINE_LATER_READY.ts]);
+    assert.ok(out.text.includes(MULTILINE_AFTER));
+  });
+}
+
+test("review-765569d2 finding-2 logs: cross-entry framing does not assemble new timestamped ready evidence", async (t) => {
+  const fragments = ["{", '  "msg": "ready",', '  "guilds": 1', "}"];
+  for (const entries of [fragments, fragments.map((message, i) => ({ message, timestamp: `2026-09-30T03:0${i + 2}:00.000Z` }))]) {
+    const input = { logs: [JSON.stringify(READY_RECORD), ...entries, MULTILINE_AFTER] };
+    const srv = await boot(() => input);
+    t.after(srv.close);
+    const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+    assert.equal(out.status, 200);
+    assert.deepEqual(findReadyLines(findBotRecords(normalizeLogPayload(out.json))).map(({ record }) => record.ts), [READY_RECORD.ts], "separate panel entries are not concatenated into fresh evidence using wrapper timestamps");
+    assert.ok(out.text.includes(MULTILINE_AFTER));
+  }
+});
+
+for (const [representation, wrap] of [
+  ["nested data/message", (message) => ({ data: { message } })],
+  ["nested logs array/message", (message) => ({ logs: [{ message }] })],
+  ["nested data array/message", (message) => ({ data: [{ message }] })],
+  ["JSON encoded message wrapper", (message) => JSON.stringify({ message })],
+  ["JSON encoded nested data/message", (message) => JSON.stringify({ data: { message } })],
+]) {
+  test(`review-765569d2 finding-2 logs: separate sensitive scalar retains selected wrapper context (${representation})`, async (t) => {
+    // This is VALID multiline JSON: the sensitive key and its scalar value
+    // happen to be separate lines. Scrubbing only the orphan-key line cannot
+    // protect the quoted value when nested/encoded transport wrappers hide the
+    // enclosing opener from batch inspection.
+    const lines = ["{", '  "password":', `  "${MULTILINE_SECRET}"`, "}"];
+    assert.equal(JSON.parse(lines.join("\n")).password, MULTILINE_SECRET);
+    const input = { logs: [JSON.stringify(READY_RECORD), ...lines.map(wrap), MULTILINE_AFTER, JSON.stringify(MULTILINE_LATER_READY)] };
+    const srv = await boot(() => input);
+    t.after(srv.close);
+    const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+    assert.equal(out.status, 200);
+    assert.ok(!out.text.includes(MULTILINE_SECRET), "a scalar line remains owned by its original sensitive member across wrapper/entry boundaries");
+    assert.ok(!JSON.stringify(shapeLogs(input, [PANEL_TOKEN, BROKER_TOKEN, PANEL_URL])).includes(MULTILINE_SECRET));
+    assert.deepEqual(findReadyLines(findBotRecords(normalizeLogPayload(out.json))).map(({ record }) => record.ts), [READY_RECORD.ts, MULTILINE_LATER_READY.ts]);
+    assert.ok(out.text.includes(MULTILINE_AFTER));
+  });
+}
+
+for (const representation of ["object", "JSON encoded", "INFO prefixed"]) {
+  test(`review-765569d2 finding-2 logs: complete ready siblings survive framing rejection inside a selected nested batch (${representation})`, async (t) => {
+    const batch = { data: [READY_RECORD, "{", '  "password":', `  "${MULTILINE_SECRET}"`, "}", MULTILINE_AFTER, MULTILINE_LATER_READY] };
+    const item = representation === "object" ? batch : representation === "JSON encoded" ? JSON.stringify(batch) : `INFO ${JSON.stringify(batch)}`;
+    const input = { logs: [item] };
+    const srv = await boot(() => input);
+    t.after(srv.close);
+    const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+    assert.equal(out.status, 200);
+    assert.ok(!out.text.includes(MULTILINE_SECRET));
+    assert.deepEqual(findReadyLines(findBotRecords(normalizeLogPayload(out.json))).map(({ record }) => record.ts), [READY_RECORD.ts, MULTILINE_LATER_READY.ts], "framing rejected within a nested batch does not consume its independent complete sibling records");
+    const shaped = shapeLogs(input, [PANEL_TOKEN, BROKER_TOKEN, PANEL_URL]);
+    assert.equal(findReadyLines(findBotRecords(normalizeLogPayload(shaped))).length, 2);
+    assert.ok(JSON.stringify(shaped).includes(MULTILINE_AFTER));
+  });
+}
+
+const orphanTailRepresentations = [
+  ["selected string", (lines) => ({ logs: lines.join("\n") })],
+  ["array entries", (lines) => ({ logs: lines })],
+  ["message wrappers", (lines) => ({ logs: lines.map((message) => ({ message })) })],
+  ["nested data/message wrappers", (lines) => ({ logs: lines.map((message) => ({ data: { message } })) })],
+  ["nested data array wrappers", (lines) => ({ logs: lines.map((message) => ({ data: [message] })) })],
+  ["single nested data array", (lines) => ({ logs: [{ data: lines }] })],
+];
+for (const [name, lines] of [
+  ["following scalar without opener or closer", ['  "password":', `  "${MULTILINE_SECRET}"`]],
+  ["split sensitive key without opener or closer", ['  "pass', `word": "${MULTILINE_SECRET}"`]],
+]) {
+  for (const [representation, encode] of orphanTailRepresentations) {
+    test(`review-765569d2 finding-2 logs: orphan sensitive member owns ${name} (${representation})`, async (t) => {
+      const input = encode(lines);
+      const srv = await boot(() => input);
+      t.after(srv.close);
+      const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+      assert.equal(out.status, 200);
+      assert.ok(!out.text.includes(MULTILINE_SECRET), "orphaned sensitive key/value framing cannot release later fragments as prose");
+      assert.ok(!JSON.stringify(shapeLogs(input, [PANEL_TOKEN, BROKER_TOKEN, PANEL_URL])).includes(MULTILINE_SECRET));
+      assert.ok(out.text.includes(SECRET_PLACEHOLDER));
+    });
+  }
+}
+
+const NUMERIC_PANEL_TOKEN = "1234567890123456";
+const NUMERIC_SECRET_EPOCH = 1790823600000;
+const ORDINARY_NUMERIC_EPOCH = 1759200000000;
+function numericTestConfig(panelToken = NUMERIC_PANEL_TOKEN) {
+  return parseConfig({ STAGING_BROKER_TOKEN: BROKER_TOKEN, COOLIFY_URL: PANEL_URL, COOLIFY_TOKEN: panelToken });
+}
+
+for (const [name, scalar, credential] of [
+  ["review integer", Number(NUMERIC_PANEL_TOKEN), NUMERIC_PANEL_TOKEN],
+  ["epoch integer", NUMERIC_SECRET_EPOCH, String(NUMERIC_SECRET_EPOCH)],
+  ["exponential numeric serialization", 1e21, "1e+21"],
+]) {
+  for (const [representation, encode] of [
+    ["object field", (value) => ({ value })],
+    ["nested array scalar", (value) => ({ values: [value, { ordinary: 42 }] })],
+    ["JSON encoded item", (value) => JSON.stringify({ value })],
+    ["INFO-prefixed JSON", (value) => `INFO ${JSON.stringify({ value })}`],
+  ]) {
+    test(`review-765569d2 finding-3 logs: known ${name} redacts (${representation})`, async (t) => {
+      const config = numericTestConfig(credential);
+      assert.equal(String(scalar), credential, "the synthetic accepted credential equals the JSON number's wire representation");
+      assert.equal(config.panelToken, credential);
+      const input = { logs: [encode(scalar), JSON.stringify(READY_RECORD)] };
+      const shaped = shapeLogs(input, [credential, BROKER_TOKEN, PANEL_URL]);
+      const srv = await boot(() => input, config);
+      t.after(srv.close);
+      const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+      assert.equal(out.status, 200);
+      assert.ok(!out.text.includes(credential), "the exact synthetic numeric credential never crosses HTTP");
+      assert.ok(!JSON.stringify(shaped).includes(credential), "non-string scalars use the same known-credential policy as strings");
+      assert.ok(out.text.includes(SECRET_PLACEHOLDER));
+      assert.equal(findReadyLines(findBotRecords(normalizeLogPayload(out.json))).length, 1, "credential-free independent readiness survives");
+    });
+  }
+}
+
+for (const field of ["timestamp", "ts", "time", "_ts", "created_at"]) {
+  test(`review-765569d2 finding-3 logs: numeric credential ${field} cannot supply or redirect timestamp authority`, async (t) => {
+    const credential = String(NUMERIC_SECRET_EPOCH);
+    const config = numericTestConfig(credential);
+    const untimedReady = { msg: "ready", guilds: 1 };
+    const input = { logs: [
+      { [field]: NUMERIC_SECRET_EPOCH, message: JSON.stringify(untimedReady) },
+      { timestamp: ORDINARY_NUMERIC_EPOCH, data: { ...untimedReady, [field]: NUMERIC_SECRET_EPOCH } },
+      // If the secret is removed, another usable alias must not become fresh
+      // evidence from a source whose timestamp authority has changed.
+      { [field]: NUMERIC_SECRET_EPOCH, [field === "ts" ? "time" : "ts"]: ORDINARY_NUMERIC_EPOCH, message: JSON.stringify(untimedReady) },
+      JSON.stringify(READY_RECORD),
+    ] };
+    const shaped = shapeLogs(input, [credential, BROKER_TOKEN, PANEL_URL]);
+    const srv = await boot(() => input, config);
+    t.after(srv.close);
+    const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+    assert.equal(out.status, 200);
+    assert.ok(!out.text.includes(credential));
+    assert.equal(shapeTimestamp(NUMERIC_SECRET_EPOCH, [credential]), null, "line-level timestamp shaping rejects exact known numeric credentials");
+    assert.ok(!JSON.stringify(shaped).includes(credential));
+    assert.equal(findReadyLines(findBotRecords(normalizeLogPayload(shaped))).length, 1, "redacted timestamp owners cannot fall back to enclosing/alias evidence");
+    assert.deepEqual(findReadyLines(findBotRecords(normalizeLogPayload(out.json))).map(({ record }) => record.ts), [READY_RECORD.ts]);
+    assert.ok(out.json.logs.slice(0, 3).every((pair) => pair.timestamp !== NUMERIC_SECRET_EPOCH), "no rejected credential epoch survives as pair metadata");
+  });
+}
+
+test("review-765569d2 finding-3 logs: review numeric timestamp never crosses either wire path", async (t) => {
+  const config = numericTestConfig();
+  const input = { logs: [{ timestamp: Number(NUMERIC_PANEL_TOKEN), message: JSON.stringify(READY_RECORD) }] };
+  const srv = await boot(() => input, config);
+  t.after(srv.close);
+  const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+  assert.equal(out.status, 200);
+  assert.ok(!out.text.includes(NUMERIC_PANEL_TOKEN), "the reviewer's numeric timestamp credential is absent from both message and pair metadata");
+  assert.equal(shapeTimestamp(Number(NUMERIC_PANEL_TOKEN), [NUMERIC_PANEL_TOKEN]), null);
+  assert.ok(!JSON.stringify(shapeLogs(input, [NUMERIC_PANEL_TOKEN, BROKER_TOKEN, PANEL_URL])).includes(NUMERIC_PANEL_TOKEN));
+});
+
+test("review-765569d2 finding-3 logs: numeric credential msg cannot become a terminal event", async (t) => {
+  const config = numericTestConfig();
+  const input = { logs: [{ msg: Number(NUMERIC_PANEL_TOKEN), guilds: 1, ts: READY_RECORD.ts }, JSON.stringify(READY_RECORD)] };
+  const srv = await boot(() => input, config);
+  t.after(srv.close);
+  const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+  assert.equal(out.status, 200);
+  assert.ok(!out.text.includes(NUMERIC_PANEL_TOKEN));
+  assert.equal(findBotRecords(normalizeLogPayload(out.json)).length, 1, "numeric-to-placeholder redaction cannot promote a non-string msg");
+});
+
+test("review-765569d2 finding-3 logs: ordinary numeric epochs/scalars and string redaction controls", async (t) => {
+  const config = numericTestConfig();
+  const input = { logs: [
+    { value: NUMERIC_PANEL_TOKEN },
+    { value: 42, values: [0, false, null], timestamp: ORDINARY_NUMERIC_EPOCH, message: JSON.stringify(READY_RECORD) },
+    { msg: "heartbeat", ts: ORDINARY_NUMERIC_EPOCH },
+  ] };
+  assert.equal(shapeLogValue(42, [NUMERIC_PANEL_TOKEN]), 42);
+  assert.equal(shapeTimestamp(ORDINARY_NUMERIC_EPOCH, [NUMERIC_PANEL_TOKEN]), ORDINARY_NUMERIC_EPOCH);
+  const srv = await boot(() => input, config);
+  t.after(srv.close);
+  const out = assertRedacted(t, await req(srv.base, "/v1/staging/logs"));
+  assert.equal(out.status, 200);
+  assert.ok(!out.text.includes(NUMERIC_PANEL_TOKEN), "string-valued equivalent still redacts");
+  const ordinary = JSON.parse(out.json.logs[1].message);
+  assert.equal(ordinary.value, 42);
+  assert.deepEqual(ordinary.values, [0, false, null]);
+  assert.equal(ordinary.timestamp, ORDINARY_NUMERIC_EPOCH);
+  assert.equal(out.json.logs[1].timestamp, ORDINARY_NUMERIC_EPOCH, "credential-free numeric pair timestamp retains number type");
+  assert.equal(JSON.parse(out.json.logs[2].message).ts, ORDINARY_NUMERIC_EPOCH);
+  assert.equal(findBotRecords(normalizeLogPayload(out.json)).length, 2, "ordinary numeric event time remains usable to the actual smoke parser");
+});
+
 test("logs-bounded unit: parseLogLines clamps to 1..500", () => {
   assert.equal(parseLogLines(new URLSearchParams("")), 200);
   assert.equal(parseLogLines(new URLSearchParams("lines=50")), 50);
