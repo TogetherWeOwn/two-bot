@@ -34,7 +34,7 @@ export function renderHtml(d: DashboardData): string {
 </head>
 <body>
 <a class="skip" href="#content">Skip to dashboard content</a>
-<main class="page" id="content">
+<main class="page" id="content" tabindex="-1">
   <header class="head">
     <h1>TWO growth dashboard</h1>
     <p class="meta">Generated ${esc(fmtStamp(d.generatedAt))} · covers the last ${d.weeks.length} weeks${
@@ -301,7 +301,10 @@ function gateNote(g: GateConversion | null): string {
 }
 
 function gateCell(g: GateConversion | null): string {
-  if (!g) return `<td class="num dim" title="gate state not observed for this cohort">—</td>`;
+  // The title tooltip is mouse-only. The visually-hidden span carries the same
+  // words to keyboard and screen-reader users (TOG-8291).
+  if (!g)
+    return `<td class="num dim" title="gate state not observed for this cohort">—<span class="vh">gate state not observed for this cohort</span></td>`;
   return `<td class="num">
     <span class="stayed">${pct(g.cleared, g.observed)}</span>
     <span class="sub">${g.cleared}/${g.observed} got in${g.stuck > 0 ? ` · ${g.stuck} stuck` : ''}</span>
@@ -309,7 +312,9 @@ function gateCell(g: GateConversion | null): string {
 }
 
 function cell(r: RetentionCell | null): string {
-  if (!r || r.eligible === 0) return `<td class="num dim" title="cohort has not aged this far">—</td>`;
+  // Same title-tooltip treatment as gateCell (TOG-8291).
+  if (!r || r.eligible === 0)
+    return `<td class="num dim" title="cohort has not aged this far">—<span class="vh">cohort has not aged this far</span></td>`;
   return `<td class="num">
     <span class="stayed">${pct(r.stayed, r.eligible)}</span>
     <span class="sub">${r.stayed}/${r.eligible} stayed · ${r.active} active</span>
@@ -416,11 +421,18 @@ function freshNotice(d: DashboardData): string {
  * tables cannot fit all columns, so the table scrolls inside this region while
  * the page itself never scrolls sideways. tabindex + role make the scrolled
  * columns reachable by keyboard, in DOM order.
+ *
+ * The injected caption names the table itself for screen-reader table
+ * navigation; the region's aria-label describes the scrolling behaviour.
+ * Both carry the same label so they agree when read in either order (TOG-8291).
  */
 function tableWrap(label: string, table: string): string {
+  // Replacer function, not a replacement string: a `$` in a future label must
+  // never be read as a `$1` back-reference.
+  const captioned = table.replace(/<table([^>]*)>/, (_m, attrs: string) => `<table${attrs}><caption class="vh">${esc(label)}</caption>`);
   return `<div class="tablewrap" tabindex="0" role="region" aria-label="${esc(
     label,
-  )} — scroll horizontally to see all columns">${table}</div>`;
+  )} — scroll horizontally to see all columns">${captioned}</div>`;
 }
 
 function tile(label: string, value: string, note: string, tone: 'good' | 'warning' | 'critical' | 'plain'): string {
@@ -435,10 +447,14 @@ function tile(label: string, value: string, note: string, tone: 'good' | 'warnin
   </div>`;
 }
 
-/** A bar is magnitude only. Same hue everywhere; width is the whole message. */
+/**
+ * A bar is magnitude only. Same hue everywhere; width is the whole message.
+ * Decorative by design: the number next to it carries the meaning, so the bar
+ * itself is hidden from assistive tech (aria-hidden) rather than labelled.
+ */
 function bar(value: number, max: number, tone: 'series' | 'muted'): string {
   const w = max <= 0 ? 0 : Math.max(value > 0 ? 2 : 0, (value / max) * 100);
-  return `<span class="bar ${tone}" style="width:${w.toFixed(1)}%"></span>`;
+  return `<span class="bar ${tone}" style="width:${w.toFixed(1)}%" aria-hidden="true"></span>`;
 }
 
 function stateBadge(s: 'alive' | 'quiet' | 'silent'): string {
@@ -495,7 +511,9 @@ const CSS = `
   --ink-3: #77766f;
   --line: #e3e2dd;
   --series: #2a78d6;
-  --series-quiet: #cde2fb;
+  /* Muted bars must still meet 3:1 non-text contrast against --raised
+     (#ffffff): #cde2fb was 1.32:1. #5b8fc4 is 3.40:1 (TOG-8291). */
+  --series-quiet: #5b8fc4;
   --good: #0a7d0a;
   --warning: #b45309;
   --critical: #b3261e;
@@ -509,7 +527,9 @@ const CSS = `
     --ink-3: #8f8e86;
     --line: #2e2e2b;
     --series: #3987e5;
-    --series-quiet: #184f95;
+    /* Same 3:1 rule against dark --raised (#1a1a19): #184f95 was 2.15:1.
+       #3a6ea8 is 3.30:1 (TOG-8291). */
+    --series-quiet: #3a6ea8;
     /* Light-mode --good (#0a7d0a) is 3.28:1 on --raised here; --critical
        (#b3261e) is 4.39:1. Both are text colours (.num.up/.down), so dark
        mode gets its own AA-passing steps. */
@@ -526,12 +546,23 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 .page { max-width: 960px; margin: 0 auto; }
+/* Visually-hidden-but-announced text (TOG-8291): title-tooltips are mouse-only,
+   so dash cells carry the same words in a span only assistive tech reads. */
+.vh {
+  position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+table.chart .vh { display: block; }
+caption.vh { caption-side: top; }
 /* Keyboard-first entry: hidden until focused, then a visible target. */
 .skip {
   position: absolute; left: 12px; top: -48px; z-index: 10;
   background: var(--raised); color: var(--ink);
   border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px;
   font-size: 14px; text-decoration: none; transition: top 0.15s ease;
+}
+@media (prefers-reduced-motion: reduce) {
+  .skip { transition: none; }
 }
 .skip:focus-visible { top: 12px; outline: 2px solid var(--series); outline-offset: 2px; }
 /* Fresh-database banner: the one message that decides whether the zeros below
