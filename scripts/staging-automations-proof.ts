@@ -3,7 +3,7 @@
  * messages, exercised against the real TWO Staging guild through the real
  * service + store, on the real staging Postgres.
  *
- *   DISCORD_STAGING_BOT_TOKEN=... TWO_DATABASE_URL=<staging> \
+ *   DISCORD_STAGING_BOT_TOKEN=... TWO_TEST_DATABASE_URL=<staging> \
  *     node scripts/staging-automations-proof.ts
  *
  * Positive, negative, permission/hierarchy, and idempotency evidence for the
@@ -29,6 +29,8 @@ import {
   registerAutomationCommands,
 } from '../src/automations/discord.ts';
 import { registerAutomationGateway } from '../src/automations/gateway.ts';
+import { checkStagingToken } from '../src/staging/spec.ts';
+import { assertTestDatabaseHost } from './test-db-guard.ts';
 import { cleanupDecision, restoredStickyRow } from './staging-automations-proof-state.ts';
 
 const GUILD = '1545644954272137297'; // TWO Staging
@@ -39,16 +41,28 @@ if (process.argv.includes('--help')) {
   console.log('usage: node scripts/staging-automations-proof.ts [--help]');
   console.log('');
   console.log('TOG-1648: custom commands, scheduled and sticky messages against TWO Staging.');
-  console.log('Requires DISCORD_STAGING_BOT_TOKEN and TWO_DATABASE_URL; --help needs neither.');
+  console.log('Requires DISCORD_STAGING_BOT_TOKEN and TWO_TEST_DATABASE_URL; --help needs neither.');
   process.exit(0);
 }
 
 const token = process.env.DISCORD_STAGING_BOT_TOKEN;
-const dbUrl = process.env.TWO_DATABASE_URL;
+const dbUrl = process.env.TWO_TEST_DATABASE_URL;
 if (!token || !dbUrl) {
-  console.error('need DISCORD_STAGING_BOT_TOKEN and TWO_DATABASE_URL (the staging db)');
+  console.error('need DISCORD_STAGING_BOT_TOKEN and TWO_TEST_DATABASE_URL (the staging db)');
   process.exit(2);
 }
+// TOG-10009: refuse a live or unknown bot before any Discord or database
+// connection, the same identity check every other staging script applies.
+const tokenCheck = checkStagingToken(token);
+if (!tokenCheck.ok) {
+  console.error(tokenCheck.message);
+  process.exit(2);
+}
+// TOG-10009: read the staging database from the test variable like the other
+// staging proofs do. The old TWO_DATABASE_URL name is the live variable, so a
+// staging run could inherit the wrong shell and write proof rows to live.
+// Refuse production/staging hosts before opening the database.
+assertTestDatabaseHost(dbUrl);
 
 interface Row {
   name: string;

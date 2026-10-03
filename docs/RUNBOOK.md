@@ -967,15 +967,18 @@ node scripts/staging-automations-proof.ts --help   # usage, exit 0, needs no tok
 A full run needs the staging token and the staging database, and nothing else:
 
 ```bash
-DISCORD_STAGING_BOT_TOKEN=... TWO_DATABASE_URL=<staging> \
+DISCORD_STAGING_BOT_TOKEN=... TWO_TEST_DATABASE_URL=<staging> \
   node scripts/staging-automations-proof.ts
 ```
 
 Without both it refuses before touching anything (exit `2`, `need
-DISCORD_STAGING_BOT_TOKEN and TWO_DATABASE_URL`). Point `TWO_DATABASE_URL` at
-the staging database — the proof writes and deletes automation rows in
-whatever database it is given. Guild and channel are pinned in the script
-(`scripts/staging-automations-proof.ts:34-35`); there is no flag that
+DISCORD_STAGING_BOT_TOKEN and TWO_TEST_DATABASE_URL`). A live-shaped or
+unknown token is refused before any Discord or database connection (exit `2`,
+`Nothing was contacted`), and a non-test database host is refused by the
+test-db guard — the proof reads the test variable, never the live
+`TWO_DATABASE_URL`, so a staging run cannot inherit the wrong shell and write
+proof rows to live. Guild and channel are pinned in the script
+(`scripts/staging-automations-proof.ts:36-37`); there is no flag that
 retargets them, so a full run cannot be aimed at the live guild by typo.
 
 Green: `N/N pass, 0 fail`, exit `0`. Any `FAIL` line means not proven — do not
@@ -998,6 +1001,7 @@ npm ci                                             # once per checkout
 npm run staging:automations-proof -- --help        # usage names the script, exit 0
 npm run staging:automations-state -- --help        # usage names the script, exit 0
 node --test test/unit.automationsproofhelp.test.ts # 4/4, exit 0
+node --test test/unit.staginglivetokenrefusal.test.ts # 8/8, exit 0
 ```
 
 Green: each `--help` prints a `usage:` line naming its script file and exits
