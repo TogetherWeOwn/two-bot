@@ -21,7 +21,7 @@ export interface ModerationDiscordClient {
   deleteMessage?(channelId: string, messageId: string, reason: string): Promise<void>;
   purge(channelId: string, count: number, reason: string): Promise<number>;
   setSlowmode(channelId: string, seconds: number, reason: string): Promise<void>;
-  /** Read the channel's current @everyone overwrite. Null when none exists. */
+  /** Read the current @everyone overwrite. Null only for valid absence; unreadable responses throw. */
   getEveryoneOverwrite(channelId: string, guildId: string): Promise<EveryoneOverwrite | null>;
   /** Write the @everyone overwrite. Both masks are full bitmasks. */
   putEveryoneOverwrite(channelId: string, guildId: string, overwrite: EveryoneOverwrite, reason: string): Promise<void>;
@@ -95,13 +95,25 @@ export class ModerationDiscord implements ModerationDiscordClient {
   async getEveryoneOverwrite(channelId: string, guildId: string): Promise<EveryoneOverwrite | null> {
     const res = await this.call('GET', `/channels/${channelId}`, undefined, '', [200]);
     const body = await readJson(res) as { permission_overwrites?: unknown } | null;
-    if (!body || !Array.isArray(body.permission_overwrites)) return null;
-    const row = body.permission_overwrites.find((entry): entry is { allow: string | number; deny: string | number } =>
-      typeof entry === 'object' && entry !== null
-      && (entry as { id?: unknown }).id === guildId
-      && (entry as { type?: unknown }).type === EVERYONE_OVERWRITE_TYPE);
-    if (!row) return null;
-    return { allow: String(row.allow), deny: String(row.deny) };
+    if (!body || typeof body !== 'object' || Array.isArray(body) || !Array.isArray(body.permission_overwrites)) {
+      throw invalidChannelOverwrites();
+    }
+    let overwrite: EveryoneOverwrite | null = null;
+    for (const entry of body.permission_overwrites) {
+      if (typeof entry !== 'object' || entry === null || Array.isArray(entry)
+        || !isSnowflakeId(entry.id) || (entry.type !== 0 && entry.type !== 1)
+        || (entry.id === guildId && entry.type !== EVERYONE_OVERWRITE_TYPE)) {
+        throw invalidChannelOverwrites();
+      }
+      if (entry.id !== guildId) continue;
+      // Never coerce masks: numeric JSON can already have lost permission bits.
+      // Ambiguous duplicate rows cannot be authoritative recovery state either.
+      if (overwrite || !isDecimalMask(entry.allow) || !isDecimalMask(entry.deny)) {
+        throw invalidChannelOverwrites();
+      }
+      overwrite = { allow: entry.allow, deny: entry.deny };
+    }
+    return overwrite;
   }
 
   async putEveryoneOverwrite(
@@ -165,6 +177,31 @@ export class ModerationDiscord implements ModerationDiscordClient {
       clearTimeout(timer);
     }
   }
+}
+
+function isDecimalMask(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && !/[^0-9]/.test(value);
+}
+
+const MAX_UINT64 = (1n << 64n) - 1n;
+
+/**
+ * Discord snowflake IDs are canonical uint64 ASCII decimal strings: no
+ * leading zeros, within uint64 range. Mask syntax is deliberately looser
+ * ("0", "0000" remain valid masks), but a row carrying a non-canonical ID
+ * cannot be classified as "not @everyone" — skipping it would let a garbled
+ * everyone row (zero-prefixed guild ID, out-of-range ID) read as verified
+ * absence — so it refuses.
+ */
+function isSnowflakeId(value: unknown): value is string {
+  if (typeof value !== 'string' || !/^[1-9][0-9]*$/.test(value)) return false;
+  return BigInt(value) <= MAX_UINT64;
+}
+
+function invalidChannelOverwrites(): ActionError {
+  return new ActionError('discord_rejected', 'Discord returned unreadable channel permission overwrites', {
+    logReason: 'discord_invalid_channel_overwrites',
+  });
 }
 
 function encodeAuditReason(reason: string): string {
