@@ -85,18 +85,45 @@ pseudonym, never a public-message body or handle. The dedicated key is not store
 in the database. Do not expose rota rows through public reporting views.
 
 Authorized rota-log readers are the accepted human primary, Community Manager
-and President & COO. An authorized erasure must also delete derived rows for the
-member pseudonym and any reply/latency/acknowledgement rows containing that responder pseudonym;
-`OnboardingRota.eraseSubject()` performs the rota portion in one transaction
-(see [ONBOARDING_ROTA.md](ONBOARDING_ROTA.md) for the key/guild scope and the
-exact queries). Disabling measurement is
-not erasure and does not rotate the pseudonym key.
+and President & COO. For an authorized request, an operator calls
+`OnboardingRota.eraseSubject(guildId, rawMemberId)` with the **raw Discord member
+ID**, not an already-derived pseudonym. Using the same dedicated key that wrote
+the rows, the helper derives the full, guild-separated HMAC-SHA256 pseudonym
+through `memberId()` and deletes, in one transaction with bound parameters:
+
+- Every `community_facts` row in that guild whose `actor_id` is the subject
+  pseudonym (not just a selected list of milestone types).
+- Rows in that guild whose `metadata.responderId` is the subject pseudonym,
+  limited to `welcome_rota_acknowledged`, `welcome_rota_replied`,
+  `onboarding_first_human_reply` and `onboarding_reply_latency`. This also
+  removes those reply/latency/acknowledgement rows from other members' funnels
+  when the requester was their responder.
+- `operational_audit_log` rows in that guild whose `event_kind` is `rota_notice`
+  and whose `target_id` is the subject pseudonym.
+
+The helper returns delete counts named `factsByActor`, `factsByResponder` and
+`auditNotices`; a repeat request against unchanged data returns zero for all
+three. It leaves other guilds, other subjects' remaining facts/notices, and
+responder references on non-listed event types alone. It does not erase raw-ID
+member records, tickets or raw community facts; those need the separate
+raw-member deletion below. Repeat the rota erasure for each applicable guild
+using the key that generated its stored pseudonyms. A different key cannot
+match those rows.
+
+This helper is operator-invoked, not an automatic live-member deletion path.
+Disabling measurement is not erasure and does not rotate the pseudonym key;
+`eraseSubject()` does not require measurement to be enabled. See
+[ONBOARDING_ROTA.md](ONBOARDING_ROTA.md) for the identity contract.
 
 ## Retention
 
 Events are kept indefinitely today, because retention analysis needs history.
+Rota-derived `community_facts` and `rota_notice` audit rows likewise have no
+time-based purge; authorized erasure removes the matching rows described above.
+The ticket transcript's 90-day limit does not apply to these rota records.
 Once we have a year of data past the backfill, revisit: aggregate counts older
-than ~18 months and drop the per-member rows behind them.
+than ~18 months and drop the per-member rows behind them. That is a proposed
+review, not an implemented expiry.
 
 Private ticket transcripts are retained for **90 days after close**. Startup
 deletes rows whose `purge_after` has passed. Attachment URLs are references to
@@ -104,7 +131,10 @@ Discord's copy, not retained attachment bytes, and may expire sooner.
 
 ## Deletion
 
-If a member asks to be removed:
+If a member asks to be removed, the raw-ID portion is below. `<id>` in this
+block is always the **raw Discord member ID**, never a rota pseudonym. These
+queries describe the predicates; execute them with bound parameters rather than
+interpolating IDs into SQL. Complete the separate rota erasure afterwards.
 
 ```sql
 DELETE FROM ticket_transcripts         WHERE opener_id = '<id>' OR claimed_by = '<id>';
@@ -131,15 +161,6 @@ DELETE FROM event_rsvps                WHERE user_id = '<id>';
 DELETE FROM lfg_signups                WHERE user_id = '<id>';
 DELETE FROM self_role_audit            WHERE member_id = '<id>';
 DELETE FROM self_role_panel_claims     WHERE member_id = '<id>';
--- Rota pseudonym erasure (guild-separated HMAC pseudonym, NOT the raw ID:
--- compute it with the rota key first, or use OnboardingRota.eraseSubject()).
--- <id> below is the pseudonym; <guild> is the guild ID. All bound parameters.
-DELETE FROM community_facts            WHERE guild_id = '<guild>' AND actor_id = '<id>';
-DELETE FROM community_facts            WHERE guild_id = '<guild>'
-                                         AND event_type IN ('welcome_rota_acknowledged', 'welcome_rota_replied',
-                                                            'onboarding_first_human_reply', 'onboarding_reply_latency')
-                                         AND metadata::json->>'responderId' = '<id>';
-DELETE FROM operational_audit_log      WHERE guild_id = '<guild>' AND event_kind = 'rota_notice' AND target_id = '<id>';
 DELETE FROM temp_voice_creates         WHERE user_id = '<id>';
 DELETE FROM temp_voice_audit           WHERE actor_id = '<id>';
 DELETE FROM temp_voice_channels        WHERE owner_id = '<id>' OR generator_id = '<id>'
@@ -151,9 +172,36 @@ DELETE FROM automation_audit_log       WHERE actor_id = '<id>';
 `TicketStore.eraseMember()` performs the ticket-table portion in one transaction.
 `OperationalAuditStore.eraseMember()` performs the operational-audit portion in one transaction;
 its opaque `entry_id` may still contain a member ID for event identity, so matching rows are deleted rather than anonymized.
-This makes historical counts drop slightly, which is correct.
+Erasure reduces historical counts, which is correct; rota erasure also removes
+reply/latency facts belonging to other members when the requester was the
+responder.
 
-What the block above deliberately does not touch, and why:
+For the **additional rota portion**, prefer
+`OnboardingRota.eraseSubject(guildId, rawMemberId)`. Its manual SQL equivalent is
+below. Bind `$1` to the guild ID and `$2` to the pseudonym computed by
+`memberId(guildId, rawMemberId)` with the original rota key — **not** to the raw
+member ID. Execute all three deletes in one transaction, as the helper does.
+
+```sql
+BEGIN;
+DELETE FROM community_facts WHERE guild_id = $1 AND actor_id = $2;
+DELETE FROM community_facts
+ WHERE guild_id = $1
+   AND event_type IN ('welcome_rota_acknowledged', 'welcome_rota_replied',
+                      'onboarding_first_human_reply', 'onboarding_reply_latency')
+   AND metadata::json->>'responderId' = $2;
+DELETE FROM operational_audit_log
+ WHERE guild_id = $1 AND event_kind = 'rota_notice' AND target_id = $2;
+COMMIT;
+```
+
+The generic `OperationalAuditStore.eraseMember()` is not a substitute for this
+rota step: the raw-member policy calls it with the raw ID, and it matches actor
+or target across all guilds in its own transaction. `eraseSubject()` instead
+uses the pseudonym, selected guild and `rota_notice` target predicate within
+the same transaction as the fact deletes.
+
+What the raw-ID block above deliberately does not touch, and why:
 
 - **Inviter IDs inside other members' join rows.** `events.metadata` on a
   `member_join` row can carry `{inviterId}`. Deleting the member's own rows

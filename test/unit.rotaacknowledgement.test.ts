@@ -96,6 +96,29 @@ test('authenticated primary command fetches fresh evidence and writes one pseudo
   assert.equal(replies?.n, 0);
 });
 
+for (const type of [ChannelType.GuildText, ChannelType.GuildAnnouncement, ChannelType.GuildVoice,
+  ChannelType.GuildStageVoice, ChannelType.GuildForum, ChannelType.PublicThread,
+  ChannelType.PrivateThread, ChannelType.AnnouncementThread]) {
+  test(`gateway enrollment and primary acknowledgement agree for ${ChannelType[type]}`, async () => {
+    const x = input();
+    x.channel.type = type as typeof x.channel.type;
+    const subject = { guildId: GUILD, actorId: SUBJECT, pending: false };
+    await core.rulesAccepted({ ...subject, occurredAt: '2026-09-01T12:00:00.000Z', sourceCohort: 'invite:campaign' });
+    await core.promptShown({ ...subject, occurredAt: '2026-09-01T12:01:00.000Z',
+      promptVariant: 'session', messageId: 'welcome', channelId: CHANNEL });
+    await observer.message({ ...x.message, member: x.subject, createdTimestamp: Date.parse(FIRST),
+      channel: { ...x.channel, isDMBased: () => false,
+        isThread: () => [ChannelType.PublicThread, ChannelType.PrivateThread, ChannelType.AnnouncementThread].includes(type) },
+    } as never);
+    const now = new Date().toISOString();
+    const candidates = await core.dueNotices(GUILD, now);
+    assert.equal(candidates.length, type === ChannelType.GuildText ? 1 : 0);
+    assert.equal(await observer.acknowledgePrimary(x.interaction), type === ChannelType.GuildText);
+    assert.deepEqual(await core.dueNotices(GUILD, now), []);
+    assert.equal((await acks()).length, type === ChannelType.GuildText ? 1 : 0);
+  });
+}
+
 test('actor authentication and canonical same-guild link checks precede every Discord fetch', async () => {
   await enroll();
   for (const mutate of [
@@ -132,6 +155,7 @@ test('fresh member, channel and fetched message exclusions fail closed', async (
     x => { x.subject.guild.id = 'other'; }, x => { x.channel.id = 'other'; },
     x => { x.channel.guild.id = 'other'; },
     x => { x.channel.type = ChannelType.PublicThread as typeof x.channel.type; },
+    x => { x.channel.type = ChannelType.GuildAnnouncement as typeof x.channel.type; },
     x => { x.channel.permissionsFor = () => new PermissionsBitField(['ViewChannel']); },
     x => { x.channel.permissionsFor = m => new PermissionsBitField(m === x.subject ? [] : ['ViewChannel', 'SendMessages', 'ReadMessageHistory']); },
     x => { x.message.id = 'other'; }, x => { x.message.guildId = 'other'; },

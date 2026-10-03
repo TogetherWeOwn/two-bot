@@ -81,7 +81,7 @@ function headline(d: DashboardData): string {
   const joinNote =
     d.thisWeek.joins > 0
       ? `${signed(delta)} vs last week (${d.lastWeek.joins})`
-      : `nobody joined. Last week: ${d.lastWeek.joins}`;
+      : `No joins recorded this week. Last week: ${d.lastWeek.joins}`;
 
   const attributed = d.sourcesAllTime.filter((s) => !s.unattributed).reduce((n, s) => n + s.joins, 0);
 
@@ -156,7 +156,7 @@ function weeklyChart(weeks: WeekRow[]): string {
 
 function sourceChart(d: DashboardData): string {
   const all = d.sourcesAllTime;
-  if (all.length === 0) return `<p class="empty" role="status">No joins on record yet — the bot has not seen a join. Run the bot once (or <code>npm run backfill</code>), rebuild, and this section fills in.</p>`;
+  if (all.length === 0) return `<p class="empty" role="status">No joins on record yet. Keep the bot running to record new joins, or run <code>npm run backfill</code> to import join history. Then run <code>npm run dashboard</code> to refresh this section.</p>`;
   const max = Math.max(1, ...all.map((s) => s.joins));
   const rows = all
     .slice(0, 12)
@@ -210,7 +210,7 @@ function retention(d: DashboardData): string {
   const withPeople = d.cohorts.filter((c) => c.size > 0);
   const table =
     withPeople.length === 0
-      ? `<p class="empty" role="status">No cohort in the last ${d.cohorts.length} weeks has anyone in it — nobody joined.</p>`
+      ? `<p class="empty" role="status">No cohorts to show — no member joins are recorded for this ${d.cohorts.length}-week window.</p>`
       : tableWrap(
           'Join cohorts',
           `<table class="chart">
@@ -254,7 +254,7 @@ function gateTile(g: GateConversion | null): string {
     return tile(
       'Cleared the rules gate',
       '—',
-      'not measured yet — run npm run backfill',
+      'not measured yet — check the rules gate with npm run backfill',
       'warning',
     );
   }
@@ -328,7 +328,7 @@ function retentionTile(label: string, r: RetentionCell | null): string {
 
 function channels(d: DashboardData): string {
   if (d.channels.length === 0) {
-    return `<p class="empty" role="status">No channel activity data yet — the bot has not collected a server snapshot. Run <code>npm run audit:collect</code>, rebuild, and this section fills in.</p>`;
+    return `<p class="empty" role="status">No channel activity data yet. Run <code>npm run audit:collect</code> to collect a server snapshot, then <code>npm run dashboard</code> to refresh this section.</p>`;
   }
   const alive = d.channels.filter((c) => c.state === 'alive');
   const quiet = d.channels.filter((c) => c.state === 'quiet');
@@ -405,10 +405,12 @@ function section(id: string, title: string, body: string): string {
  */
 function freshNotice(d: DashboardData): string {
   if (d.memberCountSource !== 'none') return '';
-  return `<div class="notice" role="status"><strong>Fresh database — nothing to show yet.</strong>
-  Every section below reads zero because nothing has been recorded, not because
-  nothing happened. Run the bot once (or <code>npm run backfill</code> and
-  <code>npm run audit:collect</code>), rebuild, and this page fills in.</div>`;
+  return `<div class="notice" role="status"><strong>Fresh database — no community data recorded yet.</strong>
+  Zeros mean no activity has been recorded; dashes mean a metric is not available yet.
+  They do not mean the server is empty. Keep the bot running to collect activity,
+  or run <code>npm run backfill</code> to import member history. Run
+  <code>npm run audit:collect</code> for a channel snapshot, then
+  <code>npm run dashboard</code> to refresh this page.</div>`;
 }
 
 /**

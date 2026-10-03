@@ -69,6 +69,11 @@ import {
   registerContainment,
 } from './moderation/containment.ts';
 import { makeContainmentAnnouncer, makeJoinRiskAnnouncer } from './discord/containmentAlert.ts';
+import {
+  STAFF_ALERT_BURST_WINDOW_MS,
+  throttledContainmentAnnouncer,
+  throttledJoinRiskAnnouncer,
+} from './moderation/containmentAlert.ts';
 import { GuildConfigDiscordApi } from './discord/guildConfigApi.ts';
 import type { GuildConfigSnapshot } from './redesign/guildConfig.ts';
 import { readFileSync } from 'node:fs';
@@ -477,14 +482,27 @@ log.info('raid_watch_enabled', {
 });
 
 const containmentStore = new ContainmentStore(db);
+// TOG-9988: a raid-scale burst of join-risk flags must not become one staff
+// post per join. The first 3 per guild per minute post immediately; the rest
+// coalesce into one digest that names executors, peak score, and the tables
+// holding per-event detail. Flushed on the same cadence below.
+const throttledJoinRisk = throttledJoinRiskAnnouncer((alert) =>
+  makeJoinRiskAnnouncer(
+    client,
+    stagingRestartArmed ? null : containmentCfg.alertChannelId,
+  )(alert),
+);
+const throttledContainment = throttledContainmentAnnouncer((alert) =>
+  makeContainmentAnnouncer(
+    client,
+    stagingRestartArmed ? null : containmentCfg.alertChannelId,
+  )(alert),
+);
 const joinRisk = containmentCfg.enabled
   ? new JoinRiskScorer({
       store: containmentStore,
       config: containmentCfg,
-      announce: makeJoinRiskAnnouncer(
-        client,
-        stagingRestartArmed ? null : containmentCfg.alertChannelId,
-      ),
+      announce: (alert) => throttledJoinRisk.announce(alert),
     })
   : undefined;
 
@@ -541,10 +559,7 @@ if (!stagingRestartArmed && containmentCfg.enabled && containmentCfg.guildId) {
       fetchImpl: stagingRestartFetch,
     }),
     config: containmentCfg,
-    announce: makeContainmentAnnouncer(
-      client,
-      stagingRestartArmed ? null : containmentCfg.alertChannelId,
-    ),
+    announce: (alert) => throttledContainment.announce(alert),
     restore,
   });
   registerContainment(client, containment, containmentCfg.guildId);
@@ -1076,6 +1091,19 @@ const auditRetry = () => {
 if (!stagingRestartArmed) client.once('ready', auditRetry);
 const auditSweep = stagingRestartArmed ? null : setInterval(auditRetry, 30_000);
 auditSweep?.unref();
+
+// TOG-9988: deliver trailing burst digests on the throttle's own cadence, so
+// a burst that stops mid-window does not sit unsummarized until the next
+// alert. Flushing emits only pending digests; window budgets are untouched.
+const alertBurstFlush = stagingRestartArmed ? null : setInterval(
+  () => {
+    void Promise.all([throttledJoinRisk.flush(), throttledContainment.flush()]).catch((err: unknown) => {
+      log.error('alert_burst_flush_failed', { err: String(err) });
+    });
+  },
+  STAFF_ALERT_BURST_WINDOW_MS,
+);
+alertBurstFlush?.unref();
 
 // Rota fallback-notice ticker. Same non-overlapping shape as the automation
 // scheduler; the durable claim row (not the interval) is the queue, so a

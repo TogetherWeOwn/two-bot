@@ -92,6 +92,7 @@
     "onboarding:web:acceptance": "node scripts/onboarding-web-slice-acceptance.ts",
     "onboarding:exploratory": "node scripts/onboarding-exploratory-acceptance.ts",
     "automod:export": "node scripts/automod-export.ts",
+    "automod:wordlist-lint": "node scripts/automod-wordlist-lint.ts",
     "community:scorecard": "node scripts/community-scorecard.ts",
     "staging:discord-fetch": "node scripts/staging-discord-fetch.ts --help",
     "staging:session-demo": "node scripts/staging-session-demo.ts",

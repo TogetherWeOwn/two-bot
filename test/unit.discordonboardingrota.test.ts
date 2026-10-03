@@ -1,7 +1,7 @@
 import { after, before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { Collection, Events, PermissionsBitField, type Client, type GuildMember, type Message } from 'discord.js';
+import { ChannelType, Collection, Events, PermissionsBitField, type Client, type GuildMember, type Message } from 'discord.js';
 import { openTestDb, type TestDb } from './helpers/testDb.ts';
 import { CommunityClassifier, loadCommunityClassifierConfig } from '../src/analytics/communityClassifier.ts';
 import { OnboardingRota } from '../src/analytics/onboardingRota.ts';
@@ -56,7 +56,7 @@ function message(m = member(), overrides: Record<string, unknown> = {}): Message
     author: m.user, webhookId: null, system: false, id: 'first-message', channelId: CHANNEL,
     createdTimestamp: Date.parse(FIRST), reference: null,
     channel: {
-      isDMBased: () => false, isThread: () => false,
+      type: ChannelType.GuildText, isDMBased: () => false, isThread: () => false,
       permissionsFor: () => new PermissionsBitField(['ViewChannel', 'SendMessages']),
     },
     ...overrides,
@@ -222,9 +222,10 @@ test('webhook/system/unknown-channel/thread and permission-denied messages do no
   for (const overrides of [
     { webhookId: 'hook' }, { system: true }, { channelId: 'elsewhere' }, { guildId: 'other' },
     { member: null }, { author: { id: 'spoof', bot: false } },
-    { channel: { isDMBased: () => true } },
-    { channel: { isDMBased: () => false, isThread: () => true } },
-    { channel: { isDMBased: () => false, isThread: () => false, permissionsFor: () => new PermissionsBitField('ViewChannel') } },
+    { channel: { type: ChannelType.DM, isDMBased: () => true } },
+    { channel: { type: ChannelType.PublicThread, isDMBased: () => false, isThread: () => true } },
+    { channel: { type: ChannelType.GuildText, isDMBased: () => false, isThread: () => false,
+      permissionsFor: () => new PermissionsBitField('ViewChannel') } },
   ]) await observer.message(message(member(), overrides));
   assert.equal((await rows()).length, 2);
 });
