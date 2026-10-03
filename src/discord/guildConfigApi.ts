@@ -4,7 +4,7 @@ import type {
   GuildConfigRole,
   GuildConfigSnapshot,
 } from '../redesign/guildConfig.ts';
-import type { RestorePlan } from '../redesign/guildConfigRestore.ts';
+import type { RestoreOperation, RestorePlan } from '../redesign/guildConfigRestore.ts';
 
 type JsonObject = Record<string, unknown>;
 type ApiResult<T> = { status: number; body: T | null };
@@ -38,6 +38,21 @@ export function checkedApiBase(raw: string | undefined): string {
 
 export function checkedCdnBase(raw: string | undefined): string {
   return raw ? checkedTestBase(raw, 'GUILD_CONFIG_CDN_BASE') : 'https://cdn.discordapp.com';
+}
+
+function requiredBitsForOperation(operation: RestoreOperation, guildId: string): Array<{ name: string; bit: bigint }> {
+  const manageChannels = { name: 'Manage Channels', bit: 1n << 4n };
+  const manageRoles = { name: 'Manage Roles', bit: 1n << 28n };
+  if (typeof operation.path !== 'string') {
+    const body = operation.body as Record<string, unknown> | unknown[] | null;
+    const restoresOverwrites = !!body && typeof body === 'object' && !Array.isArray(body) && 'permission_overwrites' in body;
+    return restoresOverwrites ? [manageChannels, manageRoles] : [manageChannels];
+  }
+  if (operation.path === `/guilds/${guildId}`) return [{ name: 'Manage Guild', bit: 1n << 5n }];
+  if (operation.path.includes('/emojis')) return [{ name: 'Manage Guild Expressions', bit: 1n << 30n }];
+  if (operation.path.includes('/roles')) return [manageRoles];
+  if (operation.path.includes('/channels')) return [manageChannels];
+  return [];
 }
 
 export class GuildConfigDiscordApi {
@@ -88,7 +103,7 @@ export class GuildConfigDiscordApi {
     }
   }
 
-  async assertRestorePermissions(snapshot: GuildConfigSnapshot, plan: Pick<RestorePlan, 'counts' | 'overwriteRoles' | 'overwriteTargets'>): Promise<void> {
+  async assertRestorePermissions(snapshot: GuildConfigSnapshot, plan: Pick<RestorePlan, 'counts' | 'roleTargets' | 'overwriteRoles' | 'overwriteTargets' | 'operations'>): Promise<void> {
     const member = await this.request<{ roles?: string[] }>('GET', `/guilds/${this.guildId}/members/${this.applicationId}`);
     if (member.status !== 200 || !member.body) throw new Error(`Could not read Owen's guild member for permission preflight: HTTP ${member.status}.`);
     const heldRoleIds = new Set([this.guildId, ...(member.body.roles ?? [])]);
@@ -106,15 +121,24 @@ export class GuildConfigDiscordApi {
     if (missing.length > 0) throw new Error(`Restore permission preflight failed: missing ${missing.join(', ')}.`);
     if (needsManageRoles && snapshot.guild.owner_id !== this.applicationId) {
       const botPosition = Math.max(...heldRoles.map((role) => role.position), -1);
-      const targets = plan.counts.roles > 0
-        ? snapshot.roles.filter((role) => !role.managed && role.id !== this.guildId)
-        : plan.overwriteRoles;
+      const targets = [
+        ...plan.roleTargets.filter((role) => role.currentId !== this.guildId),
+        ...plan.overwriteRoles,
+      ];
       const blocked = targets.filter((role) => botPosition <= role.position);
       if (blocked.length > 0) {
         throw new Error(`Restore hierarchy preflight failed: Owen role position ${botPosition} is not above overwrite target ${blocked.map((role) => `${role.name} (${role.position})`).join(', ')}.`);
       }
     }
     if (!administrator) {
+      const blockedRoles = plan.roleTargets.flatMap((target) => {
+        if (target.permissions === undefined) return [];
+        const unowned = BigInt(target.permissions) & ~permissions;
+        return unowned === 0n ? [] : [`${target.name} (unowned mask ${unowned})`];
+      });
+      if (blockedRoles.length > 0) {
+        throw new Error(`Restore role permission preflight failed: ${blockedRoles.join('; ')}.`);
+      }
       const effectivePermissions = (overwrites: GuildConfigChannel['permission_overwrites']) => {
         let effective = permissions;
         const everyone = overwrites.find((overwrite) => overwrite.type === 0 && overwrite.id === this.guildId);
@@ -144,6 +168,57 @@ export class GuildConfigDiscordApi {
       });
       if (blockedTargets.length > 0) {
         throw new Error(`Restore channel permission preflight failed: ${blockedTargets.join('; ')}.`);
+      }
+    }
+    // Project held-role authority through apply order. A planned PATCH that
+    // narrows a held role shrinks every later write's authority, so a plan
+    // that passes the initial checks above can still strand later writes
+    // with a mid-apply 403. Refuse the whole plan before any write when a
+    // later operation would lose a bit it needs or a grant it must own. A
+    // revocation that is itself the last write stays legal: nothing follows
+    // that needs the revoked authority.
+    {
+      const projected = new Map(heldRoles.map((role) => [role.id, BigInt(role.permissions)]));
+      const union = (): bigint => {
+        let mask = 0n;
+        for (const value of projected.values()) mask |= value;
+        return mask;
+      };
+      for (const operation of plan.operations) {
+        const held = union();
+        if ((held & (1n << 3n)) === 0n) {
+          const missingBits = requiredBitsForOperation(operation, this.guildId)
+            .filter((permission) => (held & permission.bit) === 0n)
+            .map((permission) => permission.name);
+          if (missingBits.length > 0) {
+            throw new Error(`Restore retained-authority preflight failed: ${operation.label} needs ${missingBits.join(', ')} that earlier planned role changes revoke; refusing before any write.`);
+          }
+          const body = operation.body as { permissions?: unknown } | null | undefined;
+          const rolePrefix = `/guilds/${this.guildId}/roles/`;
+          const desired = typeof operation.path === 'string'
+            && operation.method === 'PATCH'
+            && operation.path.startsWith(rolePrefix)
+            && !!body && typeof body === 'object' && !Array.isArray(body)
+            && typeof body.permissions === 'string'
+            ? body.permissions
+            : undefined;
+          if (desired !== undefined) {
+            const unowned = BigInt(desired) & ~held;
+            if (unowned !== 0n) {
+              throw new Error(`Restore retained-authority preflight failed: ${operation.label} grants unowned mask ${unowned} after earlier planned role changes; refusing before any write.`);
+            }
+          }
+        }
+        if (typeof operation.path === 'string' && operation.method === 'PATCH') {
+          const rolePrefix = `/guilds/${this.guildId}/roles/`;
+          if (operation.path.startsWith(rolePrefix)) {
+            const roleId = operation.path.slice(rolePrefix.length);
+            const body = operation.body as { permissions?: unknown } | null | undefined;
+            if (roleId && !roleId.includes('/') && heldRoleIds.has(roleId) && !!body && typeof body === 'object' && !Array.isArray(body) && typeof body.permissions === 'string') {
+              projected.set(roleId, BigInt(body.permissions));
+            }
+          }
+        }
       }
     }
   }

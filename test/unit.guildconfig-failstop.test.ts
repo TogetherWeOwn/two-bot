@@ -9,6 +9,7 @@ function dependencyPlan(): RestorePlan {
   return {
     counts: { roles: 1, channels: 1, overwrites: 1, settings: 1, emojis: 0, operations: 4 },
     knownIds: { roles: { 'source-guild': 'target-guild' }, channels: { 'source-category': 'target-category' }, emojis: {} },
+    roleTargets: [{ currentId: null, name: 'Moderator', position: 0 }],
     overwriteRoles: [],
     overwriteTargets: [],
     operations: [
