@@ -393,8 +393,6 @@ async function openTicket(interaction: ButtonInteraction, deps: TicketDeps, stor
     const ticket = await store.activate(reservation.id, channel.id);
     if (!ticket) throw new Error(`ticket reservation ${reservation.id} disappeared before activation`);
     await channel.send({ content: `<@${member.id}> Thanks — staff will be with you shortly. Ticket messages are retained in a staff-only audit transcript for ${TRANSCRIPT_RETENTION_DAYS} days after close.`, components: [buildTicketControls()], allowedMentions: { users: [member.id] } });
-    await interaction.editReply({ content: `Your private ticket is ready: <#${channel.id}>` });
-    log.info('ticket_opened', { ticketId: ticket.id, guildId: guild.id, openerId: member.id, channelId: channel.id });
   } catch (err) {
     let deleted = !channel;
     if (channel) {
@@ -410,6 +408,9 @@ async function openTicket(interaction: ButtonInteraction, deps: TicketDeps, stor
     if (deleted) await store.abandon(reservation.id);
     throw err;
   }
+  log.info('ticket_opened', { ticketId: reservation.id, guildId: guild.id, openerId: member.id, channelId: channel.id });
+  // The ticket is ready; a failed interaction acknowledgement must not roll it back.
+  await interaction.editReply({ content: `Your private ticket is ready: <#${channel.id}>` });
 }
 
 async function claimTicket(interaction: ButtonInteraction, deps: TicketDeps, store: TicketStore): Promise<void> {
@@ -631,4 +632,4 @@ export function registerTickets(client: Client, deps: TicketDeps): void {
   });
 }
 
-export const ticketTestHelpers = { withinCooldown, purgeAfter, isUnknownChannel };
+export const ticketTestHelpers = { withinCooldown, purgeAfter, isUnknownChannel, openTicket };
