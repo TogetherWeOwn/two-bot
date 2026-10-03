@@ -3,7 +3,9 @@ name: ci
 on:
   push:
     branches: [main]
-  pull_request:
+  # Legacy PR development checks frozen (TOG-12060/TOG-12911): the automatic
+  # pull_request trigger is removed. Push-to-main and workflow_dispatch
+  # (release-please path below) are unchanged.
   # Dispatched by the release workflow (TOG-9865) on release-please branches:
   # PRs opened with GITHUB_TOKEN trigger no workflows, so the required `check`
   # would never run on the release PR without this path.
