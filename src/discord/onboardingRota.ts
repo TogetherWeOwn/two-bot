@@ -163,7 +163,7 @@ export class DiscordOnboardingRota {
     const actor = this.actor(message.member);
     if (!actor || message.guildId !== actor.guildId || message.author.id !== actor.actorId ||
         message.author.bot || message.webhookId || message.system ||
-        message.channel.isDMBased() || message.channel.isThread() ||
+        message.channel.type !== ChannelType.GuildText ||
         !this.config.humanChannelIds.has(message.channelId)) return Promise.resolve();
     const permissions = message.channel.permissionsFor(message.member!);
     if (!permissions?.has(PermissionFlagsBits.ViewChannel | PermissionFlagsBits.SendMessages)) {
