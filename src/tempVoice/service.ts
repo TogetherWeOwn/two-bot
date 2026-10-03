@@ -651,14 +651,32 @@ export class TempVoiceService {
       log.error('temp_voice_rename_flush_collision', { channelId, name: pending });
       return;
     }
+    const attemptedAt = this.now();
+    if (this.throttle.pending(channelId, row.name) !== pending || !this.throttle.ready(channelId, attemptedAt)) return;
+    this.throttle.request(channelId, pending, attemptedAt);
     try {
-      await this.gateway.renameChannel(channelId, pending);
+      await this.applyRename(channelId, pending, attemptedAt);
       const at = this.iso();
       this.throttle.applied(channelId, pending, this.now());
       await this.store.setName(row.id, pending, at);
       log.info('temp_voice_rename_flushed', { channelId, name: pending });
     } catch (err) {
       log.error('temp_voice_rename_flush_failed', { channelId, err: String(err) });
+    }
+  }
+
+  private async applyRename(channelId: string, name: string, attemptedAt: number): Promise<void> {
+    try {
+      await this.gateway.renameChannel(channelId, name);
+    } catch (err) {
+      // Unknown Channel, Missing Access/Permissions and Invalid Form Body are
+      // definitive refusals. Transport failures, rate limits and unknown errors
+      // may have spent a rename, so retain their reserved window and intent.
+      if (err instanceof TempVoiceGatewayError &&
+          [UNKNOWN_CHANNEL_CODE, 50001, MISSING_PERMISSIONS_CODE, 50035].includes(err.code ?? 0)) {
+        this.throttle.rejected(channelId, name, attemptedAt);
+      }
+      throw err;
     }
   }
 
@@ -745,7 +763,8 @@ export class TempVoiceService {
       });
     }
 
-    const decision = this.throttle.request(channelId, filtered.name, this.now());
+    const attemptedAt = this.now();
+    const decision = this.throttle.request(channelId, filtered.name, attemptedAt);
     if (!decision.apply) {
       const seconds = Math.ceil(decision.retryAfterMs / 1000);
       return this.record(ctx, channelId, 'name', {
@@ -753,7 +772,7 @@ export class TempVoiceService {
         message: `Discord only allows a couple of renames per channel per 10 minutes, so **${filtered.name}** is queued and lands in about ${seconds}s.`,
       });
     }
-    await this.gateway.renameChannel(channelId, filtered.name);
+    await this.applyRename(channelId, filtered.name, attemptedAt);
     await this.store.setName(row.id, filtered.name, this.iso());
     return this.record(ctx, channelId, 'name', { status: 'ok', message: `Renamed to **${filtered.name}**.` });
   }
