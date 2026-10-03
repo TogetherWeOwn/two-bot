@@ -127,6 +127,33 @@ test('unknowns older than the first capture are pre-tracking', () => {
   assert.equal(report.totals.unexplained, 1);
 });
 
+test('a null capture boundary preserves backfills without hiding unknown joins', () => {
+  const report = buildUnknownReport(
+    [
+      { occurredAt: '2026-09-15T10:00:00.000Z', source: 'unknown' },
+      { occurredAt: '2026-09-16T10:00:00.000Z', source: 'backfill:log:member-join' },
+      { occurredAt: '2026-09-17T10:00:00.000Z', source: 'unknown' },
+      { occurredAt: '2026-09-23T10:00:00.000Z', source: 'backfill:member_list' },
+    ],
+    {
+      now: NOW,
+      weeks: WEEKS,
+      firstCaptureAt: null,
+      downtimeWindows: [
+        { start: '2026-09-17T00:00:00.000Z', end: '2026-09-18T00:00:00.000Z', gapMs: 86_400_000 },
+      ],
+    },
+  );
+  assert.deepEqual(report.totals, {
+    joins: 4,
+    unknown: 4,
+    unknownRate: 1,
+    preTracking: 2,
+    downtime: 1,
+    unexplained: 1,
+  });
+});
+
 test('anomaly windows leave both sides of the rate', () => {
   const report = buildUnknownReport(
     [
