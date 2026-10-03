@@ -13,3 +13,9 @@
 407017d0481dc806c164121503a770c0d8391f2a:ops/staging-deploy-broker/server.test.mjs:private-key:561
 407017d0481dc806c164121503a770c0d8391f2a:ops/staging-deploy-broker/server.test.mjs:private-key:627
 407017d0481dc806c164121503a770c0d8391f2a:ops/staging-deploy-broker/server.test.mjs:private-key:640
+
+# TOG-6911: inspected malformed-JSON smoke regression at b2fedbce L986-L1000.
+# The template wraps paired/unmatched quotes or a backslash in PEM markers;
+# the scanner spans test scaffolding, not private-key material. Preserve the
+# exact historical fingerprint: adjacent keys and new commits still fail.
+b2fedbce2ee9d03d99e3f0dc665c0a97f5f28ad4:scripts/deploy-target-selftest.mjs:private-key:986
