@@ -100,7 +100,7 @@ test('counts and conversion include the backfill row', async () => {
     (EXPECTED_DISTINCT.gate_cleared ?? 0) + 1,
     'gate counts must keep including backfilled clearings',
   );
-  const dashboard = await buildDashboard(db, { now: new Date(TEST_NOW), weeks: 4 });
+  const dashboard = await buildDashboard(db, { guildId: G, now: new Date(TEST_NOW), weeks: 4 });
   assert.equal(
     dashboard.gateOverall?.cleared,
     (EXPECTED_DISTINCT.gate_cleared ?? 0) + 1,

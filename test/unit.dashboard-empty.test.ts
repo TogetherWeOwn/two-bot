@@ -68,10 +68,10 @@ function assertSelfContained(html: string): void {
 
 describe('dashboard empty-state (fresh database)', () => {
   test('empty tables build honest zeros, not nulls dressed as numbers', async () => {
-    const d = await buildDashboard(fakeDb(), { now: NOW, weeks: 4, anomalies: [] });
+    const d = await buildDashboard(fakeDb(), { guildId: 'empty-guild', now: NOW, weeks: 4, anomalies: [] });
     assert.equal(d.memberCountSource, 'none');
     assert.equal(d.memberCountAsOf, null);
-    assert.equal(d.guildId, null);
+    assert.equal(d.guildId, 'empty-guild');
     assert.deepEqual(d.thisWeek, { start: '2026-03-02', joins: 0, leaves: 0, net: 0 });
     assert.deepEqual(d.lastWeek, { start: '2026-02-23', joins: 0, leaves: 0, net: 0 });
     assert.equal(d.active7d, 0);
@@ -104,7 +104,7 @@ describe('dashboard empty-state (fresh database)', () => {
   });
 
   test('empty page renders the fresh banner and next steps, never bare zeros', async () => {
-    const d = await buildDashboard(fakeDb(), { now: NOW, weeks: 4, anomalies: [] });
+    const d = await buildDashboard(fakeDb(), { guildId: 'empty-guild', now: NOW, weeks: 4, anomalies: [] });
     const html = renderHtml(d);
     assert.ok(html.startsWith('<!doctype html>'));
     assertNoLeaks(html);
@@ -140,7 +140,7 @@ describe('dashboard empty-state (fresh database)', () => {
           },
         ],
       }),
-      { now: NOW, weeks: 4, anomalies: [] },
+      { guildId: 'empty-guild', now: NOW, weeks: 4, anomalies: [] },
     );
     assert.equal(d.memberCountSource, 'funnel', 'one live row beats no snapshot');
     assert.equal(d.humansInServer, 1);

@@ -41,6 +41,11 @@ if (!databaseUrl) {
   console.error('dashboard: TWO_DATABASE_URL is not set.');
   process.exit(1);
 }
+const guildId = process.env.DISCORD_GUILD_ID?.trim();
+if (!guildId) {
+  console.error('dashboard: DISCORD_GUILD_ID is not set.');
+  process.exit(1);
+}
 const weeks = Number(value('weeks', '12'));
 const outPath = value('out', './data/dashboard.html');
 const dataDir = process.env.TWO_DATA_DIR || './data';
@@ -93,7 +98,7 @@ async function loadChannelSnapshot(): Promise<ChannelSnapshot | null> {
 async function build() {
   const db = await openDb(databaseUrl!, { applicationName: 'two-bot-dashboard' });
   try {
-    return await buildDashboard(db, { weeks, channelSnapshot: await loadChannelSnapshot() });
+    return await buildDashboard(db, { guildId: guildId!, weeks, channelSnapshot: await loadChannelSnapshot() });
   } finally {
     await db.close();
   }

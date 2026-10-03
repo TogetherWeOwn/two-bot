@@ -18,7 +18,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildDashboard } from '../src/analytics/dashboard.ts';
-import type { Db, RunResult, Statement } from '../src/store/driver.ts';
+import { dashboardDb, assertDashboardGuildReads, type DashboardFixture, type DashboardRead } from './helpers/dashboardDbFixture.ts';
 import type { Anomaly } from '../src/analytics/anomalies.ts';
 
 const NOW = new Date('2026-03-02T12:00:00.000Z'); // a Monday
@@ -123,36 +123,26 @@ const GATE_EVENTS = [
   { source: 'gateway', occurred_at: '2026-02-24T10:05:00.000Z', recorded_at: '2026-02-24T10:05:00.000Z' },
 ];
 
-/** In-memory stand-in for the dashboard's seven read queries. */
-function fakeDb(): Db {
-  const statement = (sql: string): Statement => ({
-    async get<T>(..._params: unknown[]): Promise<T | undefined> {
-      if (sql.includes('SELECT guild_id')) return { guild_id: GUILD } as T;
-      return undefined;
-    },
-    async all<T>(...params: unknown[]): Promise<T[]> {
-      if (sql.includes('FROM members')) return MEMBERS.map((r) => ({ ...r })) as T[];
-      if (sql.includes("event_type = 'member_join'")) return JOINS.map((r) => ({ ...r })) as T[];
-      if (sql.includes("event_type = 'member_leave'")) return LEAVES.map((r) => ({ ...r })) as T[];
-      if (sql.includes("event_type = 'voice_session_end'")) return VOICE_ENDS.map((r) => ({ ...r })) as T[];
-      if (sql.includes("source LIKE 'channel:%'")) {
-        const since = String(params[0] ?? '');
-        return CHANNEL_EVENTS.filter((e) => e.occurred_at >= since).map((r) => ({ ...r })) as T[];
-      }
-      if (sql.includes("event_type = 'gate_cleared'")) return GATE_EVENTS.map((r) => ({ ...r })) as T[];
-      throw new Error(`fakeDb: unexpected query: ${sql.slice(0, 80)}`);
-    },
-    async run(): Promise<RunResult> {
-      throw new Error('fakeDb: the dashboard never writes');
-    },
+function seedFixture(guild = GUILD): DashboardFixture {
+  const event = (event_type: string, row: Partial<DashboardFixture['events'][number]>) => ({
+    id: 0, guild_id: guild, event_type, member_id: null,
+    occurred_at: '2026-03-01T00:00:00.000Z', recorded_at: '2026-03-01T00:00:00.000Z',
+    source: 'gateway', metadata: null, ...row,
   });
-  const db: Db = {
-    prepare: (sql: string) => statement(sql),
-    exec: async () => {},
-    transaction: async <T>(fn: (tx: Db) => Promise<T>) => fn(db),
-    close: async () => {},
+  return {
+    members: MEMBERS.map((m) => ({ ...m, guild_id: guild, is_bot: false })),
+    events: [
+      ...JOINS.map((r) => event('member_join', r)),
+      ...LEAVES.map((r) => event('member_leave', r)),
+      ...VOICE_ENDS.map((r) => event('voice_session_end', r)),
+      ...CHANNEL_EVENTS.map((r) => event('first_message', r)),
+      ...GATE_EVENTS.map((r) => event('gate_cleared', r)),
+    ].map((r, i) => ({ ...r, id: i + 1 })),
   };
-  return db;
+}
+
+function fakeDb(fixture = seedFixture(), reads: DashboardRead[] = []) {
+  return dashboardDb(fixture, reads);
 }
 
 // ---------------------------------------------------------------------------
@@ -226,9 +216,86 @@ function assertGate(value: unknown, path: string): void {
 // The contract
 // ---------------------------------------------------------------------------
 
+describe('dashboard guild isolation', () => {
+  const opts = { guildId: GUILD, now: NOW, weeks: 4, anomalies: [SEED_ANOMALY] };
+
+  test('a complete foreign mirror with colliding member IDs cannot change the target dashboard', async () => {
+    const target = seedFixture();
+    const foreign = seedFixture('foreign-guild');
+    // A long foreign session changes the mean if the duration read is unscoped.
+    foreign.events.find((e) => e.event_type === 'voice_session_end')!.metadata =
+      JSON.stringify({ startKnown: true, durationSeconds: 86_400 });
+    // Older live history turns target leavers from unknowable into measured.
+    foreign.events.find((e) => e.event_type === 'gate_cleared')!.occurred_at =
+      '2025-01-01T00:00:00.000Z';
+    // Latest event must not relabel a target dashboard. Foreign roster reads
+    // also must not make target gate state look observed.
+    foreign.events.push({
+      id: 10_000, guild_id: 'foreign-guild', event_type: 'gate_cleared', member_id: 'a',
+      source: 'backfill:roster', occurred_at: NOW.toISOString(),
+      recorded_at: NOW.toISOString(), metadata: null,
+    });
+    const baseline = await buildDashboard(fakeDb(target), opts);
+    const reads: DashboardRead[] = [];
+    const mixed = await buildDashboard(fakeDb({
+      members: [...target.members, ...foreign.members],
+      events: [...target.events, ...foreign.events],
+    }, reads), opts);
+    assert.deepEqual(mixed, baseline, 'every JSON field must be guild-invariant');
+    assert.equal(mixed.guildId, GUILD);
+    assert.equal(mixed.avgVoiceSessionSeconds, 120);
+    assert.deepEqual(mixed.gateOverall, {
+      observed: 3, cleared: 1, stuck: 2, leftAtTheGate: 0, unknowable: 2,
+    });
+    assertDashboardGuildReads(reads, GUILD);
+  });
+
+  test('foreign gate history alone cannot make an unwatched target gate observed', async () => {
+    const target = seedFixture();
+    target.events = target.events.filter((e) => e.event_type !== 'gate_cleared');
+    target.members = target.members.map((m) => ({ ...m, gate_cleared_at: null }));
+    const foreign = seedFixture('foreign-guild');
+    foreign.events.push({ ...foreign.events.at(-1)!, id: 10_000, source: 'backfill:roster' });
+    const baseline = await buildDashboard(fakeDb(target), opts);
+    assert.equal(baseline.gateOverall, null);
+    const mixed = await buildDashboard(fakeDb({
+      members: target.members, events: [...target.events, ...foreign.events],
+    }), opts);
+    assert.deepEqual(mixed, baseline);
+  });
+
+  test('foreign-only data does not populate an empty target or override its snapshot census', async () => {
+    const foreign = seedFixture('foreign-guild');
+    for (const channelSnapshot of [null, {
+      collected_at: NOW.toISOString(), channels: [], members: { human_members: 84 },
+    }]) {
+      const baseline = await buildDashboard(fakeDb({ members: [], events: [] }), { ...opts, channelSnapshot });
+      const mixed = await buildDashboard(fakeDb(foreign), { ...opts, channelSnapshot });
+      assert.deepEqual(mixed, baseline);
+      assert.equal(mixed.guildId, GUILD);
+      assert.equal(mixed.memberCountSource, channelSnapshot ? 'snapshot' : 'none');
+    }
+  });
+
+  test('a trimmed guild is bound on every read', async () => {
+    const reads: DashboardRead[] = [];
+    const data = await buildDashboard(fakeDb(seedFixture(), reads), { ...opts, guildId: `  ${GUILD}\t` });
+    assert.equal(data.guildId, GUILD);
+    assertDashboardGuildReads(reads, GUILD);
+  });
+
+  for (const guildId of ['', ' \t\n ']) {
+    test(`empty guild ${JSON.stringify(guildId)} refuses before preparing SQL`, async () => {
+      const reads: DashboardRead[] = [];
+      await assert.rejects(buildDashboard(fakeDb(seedFixture(), reads), { ...opts, guildId }), /guildId/);
+      assert.deepEqual(reads, []);
+    });
+  }
+});
+
 describe('dashboard --json contract', () => {
   test('top-level keys and types are exactly the documented set', async () => {
-    const d = await buildDashboard(fakeDb(), { now: NOW, weeks: 4, anomalies: [SEED_ANOMALY] });
+    const d = await buildDashboard(fakeDb(), { guildId: GUILD, now: NOW, weeks: 4, anomalies: [SEED_ANOMALY] });
     assertShape(d, {
       generatedAt: 'string',
       guildId: 'string|null',
@@ -258,7 +325,7 @@ describe('dashboard --json contract', () => {
   });
 
   test('headline numbers come from the seed', async () => {
-    const d = await buildDashboard(fakeDb(), { now: NOW, weeks: 4, anomalies: [SEED_ANOMALY] });
+    const d = await buildDashboard(fakeDb(), { guildId: GUILD, now: NOW, weeks: 4, anomalies: [SEED_ANOMALY] });
     assert.equal(d.guildId, GUILD);
     assert.ok(!Number.isNaN(Date.parse(d.generatedAt)), 'generatedAt is an ISO instant');
     assert.deepEqual(d.thisWeek, { start: '2026-03-02', joins: 1, leaves: 0, net: 1 });
@@ -278,7 +345,7 @@ describe('dashboard --json contract', () => {
   });
 
   test('weeks pin the per-week shape and the seed counts', async () => {
-    const d = await buildDashboard(fakeDb(), { now: NOW, weeks: 4, anomalies: [SEED_ANOMALY] });
+    const d = await buildDashboard(fakeDb(), { guildId: GUILD, now: NOW, weeks: 4, anomalies: [SEED_ANOMALY] });
     assert.equal(d.weeks.length, 4);
     for (const w of d.weeks) {
       assertShape(w, {
@@ -301,7 +368,7 @@ describe('dashboard --json contract', () => {
   });
 
   test('cohorts, retention and gate pin their nested shapes', async () => {
-    const d = await buildDashboard(fakeDb(), { now: NOW, weeks: 4, anomalies: [SEED_ANOMALY] });
+    const d = await buildDashboard(fakeDb(), { guildId: GUILD, now: NOW, weeks: 4, anomalies: [SEED_ANOMALY] });
     assert.equal(d.cohorts.length, 4);
     for (const c of d.cohorts) {
       assertKeys(c, ['weekStart', 'size', 'd1', 'd7', 'd30', 'gate'], 'cohorts[]');
@@ -325,6 +392,7 @@ describe('dashboard --json contract', () => {
 
   test('sources, channels, caveats and anomalies pin their shapes', async () => {
     const d = await buildDashboard(fakeDb(), {
+      guildId: GUILD,
       now: NOW,
       weeks: 4,
       anomalies: [SEED_ANOMALY],
@@ -383,7 +451,7 @@ describe('dashboard --json contract', () => {
   });
 
   test('the output survives a JSON round trip unchanged', async () => {
-    const d = await buildDashboard(fakeDb(), { now: NOW, weeks: 4, anomalies: [SEED_ANOMALY] });
+    const d = await buildDashboard(fakeDb(), { guildId: GUILD, now: NOW, weeks: 4, anomalies: [SEED_ANOMALY] });
     // This is the actual `--json` path: stringify on the host, parse downstream.
     // Anything non-serializable (undefined, functions) fails here, not in prod.
     assert.deepEqual(JSON.parse(JSON.stringify(d)), d);
