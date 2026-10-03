@@ -10,11 +10,11 @@ const repo = fileURLToPath(new URL('../../', import.meta.url));
 const config = join(repo, '.gitleaks.toml');
 const ignore = join(repo, '.gitleaksignore');
 const history = [
-  {commit: '8afbcc916a567b9a459efc77e41e2ac93feddb3d', lines: [525]},
-  {commit: '407017d0481dc806c164121503a770c0d8391f2a', lines: [561, 627, 640]},
+  {commit: '8afbcc916a567b9a459efc77e41e2ac93feddb3d', path: 'ops/staging-deploy-broker/server.test.mjs', lines: [525]},
+  {commit: '407017d0481dc806c164121503a770c0d8391f2a', path: 'ops/staging-deploy-broker/server.test.mjs', lines: [561, 627, 640]},
+  {commit: 'b2fedbce2ee9d03d99e3f0dc665c0a97f5f28ad4', path: 'scripts/deploy-target-selftest.mjs', lines: [986]},
 ];
-const fixturePath = 'ops/staging-deploy-broker/server.test.mjs';
-const fingerprints = history.flatMap(({commit, lines}) => lines.map((line) => `${commit}:${fixturePath}:private-key:${line}`));
+const fingerprints = history.flatMap(({commit, path, lines}) => lines.map((line) => `${commit}:${path}:private-key:${line}`));
 const scanner = process.env.GITLEAKS_BIN || 'gitleaks';
 
 // Construct public, unusable marker blocks at runtime so this test's own source
@@ -68,7 +68,7 @@ test('gitleaks exception clears only the inspected historical finding', async (t
   assert.equal(objects.status, 0, objects.stderr);
   const available = new Set(objects.stdout.trim().split('\n'));
 
-  for (const {commit, lines} of history) {
+  for (const {commit, path: fixturePath, lines} of history) {
     // These hashes belong to an unmerged branch, not main's squash history.
     // Once that branch disappears, there is no historical finding to suppress;
     // skip only that hash's controls, never the fresh-commit/adjacency tests.
@@ -100,12 +100,12 @@ test('gitleaks exception clears only the inspected historical finding', async (t
     }
   }
 
-  function fixture(name, content) {
+  function fixture(name, content, fixturePath, line) {
     const cwd = join(root, name);
     mkdirSync(dirname(join(cwd, fixturePath)), {recursive: true});
     // Same path and line as the known finding, but a different commit. All
     // subprocess writes are confined to disposable Git repositories in scratch.
-    writeFileSync(join(cwd, fixturePath), '\n'.repeat(524) + content);
+    writeFileSync(join(cwd, fixturePath), '\n'.repeat(line - 1) + content);
     git(cwd, 'init', '--quiet');
     git(cwd, 'add', fixturePath);
     git(cwd, '-c', 'user.name=Gitleaks regression', '-c', 'user.email=fixture@example.invalid',
@@ -113,22 +113,27 @@ test('gitleaks exception clears only the inspected historical finding', async (t
     return cwd;
   }
 
-  for (const [name, content, count] of [
-    ['copied synthetic fixture', synthetic, 1],
-    ['standalone fabricated PEM', fabricatedPem, 1],
-    ['synthetic fixture before fabricated PEM', synthetic + fabricatedPem, 2],
-    ['short synthetic template before fabricated PEM', short + '\n' + fabricatedPem, 1],
-    ['fabricated PEM before synthetic fixture', fabricatedPem + synthetic, 2],
+  for (const [fixturePath, line] of [
+    ['ops/staging-deploy-broker/server.test.mjs', 525],
+    ['scripts/deploy-target-selftest.mjs', 986],
   ]) {
-    await t.test(name, () => {
-      const cwd = fixture(name.replaceAll(' ', '-'), content);
-      const baseline = scan(cwd, '--all', emptyIgnore);
-      expectFindings(baseline, count);
-      const result = scan(cwd, '--all');
-      expectFindings(result, count);
-      assert.deepEqual(result.findings.map((finding) => finding.Fingerprint),
-        baseline.findings.map((finding) => finding.Fingerprint));
-      assert.ok(result.findings.every((finding) => !fingerprints.includes(finding.Fingerprint)));
-    });
+    for (const [name, content, count] of [
+      ['copied synthetic fixture', synthetic, 1],
+      ['standalone fabricated PEM', fabricatedPem, 1],
+      ['synthetic fixture before fabricated PEM', synthetic + fabricatedPem, 2],
+      ['short synthetic template before fabricated PEM', short + '\n' + fabricatedPem, 1],
+      ['fabricated PEM before synthetic fixture', fabricatedPem + synthetic, 2],
+    ]) {
+      await t.test(`${fixturePath}: ${name}`, () => {
+        const cwd = fixture(`${line}-${name.replaceAll(' ', '-')}`, content, fixturePath, line);
+        const baseline = scan(cwd, '--all', emptyIgnore);
+        expectFindings(baseline, count);
+        const result = scan(cwd, '--all');
+        expectFindings(result, count);
+        assert.deepEqual(result.findings.map((finding) => finding.Fingerprint),
+          baseline.findings.map((finding) => finding.Fingerprint));
+        assert.ok(result.findings.every((finding) => !fingerprints.includes(finding.Fingerprint)));
+      });
+    }
   }
 });
