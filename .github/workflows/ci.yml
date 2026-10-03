@@ -3,12 +3,19 @@ name: ci
 on:
   push:
     branches: [main]
-  # Legacy PR development checks frozen (TOG-12060/TOG-12911): the automatic
-  # pull_request trigger is removed. Push-to-main and workflow_dispatch
-  # (release-please path below) are unchanged.
+  # CI on a pull request is opt-in (TOG-12060, TOG-12911, TOG-12971): opening,
+  # pushing to, editing or reopening a PR does not run it. A maintainer adds any
+  # label to the PR's exact head to produce `check` and `postgres` as
+  # `pull_request` check runs, which is what the PR's required checks read. A new
+  # push needs the label removed and added again. There is deliberately no
+  # job-level `if` and no path filter: a skipped required job reports success, so
+  # every `labeled` event must run the real jobs.
+  pull_request:
+    types: [labeled]
   # Dispatched by the release workflow (TOG-9865) on release-please branches:
   # PRs opened with GITHUB_TOKEN trigger no workflows, so the required `check`
-  # would never run on the release PR without this path.
+  # would never run on the release PR without this path. Dispatch runs are not in
+  # a PR's status rollup, so they do not satisfy the required check; use the label.
   workflow_dispatch:
 
 # A second push to the same PR cancels the first in-flight run. Mirrors
