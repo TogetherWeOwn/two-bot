@@ -41,14 +41,28 @@ export function loadS3Target(env: Env): S3Target {
   }
 
   const endpoint = env.TWO_BACKUP_S3_ENDPOINT!.trim();
-  if (!/^https?:\/\//.test(endpoint)) {
-    throw new ConfigError(`TWO_BACKUP_S3_ENDPOINT must start with https:// or http:// (got "${endpoint}").`);
+  let parsed: URL;
+  try {
+    parsed = new URL(endpoint);
+  } catch {
+    throw new ConfigError('TWO_BACKUP_S3_ENDPOINT must be a valid HTTP(S) origin.');
   }
-  // http:// to anything but a local test server would ship the funnel log, and
-  // the credential signing it, in clear text across the internet.
-  if (endpoint.startsWith('http://') && !/^http:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(endpoint)) {
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new ConfigError('TWO_BACKUP_S3_ENDPOINT must use https:// or http://.');
+  }
+  // The signer uses only the origin. Refuse components it would drop, including
+  // empty userinfo/query/fragment and paths the URL parser normalises to root.
+  if (parsed.username || parsed.password || parsed.search || parsed.hash || parsed.pathname !== '/' ||
+      !/^https?:\/\/[^/?#\\@]+\/?$/i.test(endpoint)) {
     throw new ConfigError(
-      `TWO_BACKUP_S3_ENDPOINT must be https:// for a remote host (got "${endpoint}"). ` +
+      'TWO_BACKUP_S3_ENDPOINT must be an origin without userinfo, query, fragment or a non-root path.',
+    );
+  }
+  // Check the same parsed authority the signer uses, not a localhost-looking
+  // prefix that could actually name a remote host after an @ delimiter.
+  if (parsed.protocol === 'http:' && parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') {
+    throw new ConfigError(
+      'TWO_BACKUP_S3_ENDPOINT must be https:// for a remote host. ' +
         'Plain http would send the dump and its credentials in clear text.',
     );
   }
