@@ -10,8 +10,15 @@ name: PR lint
 #     (for example a merge call that passes its own commit_title).
 
 on:
+  # Linting a pull request is opt-in (TOG-12060, TOG-12911, TOG-12971): opening,
+  # pushing to, editing or reopening a PR does not run it. A maintainer adds any
+  # label to the PR's exact head to produce `pr-lint` as a `pull_request` check
+  # run, which is what the PR's required check reads. A new push or an edited
+  # title/body needs the label removed and added again. There is deliberately no
+  # job-level `if` and no path filter: a skipped required job reports success, so
+  # every `labeled` event must run the real job.
   pull_request:
-    types: [opened, edited, synchronize, reopened, ready_for_review]
+    types: [labeled]
   push:
     branches: [main]
   # Dispatched by the release workflow (TOG-9865) on release-please branches:
@@ -19,7 +26,9 @@ on:
   # `pr-lint` check would never run on the release PR without this path.
   # The release workflow passes the release PR number; this job fetches the
   # title/body via the API (needs pull-requests: read) and validates them with
-  # the same ci/check-pr-conventions.py script as the pull_request path.
+  # the same ci/check-pr-conventions.py script as the pull_request path. Dispatch
+  # runs are not in a PR's status rollup, so they do not satisfy the required
+  # check; use the label.
   workflow_dispatch:
     inputs:
       pr_number:
