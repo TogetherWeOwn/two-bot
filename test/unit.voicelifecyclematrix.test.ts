@@ -23,6 +23,11 @@
  *      mid-voice landed here; the scan must be empty. The test also proves
  *      the scan bites: a synthetic dangling pair inserted past the handlers
  *      is found, then cleared by the matching leave.
+ *   H. bot-flagged server-leave (TOG-7511): GuildMemberRemove passes the
+ *      member's real bot flag, and onVoiceLeave closes the tracker entry
+ *      BEFORE its isBot early-return - so the entry closed with no end row.
+ *      An open session is human by construction (starts are only recorded
+ *      for non-bots), so the voice half of a server-leave always lands.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -259,7 +264,6 @@ test('lifecycle: a malformed join start is equally unmeasurable on the way out',
 });
 
 // --- G. dangling-open scan ----------------------------------------------------------
-
 test('lifecycle: dangling-open scan is empty across the matrix and bites on a synthetic orphan', async () => {
   const { db, store, handlers, cleanup } = await fixture();
   try {
@@ -292,5 +296,34 @@ test('lifecycle: dangling-open scan is empty across the matrix and bites on a sy
     assert.deepEqual(await findDanglingVoiceStarts(db), [], 'scan green again');
   } finally {
     await cleanup();
+  }
+});
+
+// --- H. bot-flagged server-leave (TOG-7511) ------------------------------------------
+//
+// GuildMemberRemove (src/discord/client.ts) passes the member's REAL bot flag
+// into onLeave, and onVoiceLeave closes the tracker entry BEFORE its
+// `if (i.isBot) return null` early-return. So a bot-flagged server-leave over
+// an open session closed the entry with NO voice_session_end row: the 30
+// minutes vanished from voice reports while the member_leave row existed.
+// An open session is human by construction - onVoiceJoin only records starts
+// for non-bots - so the voice half of a server-leave is always human.
+
+test('lifecycle: a bot-flagged server-leave still writes the voice end row', async () => {
+  const { db, handlers } = await fixture();
+  try {
+    await handlers.onVoiceJoin({ guildId: G, memberId: 'flagged', isBot: false, channelId: CH_A, occurredAt: '2026-08-02T19:00:00.000Z' });
+    // The TOG-7197 probe: the member flag on GuildMemberRemove says bot.
+    await handlers.onLeave(G, 'flagged', '2026-08-02T19:30:00.000Z', { isBot: true });
+    const [end] = await endMetas(db, 'flagged');
+    assert.ok(end, 'the end row lands despite the bot flag');
+    assert.equal(end.startKnown, true, 'the bot saw this session start');
+    assert.equal(end.startedAt, '2026-08-02T19:00:00.000Z');
+    assert.equal(end.durationSeconds, 30 * 60, 'measured to leave time');
+    assert.equal(handlers.voiceSessions.isOpen(G, 'flagged'), false, 'tracker entry closed, not leaked');
+    assert.equal(await countByType(db, 'member_leave', 'flagged'), 1, 'the gone marker still lands');
+    assert.deepEqual(await findDanglingVoiceStarts(db), [], 'no start left unaccounted for');
+  } finally {
+    await db.close();
   }
 });
