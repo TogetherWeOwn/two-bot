@@ -220,6 +220,7 @@ export class FunnelHandlers {
    * every existing caller and test means what it meant before.
    */
   async onVoiceJoin(i: VoiceInput): Promise<FunnelEvent | null> {
+    const generation = this.voiceSessions.generation;
     const at = i.occurredAt ?? nowIso();
     let communitySessionKey: string | undefined;
     if (this.communityFacts) {
@@ -241,7 +242,11 @@ export class FunnelHandlers {
       occurredAt: at,
       source: `channel:${i.channelId}`,
     });
-    this.voiceSessions.start(i.guildId, i.memberId, i.channelId, at, communitySessionKey);
+    // Keep the historical start row, but never restore a live interval if a
+    // reconnect cleared the tracker while one of the writes above was pending.
+    if (generation === this.voiceSessions.generation) {
+      this.voiceSessions.start(i.guildId, i.memberId, i.channelId, at, communitySessionKey);
+    }
     log.info('voice_session_start', { memberId: i.memberId, channelId: i.channelId });
 
     if (await this.store.hasEvent(i.guildId, i.memberId, 'first_voice_session')) return null;

@@ -33,6 +33,7 @@ export class VoiceSessionTracker {
   // NB: explicit field, not a parameter property - Node's type-stripping
   // loader rejects those. Same constraint as EventStore. See docs/STACK.md.
   private open: Map<string, OpenSession>;
+  private epoch = 0;
 
   constructor() {
     this.open = new Map();
@@ -75,8 +76,14 @@ export class VoiceSessionTracker {
     return this.open.size;
   }
 
+  /** Changes on every reset, including when a pending start has not opened yet. */
+  get generation(): number {
+    return this.epoch;
+  }
+
   /** Drop everything. Used when the gateway reconnects and state is suspect. */
   clear(): void {
+    this.epoch++;
     this.open.clear();
   }
 }

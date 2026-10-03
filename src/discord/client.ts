@@ -236,26 +236,20 @@ export function createClient(
   });
 }
 
-async function snapshotInvites(guild: Guild, invites: InviteTracker): Promise<string[]> {
+async function fetchInvites(guild: Guild): Promise<InviteState[] | null> {
   try {
     const fetched = await guild.invites.fetch();
-    const states: InviteState[] = fetched.map((i) => ({
+    return fetched.map((i) => ({
       code: i.code,
       uses: i.uses ?? 0,
       inviterId: i.inviter?.id ?? null,
       channelId: i.channel?.id ?? null,
     }));
-    // `return await`, not a bare `return`: the store became async with the
-    // Postgres migration, and a returned-but-not-awaited promise rejects
-    // outside this try/catch. That turns a recoverable "could not read
-    // invites" into an unhandled rejection, which index.ts answers by exiting
-    // the process - on every join.
-    return await invites.diffAndStore(guild.id, states);
   } catch (err) {
-    // Missing ManageGuild permission is the usual cause. Joins still get
-    // recorded, just with source 'unknown'.
+    // Handle fetch failures immediately, even while earlier writes are pending.
+    // null is not an empty snapshot: it must not erase the stored baseline.
     log.error('invite_snapshot_failed', { guildId: guild.id, err: String(err) });
-    return [];
+    return null;
   }
 }
 
@@ -291,11 +285,51 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     });
   };
 
+  const enqueue = <T>(
+    chains: Map<string, Promise<void>>, key: string, work: () => Promise<T>,
+  ): Promise<T> => {
+    const next = (chains.get(key) ?? Promise.resolve()).then(work);
+    // Reserve synchronously and never poison subsequent events on failure.
+    const guard = next.then(() => {}, () => {});
+    chains.set(key, guard);
+    void guard.then(() => {
+      if (chains.get(key) === guard) chains.delete(key);
+    });
+    return next;
+  };
+
+  // Fetch at gateway receipt, not after a potentially slow earlier DB write:
+  // a queued background refresh must not start reading a later join's counters.
+  // Only the read-modify-write is serialized, in dispatch order (TOG-8306).
+  // REST counters are still best-effort, not atomic per-member evidence.
+  const inviteChains = new Map<string, Promise<void>>();
+  const chainedSnapshotInvites = (guild: Guild): Promise<{ grew: string[]; inviterId: string | null }> => {
+    const fetched = fetchInvites(guild);
+    return enqueue(inviteChains, guild.id, async () => {
+      const states = await fetched;
+      if (states === null) return { grew: [], inviterId: null };
+      try {
+        const grew = await invites.diffAndStore(guild.id, states);
+        // Carry the inviter with this delta before another refresh can replace
+        // its row while the join waits for earlier member persistence.
+        const inviterId = grew.length === 1 ? await invites.inviterFor(guild.id, grew[0]) : null;
+        return { grew, inviterId };
+      } catch (err) {
+        log.error('invite_snapshot_failed', { guildId: guild.id, err: String(err) });
+        return { grew: [], inviterId: null };
+      }
+    });
+  };
+
+  // Invite I/O may delay a join. Its gate/leave/rejoin writes must not overtake
+  // it and then be undone by that older join's membership projection.
+  const memberChains = new Map<string, Promise<void>>();
+
   client.once(Events.ClientReady, async (c) => {
     log.info('ready', { user: c.user.tag, guilds: c.guilds.cache.size });
     if (!contained) {
       for (const guild of c.guilds.cache.values()) {
-        await snapshotInvites(guild, invites);
+        await chainedSnapshotInvites(guild);
       }
     }
   });
@@ -304,47 +338,43 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     if (!accepts(member.guild.id, member.id)) return;
     const observedAt = nowIso();
     const membershipObservedAt = observeMembership();
-    const joining = (async () => {
-      // Snapshot regardless of how this member arrived, so the counters stay
-      // current for the next organic join. A one-click join consumes no invite,
-      // so for it the diff legitimately shows nothing grew.
-      const grew = contained ? [] : await snapshotInvites(member.guild, invites);
+    // Consume the short-lived web note at receipt, before any queue can expire it.
+    const expected = contained ? null : expectedJoins?.consume(member.guild.id, member.id) ?? null;
+    const snapshot = contained ? Promise.resolve({ grew: [], inviterId: null }) : chainedSnapshotInvites(member.guild);
+    const occurredAt = member.joinedAt?.toISOString();
+    const gateCleared = !member.pending;
+    const joining = enqueue(memberChains, `${member.guild.id}:${member.id}`, async () => {
+      // Keep the snapshot even for one-click joins so counters stay current.
+      const { grew, inviterId: observedInviterId } = await snapshot;
 
-      // The web path's expected join beats the invite diff: a code that grew in
-      // the same window belongs to some other join's event. Contained runs have
-      // no invitation evidence: do not read real inviter rows or invent a cohort.
-      const expected = contained ? null : expectedJoins?.consume(member.guild.id, member.id) ?? null;
+      // Web evidence beats the invite diff. Contained runs have no invitation
+      // evidence: do not read real inviter rows or invent a cohort.
       const source = contained ? 'unknown' : expected ?? invites.attribute(grew, !!member.guild.vanityURLCode);
-      const inviterId =
-        !expected && grew.length === 1 ? await invites.inviterFor(member.guild.id, grew[0]) : null;
+      const inviterId = !expected ? observedInviterId : null;
       await handlers.onJoin({
         guildId: member.guild.id,
         memberId: member.id,
         isBot: !!member.user?.bot,
         source,
         inviterId,
-        occurredAt: member.joinedAt?.toISOString(),
+        occurredAt,
         observedAt: membershipObservedAt,
-        sourceEventId: `${member.guild.id}:${member.id}:${member.joinedAt?.toISOString() ?? 'observed'}`,
+        sourceEventId: `${member.guild.id}:${member.id}:${occurredAt ?? 'observed'}`,
       });
+      // Members who accepted the rules on the invite screen converted at join.
+      if (gateCleared) {
+        await handlers.onGateCleared({
+          guildId: member.guild.id,
+          memberId: member.id,
+          isBot: !!member.user?.bot,
+          occurredAt,
+        });
+      }
       return source;
-    })();
+    });
     // Reserve before the first await; the welcome listener runs concurrently.
     void deps.onboardingRota?.join(member, joining, observedAt);
     const source = await joining;
-
-    // Someone who arrives with the gate already cleared - they accepted the
-    // rules on the invite screen before the join landed - converted instantly.
-    // Recording it here as well as on the update keeps the denominator honest:
-    // otherwise the fastest members are the ones missing from the numerator.
-    if (!member.pending) {
-      await handlers.onGateCleared({
-        guildId: member.guild.id,
-        memberId: member.id,
-        isBot: !!member.user?.bot,
-        occurredAt: member.joinedAt?.toISOString(),
-      });
-    }
 
     // Burst check last, and never at the expense of the join record: an alert
     // that throws must not lose the event it was alerting about.
@@ -379,52 +409,57 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
   // number must not depend on whether we happen to be greeting people.
   client.on(Events.GuildMemberUpdate, async (oldMember, newMember) => {
     if (!accepts(newMember.guild.id, newMember.id)) return;
+    const occurredAt = nowIso();
+    // discord.js reuses the cached newMember on subsequent frames. Capture
+    // audit evidence before any wait for the membership persistence queue.
+    // A partial old member has no trustworthy role/nickname baseline.
+    if (!oldMember.partial) {
+      const oldRoles = roleIds(oldMember);
+      const newRoles = roleIds(newMember);
+      const addedRoleIds = [...newRoles].filter((id) => !oldRoles.has(id)).sort();
+      const removedRoleIds = [...oldRoles].filter((id) => !newRoles.has(id)).sort();
+      const nicknameChanged = oldMember.nickname !== newMember.nickname;
+      if (nicknameChanged || addedRoleIds.length > 0 || removedRoleIds.length > 0) {
+        const changeDigest = createHash('sha256')
+          .update(JSON.stringify({ nicknameChanged, addedRoleIds, removedRoleIds }))
+          .digest('base64url')
+          .slice(0, 16);
+        auditSafely({
+          // No gateway event id: timestamp preserves later identical changes;
+          // the bounded digest distinguishes simultaneous deltas.
+          entryId: `member-update:${newMember.guild.id}:${newMember.id}:${occurredAt}:${changeDigest}`,
+          kind: 'member_update',
+          channel: 'audit',
+          guildId: newMember.guild.id,
+          occurredAt,
+          targetId: newMember.id,
+          metadata: { nicknameChanged, addedRoleIds, removedRoleIds },
+        });
+      }
+    }
     if (oldMember.pending === true && newMember.pending === false) {
-      void deps.onboardingRota?.gateCleared(newMember, nowIso());
+      void deps.onboardingRota?.gateCleared(newMember, occurredAt);
     }
     if (oldMember.pending && !newMember.pending) {
-      await handlers.onGateCleared({
+      const input = {
         guildId: newMember.guild.id,
         memberId: newMember.id,
         isBot: !!newMember.user?.bot,
-      });
+        occurredAt,
+      };
+      await enqueue(memberChains, `${input.guildId}:${input.memberId}`, () =>
+        handlers.onGateCleared(input));
     }
-
-    // A partial old member has no trustworthy role/nickname baseline. Skipping
-    // is safer than reporting every current role as newly granted.
-    if (oldMember.partial) return;
-    const oldRoles = roleIds(oldMember);
-    const newRoles = roleIds(newMember);
-    const addedRoleIds = [...newRoles].filter((id) => !oldRoles.has(id)).sort();
-    const removedRoleIds = [...oldRoles].filter((id) => !newRoles.has(id)).sort();
-    const nicknameChanged = oldMember.nickname !== newMember.nickname;
-    if (!nicknameChanged && addedRoleIds.length === 0 && removedRoleIds.length === 0) return;
-
-    const occurredAt = nowIso();
-    const changeDigest = createHash('sha256')
-      .update(JSON.stringify({ nicknameChanged, addedRoleIds, removedRoleIds }))
-      .digest('base64url')
-      .slice(0, 16);
-    auditSafely({
-      // Discord supplies no id for this gateway event. The occurrence timestamp
-      // preserves a later identical transition; the bounded digest distinguishes
-      // simultaneous deltas without embedding an unbounded role list in the key.
-      entryId: `member-update:${newMember.guild.id}:${newMember.id}:${occurredAt}:${changeDigest}`,
-      kind: 'member_update',
-      channel: 'audit',
-      guildId: newMember.guild.id,
-      occurredAt,
-      targetId: newMember.id,
-      metadata: { nicknameChanged, addedRoleIds, removedRoleIds },
-    });
   });
 
   client.on(Events.GuildMemberRemove, async (member) => {
     if (!accepts(member.guild.id, member.id)) return;
     // A server-leave is also a voice-leave: Discord drops them from voice with
     // no VoiceStateUpdate, so onLeave closes any open session (TOG-6122).
+    const occurredAt = nowIso();
     const observedAt = observeMembership();
-    await handlers.onLeave(member.guild.id, member.id, undefined, { isBot: !!member.user?.bot, observedAt });
+    await enqueue(memberChains, `${member.guild.id}:${member.id}`, () =>
+      handlers.onLeave(member.guild.id, member.id, occurredAt, { isBot: !!member.user?.bot, observedAt }));
   });
 
   const inspectAutomod = async (msg: {
@@ -540,29 +575,15 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     }
   });
 
-  /**
-   * One chain per member for voice frames, not one concurrent handler per
-   * frame (TOG-5981). discord.js dispatches every gateway event to an async
-   * listener without awaiting the previous one, so two frames for one member
-   * on the same tick interleaved: the move's `onVoiceLeave` chain-read the
-   * tracker BEFORE the join's `onVoiceJoin` chain-wrote it, and the end
-   * landed startKnown:false with a null duration even though the bot saw the
-   * start. Same per-subject chaining precedent as TOG-3695: a stuck write for
-   * member A never stalls member B, and unrelated members stay concurrent.
-   * Scoped to this registerHandlers call so tests get a fresh map per bus.
-   */
-  const voiceChains = new Map<string, Promise<void>>();
+  // Voice frames and membership events mutate the SAME session tracker:
+  // onLeave closes any open voice session. Reserve them on one subject chain
+  // at receipt so a delayed leave cannot close a rejoined member's new session.
+  // Other members remain independent; failed work cannot poison the queue.
+  let voiceEpoch = 0;
   const chainVoice = (guildId: string, memberId: string, work: () => Promise<void>): void => {
-    // Reserve synchronously at dispatch: both same-tick frames for one member
-    // are ordered in the chain before either awaits anything.
-    const subject = `${guildId}:${memberId}`;
-    const tail = (voiceChains.get(subject) ?? Promise.resolve()).then(work).catch(() => {
+    void enqueue(memberChains, `${guildId}:${memberId}`, work).catch(() => {
       // Error strings can contain SQL binds or Discord payloads. Never log them.
       log.error('voice_state_update_failed', { guildId, memberId, classification: 'measurement_gap' });
-    });
-    voiceChains.set(subject, tail);
-    void tail.finally(() => {
-      if (voiceChains.get(subject) === tail) voiceChains.delete(subject);
     });
   };
 
@@ -580,12 +601,13 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
     const member = oldState.member ?? newState.member;
     const guildId = guild.id;
 
+    // One receipt timestamp for both halves of a move, on the same clock as
+    // GuildMemberRemove. Queue latency must not place a start after its leave.
+    const at = nowIso();
+    const epoch = voiceEpoch;
     chainVoice(guildId, memberId, async () => {
-      // One timestamp for both halves. On a move from A to B the end and the
-      // start are the same instant, and taking nowIso() twice would make the
-      // pair look like a gap. Taken inside the chain so a queued frame stamps
-      // after the frame ahead of it finished, never before its start.
-      const at = nowIso();
+      // A reconnect invalidates frames still waiting behind membership I/O.
+      if (epoch !== voiceEpoch) return;
       const voiceKind = oldChannelId
         ? newChannelId
           ? 'voice_move'
@@ -614,7 +636,8 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
           onLevelUp: levelUpRoleHook(member),
         });
       }
-      if (newChannelId) {
+      // A move may have awaited its end write while the gateway recovered.
+      if (newChannelId && epoch === voiceEpoch) {
         await handlers.onVoiceJoin({
           guildId,
           memberId,
@@ -638,6 +661,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
   // double-drop; on first-ever connect the tracker is empty and this is a
   // no-op.
   const dropSessionsOnReconnect = (event: string) => {
+    voiceEpoch++;
     const dropped = handlers.voiceSessions.openCount;
     handlers.voiceSessions.clear();
     if (dropped) log.info(event, { dropped });
@@ -646,7 +670,7 @@ export function registerHandlers(client: Client, deps: BotDeps): void {
   client.on(Events.ShardReady, () => dropSessionsOnReconnect('voice_sessions_dropped_on_fresh_session'));
 
   client.on(Events.InviteCreate, async (invite) => {
-    if (!contained && invite.guild) await snapshotInvites(invite.guild as Guild, invites);
+    if (!contained && invite.guild) await chainedSnapshotInvites(invite.guild as Guild);
   });
 
   client.on(Events.GuildAuditLogEntryCreate, (entry, guild) => {

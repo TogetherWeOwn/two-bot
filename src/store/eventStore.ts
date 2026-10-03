@@ -220,7 +220,7 @@ export class EventStore {
         break;
       case 'first_message':
         await set('first_message_at', e.occurredAt, true);
-        await set('last_active_at', e.occurredAt);
+        await advance('last_active_at', e.occurredAt);
         break;
       // The middle rung of the message ladder. It has no column and nothing
       // reports on it - it exists so the third message is identifiable. See
@@ -234,7 +234,7 @@ export class EventStore {
         break;
       case 'first_voice_session':
         await set('first_voice_at', e.occurredAt, true);
-        await set('last_active_at', e.occurredAt);
+        await advance('last_active_at', e.occurredAt);
         break;
       case 'member_inactive':
         await set('inactive_flagged_at', e.occurredAt);
