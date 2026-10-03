@@ -32,6 +32,10 @@ npm run check:env-drift:selftest
 # token, no target — the interesting cases are the ones where none exists
 # (TOG-913). Runs before the slow suites so a broken guard fails in seconds.
 npm run deploy:selftest
+# Staging-broker server-side authority (TOG-6911 correction, 2026-09-28):
+# pinned staging app, authenticated triggering, redacted reads, rejection of
+# arbitrary UUIDs and production. Hermetic like the guard above.
+npm run broker:selftest
 # The check job has its own runner: fork-gate's parser install is not shared.
 npm ci --ignore-scripts --prefix scripts/ci
 # Generation-path regression: no network/database; release-please regeneration

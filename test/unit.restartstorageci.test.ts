@@ -61,7 +61,7 @@ test('required workflow wrapper reaches owned storage in order and fails fast at
       writeFileSync(fake, '#!/usr/bin/env bash\ncommand="${0##*/} $*"\nprintf "%s\\n" "$command" >> "$TRACE"\nif [[ "${FAIL_ON:-}" == "$command" ]]; then exit 23; fi\n');
       chmodSync(fake, 0o755);
     }
-    const sequence = ['npm run check:script-targets', 'npm run check:credentials', 'npm run check:credentials:selftest', 'npm run check:env-drift', 'npm run check:env-drift:selftest', 'npm run deploy:selftest', 'npm ci --ignore-scripts --prefix scripts/ci', 'node --test scripts/ci/normalize-release.test.mjs', 'npm run typecheck', 'npm run eval:funnel-attribution', 'npm run test:postgres', 'npm run test:restart-storage -- --provision', 'npm run verify:grant:selftest'];
+    const sequence = ['npm run check:script-targets', 'npm run check:credentials', 'npm run check:credentials:selftest', 'npm run check:env-drift', 'npm run check:env-drift:selftest', 'npm run deploy:selftest', 'npm run broker:selftest', 'npm ci --ignore-scripts --prefix scripts/ci', 'node --test scripts/ci/normalize-release.test.mjs', 'npm run typecheck', 'npm run eval:funnel-attribution', 'npm run test:postgres', 'npm run test:restart-storage -- --provision', 'npm run verify:grant:selftest'];
     for (const failOn of ['', ...sequence]) {
       const trace = join(work, 'trace'); writeFileSync(trace, '');
       const result = spawnSync('bash', ['scripts/ci/run-check-job.sh'], {

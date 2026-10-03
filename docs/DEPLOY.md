@@ -190,18 +190,26 @@ The application is already live. After your change merges to `main`:
 1. **Wait for the mirror.** The box re-mirrors GitHub every 2 minutes. Deploying
    sooner just rebuilds the previous commit and looks like your change did
    nothing.
-2. **Trigger the deploy:**
+2. **Trigger the deploy through the broker** (staging: the pinned staging app;
+   production §6.2 HOLD until TOG-6903 — manual from the Coolify dashboard):
 
    ```sh
-   curl -X POST -H "Authorization: Bearer $COOLIFY_TOKEN" \
-     "$COOLIFY_URL/api/v1/deploy?uuid=cangagerae31txrk2vfvzzyq&force=true"
+   curl -X POST -H "Authorization: Bearer $STAGING_BROKER_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"repo":"TogetherWeOwn/two-bot","sha":"<40-hex-merge-sha>"}' \
+     http://127.0.0.1:8091/v1/staging/deploy
    ```
 
+   The panel bearer never leaves the host: it lives in the broker's systemd
+   credentials, and the broker admits only the pinned staging app
+   (`uy4d9ndeygjcem6lgayhxgub`). Never `POST .../api/v1/deploy?uuid=...` with
+   a panel bearer from a laptop or a job — that token is NOT app-scoped
+   (TOG-6911, 2026-09-28).
 3. **Confirm it took**, rather than trusting the call returning 200:
 
    ```sh
-   curl -s -H "Authorization: Bearer $COOLIFY_TOKEN" \
-     "$COOLIFY_URL/api/v1/applications/cangagerae31txrk2vfvzzyq/logs?lines=20"
+   curl -s -H "Authorization: Bearer $STAGING_BROKER_TOKEN" \
+     'http://127.0.0.1:8091/v1/staging/logs?lines=20'
    ```
 
    You want a fresh `ready` line naming the bot, and log timestamps that are
@@ -223,58 +231,121 @@ job red on purpose (TOG-913 — a gate that once skipped-and-passed told the
 owner a page was live when nothing had shipped, so no step here may gain a
 "skip and pass" branch).
 
-**Staging deploys automatically.** `deploy-staging` runs when the `ci` workflow
-completes green on `main` (`workflow_run`), so "main moved" is never confused
-with "main passed". A manual re-deploy of staging uses `workflow_dispatch`.
-There is deliberately no environment picker: a choice list with `production` on
-it is how the ignored gate gets rebuilt by accident.
+**Staging deploys automatically, through the staging-only broker.**
+`deploy-staging` runs when the `ci` workflow completes green on `main`
+(`workflow_run`), so "main moved" is never confused with "main passed". A
+manual re-deploy of staging uses `workflow_dispatch`. There is deliberately no
+environment picker: a choice list with `production` on it is how the ignored
+gate gets rebuilt by accident.
 
-**Production deploys only by operator dispatch.** `deploy-production` runs on
-`workflow_dispatch` only — never automatically — after `deploy-staging` on the
-same dispatch, behind the `production` environment and its required reviewer.
-It stays gated until TOG-6903 says the Community Platform may go live; the
-first production launch needs owner approval. Plan caveat: on GitHub Free with
-a private repo, environment protection rules are ignored, so the real gate
-today is the human click plus the required reviewer the operator sets on the
-production environment. If the plan cannot enforce the reviewer, keep
-production manual from the Coolify dashboard (§6.1) instead of weakening the
-workflow file.
+TRANSPORT (2026-09-28 correction, TOG-6911). Actions holds NO panel bearer.
+The live panel token carries abilities `[read,deploy]` and is NOT app-scoped,
+so any job holding it could reach production applications — a GitHub
+environment label is not a resource authorization boundary. The panel bearer
+therefore stays on the host inside the broker's systemd unit
+(`ops/staging-deploy-broker/two-staging-broker.service`); Actions holds only
+the scoped `STAGING_BROKER_TOKEN`, and the broker
+(`ops/staging-deploy-broker/server.mjs`) admits exactly one application — the
+two-bot staging app `uy4d9ndeygjcem6lgayhxgub` — rejecting arbitrary app UUIDs
+and production. Install and rollback are the pinned packet in
+`ops/staging-deploy-broker/install.sh` (operator-only; the operator provisions
+only the scoped staging credential plus the public broker origin
+`STAGING_BROKER_URL` through TOG-8272). The broker listens on host loopback
+ONLY (:8091) — a deploy authority never listens publicly. Deploy jobs run on
+ubuntu-latest (the repo is public, #304), so hosted runners reach the broker
+over public HTTPS through the host's TLS-terminating reverse proxy
+(`ops/staging-deploy-broker/reverse-proxy.Caddyfile.example`), which forwards
+at root to loopback. The first green staging Deployment+smoke over that public
+origin IS the reachability proof (an unreachable broker fails the job red,
+TOG-913, never silently).
 
-Each deploy — staging or production — runs the same five gates in order:
+**Production deploys only by operator dispatch — and stays HOLD until TOG-6903.**
+`deploy-production` runs on `workflow_dispatch` only — never automatically —
+after `deploy-staging` on the same dispatch, behind the `production`
+environment and its required reviewer. No production broker exists and no
+production credential is provisioned by TOG-6911, so that job fails red by
+design (TOG-913) until the hold lifts; the first production launch needs owner
+approval. When the hold lifts, production gets the same broker treatment as
+staging — never a copied panel bearer. If the plan cannot enforce the
+reviewer, keep production manual from the Coolify dashboard (§6.1) instead of
+weakening the workflow file.
 
-1. **Wait for the host mirror** (`scripts/wait-for-host-mirror.mjs`). Coolify
+Each staging deploy runs the same six gates in order:
+
+1. **Attest the runner.** Logs `runner_name`/`environment` first, so the
+   reachability proof below names the hosted runner it actually ran from.
+2. **Wait for the host mirror** (`scripts/wait-for-host-mirror.mjs`). Coolify
    clones the host mirror (§2), never github.com, and the box re-mirrors
    roughly every 2 minutes. This step waits out one mirror interval so the
    deploy builds the merged commit rather than its parent; the log records the
    merge SHA so a stale deploy can be told apart from a lagging mirror. Same
    rule as §6.1, automated.
-2. **Deploy-target gate** (`scripts/check-deploy-target.mjs`). Fails the job
-   when the Coolify bearer credential, panel URL, or app UUID secrets are
-   missing — printing secret NAMES only, never values. A missing deploy target
-   is red, naming the secrets that clear it.
-3. **Record deploy start time.** A freshness anchor: the smoke step's `ready`
+3. **Deploy-target gate** (`scripts/check-deploy-target.mjs`). Fails the job
+   when the scoped broker credential, the public broker origin
+   (`STAGING_BROKER_URL`), or the merge SHA is missing — printing secret
+   NAMES only, never values. A missing deploy target is red, naming the
+   secrets that clear it. The clients additionally refuse plaintext
+   non-loopback origins and credential-in-URL shapes before any request is
+   sent.
+4. **Record deploy start time.** A freshness anchor: the smoke step's `ready`
    line must prove THIS deploy, not the previous release's surviving log tail.
-4. **Trigger Coolify deploy and wait for healthy**
-   (`scripts/wait-for-coolify-deploy.mjs`). POSTs the bearer-header trigger
-   (§6.1), then polls until the deployment reports `finished` AND the app
-   reports `running:healthy` — the compose healthcheck hits `/readyz`
-   in-container, which returns 200 only when the gateway is connected and
-   Postgres answers. A 200 from the trigger only queued the deploy; green here
-   means it is live. Never skips: an unanswered panel or an app that never
-   reports healthy fails.
-5. **Post-deploy smoke** (`scripts/smoke-staging-deploy.mjs`). Through the
-   panel, not a URL — the bot publishes no ports, so the sslip.io address 404s
-   by design (§6.1). Three checks: `running:healthy`; a FRESH
+5. **Trigger staging deploy and wait for healthy**
+   (`scripts/broker-deploy.mjs`). POSTs `{repo, sha}` to the broker (which
+   validates caller/repo/commit server-side against the pinned staging app),
+   then polls the broker's bounded, redacted reads until the deployment
+   reports `finished` AND the app reports `running:healthy` — the compose
+   healthcheck hits `/readyz` in-container, which returns 200 only when the
+   gateway is connected and Postgres answers. A 200 from the trigger only
+   queued the deploy; green here means it is live. Never skips: an
+   unanswered broker or an app that never reports healthy fails.
+6. **Post-deploy smoke** (`scripts/broker-smoke.mjs`). Through the broker,
+   not a URL — the bot publishes no ports, so the sslip.io address 404s by
+   design (§6.1). Three checks: `running:healthy`; a FRESH
    `{"msg":"ready","guilds":N>=1}` log line timestamped at or after the deploy
    start; and log timestamps advancing between two reads a minute apart. Any of
-   them missing fails.
+   them missing fails. Evidence must come from complete terminal bot records,
+   not diagnostic metadata or children recovered from a capped parent. The
+   explicit transport labels are `container_output`, `stdout`, and `stderr`.
+   A wrapper selects one primary payload, in order: `message`, `output`, `log`,
+   `line`, `text`, `content`, then `logs`, `data`, `lines`, `result`. Arrays at
+   the log root or on that selected path retain all object/JSON/prefixed-text
+   siblings and inherit the nearest usable timestamp. Other fields are not
+   searched for events; ambiguous/unsupported wrapper shapes cannot prove
+   readiness. Selection uses the first present field, not the first supported
+   value: a null, boolean or numeric primary cannot fall through to another
+   sibling. A terminal bot `ts` outranks transport timestamp fields. Before
+   emitting shaped logs, the broker rejects a source object whose authority
+   field name is scrubbed, whose string `msg` changes through decoding or
+   redaction, whose non-string `msg` becomes a string (including at the depth
+   cutoff), or whose timestamp changes value or usable/unusable classification
+   (including an invalid suffix lost to truncation). Such lossy records redact
+   as a unit; they cannot acquire a newer enclosing time
+   or promote diagnostic metadata. Independent intact records still survive.
+   Scalar JSON wire representations, including numeric epochs, are checked
+   against host credentials too; clean numeric epochs remain milliseconds.
+   Root/selected multiline text is split only outside its original container
+   framing. A container spanning separate panel entries is rejected, not joined
+   into newly timestamp-bearing evidence. Bounded inspection follows nested
+   and JSON-encoded selected wrappers without emitting its inspection text;
+   internal batches retain independent complete siblings through recursive
+   shaping. Orphaned sensitive members at the start of a bounded tail own their
+   following value fragments, even if a key spans entries. JSON and PEM batch
+   context inspect original entries before redaction or output truncation can
+   erase the other context. PEM removal that would repair original JSON quote
+   or escape framing rejects the source entry, not reparses it as new evidence.
+   Independent complete records and plain prose retain their normal policy.
+
+The retired panel-bearer clients (`scripts/wait-for-coolify-deploy.mjs`,
+`scripts/smoke-staging-deploy.mjs`) remain in the tree for the post-TOG-6903
+production broker path but are NOT wired into any job.
 
 Migrations need no gate step: the bot migrates at startup under an advisory
 lock, so a normal deploy applies pending migrations before serving.
 
 Rollback for either environment is §7: `git revert` on `main`, wait for the
 mirror, re-run the deploy. Migrations do not roll back; every migration here
-is additive.
+is additive. Broker rollback itself (stop/disable the unit) is in
+`ops/staging-deploy-broker/install.sh --rollback`.
 
 ## 7. Rollback
 

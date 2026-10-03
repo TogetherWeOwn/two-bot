@@ -3,17 +3,26 @@
 // Self-test for the TOG-6911 deploy scripts.
 //
 // scripts/check-deploy-target.mjs, scripts/wait-for-host-mirror.mjs,
-// scripts/wait-for-coolify-deploy.mjs and scripts/smoke-staging-deploy.mjs
-// exist so that a deploy job FAILS when there is no target, no panel, or no
-// healthy release — never skip-and-passes (TOG-913). A guard that has never
-// been observed to fail is indistinguishable from one that cannot fail, so
-// this executes each script once per configuration and pins the exit code
-// and the reason (in-org precedent: two-web ci/deploy-target-selftest.sh).
+// scripts/broker-deploy.mjs and scripts/broker-smoke.mjs exist so that a
+// deploy job FAILS when there is no broker target, no broker, or no healthy
+// release — never skip-and-passes (TOG-913). A guard that has never been
+// observed to fail is indistinguishable from one that cannot fail, so this
+// executes each script once per configuration and pins the exit code and the
+// reason (in-org precedent: two-web ci/deploy-target-selftest.sh).
 //
-// Nothing here needs the network, a token, GitHub, or a deploy target. The
-// interesting cases are precisely the ones where no target exists. Pure
-// functions are imported and asserted in-process; CLI exit codes go through
-// spawned node with scrubbed env (every COOLIFY_* value is fake).
+// TRANSPORT (2026-09-28 correction). Actions holds NO panel bearer: staging
+// goes through the staging-only broker (ops/staging-deploy-broker/server.mjs)
+// with the scoped STAGING_BROKER_TOKEN, and the broker's own hermetic suite
+// (ops/staging-deploy-broker/server.test.mjs) pins its server-side authority.
+// The retired panel-bearer clients (wait-for-coolify-deploy.mjs,
+// smoke-staging-deploy.mjs) remain in the tree for the post-TOG-6903
+// production broker path but are NOT wired into any job: deploy.yml must
+// reference no panel bearer and no caller-supplied app UUID in staging.
+//
+// No external network, live token, GitHub, or deploy target is needed. Pure
+// functions are asserted in-process; CLI exit codes use spawned node with
+// scrubbed env (every STAGING_BROKER_* value is fake). Handler-to-smoke
+// contracts use only an ephemeral loopback server and a synthetic panel stub.
 //
 // What is pinned:
 //
@@ -24,17 +33,22 @@
 //   mirror-valid-zero    valid SHA, 0s delay             -> exit 0, fast
 //   mirror-bad-sha       non-hex MERGE_SHA               -> exit 2
 //   mirror-bad-delay     negative MIRROR_POLL_SECONDS    -> exit 2
-//   trigger-pure         URL building, status predicates, arg validation
-//   smoke-pure           log normalization, ready-line + freshness logic
-//   workflow-uses-guard  deploy.yml calls all four scripts
+//   broker-trigger-pure  staging-only refusal, status predicates, arg validation
+//   broker-url-policy    https-only off loopback, no creds, no path, both clients
+//   broker-smoke-pure    log normalization, ready-line + freshness logic
+//   workflow-uses-guard  deploy.yml calls the broker scripts, never the panel ones
+//   workflow-no-panel    staging carries no panel bearer / caller app UUID
+//   workflow-broker-url  staging gate requires STAGING_BROKER_URL
 //   workflow-has-no-skip no step gated on secrets/target presence
 //
 // Usage: node scripts/deploy-target-selftest.mjs
 // Exit: 0 all green, 1 a case failed. Stdlib only.
 
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { createHandler, PINNED_STAGING_APP_UUID } from "../ops/staging-deploy-broker/server.mjs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -50,21 +64,21 @@ import {
   sleep as mirrorSleep,
 } from "./wait-for-host-mirror.mjs";
 import {
-  apiGetJson,
-  appHealthy,
-  deployUrl,
-  deploymentTerminal,
-  parseArgs as triggerParseArgs,
-  summarizeDeployResponse,
-} from "./wait-for-coolify-deploy.mjs";
+  appHealthy as brokerAppHealthy,
+  brokerJson,
+  deploymentTerminal as brokerDeploymentTerminal,
+  parseArgs as brokerTriggerParseArgs,
+  resolveBrokerUrl as brokerTriggerResolveUrl,
+} from "./broker-deploy.mjs";
 import {
   findBotRecords,
   findReadyLines,
   jsonCandidates,
   maxTimestampMs,
   normalizeLogPayload,
-  parseArgs as smokeParseArgs,
-} from "./smoke-staging-deploy.mjs";
+  parseArgs as brokerSmokeParseArgs,
+  resolveBrokerUrl as brokerSmokeResolveUrl,
+} from "./broker-smoke.mjs";
 
 if (process.argv.includes("--help")) {
   console.log("Usage: node scripts/deploy-target-selftest.mjs");
@@ -74,14 +88,13 @@ if (process.argv.includes("--help")) {
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const WORKFLOW = join(ROOT, ".github", "workflows", "deploy.yml");
 
-// Fake panel values. Never contacted: every case that would reach the
+// Fake broker values. Never contacted: every case that would reach the
 // network lives in deploy.yml, not here. The redaction case asserts the
 // credential value never appears in output.
 const FAKE = {
-  COOLIFY_URL: "https://panel.example.invalid",
-  COOLIFY_TOKEN: "NOT-A-REAL-TOKEN-Z9Q8",
-  TWO_BOT_STAGING_APP_UUID: "app-uuid-not-real-0001",
-  TWO_BOT_PRODUCTION_APP_UUID: "app-uuid-not-real-0002",
+  STAGING_BROKER_TOKEN: "NOT-A-REAL-TOKEN-Z9Q8",
+  STAGING_BROKER_URL: "http://127.0.0.1:8091",
+  MERGE_SHA: "a".repeat(40),
 };
 
 const GATE = join(ROOT, "scripts", "check-deploy-target.mjs");
@@ -89,13 +102,17 @@ const MIRROR = join(ROOT, "scripts", "wait-for-host-mirror.mjs");
 
 function scrubbedEnv(overrides = {}) {
   const env = { ...process.env };
-  for (const name of ["COOLIFY_URL", "COOLIFY_TOKEN", "COOLIFY_APP_UUID"]) delete env[name];
+  for (const name of [
+    "COOLIFY_URL", "COOLIFY_TOKEN", "COOLIFY_APP_UUID",
+    "TWO_BOT_STAGING_APP_UUID", "TWO_BOT_PRODUCTION_APP_UUID",
+    "STAGING_BROKER_TOKEN", "STAGING_BROKER_URL", "MERGE_SHA",
+  ]) delete env[name];
   return { ...env, ...overrides };
 }
 
 function runGate(args, extraEnv = {}) {
   return spawnSync(process.execPath, [GATE, ...args], {
-    env: scrubbedEnv({ ...FAKE, COOLIFY_APP_UUID: FAKE.TWO_BOT_STAGING_APP_UUID, ...extraEnv }),
+    env: scrubbedEnv({ ...FAKE, ...extraEnv }),
     encoding: "utf8",
   });
 }
@@ -104,11 +121,11 @@ const GATE_ARGS = [
   "--env-name",
   "staging",
   "--credential-env",
-  "COOLIFY_TOKEN",
+  "STAGING_BROKER_TOKEN",
   "--require-env",
-  "COOLIFY_URL",
+  "STAGING_BROKER_URL",
   "--require-env",
-  "TWO_BOT_STAGING_APP_UUID",
+  "MERGE_SHA",
 ];
 
 // --- check-deploy-target.mjs -------------------------------------------------
@@ -117,16 +134,14 @@ test("gate-ready: all vars set exits 0, prints names only", () => {
   const run = runGate(GATE_ARGS);
   assert.equal(run.status, 0, run.stderr);
   assert.match(run.stdout, /READY deploy-target \(staging\)/);
-  assert.match(run.stdout, /COOLIFY_TOKEN/);
+  assert.match(run.stdout, /STAGING_BROKER_TOKEN/);
   assert.doesNotMatch(run.stdout + run.stderr, /NOT-A-REAL-TOKEN-Z9Q8/);
 });
 
-for (const missing of ["COOLIFY_TOKEN", "COOLIFY_URL", "TWO_BOT_STAGING_APP_UUID"]) {
+for (const missing of ["STAGING_BROKER_TOKEN", "STAGING_BROKER_URL", "MERGE_SHA"]) {
   test(`gate-missing: unset ${missing} exits 1 and names it`, () => {
-    const env = { ...FAKE, COOLIFY_APP_UUID: FAKE.TWO_BOT_STAGING_APP_UUID };
-    delete env[missing === "COOLIFY_TOKEN" ? "COOLIFY_TOKEN" : missing];
-    // COOLIFY_APP_UUID is the script-facing alias; map the staging UUID case.
-    if (missing === "TWO_BOT_STAGING_APP_UUID") env.COOLIFY_APP_UUID = "";
+    const env = { ...FAKE };
+    delete env[missing];
     const run = spawnSync(process.execPath, [GATE, ...GATE_ARGS], {
       env: scrubbedEnv(env),
       encoding: "utf8",
@@ -139,7 +154,7 @@ for (const missing of ["COOLIFY_TOKEN", "COOLIFY_URL", "TWO_BOT_STAGING_APP_UUID
 }
 
 test("gate-blank: whitespace credential exits 1", () => {
-  const run = runGate(GATE_ARGS, { COOLIFY_TOKEN: "  \n " });
+  const run = runGate(GATE_ARGS, { STAGING_BROKER_TOKEN: "  \n " });
   assert.equal(run.status, 1, run.stdout);
   assert.match(run.stderr, /FAIL deploy-target/);
 });
@@ -214,59 +229,95 @@ test("mirror unit: sleep resolves", async () => {
   await mirrorSleep(1);
 });
 
-// --- wait-for-coolify-deploy.mjs (pure, no network) --------------------------
+// --- broker-deploy.mjs (pure, no network) ----------------------------------
 
-test("trigger unit: deployUrl is a bearer-header trigger, never token-in-URL", () => {
-  const url = deployUrl("https://panel.example.invalid", "uuid-1");
-  assert.equal(url, "https://panel.example.invalid/api/v1/deploy?uuid=uuid-1&force=true");
-  assert.doesNotMatch(url, /NOT-A-REAL-TOKEN/);
-});
-
-test("trigger unit: summarizeDeployResponse reads the first deployment", () => {
-  assert.equal(
-    summarizeDeployResponse({ deployments: [{ deployment_uuid: "dep-1" }, { deployment_uuid: "dep-2" }] }),
-    "dep-1",
-  );
-  assert.equal(summarizeDeployResponse({}), "");
-  assert.equal(summarizeDeployResponse(null), "");
-});
-
-test("trigger unit: deploymentTerminal only on finished/failed/cancelled", () => {
-  assert.equal(deploymentTerminal("finished"), true);
-  assert.equal(deploymentTerminal("failed"), true);
-  assert.equal(deploymentTerminal("cancelled"), true);
-  assert.equal(deploymentTerminal("queued"), false);
-  assert.equal(deploymentTerminal("running"), false);
-  assert.equal(deploymentTerminal(""), false);
-});
-
-test("trigger unit: appHealthy requires running:healthy, rejects bare running", () => {
-  assert.equal(appHealthy("running:healthy"), true);
-  assert.equal(appHealthy("running"), false);
-  assert.equal(appHealthy("running:unhealthy"), false);
-  assert.equal(appHealthy("exited:unhealthy"), false);
-  assert.equal(appHealthy(""), false);
-  assert.equal(appHealthy(null), false);
-});
-
-test("trigger unit: parseArgs fails closed on missing env", () => {
+test("broker unit: rejects non-staging env names", () => {
   const lookup = () => "";
-  assert.throws(() => triggerParseArgs(["--env-name", "staging"], lookup), /Missing COOLIFY_URL, COOLIFY_TOKEN, COOLIFY_APP_UUID/);
-  assert.throws(() => triggerParseArgs([], lookup), /Missing required --env-name/);
-  assert.throws(() => triggerParseArgs(["--env-name", "s", "--bogus", "x"], lookup), /Unknown argument/);
+  assert.throws(() => brokerTriggerParseArgs(["--env-name", "production"], lookup), /staging only/);
+  assert.throws(() => brokerTriggerParseArgs([], lookup), /Missing required --env-name/);
+  assert.throws(() => brokerTriggerParseArgs(["--env-name", "s", "--bogus", "x"], lookup), /Unknown argument/);
 });
 
-test("trigger unit: parseArgs strips a trailing panel slash", () => {
-  const lookup = (name) => ({ COOLIFY_URL: "https://panel.example.invalid/", COOLIFY_TOKEN: "t", COOLIFY_APP_UUID: "u" }[name]);
-  const parsed = triggerParseArgs(["--env-name", "staging"], lookup);
-  assert.equal(parsed.panelUrl, "https://panel.example.invalid");
+test("broker unit: parseArgs fails closed on missing token or SHA", () => {
+  const lookup = () => "";
+  assert.throws(
+    () => brokerTriggerParseArgs(["--env-name", "staging"], lookup),
+    /Missing STAGING_BROKER_TOKEN, MERGE_SHA/,
+  );
+  assert.throws(
+    () => brokerTriggerParseArgs(["--env-name", "staging"], (n) => ({ STAGING_BROKER_TOKEN: "t" })[n] ?? ""),
+    /MERGE_SHA/,
+  );
 });
 
-test("trigger unit: apiGetJson is exported for the panel reads", () => {
-  assert.equal(typeof apiGetJson, "function");
+test("broker unit: parseArgs accepts a valid SHA and pins repo staging-only", () => {
+  const sha = "b".repeat(40);
+  const lookup = (name) => ({ STAGING_BROKER_TOKEN: "t", MERGE_SHA: sha }[name] ?? "");
+  const parsed = brokerTriggerParseArgs(["--env-name", "staging"], lookup);
+  assert.equal(parsed.sha, sha);
+  assert.equal(parsed.brokerUrl, "http://127.0.0.1:8091");
+  const withUrl = brokerTriggerParseArgs(["--env-name", "staging"], (name) =>
+    name === "STAGING_BROKER_URL" ? "http://127.0.0.1:8091/" : lookup(name),
+  );
+  assert.equal(withUrl.brokerUrl, "http://127.0.0.1:8091");
 });
 
-// --- smoke-staging-deploy.mjs (pure, no network) -----------------------------
+test("broker unit: resolveBrokerUrl is fail-closed and identical in both clients", () => {
+  // Deploy jobs run on ubuntu-latest (public repo, #304): the broker is
+  // reached over public HTTPS through the host proxy. Plaintext off loopback
+  // would send the broker token unencrypted; credentials-in-URL would leak it
+  // into logs; a path prefix would 404 every absolute broker route. All three
+  // refuse before any request is sent. Both clients carry the same policy
+  // (duplicated, stdlib-only, no shared module), so both resolvers must agree
+  // on every case.
+  for (const resolve of [brokerTriggerResolveUrl, brokerSmokeResolveUrl]) {
+    assert.equal(resolve(""), "http://127.0.0.1:8091");
+    assert.equal(resolve(undefined), "http://127.0.0.1:8091");
+    assert.equal(resolve("http://127.0.0.1:8091"), "http://127.0.0.1:8091");
+    assert.equal(resolve("http://127.0.0.1:8091/"), "http://127.0.0.1:8091");
+    assert.equal(resolve("http://[::1]:8091"), "http://[::1]:8091");
+    assert.equal(resolve("https://broker.example.invalid"), "https://broker.example.invalid");
+    assert.throws(() => resolve("http://broker.example.invalid"), /https/);
+    assert.throws(() => resolve("ftp://broker.example.invalid/x"), /http\(s\)/);
+    assert.throws(() => resolve("not-a-url"), /http\(s\)/);
+    assert.throws(
+      () => resolve("https://user:pass@broker.example.invalid"),
+      /credential-in-URL/,
+    );
+    assert.throws(
+      () => resolve("https://broker.example.invalid/prefix"),
+      /bare origin/,
+    );
+    assert.throws(
+      () => resolve("https://broker.example.invalid?x=1"),
+      /bare origin/,
+    );
+  }
+});
+
+test("broker unit: deploymentTerminal only on finished/failed/cancelled", () => {
+  assert.equal(brokerDeploymentTerminal("finished"), true);
+  assert.equal(brokerDeploymentTerminal("failed"), true);
+  assert.equal(brokerDeploymentTerminal("cancelled"), true);
+  assert.equal(brokerDeploymentTerminal("queued"), false);
+  assert.equal(brokerDeploymentTerminal("running"), false);
+  assert.equal(brokerDeploymentTerminal(""), false);
+});
+
+test("broker unit: appHealthy requires running:healthy, rejects bare running", () => {
+  assert.equal(brokerAppHealthy("running:healthy"), true);
+  assert.equal(brokerAppHealthy("running"), false);
+  assert.equal(brokerAppHealthy("running:unhealthy"), false);
+  assert.equal(brokerAppHealthy("exited:unhealthy"), false);
+  assert.equal(brokerAppHealthy(""), false);
+  assert.equal(brokerAppHealthy(null), false);
+});
+
+test("broker unit: brokerJson helper is exported for the broker reads", () => {
+  assert.equal(typeof brokerJson, "function");
+});
+
+// --- broker-smoke.mjs (pure, no network) -------------------------------------
 
 test("smoke unit: normalizeLogPayload handles string, array and object shapes", () => {
   assert.deepEqual(normalizeLogPayload('a\nb'), [
@@ -314,29 +365,686 @@ test("smoke unit: jsonCandidates finds nested objects", () => {
 });
 
 test("smoke unit: parseArgs requires --since and valid env", () => {
-  const lookup = (name) => ({ COOLIFY_URL: "https://p.invalid", COOLIFY_TOKEN: "t", COOLIFY_APP_UUID: "u" }[name]);
-  const parsed = smokeParseArgs(["--env-name", "staging", "--since", "2026-09-28T09:40:00.000Z"], lookup);
+  const lookup = (name) => ({ STAGING_BROKER_TOKEN: "t" }[name] ?? "");
+  const parsed = brokerSmokeParseArgs(["--env-name", "staging", "--since", "2026-09-28T09:40:00.000Z"], lookup);
   assert.equal(parsed.sinceMs, Date.parse("2026-09-28T09:40:00.000Z"));
-  assert.throws(() => smokeParseArgs(["--env-name", "s"], lookup), /Missing required --since/);
-  assert.throws(() => smokeParseArgs(["--env-name", "s", "--since", "yesterday"], lookup), /Invalid --since/);
+  assert.throws(() => brokerSmokeParseArgs(["--env-name", "staging"], lookup), /Missing required --since/);
+  assert.throws(() => brokerSmokeParseArgs(["--env-name", "staging", "--since", "yesterday"], lookup), /Invalid --since/);
   assert.throws(
-    () => smokeParseArgs(["--env-name", "s", "--since", "2026-09-28T09:40:00.000Z"], () => ""),
-    /Missing COOLIFY_URL, COOLIFY_TOKEN, COOLIFY_APP_UUID/,
+    () => brokerSmokeParseArgs(["--env-name", "staging", "--since", "2026-09-28T09:40:00.000Z"], () => ""),
+    /Missing STAGING_BROKER_TOKEN/,
   );
+  assert.throws(() => brokerSmokeParseArgs(["--env-name", "production", "--since", "2026-09-28T09:40:00.000Z"], lookup), /staging only/);
+});
+
+// --- handler-to-smoke contracts (synthetic panel, loopback only) -------------
+
+async function smokeRecordsFromPanel(t, items, panelToken = "synthetic-panel-credential") {
+  const server = createServer(createHandler({
+    brokerToken: FAKE.STAGING_BROKER_TOKEN,
+    panelUrl: "https://panel.example.invalid",
+    panelToken,
+    appUuid: PINNED_STAGING_APP_UUID,
+  }, async () => ({ logs: items })));
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/v1/staging/logs`, {
+    headers: { Authorization: `Bearer ${FAKE.STAGING_BROKER_TOKEN}` },
+  });
+  assert.equal(response.status, 200);
+  return findBotRecords(normalizeLogPayload(await response.json()));
+}
+
+const SMOKE_TS = "2026-09-30T19:01:00.000Z";
+const SMOKE_READY = { msg: "ready", guilds: 1 };
+
+test("smoke regression: quoted braces and escapes survive raw and wrapped handler records", async (t) => {
+  for (const user of ["Fake}Bot", "Fake{Bot", 'Fake\\"}Bot', 'Fake\\\\{Bot', 'Fake} [\\"{]Bot']) {
+    const record = { ...SMOKE_READY, user, ts: SMOKE_TS };
+    const line = `INFO ${JSON.stringify(record)}`;
+    const records = findReadyLines(await smokeRecordsFromPanel(t, [line, { message: line }]));
+    assert.equal(records.length, 2, user);
+    for (const found of records) {
+      assert.equal(found.record.msg, record.msg);
+      assert.equal(found.record.guilds, record.guilds);
+      assert.equal(found.tsMs, Date.parse(SMOKE_TS));
+      // The broker intentionally redacts unfinished JSON-like text in user
+      // fields; the closing-brace reproduction must remain unchanged.
+      if (user === "Fake}Bot") assert.equal(found.record.user, user);
+    }
+    // Independent scanner control: every valid escaped username parses before
+    // any server redaction, including braces, quotes and escaped backslashes.
+    const direct = findReadyLines(findBotRecords(normalizeLogPayload(line)));
+    assert.equal(direct.length, 1);
+    assert.deepEqual(direct[0].record, record);
+  }
+});
+
+test("smoke regression: raw string wrappers retain their timestamps through decoding", async (t) => {
+  const line = `INFO ${JSON.stringify(SMOKE_READY)}`;
+  const items = [
+    JSON.stringify({ output: line, timestamp: SMOKE_TS }),
+    JSON.stringify({ message: JSON.stringify({ content: line, time: SMOKE_TS }) }),
+    JSON.stringify({ timestamp: SMOKE_TS, data: { output: line } }),
+  ];
+  const records = findReadyLines(await smokeRecordsFromPanel(t, items));
+  assert.equal(records.length, items.length);
+  for (const found of records) assert.equal(found.tsMs, Date.parse(SMOKE_TS));
+});
+
+test("smoke regression: nearest usable timestamp wins and invalid nested timestamps fall back", () => {
+  const old = "2026-09-30T18:00:00.000Z";
+  const record = { ...SMOKE_READY, ts: "not-a-timestamp" };
+  const line = { message: JSON.stringify({
+    timestamp: old, output: JSON.stringify({ timestamp: SMOKE_TS, output: `INFO ${JSON.stringify(record)}` }),
+  }), timestamp: "2026-09-30T17:00:00.000Z" };
+  const records = findReadyLines(findBotRecords(normalizeLogPayload({ logs: [line] })));
+  assert.equal(records.length, 1);
+  assert.equal(records[0].tsMs, Date.parse(SMOKE_TS));
+  const own = { ...SMOKE_READY, ts: old };
+  const ownRecords = findBotRecords(normalizeLogPayload(JSON.stringify({ timestamp: SMOKE_TS, data: own })));
+  assert.equal(ownRecords[0].tsMs, Date.parse(old));
+});
+
+test("smoke regression: numeric epochs survive handler pairs and decoded wrappers", async (t) => {
+  const epoch = Date.parse(SMOKE_TS);
+  const line = `INFO ${JSON.stringify(SMOKE_READY)}`;
+  const items = [
+    { message: line, timestamp: epoch },
+    JSON.stringify({ output: line, timestamp: epoch }),
+    `INFO ${JSON.stringify({ ...SMOKE_READY, ts: epoch })}`,
+    { message: line, timestamp: epoch + 1000 },
+  ];
+  const records = findReadyLines(await smokeRecordsFromPanel(t, items));
+  assert.equal(records.length, items.length);
+  assert.deepEqual(records.map(({ tsMs }) => tsMs), [epoch, epoch, epoch, epoch + 1000]);
+  assert.equal(maxTimestampMs(records), epoch + 1000);
+  assert.ok(maxTimestampMs(records.slice(-1)) > maxTimestampMs(records.slice(0, 3)));
+});
+
+test("smoke regression: invalid numeric timestamps never establish freshness", () => {
+  for (const timestamp of [NaN, Infinity, -Infinity, 9e18]) {
+    const records = findBotRecords([{ text: JSON.stringify(SMOKE_READY), ts: timestamp }]);
+    assert.equal(records.length, 1);
+    assert.ok(Number.isNaN(records[0].tsMs));
+  }
+});
+
+test("smoke review-8f2dac86: terminal bot ts outranks wrapper-style timestamp fields", async (t) => {
+  const old = "2026-09-30T18:01:00.000Z";
+  for (const ts of [old, Date.parse(old)]) {
+    const record = { ...SMOKE_READY, ts, timestamp: SMOKE_TS };
+    const records = findReadyLines(await smokeRecordsFromPanel(t, [
+      JSON.stringify(record),
+      { message: JSON.stringify(record), timestamp: SMOKE_TS },
+      { timestamp: SMOKE_TS, data: record },
+    ]));
+    assert.equal(records.length, 3);
+    for (const found of records) assert.equal(found.tsMs, Date.parse(old));
+    assert.equal(records.filter(({ tsMs }) => tsMs >= Date.parse(old) + 1000).length, 0, "old ready lines cannot prove a newer deploy");
+  }
+});
+
+test("smoke review-8f2dac86: envelope messages cannot shadow nested bot records", async (t) => {
+  const ready = { ...SMOKE_READY, ts: SMOKE_TS };
+  const items = [
+    { msg: "container_output", data: ready },
+    { msg: "container_output", data: [ready] },
+    { msg: "container_output", message: `INFO ${JSON.stringify(ready)}` },
+    { msg: "container_output", output: { msg: "stdout", data: ready } },
+  ];
+  const records = findReadyLines(await smokeRecordsFromPanel(t, items));
+  assert.equal(records.length, items.length);
+  for (const found of records) assert.equal(found.tsMs, Date.parse(SMOKE_TS));
+});
+
+test("smoke review-8f2dac86: inner records need intact outer-wrapper provenance", async (t) => {
+  const ready = { ...SMOKE_READY, ts: SMOKE_TS, user: 'Fake}Bot\\"' };
+  const items = [10, 5000].map((length) => `INFO ${JSON.stringify({ data: ready, padding: "x".repeat(length) })}`);
+  const records = findReadyLines(await smokeRecordsFromPanel(t, items));
+  assert.equal(records.length, 1, "capped wrappers no longer establish terminal-event provenance");
+  for (const found of records) {
+    assert.deepEqual(found.record, ready);
+    assert.equal(found.tsMs, Date.parse(SMOKE_TS));
+  }
+  const incomplete = `INFO {"data":${JSON.stringify(ready)},"padding":"unfinished`;
+  assert.deepEqual(jsonCandidates(incomplete), [JSON.stringify(ready)]);
+  const quoted = JSON.stringify({ padding: JSON.stringify(ready) }).slice(0, -1);
+  assert.deepEqual(jsonCandidates(quoted), [], "escaped string contents are not independent JSON records");
+});
+
+// --- PR291 findings 2, 4 and 5 at 617910d9 -----------------------------------
+
+test("smoke review-617910d9: recovered children never inherit newer delivery timestamps", async (t) => {
+  const old = "2026-09-30T18:01:00.000Z";
+  for (const length of [10, 5000]) {
+    const records = findReadyLines(await smokeRecordsFromPanel(t, [{
+      timestamp: SMOKE_TS,
+      message: `INFO ${JSON.stringify({ timestamp: old, data: SMOKE_READY, padding: "x".repeat(length) })}`,
+    }]));
+    assert.equal(records.length, length === 10 ? 1 : 0, "lost parent provenance cannot be restored by delivery time");
+    if (length === 10) assert.equal(records[0].tsMs, Date.parse(old));
+    assert.equal(records.filter(({ tsMs }) => tsMs >= Date.parse(SMOKE_TS)).length, 0);
+  }
+});
+
+test("smoke review-617910d9: CLI rejects capped stale ready events despite advancing delivery times", async (t) => {
+  let reads = 0;
+  const server = createServer(createHandler({
+    brokerToken: FAKE.STAGING_BROKER_TOKEN,
+    panelUrl: "https://panel.example.invalid",
+    panelToken: "synthetic-panel-credential",
+    appUuid: PINNED_STAGING_APP_UUID,
+  }, async ({ path }) => {
+    if (!path.includes("/logs")) return { status: "running:healthy" };
+    const timestamp = new Date(Date.parse(SMOKE_TS) + reads++ * 1000).toISOString();
+    return { logs: [{ timestamp, message: `INFO ${JSON.stringify({
+      timestamp: "2026-09-30T18:01:00.000Z", data: SMOKE_READY, padding: "x".repeat(5000),
+    })}` }] };
+  }));
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const child = spawn(process.execPath, [join(ROOT, "scripts", "broker-smoke.mjs"),
+    "--env-name", "staging", "--since", SMOKE_TS, "--interval-seconds", "1", "--timeout-seconds", "2",
+  ], { env: scrubbedEnv({
+    STAGING_BROKER_TOKEN: FAKE.STAGING_BROKER_TOKEN,
+    STAGING_BROKER_URL: `http://127.0.0.1:${server.address().port}`,
+  }), stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const timer = setTimeout(() => child.kill(), 8000);
+  let result;
+  try {
+    result = await new Promise((resolve, reject) => {
+      child.on("error", reject);
+      child.on("close", (code, signal) => resolve({ code, signal }));
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+  assert.equal(result.signal, null, "CLI must finish without the test timeout killing it");
+  assert.equal(result.code, 1, stdout + stderr);
+  assert.equal(reads, 2);
+  assert.match(stderr, /no fresh/);
+  assert.doesNotMatch(stdout, /PASS/);
+});
+
+test("smoke review-617910d9: terminal events outrank diagnostic metadata, never the reverse", async (t) => {
+  const ready = { ...SMOKE_READY, ts: SMOKE_TS, metadata: { msg: "cache_loaded" } };
+  const diagnostic = { msg: "diagnostic", ts: SMOKE_TS, metadata: SMOKE_READY };
+  const records = await smokeRecordsFromPanel(t, [ready, diagnostic]);
+  assert.deepEqual(records.map(({ record }) => record), [ready, diagnostic]);
+  assert.deepEqual(findReadyLines(records).map(({ record }) => record), [ready]);
+});
+
+test("smoke review-617910d9: batched envelopes retain every sibling and the newest timestamp", async (t) => {
+  const older = { msg: "health_listening", ts: "2026-09-30T18:01:00.000Z" };
+  const ready = { ...SMOKE_READY, ts: SMOKE_TS };
+  const newest = { msg: "heartbeat", ts: "2026-09-30T19:02:00.000Z" };
+  for (const data of [[older, ready, newest], [older, { msg: "stdout", data: [ready, newest] }]]) {
+    const records = await smokeRecordsFromPanel(t, [{ msg: "container_output", data }]);
+    assert.deepEqual(records.map(({ record }) => record), [older, ready, newest]);
+    assert.equal(findReadyLines(records).length, 1);
+    assert.equal(findReadyLines(records)[0].tsMs, Date.parse(SMOKE_TS));
+    assert.equal(maxTimestampMs(records), Date.parse(newest.ts));
+  }
+});
+
+test("smoke review-617910d9: top-level arrays and adjacent complete records keep all events", () => {
+  const records = [{ msg: "health_listening", ts: "2026-09-30T18:01:00.000Z" }, { ...SMOKE_READY, ts: SMOKE_TS }];
+  for (const text of [JSON.stringify(records), records.map((record) => `INFO ${JSON.stringify(record)}`).join(" ")]) {
+    assert.deepEqual(findBotRecords([{ text, ts: null }]).map(({ record }) => record), records);
+  }
+});
+
+// --- PR291 findings 1 and 3 at d883a973 --------------------------------------
+
+for (const length of [10, 5000]) {
+  test(`smoke review-d883a973: diagnostic metadata never proves readiness (${length} padding)`, async (t) => {
+    const diagnostic = {
+      msg: "diagnostic", ts: "2026-09-30T18:01:00.000Z",
+      metadata: { ...SMOKE_READY, ts: SMOKE_TS }, padding: "A".repeat(length),
+    };
+    const records = await smokeRecordsFromPanel(t, [{ timestamp: SMOKE_TS, message: `INFO ${JSON.stringify(diagnostic)}` }]);
+    assert.equal(findReadyLines(records).length, 0, "losing terminal-parent provenance must not promote metadata");
+  });
+
+  test(`smoke review-d883a973: real CLI rejects metadata-only readiness (${length} padding)`, async (t) => {
+    let reads = 0;
+    const server = createServer(createHandler({
+      brokerToken: FAKE.STAGING_BROKER_TOKEN,
+      panelUrl: "https://panel.example.invalid", panelToken: "synthetic-panel-credential",
+      appUuid: PINNED_STAGING_APP_UUID,
+    }, async ({ path }) => {
+      if (!path.includes("/logs")) return { status: "running:healthy" };
+      const timestamp = new Date(Date.parse(SMOKE_TS) + reads++ * 1000).toISOString();
+      return { logs: [{ timestamp, message: `INFO ${JSON.stringify({
+        msg: "diagnostic", ts: "2026-09-30T18:01:00.000Z",
+        metadata: { ...SMOKE_READY, ts: timestamp }, padding: "A".repeat(length),
+      })}` }] };
+    }));
+    await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+    t.after(() => new Promise((resolve) => server.close(resolve)));
+    const child = spawn(process.execPath, [join(ROOT, "scripts", "broker-smoke.mjs"),
+      "--env-name", "staging", "--since", SMOKE_TS, "--interval-seconds", "1", "--timeout-seconds", "2",
+    ], { env: scrubbedEnv({
+      STAGING_BROKER_TOKEN: FAKE.STAGING_BROKER_TOKEN,
+      STAGING_BROKER_URL: `http://127.0.0.1:${server.address().port}`,
+    }), stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    const timer = setTimeout(() => child.kill(), 8000);
+    let result;
+    try {
+      result = await new Promise((resolve, reject) => {
+        child.on("error", reject);
+        child.on("close", (code, signal) => resolve({ code, signal }));
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    assert.equal(result.signal, null, "CLI must finish without the test timeout killing it");
+    assert.equal(result.code, 1, stdout + stderr);
+    assert.equal(reads, 2);
+    assert.match(stderr, /no fresh/);
+    assert.doesNotMatch(stdout, /PASS/);
+  });
+}
+
+test("smoke review-d883a973: textual batch entries retain siblings and wrapper timestamps", async (t) => {
+  const ready = { ...SMOKE_READY, ts: SMOKE_TS };
+  const newest = { msg: "heartbeat", ts: "2026-09-30T19:02:00.000Z" };
+  for (const format of [
+    (record) => record,
+    (record) => JSON.stringify(record),
+    (record) => `INFO ${JSON.stringify(record)}`,
+  ]) {
+    const records = await smokeRecordsFromPanel(t, [{ msg: "stdout", timestamp: SMOKE_TS, data: [ready, newest].map(format) }]);
+    assert.deepEqual(records.map(({ record }) => record), [ready, newest]);
+    assert.equal(findReadyLines(records).length, 1);
+    assert.equal(maxTimestampMs(records), Date.parse(newest.ts));
+    const fallback = await smokeRecordsFromPanel(t, [{ msg: "stdout", timestamp: SMOKE_TS,
+      data: [format(SMOKE_READY), format({ msg: "heartbeat" })],
+    }]);
+    assert.deepEqual(fallback.map(({ tsMs }) => tsMs), [Date.parse(SMOKE_TS), Date.parse(SMOKE_TS)]);
+  }
+});
+
+test("smoke review-d883a973: incomplete parents cannot promote locally timestamped children", () => {
+  const ready = { ...SMOKE_READY, ts: SMOKE_TS };
+  const complete = `INFO ${JSON.stringify(ready)}`;
+  const incomplete = `INFO {"msg":"diagnostic","metadata":${JSON.stringify(ready)},"padding":"unfinished`;
+  const records = findBotRecords([{ text: `${complete} ${incomplete}`, ts: SMOKE_TS }]);
+  assert.deepEqual(records.map(({ record }) => record), [ready], "complete independent records survive; context-lost children do not");
+});
+
+// --- PR291 payload-provenance finding at 1194ab33 ---------------------------
+
+async function smokeCliFromPanel(t, makeItem, panelToken = "synthetic-panel-credential", batch = false) {
+  let reads = 0;
+  const server = createServer(createHandler({
+    brokerToken: FAKE.STAGING_BROKER_TOKEN,
+    panelUrl: "https://panel.example.invalid", panelToken,
+    appUuid: PINNED_STAGING_APP_UUID,
+  }, async ({ path }) => {
+    if (!path.includes("/logs")) return { status: "running:healthy" };
+    const timestamp = new Date(Date.parse(SMOKE_TS) + reads++ * 1000).toISOString();
+    return { logs: batch ? makeItem(timestamp) : [makeItem(timestamp)] };
+  }));
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const child = spawn(process.execPath, [join(ROOT, "scripts", "broker-smoke.mjs"),
+    "--env-name", "staging", "--since", SMOKE_TS, "--interval-seconds", "1", "--timeout-seconds", "2",
+  ], { env: scrubbedEnv({
+    STAGING_BROKER_TOKEN: FAKE.STAGING_BROKER_TOKEN,
+    STAGING_BROKER_URL: `http://127.0.0.1:${server.address().port}`,
+  }), stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.on("data", (chunk) => { stdout += chunk; });
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  const timer = setTimeout(() => child.kill(), 8000);
+  let result;
+  try {
+    result = await new Promise((resolve, reject) => {
+      child.on("error", reject);
+      child.on("close", (code, signal) => resolve({ code, signal }));
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+  assert.equal(result.signal, null, "CLI must finish without the test timeout killing it");
+  assert.equal(reads, 2);
+  return { ...result, stdout, stderr };
+}
+
+for (const [name, makeItem] of [
+  ["textual metadata array", (timestamp) => ({ timestamp, message: 'INFO {"msg":"diagnostic"}',
+    metadata: ['INFO {"msg":"ready","guilds":1}'] })],
+  ["object metadata", (timestamp) => ({ timestamp, message: 'INFO {"msg":"diagnostic"}',
+    metadata: SMOKE_READY })],
+  ["explicit terminal diagnostic", (timestamp) => ({ timestamp, msg: "diagnostic",
+    message: 'INFO {"msg":"diagnostic"}', metadata: ['INFO {"msg":"ready","guilds":1}'] })],
+  ["competing sibling payload", (timestamp) => ({ timestamp, message: 'INFO {"msg":"diagnostic"}',
+    data: ['INFO {"msg":"ready","guilds":1}'] })],
+]) {
+  test(`smoke review-1194ab33: ${name} cannot promote readiness`, async (t) => {
+    const records = await smokeRecordsFromPanel(t, [makeItem(SMOKE_TS)]);
+    assert.equal(records.length, 1, "only the primary terminal payload is an event");
+    assert.equal(records[0].record.msg, "diagnostic");
+    assert.equal(findReadyLines(records).length, 0);
+  });
+  test(`smoke review-1194ab33: real CLI rejects ${name}`, async (t) => {
+    const result = await smokeCliFromPanel(t, makeItem);
+    assert.equal(result.code, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /no fresh/);
+    assert.doesNotMatch(result.stdout, /PASS/);
+  });
+}
+
+test("smoke review-1194ab33: unknown tree paths do not establish payload provenance", () => {
+  for (const key of ["metadata", "wrapper", "inner"]) {
+    for (const value of [SMOKE_READY, [SMOKE_READY], ['INFO {"msg":"ready","guilds":1}'],
+      { output: JSON.stringify(SMOKE_READY) }]) {
+      const text = JSON.stringify({ timestamp: SMOKE_TS, [key]: value });
+      assert.deepEqual(findBotRecords([{ text, ts: SMOKE_TS }]), [], key);
+    }
+  }
+});
+
+test("smoke review-1194ab33: valid transport batches pass handler-to-CLI smoke", async (t) => {
+  for (const format of [(record) => record, (record) => JSON.stringify(record), (record) => `INFO ${JSON.stringify(record)}`]) {
+    const result = await smokeCliFromPanel(t, (timestamp) => ({ msg: "stdout", timestamp,
+      data: [SMOKE_READY, { msg: "heartbeat" }].map(format),
+      metadata: ['INFO {"msg":"diagnostic"}'],
+    }));
+    assert.equal(result.code, 0, result.stdout + result.stderr);
+    assert.match(result.stdout, /PASS/);
+  }
+});
+
+test("smoke review-1194ab33: real CLI rejects metadata-only timestamp advancement", async (t) => {
+  const result = await smokeCliFromPanel(t, (timestamp) => ({ timestamp: SMOKE_TS,
+    message: JSON.stringify({ ...SMOKE_READY, ts: SMOKE_TS }),
+    metadata: [{ msg: "heartbeat", ts: timestamp }],
+  }));
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /timestamps did not advance/);
+  assert.doesNotMatch(result.stdout, /PASS/);
+});
+
+test("smoke review-1194ab33: root textual batches retain complete siblings", async (t) => {
+  const events = [{ ...SMOKE_READY, ts: SMOKE_TS }, { msg: "heartbeat", ts: "2026-09-30T19:02:00.000Z" }];
+  for (const format of [(record) => record, (record) => JSON.stringify(record), (record) => `INFO ${JSON.stringify(record)}`]) {
+    const text = JSON.stringify(events.map(format));
+    const records = await smokeRecordsFromPanel(t, [text]);
+    assert.deepEqual(records.map(({ record }) => record), events);
+    assert.equal(maxTimestampMs(records), Date.parse(events[1].ts));
+  }
+});
+
+test("smoke review-1194ab33: selected payload retains ready siblings but excludes metadata", async (t) => {
+  const events = [SMOKE_READY, { msg: "heartbeat" }];
+  for (const key of ["logs", "data", "output", "lines", "result", "message", "log", "line", "text", "content"]) {
+    const records = await smokeRecordsFromPanel(t, [{ timestamp: SMOKE_TS,
+      [key]: events.map((record) => `INFO ${JSON.stringify(record)}`),
+      metadata: [{ msg: "diagnostic", ts: "2026-09-30T19:02:00.000Z" }],
+    }]);
+    assert.deepEqual(records.map(({ record }) => record), events, key);
+    assert.deepEqual(records.map(({ tsMs }) => tsMs), [Date.parse(SMOKE_TS), Date.parse(SMOKE_TS)], key);
+    assert.equal(maxTimestampMs(records), Date.parse(SMOKE_TS), "metadata cannot prove advancing log timestamps");
+  }
+});
+
+// --- PR291 source-authority findings at 3260ad79 ----------------------------
+
+const STALE_SMOKE_TS = "2026-09-30T18:01:00.000Z";
+
+for (const [name, makeItem, panelToken] of [
+  ["decoded terminal msg", (timestamp) => ({ timestamp, msg: '{"kind":"diagnostic"}', data: [SMOKE_READY] })],
+  ...[0, false, null].map((message) => [`unsupported primary ${JSON.stringify(message)}`,
+    (timestamp) => ({ timestamp, message, data: [SMOKE_READY] })]),
+  ["scrubbed primary name", (timestamp) => ({ timestamp, message: 'INFO {"msg":"diagnostic"}', data: [SMOKE_READY] }), "message"],
+  ["scrubbed terminal ts name", (timestamp) => ({ timestamp, message: JSON.stringify({ ...SMOKE_READY, ts: STALE_SMOKE_TS }) }), "ts"],
+]) {
+  test(`smoke review-3260ad79: real CLI rejects ${name}`, async (t) => {
+    const result = await smokeCliFromPanel(t, makeItem, panelToken);
+    assert.equal(result.code, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /no fresh/);
+    assert.doesNotMatch(result.stdout, /PASS/);
+  });
+}
+
+test("smoke review-3260ad79: every present unsupported primary excludes later siblings", async (t) => {
+  const keys = ["message", "output", "log", "line", "text", "content", "logs", "data", "lines", "result"];
+  for (const [i, key] of keys.slice(0, -1).entries()) {
+    for (const value of [0, false, null]) {
+      const item = { timestamp: SMOKE_TS, [key]: value, [keys[i + 1]]: [SMOKE_READY] };
+      assert.deepEqual(findBotRecords([{ text: JSON.stringify(item), ts: SMOKE_TS }]), [], `${key}:${value}`);
+      assert.deepEqual(await smokeRecordsFromPanel(t, [item]), [], `${key}:${value} through broker`);
+    }
+  }
+  assert.deepEqual(normalizeLogPayload({ logs: [{ message: null, output: JSON.stringify(SMOKE_READY) }] }), []);
+  assert.deepEqual(normalizeLogPayload({ logs: null, data: [JSON.stringify(SMOKE_READY)] }), []);
+});
+
+test("smoke review-3260ad79: erased field identities cannot create readiness or newer time", async (t) => {
+  for (const key of ["message", "output", "log", "line", "text", "content", "logs", "data", "lines", "result"]) {
+    const item = { timestamp: SMOKE_TS, [key]: 'INFO {"msg":"diagnostic"}', result: [SMOKE_READY] };
+    if (key === "result") item[key] = 'INFO {"msg":"diagnostic"}';
+    assert.equal(findReadyLines(await smokeRecordsFromPanel(t, [item, JSON.stringify(item), `INFO ${JSON.stringify(item)}`], key)).length, 0, key);
+  }
+  for (const key of ["ts", "timestamp", "time", "_ts", "created_at"]) {
+    const ready = { ...SMOKE_READY, [key]: STALE_SMOKE_TS };
+    const item = { timestamp: SMOKE_TS, data: ready };
+    const records = await smokeRecordsFromPanel(t, [item, JSON.stringify(item), `INFO ${JSON.stringify(item)}`], key);
+    assert.equal(findReadyLines(records).filter(({ tsMs }) => tsMs >= Date.parse(SMOKE_TS)).length, 0, key);
+  }
+  const diagnostic = { timestamp: SMOKE_TS, msg: "diagnostic", data: [SMOKE_READY] };
+  assert.equal(findReadyLines(await smokeRecordsFromPanel(t, [diagnostic], "msg")).length, 0);
+});
+
+test("smoke review-3260ad79: redacted usable timestamp values cannot acquire enclosing time", async (t) => {
+  for (const key of ["ts", "timestamp", "time", "_ts", "created_at"]) {
+    const item = { timestamp: SMOKE_TS, data: { ...SMOKE_READY, [key]: STALE_SMOKE_TS } };
+    const records = await smokeRecordsFromPanel(t, [item], STALE_SMOKE_TS);
+    assert.equal(findReadyLines(records).filter(({ tsMs }) => tsMs >= Date.parse(SMOKE_TS)).length, 0, key);
+  }
+  const result = await smokeCliFromPanel(t, (timestamp) => ({ timestamp,
+    data: { ...SMOKE_READY, ts: STALE_SMOKE_TS },
+  }), STALE_SMOKE_TS);
+  assert.equal(result.code, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /no fresh/);
+});
+
+function cappedInvalidTimestamp(timestamp) {
+  const date = new Date(timestamp).toUTCString();
+  return date + " ".repeat(4096 - date.length) + "invalid-tail";
+}
+
+for (const wrapped of [false, true]) {
+  test(`smoke source-authority: real CLI rejects invalid-to-usable truncation (${wrapped ? "wrapped" : "raw"})`, async (t) => {
+    const result = await smokeCliFromPanel(t, (timestamp) => {
+      const message = JSON.stringify({ ...SMOKE_READY, timestamp: STALE_SMOKE_TS, ts: cappedInvalidTimestamp(timestamp) });
+      return wrapped ? { timestamp: STALE_SMOKE_TS, message } : message;
+    });
+    assert.equal(result.code, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /no fresh/);
+    assert.doesNotMatch(result.stdout, /PASS/);
+  });
+}
+
+test("smoke source-authority: every timestamp alias retains unusable classification", async (t) => {
+  for (const key of ["ts", "timestamp", "time", "_ts", "created_at"]) {
+    const event = { ...SMOKE_READY, [key]: cappedInvalidTimestamp(SMOKE_TS) };
+    assert.ok(Number.isNaN(Date.parse(event[key])));
+    const message = JSON.stringify({ data: event, timestamp: STALE_SMOKE_TS });
+    const original = findReadyLines(findBotRecords([{ text: message, ts: SMOKE_TS }]));
+    assert.equal(original[0].tsMs, Date.parse(STALE_SMOKE_TS), key);
+    const records = await smokeRecordsFromPanel(t, [message, { message, timestamp: SMOKE_TS }]);
+    assert.equal(findReadyLines(records).filter(({ tsMs }) => tsMs >= Date.parse(SMOKE_TS)).length, 0, key);
+  }
+});
+
+test("smoke review-3260ad79: JSON-valued terminal labels never become envelopes", async (t) => {
+  for (const msg of ['{"kind":"diagnostic"}', '[{"msg":"ready","guilds":1}]', 'INFO {"kind":"diagnostic"}', '{"password":"synthetic-db-value"}']) {
+    const item = { timestamp: SMOKE_TS, msg, data: [SMOKE_READY] };
+    const records = await smokeRecordsFromPanel(t, [item, JSON.stringify(item), `INFO ${JSON.stringify(item)}`]);
+    assert.equal(findReadyLines(records).length, 0, msg);
+  }
+});
+
+for (const [name, makeSuspect, panelToken] of [
+  ["decoded terminal label", (timestamp) => ({ msg: '{"kind":"diagnostic"}', ts: timestamp,
+    data: [{ msg: "heartbeat", ts: timestamp }] })],
+  ["redacted transport label", (timestamp) => ({ msg: "stdout", ts: timestamp, metadata: SMOKE_READY }), "stdout"],
+  ["redacted heartbeat time", (timestamp) => ({ timestamp,
+    data: { msg: "heartbeat", ts: STALE_SMOKE_TS } }), STALE_SMOKE_TS],
+]) {
+  test(`smoke review-3260ad79: real CLI rejects lossy-only advancement (${name})`, async (t) => {
+    const result = await smokeCliFromPanel(t, (timestamp) => [
+      { ...SMOKE_READY, ts: SMOKE_TS }, makeSuspect(timestamp),
+    ], panelToken);
+    assert.equal(result.code, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /timestamps did not advance/);
+    assert.doesNotMatch(result.stdout, /PASS/);
+  });
+}
+
+test("smoke review-3260ad79: source-authority rejection keeps genuine independent siblings", async (t) => {
+  const stale = { ...SMOKE_READY, ts: STALE_SMOKE_TS };
+  const ready = { ...SMOKE_READY, time: SMOKE_TS };
+  const heartbeat = { msg: "heartbeat", time: "2026-09-30T19:02:00.000Z" };
+  for (const items of [[stale, ready, heartbeat], [JSON.stringify([stale, ready, heartbeat])],
+    [`INFO ${JSON.stringify(stale)} INFO ${JSON.stringify(ready)} INFO ${JSON.stringify(heartbeat)}`]]) {
+    const records = await smokeRecordsFromPanel(t, items, "ts");
+    assert.deepEqual(records.map(({ record }) => record), [ready, heartbeat]);
+    assert.equal(maxTimestampMs(records), Date.parse(heartbeat.time));
+  }
+  const result = await smokeCliFromPanel(t, (timestamp) => ({ msg: "stdout", time: timestamp,
+    data: [stale, SMOKE_READY, { msg: "heartbeat" }],
+  }), "ts");
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /PASS/);
+});
+
+// --- PR291 depth-classification finding at 765569d2 -------------------------
+
+function deepSmokeEnvelope(timestamp, msg, links = 10) {
+  let data = { msg };
+  for (let i = 1; i < links; i++) data = { data };
+  return { timestamp, data };
+}
+
+test("smoke review-765569d2: depth shaping cannot fabricate terminal records", async (t) => {
+  const ready = { ...SMOKE_READY, ts: SMOKE_TS };
+  for (const msg of [{}, [], null, false, true, 0, 314]) {
+    for (const links of [9, 10, 11]) {
+      const envelope = deepSmokeEnvelope("2026-09-30T19:02:00.000Z", msg, links);
+      for (const format of [(value) => value, (value) => JSON.stringify(value), (value) => `INFO ${JSON.stringify(value)}`]) {
+        const source = findBotRecords([{ text: JSON.stringify(envelope), ts: null }]);
+        assert.deepEqual(source, [], "the source has no terminal event");
+        const records = await smokeRecordsFromPanel(t, [ready, format(envelope)]);
+        assert.deepEqual(records.map(({ record }) => record), [ready], `${links} links, ${JSON.stringify(msg)}`);
+        assert.equal(maxTimestampMs(records), Date.parse(SMOKE_TS), "only original terminal events carry advancement");
+      }
+    }
+  }
+});
+
+for (const [name, msg] of [["object", {}], ["array", []], ["null", null], ["boolean", false], ["number", 0]]) {
+  test(`smoke review-765569d2: real CLI rejects depth-promoted ${name} msg`, async (t) => {
+    const result = await smokeCliFromPanel(t, (timestamp) => [
+      { ...SMOKE_READY, ts: SMOKE_TS }, deepSmokeEnvelope(timestamp, msg),
+    ], "synthetic-panel-credential", true);
+    assert.equal(result.code, 1, result.stdout + result.stderr);
+    assert.match(result.stderr, /timestamps did not advance/);
+    assert.doesNotMatch(result.stdout, /PASS/);
+  });
+}
+
+test("smoke review-765569d2: depth rejection preserves genuine independent advancement", async (t) => {
+  const result = await smokeCliFromPanel(t, (timestamp) => [
+    { ...SMOKE_READY, ts: SMOKE_TS }, deepSmokeEnvelope(timestamp, {}),
+    { msg: "heartbeat", ts: timestamp },
+  ], "synthetic-panel-credential", true);
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /PASS/);
+});
+
+for (const [name, body] of [["paired quotes", '"evil"'], ["escape", "\\"], ["unmatched quote", '"']]) {
+  for (const [formatName, format] of [
+    ["raw", (message) => message], ["wrapped", (message, timestamp) => ({ message, timestamp })],
+    ["prefixed", (message) => `INFO ${message}`],
+  ]) {
+    test(`smoke source-framing: real CLI rejects PEM-repaired JSON (${name}, ${formatName})`, async (t) => {
+      const result = await smokeCliFromPanel(t, (timestamp) => {
+        const message = `{"data":${JSON.stringify({ ...SMOKE_READY, ts: timestamp })},"note":"-----BEGIN PRIVATE KEY-----${body}-----END PRIVATE KEY-----"}`;
+        assert.deepEqual(findBotRecords([{ text: message, ts: timestamp }]), [], "original malformed source has no terminal event");
+        return format(message, timestamp);
+      });
+      assert.equal(result.code, 1, result.stdout + result.stderr);
+      assert.match(result.stderr, /no fresh/);
+      assert.doesNotMatch(result.stdout, /PASS/);
+    });
+  }
+}
+
+test("smoke source-framing: PEM rejection preserves independent ready and heartbeat records", async (t) => {
+  const result = await smokeCliFromPanel(t, (timestamp) => [
+    { ...SMOKE_READY, ts: SMOKE_TS }, { msg: "heartbeat", ts: timestamp },
+    `{"data":${JSON.stringify({ ...SMOKE_READY, ts: timestamp })},"note":"-----BEGIN PRIVATE KEY-----"evil"-----END PRIVATE KEY-----"}`,
+  ], "synthetic-panel-credential", true);
+  assert.equal(result.code, 0, result.stdout + result.stderr);
+  assert.match(result.stdout, /PASS/);
 });
 
 // --- deploy.yml wiring (the TOG-913 shape) -----------------------------------
 
-test("workflow-uses-guard: deploy.yml calls all four deploy scripts", () => {
+test("workflow-uses-guard: deploy.yml calls the broker deploy scripts", () => {
   const workflow = readFileSync(WORKFLOW, "utf8");
   for (const script of [
     "scripts/check-deploy-target.mjs",
     "scripts/wait-for-host-mirror.mjs",
-    "scripts/wait-for-coolify-deploy.mjs",
-    "scripts/smoke-staging-deploy.mjs",
+    "scripts/broker-deploy.mjs",
+    "scripts/broker-smoke.mjs",
   ]) {
     assert.match(workflow, new RegExp(script.replace(/\./g, "\\."), "m"), `${script} must be called from deploy.yml`);
   }
+});
+
+test("workflow-no-panel: staging carries no panel bearer or caller app UUID", () => {
+  // The 2026-09-28 correction: the live panel token is NOT app-scoped, so no
+  // staging step may read COOLIFY_TOKEN, COOLIFY_URL or a caller-supplied app
+  // UUID. Staging speaks to the broker with STAGING_BROKER_TOKEN only (the
+  // production HOLD job is allowed its own PRODUCTION_BROKER_TOKEN gate names).
+  const workflow = readFileSync(WORKFLOW, "utf8");
+  const staging = workflow.split("deploy-production:")[0];
+  assert.doesNotMatch(staging, /COOLIFY_TOKEN/, "staging must not reference the panel bearer");
+  assert.doesNotMatch(staging, /COOLIFY_APP_UUID/, "staging must not take a caller-supplied app UUID");
+  assert.doesNotMatch(staging, /TWO_BOT_STAGING_APP_UUID/, "staging must not take a caller-supplied app UUID");
+  assert.doesNotMatch(staging, /COOLIFY_URL/, "staging must not reference the panel URL");
+  assert.doesNotMatch(staging, /wait-for-coolify-deploy/, "staging must not call the retired panel client");
+  assert.doesNotMatch(staging, /smoke-staging-deploy/, "staging must not call the retired panel client");
+  assert.match(staging, /STAGING_BROKER_TOKEN/, "staging gates and triggers carry the scoped broker credential");
+  assert.match(staging, /MERGE_SHA/, "staging trigger pins the merge commit for broker validation");
+});
+
+test("workflow-broker-url: staging gate requires STAGING_BROKER_URL", () => {
+  // Deploy jobs run on ubuntu-latest (public repo, #304), so host loopback is
+  // unreachable from the runner. The clients fall back to the loopback
+  // default only when STAGING_BROKER_URL is empty/unset (local smoke); in CI
+  // the gate must require the public https:// origin, or a missing secret
+  // would send the trigger at unreachable loopback and fail confusingly
+  // instead of naming the missing secret (TOG-913).
+  const workflow = readFileSync(WORKFLOW, "utf8");
+  const staging = workflow.split("deploy-production:")[0];
+  assert.match(staging, /--require-env STAGING_BROKER_URL/, "staging gate must require the broker origin");
+  assert.match(staging, /STAGING_BROKER_URL: \$\{\{ secrets\.STAGING_BROKER_URL \}\}/, "staging passes the broker origin from secrets");
 });
 
 test("workflow-has-no-skip: no step gated on secrets or target presence", () => {

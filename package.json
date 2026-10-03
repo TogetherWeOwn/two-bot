@@ -59,6 +59,7 @@
     "check:env-drift:selftest": "bash scripts/ci/check-env-drift.test.sh",
     "check:script-targets": "node scripts/check-script-targets.ts",
     "deploy:selftest": "node --test scripts/deploy-target-selftest.mjs",
+    "broker:selftest": "node --test ops/staging-deploy-broker/server.test.mjs",
     "backup": "node scripts/pg-backup.ts",
     "verify:catalog": "node scripts/verify-catalog.ts",
     "event:sunday-squad": "node scripts/sunday-squad-event.ts",

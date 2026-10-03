@@ -20,15 +20,46 @@
 # after blocking checks pass" comes from keying staging off `workflow_run`
 # on CI success (the two-web shape), not off push.
 #
-# TRANSPORT. The panel token is an Authorization Bearer HEADER from a
-# self-hosted runner, never a token-in-URL hook (docs/DEPLOY.md §6.1; the
-# wayselect TOG-7131 recipe). The bot publishes no ports, so there is no URL
-# to curl — the staging app's sslip.io address answers proxy 404 BY DESIGN
-# (docs/DEPLOY.md §6.1). Liveness is proved through the panel: the deployment
-# reaches `finished`, the app reports `running:healthy` (the compose
-# healthcheck is /readyz: gateway connected AND Postgres answering), the logs
-# carry a fresh {"msg":"ready","guilds":N>=1} line, and log timestamps advance
-# between two reads a minute apart.
+# TRANSPORT. Staging deploys through the staging-only broker
+# (ops/staging-deploy-broker/server.mjs), never with a panel bearer in
+# Actions. The live panel token carries abilities [read,deploy] and is NOT
+# app-scoped, so any job holding it could reach production applications; a
+# GitHub environment label is not a resource authorization boundary
+# (operator hand-back on TOG-6911, 2026-09-28). The panel bearer therefore
+# stays on the host inside the broker's systemd unit
+# (ops/staging-deploy-broker/two-staging-broker.service); Actions holds only
+# the scoped STAGING_BROKER_TOKEN, and the broker's server-side authority
+# admits exactly one application — the two-bot staging app
+# (uy4d9ndeygjcem6lgayhxgub) — rejecting arbitrary app UUIDs and production.
+# scripts/broker-deploy.mjs POSTs {repo, sha} (caller/resource/commit
+# validation) and polls the broker's bounded, redacted status reads;
+# scripts/broker-smoke.mjs proves liveness through the same path.
+#
+# The broker listens on host loopback ONLY (:8091) — a deploy authority never
+# listens on a public interface. Deploy jobs run on ubuntu-latest (the repo is
+# public, #304), so hosted runners reach the broker over public HTTPS through
+# the host's TLS-terminating reverse proxy
+# (ops/staging-deploy-broker/reverse-proxy.Caddyfile.example), which forwards
+# at root to loopback. STAGING_BROKER_URL carries that public https:// origin
+# in CI (the bare-loopback default in the clients is local-smoke only); the
+# clients refuse plaintext non-loopback origins and credential-in-URL shapes
+# before any request is sent. The first green staging Deployment+smoke over
+# that public origin IS the reachability proof (a broker the runner cannot
+# reach fails the job red, TOG-913, never silently).
+#
+# The bot publishes no ports, so there is no URL to curl — the staging app's
+# sslip.io address answers proxy 404 BY DESIGN (docs/DEPLOY.md §6.1).
+# Liveness is proved through the broker: the deployment reaches `finished`,
+# the app reports `running:healthy` (the compose healthcheck is /readyz:
+# gateway connected AND Postgres answering), the logs carry a fresh
+# {"msg":"ready","guilds":N>=1} line, and log timestamps advance between two
+# reads a minute apart.
+#
+# PRODUCTION IS HOLD UNTIL TOG-6903 and keeps the panel-bearer code path in
+# deploy-production below, UNPROVISIONED: no production credential is set by
+# this card, so the gate fails that job red by design (TOG-913) until the
+# hold lifts — at which point production gets the same broker treatment,
+# never a copied panel bearer.
 #
 # NO MIGRATE STEP. The bot migrates at startup under an advisory lock
 # (scripts/migrate.ts header), so a normal deploy applies pending migrations
@@ -74,7 +105,7 @@ jobs:
     # Fork hardening for the public repo (Steward audit TOG-8951 §2A): a fork
     # PR from a branch named `main` fires this `workflow_run` with a `success`
     # conclusion, so conclusion alone is a pwn request. Require a push event
-    # on OUR main — same-repo head — before touching COOLIFY_TOKEN.
+    # on OUR main — same-repo head — before touching the staging broker credential.
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'workflow_run' &&
@@ -117,19 +148,27 @@ jobs:
           MERGE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: node scripts/wait-for-host-mirror.mjs
 
-      # Fails the job when there is no target. Prints secret NAMES only,
-      # never values. This step is the entire subject of TOG-913: it must
-      # never gain a "skip and pass" branch.
+      # Attest the runner first: broker reachability below runs from a hosted
+      # runner over the public broker origin (TOG-6911 hand-back), so the
+      # record names the runner the proof actually ran from.
+      - name: Attest the runner
+        run: |
+          echo "runner_name=${RUNNER_NAME:-unknown} runner_env=${RUNNER_ENVIRONMENT:-unknown} job=${GITHUB_JOB:-unknown}"
+
+      # Fails the job when there is no broker target. Prints secret NAMES
+      # only, never values. This step is the entire subject of TOG-913: it
+      # must never gain a "skip and pass" branch. The credential here is the
+      # SCOPED staging broker token — no panel bearer exists in this job.
       - name: Deploy-target gate
         env:
-          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-          COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
-          TWO_BOT_STAGING_APP_UUID: ${{ secrets.TWO_BOT_STAGING_APP_UUID }}
+          STAGING_BROKER_TOKEN: ${{ secrets.STAGING_BROKER_TOKEN }}
+          STAGING_BROKER_URL: ${{ secrets.STAGING_BROKER_URL }}
+          MERGE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: >-
           node scripts/check-deploy-target.mjs --env-name staging
-          --credential-env COOLIFY_TOKEN
-          --require-env COOLIFY_URL
-          --require-env TWO_BOT_STAGING_APP_UUID
+          --credential-env STAGING_BROKER_TOKEN
+          --require-env STAGING_BROKER_URL
+          --require-env MERGE_SHA
 
       # Freshness anchor for the smoke step: the ready line must prove THIS
       # deploy, not the previous release's surviving log tail.
@@ -140,19 +179,18 @@ jobs:
       # No `if:` on this step or the next. A gate-gated trigger is what let a
       # missing target sail through as a pass; the step above fails the job
       # outright and these simply never start.
-      - name: Trigger Coolify deploy and wait for healthy
+      - name: Trigger staging deploy and wait for healthy
         env:
-          COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
-          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-          COOLIFY_APP_UUID: ${{ secrets.TWO_BOT_STAGING_APP_UUID }}
-        run: node scripts/wait-for-coolify-deploy.mjs --env-name staging
+          STAGING_BROKER_TOKEN: ${{ secrets.STAGING_BROKER_TOKEN }}
+          STAGING_BROKER_URL: ${{ secrets.STAGING_BROKER_URL }}
+          MERGE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: node scripts/broker-deploy.mjs --env-name staging
 
       - name: Post-deploy smoke against staging
         env:
-          COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
-          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-          COOLIFY_APP_UUID: ${{ secrets.TWO_BOT_STAGING_APP_UUID }}
-        run: node scripts/smoke-staging-deploy.mjs --env-name staging --since "${{ steps.start.outputs.since }}"
+          STAGING_BROKER_TOKEN: ${{ secrets.STAGING_BROKER_TOKEN }}
+          STAGING_BROKER_URL: ${{ secrets.STAGING_BROKER_URL }}
+        run: node scripts/broker-smoke.mjs --env-name staging --since "${{ steps.start.outputs.since }}"
 
   deploy-production:
     name: deploy-production
@@ -191,31 +229,27 @@ jobs:
           MERGE_SHA: ${{ github.sha }}
         run: node scripts/wait-for-host-mirror.mjs
 
+      # PRODUCTION HOLD (TOG-6903, TOG-9053 finding 3): no production broker
+      # exists and no production credential is provisioned by TOG-6911. The
+      # gate above fails red while unprovisioned (TOG-913, naming the missing
+      # credential). Once a token IS present, the HOLD step below fails red
+      # unconditionally instead: the previous shape (presence checks as the
+      # deploy/smoke steps) exited 0 on any nonblank placeholder token without
+      # contacting a target — a green production Deployment that deployed
+      # nothing, the exact skip-and-pass TOG-913 forbids. When the hold lifts,
+      # production gets the same broker treatment as staging (never a copied
+      # panel bearer), and the HOLD step is replaced by the real trigger +
+      # smoke — not by presence checks.
       - name: Deploy-target gate
         env:
-          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-          COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
-          TWO_BOT_PRODUCTION_APP_UUID: ${{ secrets.TWO_BOT_PRODUCTION_APP_UUID }}
+          PRODUCTION_BROKER_TOKEN: ${{ secrets.PRODUCTION_BROKER_TOKEN }}
+          MERGE_SHA: ${{ github.sha }}
         run: >-
           node scripts/check-deploy-target.mjs --env-name production
-          --credential-env COOLIFY_TOKEN
-          --require-env COOLIFY_URL
-          --require-env TWO_BOT_PRODUCTION_APP_UUID
+          --credential-env PRODUCTION_BROKER_TOKEN
+          --require-env MERGE_SHA
 
-      - name: Record deploy start time
-        id: start
-        run: echo "since=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-
-      - name: Trigger Coolify deploy and wait for healthy
-        env:
-          COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
-          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-          COOLIFY_APP_UUID: ${{ secrets.TWO_BOT_PRODUCTION_APP_UUID }}
-        run: node scripts/wait-for-coolify-deploy.mjs --env-name production
-
-      - name: Post-deploy smoke against production
-        env:
-          COOLIFY_URL: ${{ secrets.COOLIFY_URL }}
-          COOLIFY_TOKEN: ${{ secrets.COOLIFY_TOKEN }}
-          COOLIFY_APP_UUID: ${{ secrets.TWO_BOT_PRODUCTION_APP_UUID }}
-        run: node scripts/smoke-staging-deploy.mjs --env-name production --since "${{ steps.start.outputs.since }}"
+      - name: Production HOLD — fails until TOG-6903 lifts it
+        run: |
+          echo "HOLD production: no production broker exists (TOG-6903). Failing red by design (TOG-913) — an approved dispatch must never record a green production Deployment that deployed nothing."
+          exit 1
