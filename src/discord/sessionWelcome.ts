@@ -111,30 +111,39 @@ function botCanPost(client: Client, channelId: string, guildId: string): GuildTe
 
 export function registerSessionWelcome(client: Client, deps: SessionWelcomeDeps): void {
   const { recorder } = deps;
+  const prompting = new Map<string, Promise<void>>();
 
   async function promptMember(member: GuildMember): Promise<void> {
     if (member.guild.id !== deps.guildId) return;
     if (member.user.bot) return;
-    // Idempotency half one: a member who has already been welcomed is not
-    // welcomed again, no matter how many times pending flips.
-    if (await deps.store.hasEvent(member.guild.id, member.id, 'onboarding_prompted')) return;
-
-    const landingChannelIds = deps.landingChannelIds();
-    const target =
-      landingChannelIds.map((id) => botCanPost(client, id, deps.guildId)).find(Boolean) ?? null;
-    if (!target) {
-      log.error('session_welcome_no_channel', {
-        tried: landingChannelIds,
-        memberId: member.id,
-      });
-      return;
-    }
-
-    if (deps.dryRun) {
-      log.info('session_welcome_dry_run', { memberId: member.id, channelId: target.id });
-    }
+    // Queue before the first await, and hold through recording. Overlapping
+    // callbacks recheck persistence after the active attempt, even if it fails.
+    const previous = prompting.get(member.id);
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    prompting.set(member.id, current);
 
     try {
+      await previous;
+      // Idempotency half one: a member who has already been welcomed is not
+      // welcomed again, no matter how many times pending flips.
+      if (await deps.store.hasEvent(member.guild.id, member.id, 'onboarding_prompted')) return;
+
+      const landingChannelIds = deps.landingChannelIds();
+      const target =
+        landingChannelIds.map((id) => botCanPost(client, id, deps.guildId)).find(Boolean) ?? null;
+      if (!target) {
+        log.error('session_welcome_no_channel', {
+          tried: landingChannelIds,
+          memberId: member.id,
+        });
+        return;
+      }
+
+      if (deps.dryRun) {
+        log.info('session_welcome_dry_run', { memberId: member.id, channelId: target.id });
+      }
+
       const message = await target.send({
         content: sessionWelcomeText(`<@${member.id}>`),
         components: [buildSessionMenu(deps.picks)],
@@ -147,6 +156,9 @@ export function registerSessionWelcome(client: Client, deps: SessionWelcomeDeps)
       await recorder.prompted(member.guild.id, member.id, target.id);
     } catch (err) {
       log.error('session_welcome_failed', { memberId: member.id, err: String(err) });
+    } finally {
+      release();
+      if (prompting.get(member.id) === current) prompting.delete(member.id);
     }
   }
 
