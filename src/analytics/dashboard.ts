@@ -23,6 +23,7 @@
 import type { Db } from '../store/db.ts';
 import { ANOMALIES, isExcluded, type Anomaly } from './anomalies.ts';
 import { parseVoiceEndMetadata, summarizeVoiceDurations } from '../core/voiceSessions.ts';
+import { attributionCategory } from '../core/inviteTracker.ts';
 
 const DAY_MS = 86_400_000;
 
@@ -269,6 +270,9 @@ export function labelSource(source: string | null): { label: string; unattribute
   if (!source || source === 'unknown') return { label: 'Unknown', unattributed: true };
   if (source.startsWith('backfill:')) {
     return { label: 'Before tracking (imported history)', unattributed: true };
+  }
+  if (attributionCategory(source) === 'ambiguous') {
+    return { label: 'Ambiguous invite', unattributed: true };
   }
   if (source === 'vanity') return { label: 'Vanity URL', unattributed: false };
   if (source.startsWith('invite:')) return { label: `Invite ${source.slice(7)}`, unattributed: false };
@@ -640,9 +644,8 @@ export async function buildDashboard(db: Db, opts: BuildOptions = {}): Promise<D
   const attributed = countBySource(humanJoins.map((e) => e.source)).filter((s) => !s.unattributed);
   if (attributed.length === 0) {
     caveats.push(
-      'No join has an invite source yet. Every join on record was imported from ' +
-        'the server log, which does not say which invite was used. Invite attribution ' +
-        'starts working on the first join after the bot went live.',
+      'No join has a known invite source yet. Joins still count, but unknown or ' +
+        'ambiguous sources and imported history cannot identify which invite was used.',
     );
   }
   if (!snapshot) {

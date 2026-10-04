@@ -9,7 +9,7 @@ const OTHER_GUILD = 'other-guild';
 const MEMBER = 'member';
 const COMMANDS = ['rank', 'leaderboard'] as const;
 
-function fixture(config: Pick<LevelingDiscordDeps, 'guildId'>) {
+function fixture(config: Pick<LevelingDiscordDeps, 'guildId'>, profileOverrides: Partial<LevelProfile> = {}) {
   const reads: Array<{ method: string; guildId: string; memberId?: string; limit?: number }> = [];
   const replies: InteractionReplyOptions[] = [];
   const profile: LevelProfile = {
@@ -23,6 +23,7 @@ function fixture(config: Pick<LevelingDiscordDeps, 'guildId'>) {
     rank: 1,
     memberCount: 1,
     nextLevelXp: 255,
+    ...profileOverrides,
   };
   const service = {
     async profile(guildId: string, memberId: string) {
@@ -102,6 +103,30 @@ for (const command of COMMANDS) {
     });
   }
 }
+
+for (const memberCount of [0, 1, 3]) {
+  test(`rank renders an absent member as unranked with ${memberCount} stored members`, async () => {
+    const f = fixture({ guildId: GUILD }, {
+      rank: null, memberCount, xp: 0, level: 0, messageXp: 0, nextLevelXp: 100,
+    });
+    await f.dispatch('rank', GUILD);
+    assert.deepEqual(f.reads, [{ method: 'profile', guildId: GUILD, memberId: MEMBER }]);
+    assert.equal(f.replies.length, 1);
+    assert.equal(f.replies[0].content,
+      '**Player One**\nLevel **0** · Rank **Unranked** (no XP recorded)\nXP **0** · 0/100 this level · **100** to level 1');
+    assert.equal(f.replies[0].flags, MessageFlags.Ephemeral);
+  });
+}
+
+test('rank renders an existing zero-XP member with a numeric rank', async () => {
+  const f = fixture({ guildId: GUILD }, {
+    rank: 3, memberCount: 3, xp: 0, level: 0, messageXp: 0, nextLevelXp: 100,
+  });
+  await f.dispatch('rank', GUILD);
+  assert.equal(f.replies.length, 1);
+  assert.equal(f.replies[0].content,
+    '**Player One**\nLevel **0** · Rank **#3** of **3**\nXP **0** · 0/100 this level · **100** to level 1');
+});
 
 test('registration still ignores DMs, non-chat-input interactions and unrelated commands', async () => {
   for (const config of [{ guildId: GUILD }, {}]) {

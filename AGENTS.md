@@ -30,7 +30,9 @@ Agents must never test against production services (owner directive
 
 - Conventional Commits PR title `type(scope): summary`, ≤100 chars, no
   trailing period; scope is the code area, never the card id. PR body follows
-  the repo template with `Refs: TOG-NNNN`.
+  the repo template. This repo is public: keep internal tracker IDs out of
+  the title, body, commits and branch name, and link only public GitHub
+  issues.
 - Push the working branch to `origin` after every commit and before the run ends.
 - One review per PR on the same card; the approving reviewer squash-merges in
   the same run (reviewer ≠ author). Never bypass `pr-lint` or red CI.
