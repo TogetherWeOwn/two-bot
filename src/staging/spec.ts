@@ -188,6 +188,7 @@ export const STAGING_ROLES = [
  * server created from an older link has to be re-authorized with a new one.
  */
 export const STAGING_PERMISSIONS =
+  (1 << 4) | // Manage Channels - tickets.open creates the channel, tickets.close deletes it
   (1 << 6) | // Add Reactions
   (1 << 7) | // View Audit Log
   (1 << 10) | // View Channels
@@ -208,7 +209,9 @@ const HIGH_BITS = (1n << 33n) | (1n << 40n) | (1n << 44n); // Manage Events, Mod
 /**
  * What the invite link actually asks for.
  *
- * `STAGING_PERMISSIONS` covers onboarding and the moderation audit mirror. It
+ * `STAGING_PERMISSIONS` covers onboarding, the moderation audit mirror, and
+ * tickets (`tickets.open` creates the channel, `tickets.close` deletes it -
+ * both need Manage Channels, per staging measurement). It
  * does NOT cover `event.upsert`, which calls
  * `POST /guilds/{id}/scheduled-events` and needs Manage Events - a bit Manage
  * Server does not imply (`docs/INTERNAL_ACTIONS.md` §8). TOG-463 measured that
@@ -225,6 +228,7 @@ export const STAGING_INVITE_PERMISSIONS: bigint =
 
 /** Decoded, so a mismatch reads as English instead of arithmetic. */
 export const PERMISSION_BITS: ReadonlyArray<{ name: string; bit: bigint }> = [
+  { name: 'Manage Channels', bit: 1n << 4n },
   { name: 'Add Reactions', bit: 1n << 6n },
   { name: 'View Audit Log', bit: 1n << 7n },
   { name: 'View Channels', bit: 1n << 10n },

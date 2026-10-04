@@ -40,13 +40,18 @@ confirmed on a bare payload and on API v9. A human created the server and
 invited the bot. If staging is ever rebuilt from scratch, that step is a
 human's, and it is not a credential or a permission problem.
 
-*The bot holds Administrator here, and is not the server owner.* Administrator
-implies every other permission, so `staging-verify.ts` reports a **WARN** on
-permissions rather than a pass: this server cannot prove the live bot needs no
-more than the scoped set, and that proof belongs on the live invite. Not being
-the owner also means role hierarchy is enforced — if role assignment ever
+*The bot is not the server owner here.* Not being
+the owner means role hierarchy is enforced — if role assignment ever
 starts failing, check the bot's role is still above `Moderator`, `Member` and
 `Game: Test`.
+
+*Grant update (2026-09-26): the bot no longer
+holds Administrator* — effective mask `2240785742687959`, Administrator (bit 3)
+absent, Manage Channels (bit 4) present. So a staging green run proves the
+*with-bit-4* path only; it cannot prove the no-bit-4 case, which is decided by
+the static requirement (`POST /guilds/{id}/channels` needs guild-level bit 4 —
+see docs/INTERNAL_ACTIONS.md §8). The old "Administrator confound" warning above is
+stale; the confound is now explicit bit 4, not Admin.
 
 ---
 

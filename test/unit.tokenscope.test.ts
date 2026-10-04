@@ -33,7 +33,11 @@ test('every authorized grant bit has a name and a rationale', () => {
   // challenged - both are how an extra bit survives review unnoticed.
   const bits: number[] = [];
   for (let b = 0; b < 64; b++) if ((EXPECTED >> BigInt(b)) & 1n) bits.push(b);
-  assert.deepEqual(bits, [0, 5, 10, 11, 28, 33], 'the live least-privilege set changed - see docs/SECRETS.md');
+  // Bit 4 (Manage Channels): tickets.open creates the channel,
+  // tickets.close deletes it - measured in staging. Bit 4 also
+  // permits channel deletion, so the RATIONALE entry must say so.
+  assert.deepEqual(bits, [0, 4, 5, 10, 11, 28, 33], 'the live least-privilege set changed - see docs/SECRETS.md');
+  assert.match(RATIONALE[4] ?? '', /deletion/i, 'bit 4 rationale must name the channel-deletion power');
   for (const b of bits) {
     assert.ok(NAMES[b], `live bit ${b} has no name in verify-grant.ts`);
     assert.ok(RATIONALE[b], `live bit ${b} has no rationale in verify-grant.ts`);
@@ -59,7 +63,7 @@ test('both invite URLs request the application-commands scope', () => {
   const urls = [...secrets.matchAll(/https:\/\/discord\.com\/api\/oauth2\/authorize\?[^\s)]+/g)].map((m) => m[0]);
   assert.ok(urls.length >= 1, 'expected a live invite URL in docs/SECRETS.md');
   for (const url of urls) {
-    assert.ok(url.includes('permissions=8858373153'), `live invite must carry the six-bit grant: ${url}`);
+    assert.ok(url.includes('permissions=8858373169'), `live invite must carry the seven-bit grant: ${url}`);
     assert.ok(
       url.includes('applications.commands'),
       `live invite must carry the applications.commands scope or slash-command registration 403s: ${url}`,

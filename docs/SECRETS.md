@@ -96,15 +96,25 @@ commands. Inviting with `bot` alone registers the bot but 403s command
 registration. Matches the staging invite in `src/staging/spec.ts`.
 
 **Permissions:** `View Channels`, `Manage Server`, `Manage Roles`,
-`Manage Events`, `Create Instant Invite`, `Send Messages`.
+`Manage Events`, `Create Instant Invite`, `Send Messages`, `Manage Channels`.
 
-**Permission integer: `8858373153`** (verified against `discord.js`'s own
-`PermissionFlagsBits` constants, not hand-computed). Apply/invite URL, using
+**Permission integer: `8858373169`** (verified against `discord.js`'s own
+`PermissionFlagsBits` constants, not hand-computed; `8858373153 + 2^4` for
+Manage Channels). Apply/invite URL, using
 the live application id:
 
 ```
-https://discord.com/api/oauth2/authorize?client_id=1539711683898118154&permissions=8858373153&scope=bot%20applications.commands
+https://discord.com/api/oauth2/authorize?client_id=1539711683898118154&permissions=8858373169&scope=bot%20applications.commands
 ```
+
+`Manage Channels` is the uncomfortable new one, so to be explicit about why:
+`tickets.open` (`src/discord/tickets.ts:381`, `guild.channels.create`) needs
+guild-level Manage Channels (bit 4), and `tickets.close` plus the
+open-failure rollback delete the channel — measured in staging
+(throwaway channel-create HTTP 201 with bit 4
+present; all four staging category overwrite lists empty, so no category grant
+substitutes). Bit 4 also permits channel deletion, so it is granted
+deliberately and recorded here — not widened silently.
 
 `Manage Server` is the uncomfortable one, so to be explicit about why: it is the
 only permission that allows reading the server's invite list, and reading invite
@@ -129,8 +139,9 @@ breaks even when every bit above is correctly granted.
 ## Not needed, not requested
 
 The bot does not ask for and must not be given: Administrator, Kick Members,
-Ban Members, or Manage Channels. It is a read-and-record service plus the four
-internal-actions bits above — nothing that lets it moderate the server.
+or Ban Members. It is a read-and-record service plus the four
+internal-actions bits above and Manage Channels for tickets — nothing that lets it moderate the server
+beyond opening and deleting its own ticket channels.
 
 ## Checking it is right
 
@@ -157,8 +168,8 @@ DISCORD_TOKEN=... DISCORD_GUILD_ID=... npm run verify:grant
 ```
 
 It exits non-zero on any missing bit, any extra bit, and on Administrator
-specifically, so exit 0 means the live grant is bit-for-bit `8858373153` and
-nothing more. `npm run verify:grant:selftest` runs its six cases offline with
+specifically, so exit 0 means the live grant is bit-for-bit `8858373169` and
+nothing more. `npm run verify:grant:selftest` runs its seven cases offline with
 no token and no network; CI runs it on every PR.
 
 ## Current state
@@ -189,7 +200,9 @@ and one-click join (TWO-57) additionally needs `Manage Events` and
 
 **TOG-64 reconciled this** (2026-09-02): the target grant is the six-bit set
 above, permission integer `8858373153`, not the two-bit set this section used
-to describe. `scripts/preflight.ts` now asserts all four internal-actions bits
+to describe. **Extended** (2026-09-26): tickets need Manage
+Channels (bit 4), so the target is now the seven-bit set, permission integer
+`8858373169`. `scripts/preflight.ts` now asserts all four internal-actions bits
 explicitly. Applying it — via the invite URL above, re-inviting the bot with
 the new permissions — is still a Discord-portal change gated on whoever
 administers the server; this repo cannot execute it. After applying it, run
