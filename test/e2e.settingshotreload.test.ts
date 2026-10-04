@@ -51,6 +51,10 @@ before(async () => {
   // TOG-3536: same reasoning - explicit so what follows is store-beats-env,
   // not store-beats-the-`?? ...`-default in loadConfig().
   process.env.DISCORD_LANDING_CHANNEL_IDS = '100000000000000001,100000000000000002';
+  // TOG-3314: the same reasoning - the running staging container booted with an
+  // empty goodbye list (TOG-4704) and silently no-opped the goodbye handler, so
+  // the re-proof must show a stored goodbye value reaching a live consumer.
+  process.env.DISCORD_GOODBYE_CHANNEL_IDS = '100000000000000001';
   process.env.TWO_AUTOMOD_REPEAT_COUNT = '4';
 });
 after(async () => {
@@ -205,6 +209,40 @@ test('a stored landing channel list reaches a thunk built before the write', asy
   assert.deepEqual(
     fixed,
     ['100000000000000001', '100000000000000002'],
+    'a value captured once, the way it shipped before this card, does not move',
+  );
+});
+
+/**
+ * TOG-3314: the goodbye channels are the setting the TOG-4704 inspection found
+ * empty-on-boot on the running staging container (`goodbyeChannelIds=[]` while
+ * the kick silently no-opped). Same discipline as the landing list above - a
+ * thunk built before the write sees the stored value, a value captured once
+ * does not.
+ */
+test('a stored goodbye channel list reaches a thunk built before the write', async () => {
+  const store = new SettingsStore(testDb.db);
+  await store.load();
+  const { cfg } = bootLikeIndex(store);
+  // The exact shape src/index.ts passes into SessionWelcomeDeps.
+  const live = () => cfg().goodbyeChannelIds;
+  // The control: a plain array captured once, which is what shipped before
+  // this card (`registerSessionWelcome` took the list itself rather than a thunk).
+  const fixed = cfg().goodbyeChannelIds;
+
+  assert.deepEqual(live(), ['100000000000000001']);
+
+  await store.set(GUILD, 'DISCORD_GOODBYE_CHANNEL_IDS', ['200000000000000003'], ADMIN);
+  assert.equal(await store.refreshIfChanged(), true, 'the version poll saw the write');
+
+  assert.deepEqual(
+    live(),
+    ['200000000000000003'],
+    'the thunk this card wires into session welcome sees the new list',
+  );
+  assert.deepEqual(
+    fixed,
+    ['100000000000000001'],
     'a value captured once, the way it shipped before this card, does not move',
   );
 });
@@ -469,8 +507,9 @@ test('all settings refusals are VALID constraints, checked on every write', asyn
 
   assert.deepEqual(
     rows.map((r) => r.conname),
-    ['guild_settings_env_only_keys', 'guild_settings_no_internal_keys', 'guild_settings_rota_env_only_keys',
-      'guild_settings_rota_primary_env_only', 'guild_settings_rota_readers_env_only',
+    ['guild_settings_cli_color_env_only', 'guild_settings_env_only_keys', 'guild_settings_no_internal_keys',
+      'guild_settings_redirect_trusted_proxies_env_only',
+      'guild_settings_rota_env_only_keys', 'guild_settings_rota_primary_env_only', 'guild_settings_rota_readers_env_only',
       'guild_settings_staging_restart_env_only'],
     'all CHECK constraints are present on the table',
   );

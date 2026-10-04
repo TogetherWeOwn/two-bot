@@ -14,7 +14,13 @@
  * written to the database. The funnel stores snowflakes only. See docs/PRIVACY.md.
  */
 import { openDb } from '../src/store/db.ts';
+import { formatRosterText } from '../src/analytics/cliFormat.ts';
 import { DiscordRest } from '../src/discord/rest.ts';
+
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/roster.ts [days] [--names]');
+  process.exit(0);
+}
 
 const argv = process.argv.slice(2);
 const days = Number(argv.find((a) => /^\d+$/.test(a)) ?? 7);
@@ -47,20 +53,6 @@ const rows = await db
   )
   .all<Row>(guildId, since);
 
-/**
- * Turn a stored source into something a community operator can act on.
- * `backfill:*` means the member predates the instrumentation, and saying
- * "unknown (pre-tracking)" is honest where "unknown" alone would look like a
- * bug in the tracker.
- */
-function describeSource(s: string | null): string {
-  if (!s) return 'unknown';
-  if (s.startsWith('invite:')) return s.slice('invite:'.length);
-  if (s.startsWith('ambiguous:')) return `ambiguous (${s.slice('ambiguous:'.length)})`;
-  if (s.startsWith('backfill:')) return 'unknown (pre-tracking)';
-  if (s === 'vanity') return 'vanity URL';
-  return s;
-}
 
 let names = new Map<string, string>();
 if (withNames && guildId) {
@@ -84,46 +76,24 @@ if (withNames && guildId) {
   }
 }
 
-const label = (id: string) => {
-  const n = names.get(id);
-  return n ? `${n} (${id})` : id;
-};
-
-console.log(`\nTWO new members - last ${days} days (since ${since.slice(0, 10)})\n`);
-
-if (rows.length === 0) {
-  console.log('  No joins recorded in this window.\n');
-} else {
-  const w = Math.max(20, ...rows.map((r) => label(r.member_id).length));
-  console.log(
-    `  ${'member'.padEnd(w)}  ${'joined'.padEnd(16)}  ${'came from'.padEnd(22)}  posted?  voice?  still here?`,
-  );
-  console.log(`  ${'-'.repeat(w)}  ${'-'.repeat(16)}  ${'-'.repeat(22)}  -------  ------  -----------`);
-  for (const r of rows) {
-    console.log(
-      `  ${label(r.member_id).padEnd(w)}  ${r.joined_at.slice(0, 16).replace('T', ' ')}  ` +
-        `${describeSource(r.join_source).padEnd(22)}  ` +
-        `${(r.first_message_at ? 'yes' : 'NO').padEnd(7)}  ` +
-        `${(r.first_voice_at ? 'yes' : 'no').padEnd(6)}  ` +
-        `${r.left_at ? 'left' : 'yes'}`,
-    );
-  }
-
-  const posted = rows.filter((r) => r.first_message_at).length;
-  const silent = rows.filter((r) => !r.first_message_at && !r.left_at).length;
-  const attributed = rows.filter((r) => (r.join_source ?? '').startsWith('invite:')).length;
-  console.log(`\n  ${rows.length} joined, ${posted} posted, ${rows.length - posted} never posted`);
-  console.log(`  ${attributed} of ${rows.length} attributed to a specific invite code`);
-  if (attributed < rows.length) {
-    console.log(
-      `  The rest joined before per-invite tracking was live. Every join from` +
-        `\n  deploy onward is attributed to a code.`,
-    );
-  }
-  if (silent > 0) {
-    console.log(`\n  ${silent} still in the server and have never posted - the re-engagement list.`);
-  }
-}
-
-console.log();
+// Table layout and zero-state guidance live in cliFormat.ts (TOG-5723) so
+// fixture tests cover them without a live DB or Discord token.
+console.log(
+  formatRosterText(
+    rows.map((r) => {
+      const n = (names.get(r.member_id) ?? '').trim();
+      return {
+        memberId: r.member_id,
+        displayName: n ? n : null,
+        joinedAt: r.joined_at,
+        joinSource: r.join_source,
+        firstMessageAt: r.first_message_at,
+        firstVoiceAt: r.first_voice_at,
+        leftAt: r.left_at,
+      };
+    }),
+    days,
+    since,
+  ),
+);
 await db.close();

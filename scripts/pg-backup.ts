@@ -15,9 +15,10 @@
  * Run by two-bot-backup.timer at 04:17 UTC. Safe while the bot is up: the dump
  * is one REPEATABLE READ snapshot. See src/store/dump.ts and docs/RUNBOOK.md.
  *
- * Exits non-zero on an empty event log. A backup that quietly reports zero
- * events every night for six months is worse than no backup at all, because
- * you believe you have one - so make systemd show it as failed.
+ * Removes an empty-event dump and exits non-zero before retention or upload.
+ * A backup that quietly reports zero events every night for six months is
+ * worse than no backup at all, because you believe you have one - so make
+ * systemd show it as failed.
  */
 import { mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
@@ -26,6 +27,11 @@ import { openDb, isPostgresSpec } from '../src/store/db.ts';
 import { dump } from '../src/store/dump.ts';
 import { buildUploadArgv } from '../src/store/uploadCmd.ts';
 import { parseKeep, toPrune } from '../src/store/backupRetention.ts';
+
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/pg-backup.ts');
+  process.exit(0);
+}
 
 const url = process.env.TWO_DATABASE_URL?.trim();
 if (!url || !isPostgresSpec(url)) {
@@ -65,11 +71,15 @@ try {
   const events = manifest.tables.find((t) => t.name === 'events')?.count ?? 0;
   if (events === 0) {
     console.error('backup: the event log is empty. Refusing to call this a good backup.');
+    // Rejected dumps must not displace recovery history or look like a valid
+    // newest backup. If removal fails, abort here rather than prune or upload.
+    unlinkSync(out);
     empty = true;
   }
 } finally {
   await db.close();
 }
+if (empty) process.exit(1);
 
 // Retention: newest `keep` files survive. Done before the upload so a failing
 // upload does not also stop the disk being tidied.
@@ -102,5 +112,4 @@ if (upload) {
   );
 }
 
-if (empty) process.exit(1);
 console.log('backup: done');

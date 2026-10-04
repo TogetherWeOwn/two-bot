@@ -31,6 +31,11 @@ import { EventStore } from '../src/store/eventStore.ts';
 import { joinedNeverPosted } from '../src/jobs/inactivity.ts';
 import type { EventType } from '../src/core/events.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/staging-reset.ts [--check]');
+  process.exit(0);
+}
+
 const checkOnly = process.argv.includes('--check');
 
 function die(msg: string): never {

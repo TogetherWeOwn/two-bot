@@ -53,7 +53,12 @@ import { openDb } from '../src/store/db.ts';
 import { EventStore } from '../src/store/eventStore.ts';
 import { InviteTracker, inviteGrowth, attributeJoins } from '../src/core/inviteTracker.ts';
 import type { FunnelEvent } from '../src/core/events.ts';
-import { DiscordRest, fetchAllMembers, type RawInvite } from '../src/discord/rest.ts';
+import { DiscordRest, fetchAllMembersObserved, type RawInvite } from '../src/discord/rest.ts';
+
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/capture.ts [--dry-run]');
+  process.exit(0);
+}
 
 const argv = process.argv.slice(2);
 const dryRun = argv.includes('--dry-run');
@@ -75,10 +80,38 @@ if (!databaseUrl) {
  * instant and the fetch below would otherwise fall in the crack between two
  * windows; this way it simply lands in the next one. Double-counting is not a
  * risk - member_join is keyed on (guild, member, joined_at).
+ *
+ * This is the WINDOW watermark only (snapshot updated_at, window label). It is
+ * NOT presence evidence: stamping a captured join with it would predate the
+ * roster read below, so a removal and rejoin that both land mid-window would
+ * lose to the removal. Presence gets its own stamp after the roster read.
  */
 const capturedAt = new Date().toISOString();
 
-const rest = new DiscordRest({ token });
+/**
+ * Test seam: point the invite/member reads at a loopback stub. Loopback-only,
+ * so a live bot token can never be sent to an arbitrary host. Production never
+ * sets this. Used by test/e2e.capture.test.ts for the offline REST regression.
+ */
+function apiBase(): string | undefined {
+  const raw = process.env.DISCORD_API_BASE?.trim();
+  if (!raw) return undefined;
+  let host: string;
+  try {
+    host = new URL(raw).hostname;
+  } catch {
+    console.error(`DISCORD_API_BASE is not a URL: ${raw}`);
+    process.exit(2);
+  }
+  if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') {
+    console.error(`DISCORD_API_BASE is a test seam and only accepts loopback. Got host ${host}.`);
+    process.exit(2);
+  }
+  return raw;
+}
+
+const api = apiBase();
+const rest = new DiscordRest(api ? { token, base: api, minIntervalMs: 0 } : { token });
 const db = await openDb(databaseUrl);
 const store = new EventStore(db);
 const tracker = new InviteTracker(db);
@@ -125,21 +158,27 @@ const totalGrowth = [...growth.values()].reduce((a, b) => a + b, 0);
 
 // --- 3. who is new in this window? ------------------------------------------
 
-const members = await fetchAllMembers(rest, guildId);
-if (members.length === 0) {
+// Per-page request bounds: scan/body completion does not prove presence at
+// completion. A member may leave while a page streams. The conservative
+// request-start bound keeps that departure; a newer joined_at in the response
+// still proves a genuine rejoin during the request. `capturedAt` is only the
+// invite-window watermark, not membership observation evidence.
+const observed = await fetchAllMembersObserved(rest, guildId);
+if (!observed || observed.length === 0) {
   console.error(
     'Read zero members. That is Server Members Intent being OFF - the REST\n' +
       'member list needs it too, not just the gateway. Run scripts/preflight.ts.',
   );
   process.exit(1);
 }
+const members = observed.map((o) => o.member);
 
 const guild = await rest.get<{ vanity_url_code?: string | null }>(`/guilds/${guildId}`);
 const hasVanity = !!guild?.vanity_url_code;
 
-const newJoins: { id: string; joinedAt: string }[] = [];
+const newJoins: { id: string; joinedAt: string; observedAt: string }[] = [];
 let bots = 0;
-for (const m of members) {
+for (const { member: m, observedAt } of observed) {
   const id = m.user?.id;
   if (!id || !m.joined_at) continue;
   if (m.user?.bot) {
@@ -150,7 +189,9 @@ for (const m of members) {
   const joinedAt = new Date(m.joined_at).toISOString();
   // First ever capture has no `since`; the member list is history, not this
   // window, and backfill.ts owns history. Baseline only, emit nothing.
-  if (since !== null && joinedAt > since) newJoins.push({ id, joinedAt });
+  if (since !== null && joinedAt > since) {
+    newJoins.push({ id, joinedAt, observedAt: joinedAt > observedAt ? joinedAt : observedAt });
+  }
 }
 newJoins.sort((a, b) => a.joinedAt.localeCompare(b.joinedAt));
 
@@ -187,8 +228,12 @@ const events: FunnelEvent[] = newJoins.map((j, i) => ({
 
 let written = 0;
 if (!dryRun) {
-  for (const e of events) {
-    const res = await store.record(e);
+  for (let i = 0; i < events.length; i++) {
+    // Request-start evidence beats older removals, never departures while the
+    // response streams. If joined_at is newer than the request, it proves a
+    // new spell after that bound and must not be ordered before its own join.
+    // Occurrence remains Discord's joined_at. Backfill joins stay historical.
+    const res = await store.record(events[i], { membershipObservedAt: newJoins[i].observedAt });
     if (res.inserted) written++;
   }
   // Store the new counters last, so a crash mid-write re-reads the same window

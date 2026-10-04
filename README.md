@@ -1,5 +1,10 @@
 # two-bot
 
+[![Release](https://img.shields.io/github/v/release/TogetherWeOwn/two-bot)](https://github.com/TogetherWeOwn/two-bot/releases)
+
+> **Maintenance mode (2026-09-29, TOG-9788):** bug and security fixes only — new
+> development continues in two-bot-next.
+
 The Discord bot and funnel instrumentation for the TWO gaming community.
 
 Its one job right now: **produce trustworthy numbers about how people find us,
@@ -20,6 +25,12 @@ without the numbers first.
 - Flags members who have gone quiet, and can list everyone who joined and never
   posted. It produces lists; it does not message anyone.
 - Prints a funnel report on demand.
+- Welcomes new members through the onboarding flow (`src/onboarding/`,
+  posting via `src/discord/onboarding.ts`).
+- Lets members assign themselves roles from maintainer-configured panels
+  (`src/selfRoles/`, enabled via `TWO_SELF_ROLE_PANELS`).
+- Builds a local growth dashboard: `npm run dashboard` writes
+  `data/dashboard.html` from the same database.
 - Counts invite clicks, via a redirect we own: `go.two.gg/<campaign>` logs the
   click and 302s to the invite, so we can tell which places actually send
   people. A campaign and a timestamp, nothing about the visitor.
@@ -27,29 +38,31 @@ without the numbers first.
 
 ## What it does not do yet
 
-- No dashboard. `scripts/funnel.ts` is the stopgap and reads the same data.
-- No onboarding flow, role self-assignment, or go-live alerts.
+- No hosted dashboard service. `npm run dashboard` builds a static page
+  locally (`data/dashboard.html`) from the same data; there is nothing
+  deployed to visit.
+- Join-burst alerts post to a staff channel the operator configures
+  (`DISCORD_STAFF_ALERT_CHANNEL_ID`); there is no paging or external
+  alerting beyond that.
 
 ## Quick start
 
 Requires **Node 24 or newer** (it runs TypeScript directly).
 
-All three repos are **private**, so git needs the credential before anything
-else. Run this once per machine — `gh` reads `GH_TOKEN` from the environment,
-and this hands the same token to git:
-
 ```bash
-gh auth setup-git
 git clone https://github.com/TogetherWeOwn/two-bot.git
 cd two-bot
 ```
 
-Without it you get `could not read Username for 'https://github.com'`.
-`gh repo clone` gets you past the clone on its own, but **not** the first
-`git push` — the clone it leaves behind has no credential helper configured, so
-setup-git is the step that actually matters. Do it first.
-
-Then point the suite at an isolated Postgres database:
+Then point the suite at an isolated Postgres database. Locally that is a
+running Postgres 17+ with a scratch database of your own
+(e.g. `createdb two_bot_test`); Paperclip agents use the sandbox database
+`agent-testdb` with one database per card
+(e.g. `two_bot_test_togXXXX`, see `AGENTS.md`). CI supplies its own
+throwaway service; the repo provisions none.
+The suite refuses any host outside `scripts/test-db-guard.ts` (TOG-9656):
+never point `TWO_TEST_DATABASE_URL` at production or staging.
+Without it the suite fails fast with `TWO_TEST_DATABASE_URL is required`.
 
 ```bash
 npm ci --include=dev
@@ -57,8 +70,8 @@ TWO_TEST_DATABASE_URL=postgres://localhost:5432/two_bot_test npm test
 ```
 
 CI runs the stricter wrapper below. It executes the same full suite and fails if
-`e2e.webcontract`, `e2e.backup` or `e2e.concurrency` reports no tests, skips, or
-comes back short:
+any required Postgres-backed suite reports no tests, skips, or comes back short
+(the list lives in `scripts/require-suites.ts` as `POSTGRES_SUITES`):
 
 ```bash
 TWO_TEST_DATABASE_URL=postgres://localhost:5432/two_bot_test npm run test:postgres
@@ -84,11 +97,14 @@ project was built and verified before the live token existed.
 
 ```bash
 node tools/mock-discord/run.ts
-# prints DISCORD_API_BASE; in another shell:
-DISCORD_TOKEN=mock DISCORD_API_BASE=http://127.0.0.1:<port>/api node src/index.ts
+# prints DISCORD_API_BASE and DISCORD_GUILD_ID; in another shell, with a
+# scratch Postgres of your own (same requirement as the suite above):
+TWO_DATABASE_URL=postgres://localhost:5432/two_bot_dev DISCORD_TOKEN=mock DISCORD_API_BASE=http://127.0.0.1:<port>/api DISCORD_GUILD_ID=<printed-id> node src/index.ts
 ```
 
-It exercises everything except Discord's own servers and TLS.
+Without `TWO_DATABASE_URL` the bot exits at boot with `Missing database URL`
+— the mock replaces Discord, not Postgres. It exercises everything except
+Discord's own servers and TLS.
 
 ## Layout
 
@@ -111,6 +127,7 @@ are tested without a network, a token, or a server.
 
 | | |
 |---|---|
+| [docs/CONTRIBUTOR_ONBOARDING.md](docs/CONTRIBUTOR_ONBOARDING.md) | New to the pilot? Start here: joining, hosting, conduct, first contribution |
 | [docs/STACK.md](docs/STACK.md) | What we chose, why, and when to revisit |
 | [docs/EVENTS.md](docs/EVENTS.md) | The event schema and its known limits |
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | Deploy, health checks, restore, common problems |
@@ -118,31 +135,12 @@ are tested without a network, a token, or a server.
 | [docs/PRIVACY.md](docs/PRIVACY.md) | What member data we store, and what we refuse to |
 | [docs/RAID-RESPONSE.md](docs/RAID-RESPONSE.md) | The three bot raids, what the join-burst detector does, and what stops a fourth |
 | [docs/WEBSITE_CONTRACT.md](docs/WEBSITE_CONTRACT.md) | The `web_v1` views the website reads, and the rules around them |
-| [docs/GITHUB.md](docs/GITHUB.md) | The org, branch protection, and how a repo gets moved in |
+| [docs/GITHUB.md](docs/GITHUB.md) | Branch protection and merge rules (maintainer note) |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Local setup, branch naming, commits, how a PR gets merged |
 
-## Open items needing a decision
+## License
 
-- **The live bot token.** Not yet issued to engineering. Needed to point this at
-  the real TWO server. Required permissions are in `docs/SECRETS.md` — the only
-  notable one is *Manage Server*, without which no join can be attributed to an
-  invite.
-- **A host.** This needs one small always-on Linux box. That is a spend
-  decision.
-- **Off-box backups.** Backups currently sit on the same machine as the
-  database, which protects against corruption but not against losing the
-  machine. The nightly dump and the restore both work and have been drilled
-  (`docs/RUNBOOK.md`); all that is missing is somewhere to put them, which is a
-  spend decision. TOG-69 (was TWO-47).
-- **A Postgres for staging and production.** The bot runs on Postgres now
-  (TWO-18) and the website writes the same database. Neither environment has a
-  TWO-owned Postgres yet — the migration was proven against a development
-  database. Spend decision. TWO-46.
-- **30 raid accounts still in the server.** Confirmed live on 2026-08-19: 30 of
-  the 84 humans Discord counts joined in one of three bot raids, have never
-  posted or spoken, and have never accepted the rules. Removing them is a
-  moderation decision. `node scripts/raid-list.ts` prints the exact list and
-  kicks nobody. TWO-56.
-- **A staff channel for join-burst alerts.** The detector ships in this repo and
-  goes live with the bot; until `DISCORD_STAFF_ALERT_CHANNEL_ID` names a
-  staff-only channel, the alert reaches a log file nobody reads. TWO-56.
+Licensed under the Business Source License 1.1 (see [LICENSE](LICENSE)).
+Licensor: TogetherWeOwn. Each version converts to the Change License —
+MIT — on its Change Date (three years after that version is first publicly
+released).

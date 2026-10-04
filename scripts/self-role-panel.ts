@@ -5,6 +5,12 @@
  * Dry-run by default. `--apply` posts a new Discord message and prints the exact
  * config entry to persist. It refuses the live guild and accepts only the Owen
  * QA Test staging token.
+ *
+ * The dry-run also proves the panel's grant+revoke path against a disposable
+ * fixture member: it runs the configured role through the same role planner
+ * the live dispatch uses, applies the resulting deltas to an in-memory role
+ * set, and fails closed if the grant does not take or the revoke does not
+ * clear. No Discord call is made; no live guild role is touched.
  */
 import {
   applicationIdFromToken,
@@ -14,9 +20,15 @@ import {
   STAGING_BOT_APPLICATION_NAME,
   stagingGuildId,
 } from '../src/staging/spec.ts';
-import { loadSelfRolePanels } from '../src/selfRoles/config.ts';
+import { loadSelfRolePanels, SelfRoleConfigError } from '../src/selfRoles/config.ts';
 import { buildSelfRoleComponents } from '../src/discord/selfRoles.ts';
 import { reactionEndpointEmoji } from '../src/selfRoles/plan.ts';
+import { proveGrantRevoke } from '../src/selfRoles/proof.ts';
+
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/self-role-panel.ts --panel <id> [--apply]');
+  process.exit(0);
+}
 
 const API = process.env.SELF_ROLE_PANEL_API_BASE ?? 'https://discord.com/api/v10';
 if (API !== 'https://discord.com/api/v10' && !/^http:\/\/(127\.0\.0\.1|\[::1\]|localhost)(:\d+)?(?:\/|$)/.test(API)) {
@@ -31,7 +43,16 @@ if (!panelId) {
   console.error('usage: node scripts/self-role-panel.ts --panel <id> [--apply]');
   process.exit(2);
 }
-const panels = loadSelfRolePanels();
+let panels: ReturnType<typeof loadSelfRolePanels>;
+try {
+  panels = loadSelfRolePanels();
+} catch (err) {
+  if (err instanceof SelfRoleConfigError) {
+    console.error(err.message);
+    process.exit(2);
+  }
+  throw err;
+}
 const panel = panels.find((candidate) => candidate.id === panelId);
 if (!panel) {
   console.error(`panel "${panelId}" is not in TWO_SELF_ROLE_PANELS`);
@@ -69,6 +90,15 @@ const body = {
 console.log(`\nself-role panel ${panel.id}\n  guild   ${guildId}\n  channel ${panel.channelId}\n  mode    ${panel.mode}\n`);
 if (!apply) {
   console.log(JSON.stringify(body, null, 2));
+  let proof: string[];
+  try {
+    proof = proveGrantRevoke(panel);
+  } catch (err) {
+    console.error(`grant+revoke proof FAILED: ${(err as Error).message}`);
+    process.exit(1);
+  }
+  console.log('\ngrant+revoke proof (fixture member, no Discord calls):');
+  for (const line of proof) console.log(`  ${line}`);
   console.log('\nDry run. Nothing was posted. Re-run with --apply.\n');
   process.exit(0);
 }

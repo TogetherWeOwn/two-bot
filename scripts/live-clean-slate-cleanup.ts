@@ -58,6 +58,14 @@ import {
 } from '../src/redesign/live-cleanup.ts';
 
 const argv = process.argv.slice(2);
+// --help boots with no token, no guild, no network.
+if (argv.includes('--help')) {
+  console.log('usage: node scripts/live-clean-slate-cleanup.ts --phase archive-legacy --run-dir <dir> --confirm-main-guild [--apply]');
+  console.log('');
+  console.log('Archive-legacy clean-slate run against the live guild (plan first, then phase-01 writes).');
+  console.log('Refuses without --confirm-main-guild; --help contacts nothing and needs no token.');
+  process.exit(0);
+}
 const APPLY = argv.includes('--apply');
 const CONFIRMED = argv.includes('--confirm-main-guild');
 const token = process.env.DISCORD_BOT_TOKEN;

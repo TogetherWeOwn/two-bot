@@ -9,6 +9,7 @@
 import { basename } from 'node:path';
 import { openDb, isPostgresSpec, type Db } from '../../src/store/db.ts';
 import { webSchemaFor } from '../../src/store/webContract.ts';
+import { assertTestDatabaseHost } from '../../scripts/test-db-guard.ts';
 
 function requiredTestDatabaseUrl(): string {
   const url = process.env.TWO_TEST_DATABASE_URL?.trim() ?? '';
@@ -20,7 +21,9 @@ function requiredTestDatabaseUrl(): string {
   if (!isPostgresSpec(url)) {
     throw new Error('TWO_TEST_DATABASE_URL must use postgres:// or postgresql://.');
   }
-  return url;
+  // TOG-9656: refuse production/staging hosts before opening any connection,
+  // so before any migration runs. See scripts/test-db-guard.ts.
+  return assertTestDatabaseHost(url);
 }
 
 export const TEST_PG_URL = requiredTestDatabaseUrl();
@@ -103,6 +106,17 @@ const TABLES = [
   // a stray UPDATE/DELETE still does not.
   'guild_settings',
   'guild_settings_audit',
+  // TOG-3052 temp voice.
+  'temp_voice_audit',
+  'temp_voice_creates',
+  'temp_voice_channels',
+  // TOG-9074: invite campaigns and internal-actions state. rank_ladder and
+  // web_contract_meta stay out - they are migration seed rows, not test data.
+  'invite_campaigns',
+  'internal_action_log',
+  'internal_discord_events',
+  'internal_idempotency',
+  'internal_nonces',
 ];
 
 export interface TestDb {

@@ -31,6 +31,27 @@ inspects public messages in memory but stores no content. No email.**
   resolved to names at the moment it is used, and thrown away after.
 - **Email, IP, location, voice audio.** Never collected.
 
+## Invite-redirect clicks
+
+`GET go.two.gg/<campaign>` records one `invite_click` row, then 302s to the
+Discord invite (`src/redirect/`, TOG-116). A click row is a campaign and a
+timestamp — the whole record:
+
+- `member_id` is always NULL. `source` is `invite:<code>` and `metadata` is
+  exactly `{"campaign": "<slug>"}` — both ours, never the visitor's.
+  `occurred_at`/`recorded_at` are server timestamps; `idempotency_key` is the
+  guild, the timestamp and a random per-request token.
+- No IP address, user agent, referrer, cookie, query string or fingerprint is
+  stored, logged or written to the event. The query string is dropped unparsed;
+  HEAD previews, health/favicon probes, unknown slugs, throttled (429),
+  outage-fallback and misconfigured-code paths record nothing.
+- The socket address is read to pick a rate-limit bucket and never leaves the
+  request handler — process memory only, never stored, logged or written.
+
+`test/unit.redirect.test.ts` asserts this with identifying headers in: a
+full-row allowlist (any extra populated column fails) plus error-path
+coverage.
+
 ## The historical backfill
 
 `scripts/backfill.ts` reads two things that already exist in the server, once,
@@ -66,7 +87,9 @@ in the database. Do not expose rota rows through public reporting views.
 Authorized rota-log readers are the accepted human primary, Community Manager
 and President & COO. An authorized erasure must also delete derived rows for the
 member pseudonym and any reply/latency/acknowledgement rows containing that responder pseudonym;
-see the measurement document for the key/guild scope. Disabling measurement is
+`OnboardingRota.eraseSubject()` performs the rota portion in one transaction
+(see [ONBOARDING_ROTA.md](ONBOARDING_ROTA.md) for the key/guild scope and the
+exact queries). Disabling measurement is
 not erasure and does not rotate the pseudonym key.
 
 ## Retention
@@ -91,17 +114,70 @@ DELETE FROM xp_cooldowns               WHERE member_id = '<id>';
 DELETE FROM member_levels              WHERE member_id = '<id>';
 DELETE FROM events                     WHERE member_id = '<id>';
 DELETE FROM members                    WHERE member_id = '<id>';
+DELETE FROM member_ranks               WHERE member_id = '<id>';
+DELETE FROM member_exclusions          WHERE member_id = '<id>';
+DELETE FROM invite_snapshots           WHERE inviter_id = '<id>';
+DELETE FROM community_facts            WHERE actor_id = '<id>';
 DELETE FROM automod_violations         WHERE user_id = '<id>';
 DELETE FROM automod_processed_messages WHERE user_id = '<id>';
-DELETE FROM moderation_warnings        WHERE user_id = '<id>';
+DELETE FROM moderation_warnings        WHERE user_id = '<id>' OR actor_id = '<id>';
+DELETE FROM moderation_scheduled_unbans WHERE user_id = '<id>';
 DELETE FROM moderation_audit           WHERE target_id = '<id>' OR actor_id = '<id>';
 DELETE FROM operational_audit_log      WHERE target_id = '<id>' OR actor_id = '<id>';
+DELETE FROM containment_events         WHERE target_id = '<id>' OR executor_id = '<id>';
+DELETE FROM containment_incidents      WHERE executor_id = '<id>';
+DELETE FROM join_risk_flags            WHERE member_id = '<id>';
+DELETE FROM event_rsvps                WHERE user_id = '<id>';
+DELETE FROM lfg_signups                WHERE user_id = '<id>';
+DELETE FROM self_role_audit            WHERE member_id = '<id>';
+DELETE FROM self_role_panel_claims     WHERE member_id = '<id>';
+-- Rota pseudonym erasure (guild-separated HMAC pseudonym, NOT the raw ID:
+-- compute it with the rota key first, or use OnboardingRota.eraseSubject()).
+-- <id> below is the pseudonym; <guild> is the guild ID. All bound parameters.
+DELETE FROM community_facts            WHERE guild_id = '<guild>' AND actor_id = '<id>';
+DELETE FROM community_facts            WHERE guild_id = '<guild>'
+                                         AND event_type IN ('welcome_rota_acknowledged', 'welcome_rota_replied',
+                                                            'onboarding_first_human_reply', 'onboarding_reply_latency')
+                                         AND metadata::json->>'responderId' = '<id>';
+DELETE FROM operational_audit_log      WHERE guild_id = '<guild>' AND event_kind = 'rota_notice' AND target_id = '<id>';
+DELETE FROM temp_voice_creates         WHERE user_id = '<id>';
+DELETE FROM temp_voice_audit           WHERE actor_id = '<id>';
+DELETE FROM temp_voice_channels        WHERE owner_id = '<id>' OR generator_id = '<id>'
+                                        OR pending_owner_id = '<id>';
+DELETE FROM announcements_audit_log    WHERE actor_id = '<id>';
+DELETE FROM automation_audit_log       WHERE actor_id = '<id>';
 ```
 
 `TicketStore.eraseMember()` performs the ticket-table portion in one transaction.
 `OperationalAuditStore.eraseMember()` performs the operational-audit portion in one transaction;
 its opaque `entry_id` may still contain a member ID for event identity, so matching rows are deleted rather than anonymized.
 This makes historical counts drop slightly, which is correct.
+
+What the block above deliberately does not touch, and why:
+
+- **Inviter IDs inside other members' join rows.** `events.metadata` on a
+  `member_join` row can carry `{inviterId}`. Deleting the member's own rows
+  leaves that attribution inside somebody else's join record, where it belongs
+  — it is that member's funnel history, and removing it would corrupt their
+  row. Erasure removes what the member *is*, not what they caused.
+- **Staff-admin attribution** (`created_by`/`updated_by` on automation,
+  scheduled/sticky, feed, LFG-post and temp-voice-channel definitions;
+  `guild_settings.updated_by` and `guild_settings_audit.actor`). These name
+  the admin who saved a definition, not the member being erased. When the
+  requester was themselves the admin author, reassign or remove those rows
+  case by case; there is no blanket DELETE because most of the time the two
+  people are not the same.
+- **Free-form audit keys** (`target_key` on the automation/announcements
+  audit logs, `source_id` on self-role audit rows). These are not provably
+  member IDs, so no DELETE line can match them reliably; review the rows by
+  hand when the action that wrote them could have named the member.
+- **`presence_probe`** holds one guild-wide number per hour with no
+  per-member data (see `docs/PRESENCE_PROBE.md`). Nothing to delete.
+
+`test/unit.privacyretention.test.ts` pins this section: the 90-day
+`purge_after` arithmetic, the startup-purge predicate, both `eraseMember`
+implementations, and a schema sweep that fails when a new per-member column
+lands without a DELETE line (or a written reason it needs none).
 
 ## Boundaries this codebase enforces
 

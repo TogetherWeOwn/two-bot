@@ -1,4 +1,4 @@
-import { emojiIdentity } from './plan.ts';
+import { emojiIdentity, selfRoleCustomId } from './plan.ts';
 import {
   findSelfRoleDisallowedPermission,
   findSelfRoleUnsafeChannelGrant,
@@ -167,6 +167,9 @@ function parsePanel(value: unknown, index: number): SelfRolePanel {
   if (mode === 'select' && panel.options.length > 25) {
     throw new SelfRoleConfigError(`${at} has more than Discord's 25-option select limit`);
   }
+  if (mode === 'reaction' && panel.options.length > 20) {
+    throw new SelfRoleConfigError(`${at} has more than Discord's 20-reaction limit`);
+  }
 
   const optionKeys = new Set<string>();
   const roleIds = new Set<string>();
@@ -175,7 +178,8 @@ function parsePanel(value: unknown, index: number): SelfRolePanel {
     const oat = `${at}.options[${optionIndex}]`;
     const o = record(option, oat);
     const key = shortKey(o.key, `${oat}.key`);
-    const label = text(o.label, `${oat}.label`, 100);
+    // Discord caps button labels at 80 chars; select option labels allow 100.
+    const label = text(o.label, `${oat}.label`, mode === 'button' ? 80 : 100);
     const roleId = snowflake(o.roleId, `${oat}.roleId`);
     const permissions = permissionMask(o.permissions, `${oat}.permissions`);
     const disallowed = findSelfRoleDisallowedPermission(permissions);
@@ -199,6 +203,18 @@ function parsePanel(value: unknown, index: number): SelfRolePanel {
     if (emojiKey) emojis.add(emojiKey);
     return { key, label, roleId, permissions, ...(emoji ? { emoji } : {}), ...(description ? { description } : {}) };
   });
+
+  if (mode === 'button') {
+    for (const [optionIndex, option] of options.entries()) {
+      const customId = selfRoleCustomId(id, option.key);
+      if (customId.length > 100) {
+        throw new SelfRoleConfigError(
+          `panel[${index}].options[${optionIndex}].key "${option.key}" builds button custom_id ` +
+            `"${customId}" (${customId.length} chars), over Discord's 100-char custom_id limit`,
+        );
+      }
+    }
+  }
 
   return { id, channelId, messageId, mode, exclusive, color, options };
 }

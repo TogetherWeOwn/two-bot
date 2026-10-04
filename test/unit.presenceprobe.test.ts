@@ -32,7 +32,29 @@ import {
   countBotFloor,
   PRESENCE_PROBE_INTERVAL_MS,
 } from '../src/jobs/presenceProbe.ts';
+import { DiscordRest } from '../src/discord/rest.ts';
 import { stubRest } from './helpers/stubRest.ts';
+
+/** A DiscordRest wired to a fixed response sequence, recording every path. */
+function sequenceRest(responses: Array<{ status: number; body?: unknown; headers?: Record<string, string> }>) {
+  let index = 0;
+  const paths: string[] = [];
+  const rest = new DiscordRest({
+    token: 'test-token',
+    base: 'https://discord.test/api/v10',
+    minIntervalMs: 0,
+    fetchImpl: (async (url: string) => {
+      const path = String(url).replace('https://discord.test/api/v10', '');
+      paths.push(path);
+      const current = responses[Math.min(index++, responses.length - 1)]!;
+      return new Response(current.body === undefined ? '' : JSON.stringify(current.body), {
+        status: current.status,
+        headers: { 'content-type': 'application/json', ...current.headers },
+      });
+    }) as unknown as typeof fetch,
+  });
+  return { rest, paths };
+}
 import {
   evaluateTrigger,
   dailyPeaks,
@@ -93,11 +115,22 @@ describe('presence probe containment', () => {
         'If this instrument seems to need it, the issue has been misread.',
     );
 
-    // Ticket transcripts and automod reuse MessageContent; self roles add
-    // reaction metadata, but none of these features adds GuildPresences.
-    assert.equal(intents(false).length, 8, 'the default intent list changed - see client.ts');
-    assert.equal(intents(true).length, 8, 'automod must reuse the existing MessageContent intent');
-    assert.deepEqual(INTENTS, [
+    // TOG-5258: MessageContent is requested only when automod is enabled or
+    // tickets are configured; the default is the 7-intent gated set. Self
+    // roles add reaction metadata, but none of these features adds
+    // GuildPresences.
+    assert.equal(intents(false, {}).length, 7, 'the default intent list changed - see client.ts');
+    assert.equal(intents(true, {}).length, 8, 'automod must reuse the existing MessageContent intent');
+    assert.deepEqual(intents(false, {}), [
+      GatewayIntentBits.Guilds,
+      GatewayIntentBits.GuildModeration,
+      GatewayIntentBits.GuildMembers,
+      GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.GuildMessageReactions,
+      GatewayIntentBits.GuildVoiceStates,
+      GatewayIntentBits.GuildInvites,
+    ]);
+    assert.deepEqual(intents(true, {}), [
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildModeration,
       GatewayIntentBits.GuildMembers,
@@ -107,6 +140,7 @@ describe('presence probe containment', () => {
       GatewayIntentBits.GuildVoiceStates,
       GatewayIntentBits.GuildInvites,
     ]);
+    assert.deepEqual(INTENTS, intents());
     assert.deepEqual(PARTIALS, [Partials.Message, Partials.Reaction, Partials.User]);
     const client = createClient(false);
     assert.deepEqual(client.options.partials, PARTIALS);
@@ -145,15 +179,33 @@ describe('presence probe containment', () => {
     // blast radius to three files is what makes the rule above enforceable.
     const allowed = new Set([
       join('migrations', '0004_presence_probe.sql'),
+      // Aggregate-only scan outcome: no new reader or rendering path.
+      join('migrations', '0041_presence_probe_truncated_scan.sql'),
       join('src', 'jobs', 'presenceProbe.ts'),
       join('scripts', 'presence-trend.ts'),
       join('test', 'unit.presenceprobe.test.ts'),
+      // TOG-7206 cost test. Seeds and reads the table to measure scan cost,
+      // never renders it - same non-rendering status as this file.
+      join('test', 'unit.presenceprobecost.test.ts'),
+      // TOG-6488 CLI output test. Seeds the table to pin the trend script's
+      // buckets, verdict lines and exit codes, never renders it anywhere
+      // else - same non-rendering status as the cost test above.
+      join('test', 'e2e.presencetrend-cli.test.ts'),
       join('test', 'helpers', 'testDb.ts'),
       // The role verifier names every bot-owned table so a specific denial is
       // proven in addition to the relation census. Its inventory test parses
       // migrations to catch named-check drift; neither file has a rendering path.
       join('src', 'store', 'webRoleCheck.ts'),
       join('test', 'unit.webroletables.test.ts'),
+      // TOG-5718 privacy-retention doc test names the table once, in a comment
+      // documenting the deliberate out-of-scope exclusion. No rendering path.
+      join('test', 'unit.privacyretention.test.ts'),
+      // TOG-9074 backup path. The dump inventory names every bot-owned table
+      // and the e2e seeds rows to prove the round trip - rows move to and
+      // from a file, never to a page. Same non-rendering status as the role
+      // verifier above.
+      join('src', 'store', 'dump.ts'),
+      join('test', 'e2e.backup.test.ts'),
     ]);
     // The BARE identifier only. `\b` on both sides deliberately does not match
     // `presence_probe_enabled` (a log event name) or `0004_presence_probe.sql`
@@ -182,12 +234,13 @@ describe('presence probe containment', () => {
         .all<{ column_name: string }>()
     ).map((r) => r.column_name);
 
-    // Exactly these four. A member id would break the aggregate-only promise
-    // that makes this acceptable at all; a `human_estimate` column would be a
-    // stored guess that someone eventually publishes. See migration 0004.
+    // Counts and scan outcome only. A member id would break the aggregate-only
+    // promise; a `human_estimate` would be a stored guess eventually published.
+    // The boolean budgets retries without pretending truncation is a floor.
     assert.deepEqual(cols.sort(), [
       'approximate_presence_count',
       'bot_floor',
+      'bot_floor_scan_truncated',
       'guild_id',
       'observed_at',
     ]);
@@ -236,7 +289,7 @@ describe('presence probe collection', () => {
       { user: { id: '4', bot: false } },
     ];
     const { rest } = stubRest((p) => (p.startsWith(`/guilds/${GUILD}/members`) ? members : []));
-    const floor = await countBotFloor(rest, GUILD);
+    const { floor } = await countBotFloor(rest, GUILD, { maxPages: 10 });
 
     assert.equal(floor, 2);
     // The value handed back is a number. Not a list we might later log, not an
@@ -248,7 +301,7 @@ describe('presence probe collection', () => {
 
   test('a failed presence read writes nothing at all', async () => {
     const { rest } = stubRest(() => undefined); // 404 everywhere
-    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z' });
+    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z', botFloorMaxPages: 10 });
 
     assert.equal(res.recorded, false);
     assert.deepEqual(await readSeries(db, GUILD), []);
@@ -271,7 +324,7 @@ describe('presence probe collection', () => {
     });
 
     const cycle = (iso: string) =>
-      runProbeCycle({ db, rest, guildId: GUILD, now: () => iso, botFloorMaxAgeMs: 86_400_000 });
+      runProbeCycle({ db, rest, guildId: GUILD, now: () => iso, botFloorMaxAgeMs: 86_400_000, botFloorMaxPages: 10 });
 
     const first = await cycle('2026-08-25T10:00:00.000Z');
     assert.equal(first.botFloor, 23, 'the floor from IDENTIFIERS.md, re-derived live');
@@ -300,7 +353,7 @@ describe('presence probe collection', () => {
     const { rest } = stubRest((p) =>
       p.startsWith(`/guilds/${GUILD}/members`) ? undefined : { approximate_presence_count: 30 },
     );
-    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z' });
+    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z', botFloorMaxPages: 10 });
 
     assert.equal(res.recorded, true);
     assert.equal(res.presence, 30);
@@ -326,6 +379,104 @@ describe('presence probe collection', () => {
     };
     await recordReading(db, GUILD, r);
     await recordReading(db, GUILD, r);
+    assert.equal((await readSeries(db, GUILD)).length, 1);
+  });
+
+  test('zero presence is a real reading, not a gap', async () => {
+    const { rest } = stubRest((p) =>
+      p.startsWith(`/guilds/${GUILD}/members`)
+        ? [{ user: { id: '1', bot: true } }, { user: { id: '2' } }]
+        : { approximate_presence_count: 0, approximate_member_count: 107 },
+    );
+    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z', botFloorMaxPages: 10 });
+
+    assert.equal(res.recorded, true);
+    assert.equal(res.presence, 0);
+    // A dead-quiet night must land in the series. If 0 were treated like a
+    // failed read, the instrument could never observe the thing it measures.
+    assert.deepEqual(await readSeries(db, GUILD), [
+      { observedAt: '2026-08-25T10:00:00.000Z', presence: 0, botFloor: 1 },
+    ]);
+  });
+
+  test('a full house is stored as-is', async () => {
+    const { rest } = stubRest((p) =>
+      p.startsWith(`/guilds/${GUILD}/members`)
+        ? [{ user: { id: '1', bot: true } }, { user: { id: '2' } }]
+        : { approximate_presence_count: 112, approximate_member_count: 112 },
+    );
+    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z', botFloorMaxPages: 10 });
+
+    assert.equal(res.recorded, true);
+    assert.equal(res.presence, 112);
+    assert.equal((await readSeries(db, GUILD))[0]?.presence, 112);
+  });
+
+  test('an all-bot roster puts the whole roster on the floor', async () => {
+    const { rest } = stubRest((p) =>
+      p.startsWith(`/guilds/${GUILD}/members`)
+        ? [{ user: { id: '1', bot: true } }, { user: { id: '2', bot: true } }]
+        : { approximate_presence_count: 2 },
+    );
+    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z', botFloorMaxPages: 10 });
+
+    assert.equal(res.recorded, true);
+    assert.equal(res.botFloor, 2);
+    assert.equal((await readSeries(db, GUILD))[0]?.botFloor, 2);
+  });
+
+  test('an all-human roster stores a zero floor, not a missing one', async () => {
+    const { rest } = stubRest((p) =>
+      p.startsWith(`/guilds/${GUILD}/members`)
+        ? [{ user: { id: '1' } }, { user: { id: '2', bot: false } }]
+        : { approximate_presence_count: 2 },
+    );
+    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z', botFloorMaxPages: 10 });
+
+    assert.equal(res.recorded, true);
+    assert.equal(res.botFloor, 0);
+    // 0 is data ("no bots"); null is "not rescanned". The reader tells them
+    // apart, so the writer must too.
+    assert.equal((await readSeries(db, GUILD))[0]?.botFloor, 0);
+    assert.equal(await lastBotFloorAt(db, GUILD), '2026-08-25T10:00:00.000Z');
+  });
+
+  test('an empty member listing is a failed floor read, not a zero floor', async () => {
+    const { rest } = stubRest((p) =>
+      p.startsWith(`/guilds/${GUILD}/members`) ? [] : { approximate_presence_count: 30 },
+    );
+    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z', botFloorMaxPages: 10 });
+
+    assert.equal(res.recorded, true);
+    assert.equal(res.presence, 30);
+    assert.equal(res.botFloor, null);
+    assert.equal((await readSeries(db, GUILD))[0]?.botFloor, null);
+  });
+
+  test('a negative presence from Discord is a failed read, never a row', async () => {
+    const { rest } = stubRest(() => ({ approximate_presence_count: -5 }));
+    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z', botFloorMaxPages: 10 });
+
+    assert.equal(res.recorded, false);
+    assert.equal(res.presence, null);
+    assert.deepEqual(await readSeries(db, GUILD), []);
+  });
+
+  test('a transient 500 on the presence read is retried and the cycle records', async () => {
+    const { rest, paths } = sequenceRest([
+      { status: 500, body: { message: 'internal error' } },
+      { status: 200, body: { approximate_presence_count: 31, approximate_member_count: 107 } },
+      {
+        status: 200,
+        body: [{ user: { id: '1', bot: true } }, { user: { id: '2' } }],
+      },
+    ]);
+    const res = await runProbeCycle({ db, rest, guildId: GUILD, now: () => '2026-08-25T10:00:00.000Z', botFloorMaxPages: 10 });
+
+    assert.equal(res.recorded, true);
+    assert.equal(res.presence, 31);
+    assert.equal(res.botFloor, 1);
+    assert.ok(paths.length >= 3, `expected presence retry plus member listing, got ${paths.length} calls`);
     assert.equal((await readSeries(db, GUILD)).length, 1);
   });
 });

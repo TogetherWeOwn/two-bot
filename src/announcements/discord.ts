@@ -8,7 +8,7 @@ import {
 } from 'discord.js';
 import { XMLParser } from 'fast-xml-parser';
 import type { FeedItem, FeedReader, AnnouncementDiscord } from './service.ts';
-import { parseRoleSpec, AnnouncementsService } from './service.ts';
+import { parseRoleSpec, AnnouncementsService, LFG_LEAVE_ACTION } from './service.ts';
 import type { FeedRelayRow, RsvpStatus } from './store.ts';
 import { PublicFeedFetcher } from './feedHttp.ts';
 import { log } from '../core/log.ts';
@@ -102,8 +102,8 @@ export class XmlFeedReader implements FeedReader {
     this.fetcher = fetcher;
   }
 
-  async read(feed: FeedRelayRow): Promise<FeedItem[]> {
-    const res = await this.fetcher.read(feed.source, AbortSignal.timeout(REQUEST_TIMEOUT_MS));
+  async read(feed: FeedRelayRow, signal?: AbortSignal): Promise<FeedItem[]> {
+    const res = await this.fetcher.read(feed.source, signal ?? AbortSignal.timeout(REQUEST_TIMEOUT_MS));
     if (!res.ok) throw new Error(`Feed fetch failed: HTTP ${res.status}`);
     const type = res.headers.get('content-type')?.toLowerCase() ?? '';
     if (!type.includes('xml') && !type.includes('rss') && !type.includes('atom') && type !== '') {
@@ -133,8 +133,7 @@ export function parseXmlFeed(xml: string): FeedItem[] {
   const entries = [...asArray(rss?.item), ...asArray(atom?.entry)].slice(0, 200);
   return entries.map((entry) => {
     const row = asRecord(entry);
-    const linkValue = row?.link;
-    const link = typeof linkValue === 'string' ? linkValue : textValue(asRecord(linkValue)?.href);
+    const link = resolveLink(row?.link);
     const key = textValue(row?.guid) || textValue(row?.id) || link;
     const title = decodeXml(textValue(row?.title) || 'Untitled');
     const publishedAt = decodeXml(textValue(row?.pubDate) || textValue(row?.published) || textValue(row?.updated));
@@ -144,6 +143,27 @@ export function parseXmlFeed(xml: string): FeedItem[] {
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function resolveLink(value: unknown): string {
+  if (typeof value === 'string' || typeof value === 'number') return String(value).trim();
+  const record = asRecord(value);
+  if (record) return textValue(record.href);
+  if (Array.isArray(value)) {
+    const hrefs = value
+      .map((item) => ({
+        rel: typeof item === 'string' ? '' : textValue(asRecord(item)?.rel),
+        href: typeof item === 'string' ? item.trim() : textValue(asRecord(item)?.href),
+      }))
+      .filter((entry) => entry.href);
+    if (hrefs.length === 0) return '';
+    const alternate = hrefs.find(
+      (entry) => (entry.rel || 'alternate').toLowerCase() === 'alternate' && /^https?:\/\//i.test(entry.href),
+    );
+    if (alternate) return alternate.href;
+    return (hrefs.find((entry) => /^https?:\/\//i.test(entry.href)) ?? hrefs[0]).href;
+  }
+  return '';
 }
 
 function asArray(value: unknown): unknown[] {
@@ -223,23 +243,26 @@ export function registerAnnouncementCommands(client: Client, options: {
     if (!interaction.inGuild() || interaction.guildId !== options.guildId) return;
     try {
       if (interaction.isStringSelectMenu() && interaction.customId.startsWith(LFG_PREFIX)) {
+        await interaction.deferReply({ ephemeral: true });
         const id = interaction.customId.slice(LFG_PREFIX.length);
         const role = interaction.values[0];
-        const outcome = role === '__leave__'
+        const outcome = role === LFG_LEAVE_ACTION
           ? (await options.service.leaveLfg(options.guildId, id, interaction.user.id) ? 'left' : 'were not signed up')
           : await options.service.signupLfg({ guildId: options.guildId, id, roleKey: role ?? '', userId: interaction.user.id });
-        await interaction.reply({ content: `LFG ${outcome}.`, ephemeral: true });
+        await interaction.editReply({ content: `LFG ${outcome}.` });
         return;
       }
       if (!interaction.isChatInputCommand()) return;
       await handleCommand(interaction, options);
     } catch (error) {
       log.error('announcement_interaction_failed', { err: String(error) });
-      if (interaction.isRepliable() && !interaction.replied && !interaction.deferred) {
-        await interaction.reply({
-          content: error instanceof Error ? error.message.slice(0, 2000) : 'The announcement command failed.',
-          ephemeral: true,
-        }).catch(() => {});
+      if (interaction.isRepliable() && !interaction.replied) {
+        const content = error instanceof Error ? error.message.slice(0, 2000) : 'The announcement command failed.';
+        if (interaction.deferred) {
+          await interaction.editReply({ content }).catch(() => {});
+        } else {
+          await interaction.reply({ content, ephemeral: true }).catch(() => {});
+        }
       }
     }
   });
@@ -251,6 +274,7 @@ async function handleCommand(
 ): Promise<void> {
   switch (interaction.commandName) {
     case 'rsvp': {
+      await interaction.deferReply({ ephemeral: true });
       const status = interaction.options.getString('status', true) as RsvpStatus;
       await options.service.rsvp({
         guildId: options.guildId,
@@ -258,19 +282,20 @@ async function handleCommand(
         userId: interaction.user.id,
         status,
       });
-      await interaction.reply({ content: `RSVP saved: ${status}.`, ephemeral: true });
+      await interaction.editReply({ content: `RSVP saved: ${status}.` });
       break;
     }
     case 'attendance': {
+      await interaction.deferReply({ ephemeral: true });
       const attendance = await options.service.attendance(options.guildId, interaction.options.getString('event-id', true));
-      await interaction.reply({
+      await interaction.editReply({
         content: `Going: ${attendance.going.length}\nInterested: ${attendance.interested.length}\nDeclined: ${attendance.declined.length}`,
-        ephemeral: true,
       });
       break;
     }
     case 'lfg': {
       if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageEvents)) throw new Error('Manage Events permission is required.');
+      await interaction.deferReply({ ephemeral: true });
       const post = await options.service.createLfg({
         guildId: options.guildId,
         channelId: interaction.channelId,
@@ -279,18 +304,20 @@ async function handleCommand(
         roles: parseRoleSpec(interaction.options.getString('roles', true)),
         actorId: interaction.user.id,
       });
-      await interaction.reply({ content: `LFG posted: \`${post.id}\`.`, ephemeral: true });
+      await interaction.editReply({ content: `LFG posted: \`${post.id}\`.` });
       break;
     }
     case 'lfg-close': {
       if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageEvents)) throw new Error('Manage Events permission is required.');
+      await interaction.deferReply({ ephemeral: true });
       const id = interaction.options.getString('id', true);
       const closed = await options.service.closeLfg(options.guildId, id, interaction.user.id);
-      await interaction.reply({ content: closed ? 'LFG closed.' : 'LFG was already closed or missing.', ephemeral: true });
+      await interaction.editReply({ content: closed ? 'LFG closed.' : 'LFG was already closed or missing.' });
       break;
     }
     case 'feed-add': {
       if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) throw new Error('Manage Server permission is required.');
+      await interaction.deferReply({ ephemeral: true });
       const feed = await options.service.addFeed({
         guildId: options.guildId,
         channelId: interaction.channelId,
@@ -298,22 +325,24 @@ async function handleCommand(
         source: interaction.options.getString('source', true),
         actorId: interaction.user.id,
       });
-      await interaction.reply({ content: `Feed relay created: \`${feed.id}\`.`, ephemeral: true });
+      await interaction.editReply({ content: `Feed relay created: \`${feed.id}\`.` });
       break;
     }
     case 'feed-remove': {
       if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) throw new Error('Manage Server permission is required.');
+      await interaction.deferReply({ ephemeral: true });
       const removed = await options.service.removeFeed(options.guildId, interaction.options.getString('id', true), interaction.user.id);
-      await interaction.reply({ content: removed ? 'Feed relay removed.' : 'No feed relay with that id.', ephemeral: true });
+      await interaction.editReply({ content: removed ? 'Feed relay removed.' : 'No feed relay with that id.' });
       break;
     }
     case 'feed-list': {
       if (!interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) throw new Error('Manage Server permission is required.');
+      await interaction.deferReply({ ephemeral: true });
       const feeds = await options.store.listFeeds(options.guildId);
       const content = feeds.length
         ? feeds.map((feed) => `\`${feed.id}\` ${feed.kind} → <#${feed.channelId}> ${feed.source}`).join('\n').slice(0, 2000)
         : 'No feed relays configured.';
-      await interaction.reply({ content, ephemeral: true });
+      await interaction.editReply({ content });
       break;
     }
   }

@@ -23,6 +23,11 @@ Documentation=https://github.com/TogetherWeOwn/two-bot
 After=network-online.target
 Wants=network-online.target
 
+# Crash-loop cap. StartLimit* belongs in [Unit]: systemd 255+ ignores it in
+# [Service], silently dropping the cap this file claims.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
 [Service]
 Type=simple
 User=twobot
@@ -41,15 +46,22 @@ ExecStart=/usr/bin/node src/index.ts
 # core dump. A credential is a file exactly one Unix user can open. A fully
 # compromised PHP-FPM worker running as the web user cannot read it.
 #
-# Source files must be root-owned and chmod 600:
+# Source files must be root-owned and chmod 600; scripts/bootstrap-host.sh
+# provisions each of these empty on a fresh box, so a wired credential always
+# has a source file and the unit never fails at start for a missing path:
 #   sudo install -d -m 0700 -o root -g root /etc/two-bot/credentials
 #   sudo install -m 0600 /dev/null /etc/two-bot/credentials/discord_token
 #   sudo $EDITOR /etc/two-bot/credentials/discord_token   # token, no quotes, no trailing newline needed
 LoadCredential=discord_token:/etc/two-bot/credentials/discord_token
-# Optional. Uncomment as each lands - a missing file makes the unit fail to
-# start, so do not list a credential before it exists on the box.
-#LoadCredential=database_url:/etc/two-bot/credentials/database_url
-#LoadCredential=internal_keys:/etc/two-bot/credentials/internal_keys
+# database_url: requiredDatabaseUrl() in src/core/config.ts prefers this over
+# TWO_DATABASE_URL. Leaving it commented while the code reads it is the exact
+# drift TOG-5706 found: the bot keeps working through the env fallback, so
+# nobody notices the credential stopped being the path in use.
+LoadCredential=database_url:/etc/two-bot/credentials/database_url
+# internal_keys: loadInternalActionsConfig() prefers this over TWO_INTERNAL_KEYS.
+# Empty until the internal-actions endpoint is enabled (TWO_INTERNAL_ACTIONS=1);
+# an empty file falls through to the environment, so wiring it is safe now.
+LoadCredential=internal_keys:/etc/two-bot/credentials/internal_keys
 
 # Non-secret configuration only: guild ID, channel IDs, log level, feature
 # flags. Root-owned, chmod 600. The token MUST NOT be in this file any more -
@@ -58,12 +70,11 @@ LoadCredential=discord_token:/etc/two-bot/credentials/discord_token
 EnvironmentFile=/etc/two-bot/two-bot.env
 
 # --- Restart policy ----------------------------------------------------------
-# Restart always, with backoff, but give up if it is crash-looping so we get
-# paged instead of silently burning the Discord identify budget.
+# Restart always, with backoff; the [Unit] crash-loop cap above gives up if it
+# is crash-looping so we get paged instead of silently burning the Discord
+# identify budget.
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=300
-StartLimitBurst=10
 
 # Stop cleanly: index.ts handles SIGTERM and closes the database.
 KillSignal=SIGTERM

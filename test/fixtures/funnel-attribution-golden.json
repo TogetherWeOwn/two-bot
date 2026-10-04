@@ -1,0 +1,251 @@
+{
+  "_comment": "Golden ambiguous-vs-unknown attribution cases (TOG-5849, prompt-quality slice of TOG-5681). Each case drives the REAL code in src/core/inviteTracker.ts - inviteGrowth + attributeJoins for kind=window, InviteTracker.attribute for kind=legacy-attribute - and the eval scores the fixture split: ambiguous cases must come back ambiguous, unknown cases unknown, and placed per-code splits must NOT read as ambiguous. See docs/FUNNEL_ATTRIBUTION_EVAL.md for how to add a case.",
+  "version": 1,
+  "cases": [
+    {
+      "id": "unknown-offline-join",
+      "title": "Join while the bot was down reads unknown, never a guess",
+      "why": "Discord replays the member on reconnect but the invite delta is lost (EVENTS.md limit 3). The honest answer is unknown.",
+      "kind": "window",
+      "scenario": {
+        "prevUses": { "aaa": 5 },
+        "currentUses": [{ "code": "aaa", "uses": 5 }],
+        "joinCount": 1,
+        "guildHasVanity": false
+      },
+      "expect": { "sources": ["unknown"], "exact": [false] },
+      "expectCategory": "unknown"
+    },
+    {
+      "id": "unknown-discovery-several",
+      "title": "Several offline joins are all unknown",
+      "why": "Nothing moved, so there is no code to name - not one guess per member, unknown per member.",
+      "kind": "window",
+      "scenario": {
+        "prevUses": { "a": 2, "b": 7 },
+        "currentUses": [
+          { "code": "a", "uses": 2 },
+          { "code": "b", "uses": 7 }
+        ],
+        "joinCount": 3,
+        "guildHasVanity": false
+      },
+      "expect": { "sources": ["unknown", "unknown", "unknown"], "exact": [false, false, false] },
+      "expectCategory": "unknown"
+    },
+    {
+      "id": "vanity-control",
+      "title": "No movement with a vanity URL is vanity, not unknown",
+      "why": "Control for the unknown boundary: 'no code moved' alone does not mean unknown - the vanity URL is the probable path.",
+      "kind": "window",
+      "scenario": {
+        "prevUses": { "a": 2 },
+        "currentUses": [{ "code": "a", "uses": 2 }],
+        "joinCount": 2,
+        "guildHasVanity": true
+      },
+      "expect": { "sources": ["vanity", "vanity"], "exact": [false, false] },
+      "expectCategory": "vanity"
+    },
+    {
+      "id": "ambiguous-two-codes-no-close",
+      "title": "Two codes moved but the arithmetic does not close: ambiguous",
+      "why": "Counters say 3 arrivals, the member list gained 2 - somebody joined and left inside the window. Any per-code split would be a guess printed as a number.",
+      "kind": "window",
+      "scenario": {
+        "prevUses": { "aaa": 5, "bbb": 1 },
+        "currentUses": [
+          { "code": "aaa", "uses": 7 },
+          { "code": "bbb", "uses": 2 }
+        ],
+        "joinCount": 2,
+        "guildHasVanity": false
+      },
+      "expect": { "sources": ["ambiguous:aaa+bbb", "ambiguous:aaa+bbb"], "exact": [false, false] },
+      "expectCategory": "ambiguous"
+    },
+    {
+      "id": "ambiguous-three-codes",
+      "title": "Three codes moved without closing: one ambiguous string, not three guesses",
+      "why": "The failure mode this guards: splitting 3 members across a+2/b+1/c+1 when only 3 arrived. The codes join with + in sorted order.",
+      "kind": "window",
+      "scenario": {
+        "prevUses": { "a": 0, "b": 0, "c": 0 },
+        "currentUses": [
+          { "code": "a", "uses": 2 },
+          { "code": "b", "uses": 1 },
+          { "code": "c", "uses": 1 }
+        ],
+        "joinCount": 3,
+        "guildHasVanity": false
+      },
+      "expect": {
+        "sources": ["ambiguous:a+b+c", "ambiguous:a+b+c", "ambiguous:a+b+c"],
+        "exact": [false, false, false]
+      },
+      "expectCategory": "ambiguous"
+    },
+    {
+      "id": "split-exact-counts-not-ambiguous",
+      "title": "Two codes moved and the arithmetic closes: per-code counts, NOT ambiguous",
+      "why": "The TOG-5681 distinction. A +2 / B +1 with 3 arrivals is fully determined in aggregate - quoting it as ambiguous would throw away the campaign's per-code join counts.",
+      "kind": "window",
+      "scenario": {
+        "prevUses": { "aaa": 5, "bbb": 1 },
+        "currentUses": [
+          { "code": "aaa", "uses": 7 },
+          { "code": "bbb", "uses": 2 }
+        ],
+        "joinCount": 3,
+        "guildHasVanity": false
+      },
+      "expect": {
+        "sources": ["invite:aaa", "invite:aaa", "invite:bbb"],
+        "exact": [false, false, false]
+      },
+      "expectCategory": "invite-placed"
+    },
+    {
+      "id": "single-code-exact",
+      "title": "One code moved and the count closes: the only exact case",
+      "why": "Exactly one code gained exactly the arrivals observed. This - and only this - is proof a member came through that code.",
+      "kind": "window",
+      "scenario": {
+        "prevUses": { "aB3xY9": 4 },
+        "currentUses": [{ "code": "aB3xY9", "uses": 5 }],
+        "joinCount": 1,
+        "guildHasVanity": false
+      },
+      "expect": { "sources": ["invite:aB3xY9"], "exact": [true] },
+      "expectCategory": "invite-exact"
+    },
+    {
+      "id": "single-code-best-guess",
+      "title": "One code moved but two arrived: best guess, not proof",
+      "why": "Behaviour is unchanged - the code is still stamped on both - but exact stays false: one of the two did not come through it.",
+      "kind": "window",
+      "scenario": {
+        "prevUses": { "aB3xY9": 4 },
+        "currentUses": [{ "code": "aB3xY9", "uses": 5 }],
+        "joinCount": 2,
+        "guildHasVanity": false
+      },
+      "expect": { "sources": ["invite:aB3xY9", "invite:aB3xY9"], "exact": [false, false] },
+      "expectCategory": "invite-placed"
+    },
+    {
+      "id": "new-code-single-no-close",
+      "title": "A code created inside the window still claims its uses on the best-guess path",
+      "why": "The newest invite is usually the one a growth push is handing out. Fresh has +3 against 1 arrival: single code, no close, so best guess - but the code is named, not dropped.",
+      "kind": "window",
+      "scenario": {
+        "prevUses": { "old": 4 },
+        "currentUses": [
+          { "code": "old", "uses": 4 },
+          { "code": "fresh", "uses": 3 }
+        ],
+        "joinCount": 1,
+        "guildHasVanity": false
+      },
+      "expect": { "sources": ["invite:fresh"], "exact": [false] },
+      "expectCategory": "invite-placed"
+    },
+    {
+      "id": "counter-reset-clamp-feeds-exact",
+      "title": "A reset code cannot cancel a real rise out of exactness",
+      "why": "Deleted-and-recreated codes reset to zero. Unclamped, the -9 would swallow real's +1 and this arrival would read unknown. Clamped, it is the ordinary exact case.",
+      "kind": "window",
+      "scenario": {
+        "prevUses": { "reset": 9, "real": 1 },
+        "currentUses": [
+          { "code": "reset", "uses": 0 },
+          { "code": "real", "uses": 2 }
+        ],
+        "joinCount": 1,
+        "guildHasVanity": false
+      },
+      "expect": { "sources": ["invite:real"], "exact": [true] },
+      "expectCategory": "invite-exact"
+    },
+    {
+      "id": "no-members-no-events",
+      "title": "Counters moved but nobody arrived: no attributions at all",
+      "why": "Uses can move without joins (bot restarts, recounts). A window with no new members emits nothing, whatever the counters did.",
+      "kind": "window",
+      "scenario": {
+        "prevUses": { "a": 2 },
+        "currentUses": [{ "code": "a", "uses": 9 }],
+        "joinCount": 0,
+        "guildHasVanity": false
+      },
+      "expect": { "sources": [], "exact": [] },
+      "expectCategory": "invite-placed"
+    },
+    {
+      "id": "seven-code-campaign",
+      "title": "Seven listing codes in one window keep their own counts",
+      "why": "The campaign shape: before the multi-code split this whole window recorded as one ambiguous:a+b+c+... string and launches had to be staggered to get readable numbers.",
+      "kind": "window",
+      "scenario": {
+        "prevUses": { "c1": 0, "c2": 0, "c3": 0, "c4": 0, "c5": 0, "c6": 0, "c7": 0 },
+        "currentUses": [
+          { "code": "c1", "uses": 3 },
+          { "code": "c2", "uses": 0 },
+          { "code": "c3", "uses": 1 },
+          { "code": "c4", "uses": 0 },
+          { "code": "c5", "uses": 2 },
+          { "code": "c6", "uses": 0 },
+          { "code": "c7", "uses": 4 }
+        ],
+        "joinCount": 10,
+        "guildHasVanity": false
+      },
+      "expect": {
+        "sources": [
+          "invite:c1", "invite:c1", "invite:c1",
+          "invite:c3",
+          "invite:c5", "invite:c5",
+          "invite:c7", "invite:c7", "invite:c7", "invite:c7"
+        ],
+        "exact": [false, false, false, false, false, false, false, false, false, false]
+      },
+      "expectCategory": "invite-placed"
+    },
+    {
+      "id": "legacy-two-grew",
+      "title": "Legacy path: two codes grew in one instant is ambiguous",
+      "why": "The live-bot single-join path (InviteTracker.attribute) has no magnitudes to split - two growers is genuinely unknowable and stays ambiguous:a+b.",
+      "kind": "legacy-attribute",
+      "scenario": { "grew": ["a", "b"], "guildHasVanity": false },
+      "expect": { "source": "ambiguous:a+b" },
+      "expectCategory": "ambiguous"
+    },
+    {
+      "id": "legacy-none-no-vanity",
+      "title": "Legacy path: nothing grew and no vanity URL is unknown",
+      "why": "Discovery, or a code created while the bot was offline. Reported as itself, never folded into a real code.",
+      "kind": "legacy-attribute",
+      "scenario": { "grew": [], "guildHasVanity": false },
+      "expect": { "source": "unknown" },
+      "expectCategory": "unknown"
+    },
+    {
+      "id": "legacy-none-vanity",
+      "title": "Legacy path: nothing grew with a vanity URL is vanity",
+      "why": "Control mirroring the window vanity case on the legacy path.",
+      "kind": "legacy-attribute",
+      "scenario": { "grew": [], "guildHasVanity": true },
+      "expect": { "source": "vanity" },
+      "expectCategory": "vanity"
+    },
+    {
+      "id": "legacy-one-grew",
+      "title": "Legacy path: exactly one code grew names that code",
+      "why": "The ordinary live-bot case. Exactness is not recorded on this path - that flag belongs to the windowed attributeJoins path.",
+      "kind": "legacy-attribute",
+      "scenario": { "grew": ["aB3xY9"], "guildHasVanity": false },
+      "expect": { "source": "invite:aB3xY9" },
+      "expectCategory": "invite-placed"
+    }
+  ]
+}

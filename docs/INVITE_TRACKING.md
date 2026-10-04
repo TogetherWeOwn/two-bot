@@ -51,6 +51,7 @@ npm run redirect          # binds 127.0.0.1:8088 by default
 | `TWO_REDIRECT_PORT` | Default `8088`. |
 | `DISCORD_GUILD_ID` | Which guild clicks belong to. Required. |
 | `TWO_REDIRECT_FALLBACK_CODE` | Invite code for `/` and for database outages. |
+| `TWO_REDIRECT_TRUSTED_PROXIES` | Comma-separated IPs/CIDRs whose `X-Forwarded-For` the throttle believes (TOG-9924). Default loopback. Env-only. |
 | `TWO_REDIRECT_BASE_URL` | What `npm run campaigns` prints. Default `https://go.two.gg`. |
 
 Put it behind the host's existing reverse proxy, terminating TLS for
@@ -128,6 +129,25 @@ Decisions worth not re-litigating:
   under-counting the denominator and making conversion look *better* than it is.
   `FunnelEvent.dedupeToken` is random per request and is not derived from
   anything about the visitor.
+- **Abuse limits are per caller, not per campaign.** One caller gets 60 requests
+  with a 1/sec refill (`CLICK_BUCKET` in `src/redirect/server.ts`, proved by
+  `test/unit.redirect.test.ts`), then 429s. "Caller" is the socket address
+  resolved through the trusted-proxy chain (TOG-9924): behind the reverse proxy
+  every request shares one socket IP, so a trusted socket believes
+  `X-Forwarded-For` back to the leftmost untrusted hop (`resolveClientIp` in
+  `src/redirect/clientIp.ts`, proved by `test/unit.redirectproxy.test.ts`),
+  while an untrusted socket ignores the header entirely — a client cannot
+  self-exempt with a spoofed header. The caller key picks a bucket and is never
+  stored, logged or recorded. The allowlist is env-only
+  (`TWO_REDIRECT_TRUSTED_PROXIES`, default loopback): a dashboard write must
+  never be able to bless a spoofed header. That caps how badly one broken
+  crawler can inflate the count. It does not stop a burst spread across many
+  IPs against one campaign — evaluated in TOG-5895 with a decision for no
+  request-time per-campaign ceiling (429-by-campaign would drop real members
+  exactly when a placement goes viral; redirect-without-record would distort
+  the wins that matter). The recommended follow-up is a click-anomaly flag in
+  `npm run funnel`, reusing the `detectSpikes` spike section. Unknown slugs 404
+  with no redirect target, so there is no open redirect to launder links through.
 - **A database outage redirects anyway** when a fallback code is set. Losing the
   measurement is much cheaper than turning a live link into a 404 that a crawler
   caches.

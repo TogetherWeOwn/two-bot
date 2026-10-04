@@ -14,6 +14,13 @@
  */
 
 import { applicationIdFromToken, LIVE_GUILD_ID, STAGING_BOT_APPLICATION_ID, TWO_STAGING_GUILD_ID } from './spec.ts';
+// TOG-9656: the storage gate shares the single test-host allowlist with the
+// suite guard (scripts/test-db-guard.ts) — disposable means allowlisted, not
+// loopback-only, so the sanctioned agent-testdb sandbox passes. Production and
+// staging hosts stay refused. scripts/ is not imported anywhere else in src/;
+// this pure, dependency-free policy module is the one exception, to keep the
+// allowlist in exactly one place.
+import { isAllowedTestDatabaseUrl } from '../../scripts/test-db-guard.ts';
 import {
   FunnelHandlers,
   type GateClearedInput,
@@ -113,14 +120,18 @@ export function checkStagingRestartPreflight(
   } catch {
     return refuse('Staging restart containment could not parse TWO_DATABASE_URL. Refusing to continue.');
   }
-  if (parsed.hostname !== '127.0.0.1' || !parsed.port) {
-    return refuse(
-      'Staging restart containment requires a disposable loopback database ' +
-        '(127.0.0.1 with an explicit port). Refusing to continue.',
-    );
-  }
+  // Query string first: node-postgres promotes ?host=/?port= over the
+  // hostname, so a query string bypasses the hostname allowlist below
+  // (TOG-9740). This keeps the injection-specific refusal for query URLs.
   if (parsed.search) {
     return refuse('Staging restart containment refuses connection-option injection. Refusing to continue.');
+  }
+  if (!isAllowedTestDatabaseUrl(url) || !parsed.port) {
+    return refuse(
+      'Staging restart containment requires a disposable isolated test database ' +
+        '(agent-testdb, 127.0.0.1/localhost, or the CI "postgres" service, with an explicit port). ' +
+        'Production and staging hosts are never valid. Refusing to continue.',
+    );
   }
   if (!/staging|test/i.test(dbName(url))) {
     return refuse(
@@ -188,9 +199,9 @@ export class StagingRestartFunnelFirewall extends FunnelHandlers {
     return guildId === TWO_STAGING_GUILD_ID && this.syntheticActorIds.has(memberId);
   }
 
-  override async onLeave(guildId: string, memberId: string, occurredAt?: string): Promise<FunnelEvent | null> {
+  override async onLeave(guildId: string, memberId: string, occurredAt?: string, opts: { isBot?: boolean } = {}): Promise<FunnelEvent | null> {
     if (!this.synthetic(guildId, memberId)) return null;
-    return super.onLeave(guildId, memberId, occurredAt);
+    return super.onLeave(guildId, memberId, occurredAt, opts);
   }
 
   override async onJoin(i: JoinInput): Promise<FunnelEvent | null> {

@@ -15,7 +15,7 @@ Cooldown claims and XP writes are one database transaction. Restarting the bot t
 
 ## Role rewards
 
-The bot only grants roles explicitly configured in `level_role_rewards`. It never creates roles and never removes a reward already earned.
+The bot only grants roles explicitly configured in `level_role_rewards`. It never creates roles. The grant-side hook (`applyLevelRoles`) only adds earned rewards; its named revoker `removeLevelRoles` (TOG-4963, `src/leveling/discord.ts`) removes configured rewards the member no longer earns at their level. The revoker is staging-only (refuses the live guild via `assertStagingGuild` before any DB read or Discord write) and fail-closed: without Manage Roles, or when any target role is missing, managed, or not below the bot, the whole revoke is refused and logged, never applied partially. Discord write failures are logged, never thrown.
 
 ```sh
 TWO_DATABASE_URL=postgres://... npm run levels:roles -- \
@@ -79,7 +79,7 @@ Duplicate member rows resolve to the highest XP, and the losing row is reported 
 TWO_DATABASE_URL=postgres://... npm run levels:roles:probe -- \
   --guild 1545644954272137297 \
   --file mee6-levels.json \
-  --roles audit/raw/roles.json \
+  --roles roles.json \
   --bot-id OWEN_APPLICATION_ID \
   --report reward-probe.json
 ```

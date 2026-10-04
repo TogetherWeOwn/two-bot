@@ -38,6 +38,8 @@ const READ_SHAPES = [
   /\b(?:process\.)?env\.([A-Z][A-Z0-9_]+)/g,
   /** Read through the store-first source in loadConfig(). */
   /\b(?:src\.get|str|list)\(\s*'([A-Z][A-Z0-9_]+)'/g,
+  /** Validated environment reads in the temporary-voice config loader. */
+  /\b(?:requireSnowflake|optionalSnowflake|integer)\(env,\s*'([A-Z][A-Z0-9_]+)'/g,
 ];
 
 function envNamesReadBySrc(dir = 'src'): Set<string> {
@@ -60,6 +62,13 @@ function envNamesReadBySrc(dir = 'src'): Set<string> {
   walk(dir);
   return found;
 }
+
+test('the temp-voice validated read shapes remain in the census', () => {
+  const names = envNamesReadBySrc();
+  for (const key of ['TWO_TEMP_VOICE_GENERATOR_CHANNEL_ID', 'TWO_TEMP_VOICE_PANEL_CHANNEL_ID', 'TWO_TEMP_VOICE_MAX_PER_GUILD']) {
+    assert.ok(names.has(key), `missing validated environment read: ${key}`);
+  }
+});
 
 test('every env var src/ reads is classified', () => {
   const unclassified = [...envNamesReadBySrc()].filter((n) => classifyKey(n) === undefined).sort();
@@ -354,6 +363,8 @@ test('TOG-3217: env-only constraints and the catalog refuse the same names', () 
     'migrations/0031_rota_primary_env_only.sql',
     'migrations/0032_rota_readers_env_only.sql',
     'migrations/0034_staging_restart_env_only.sql',
+    'migrations/0039_redirect_trusted_proxies_env_only.sql',
+    'migrations/0042_cli_color_env_only.sql',
   ].map((path) => {
     const sql = readFileSync(path, 'utf8');
     const start = sql.indexOf('key NOT IN (');

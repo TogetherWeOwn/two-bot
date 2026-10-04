@@ -343,7 +343,7 @@ test(
 
     // Goodbye dry-run (TOG-3467): unlike the welcome above, GuildMemberRemove
     // returns immediately after logging when dry-run is set - see
-    // src/discord/sessionWelcome.ts:157-160 - so this must prove the inverse
+    // src/discord/sessionWelcome.ts:171-174 - so this must prove the inverse
     // of the "leaves -> goodbye posted" case already covered by the non-dry-run
     // test above: the log line fires and nothing is sent.
     const postedBeforeLeave = postedMessages(mock).length;

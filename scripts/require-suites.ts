@@ -36,6 +36,52 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     why: 'the whole web_v1 contract the website reads, including the role grants',
   },
   {
+    // TOG-6492. The two website-role CLIs executed end to end through the
+    // real scripts: the provision grant list equals the contract, verify
+    // passes on its own exit code, and a real over-grant fails it. Counted
+    // from the 4 top-level test() blocks; CI's postgres job confirms the
+    // count on the first run after this commit.
+    file: 'test/e2e.webrole.test.ts',
+    minTests: 4,
+    why: 'the provision/verify website-role CLIs themselves, not just the library calls underneath them',
+  },
+  {
+    file: 'test/e2e.growthreview.test.ts',
+    minTests: 4,
+    why: 'growth-review CLI golden scores, kill/scale citations, red-gate refusal and sustained-effort guard',
+  },
+  {
+    // TOG-6489 slice. The campaigns operator CLI executed end to end through
+    // the real npm entry: --add creates the row, the bare list shows it, a
+    // duplicate --add fails naming "already exists", and the new slug 302s
+    // over loopback HTTP. Counted from the 4 top-level test() blocks; CI's
+    // postgres job confirms the count on the first run after this commit.
+    file: 'test/e2e.campaigns.test.ts',
+    minTests: 4,
+    why: 'the campaigns --add/--list operator path itself, not just the CampaignStore underneath it',
+  },
+  {
+    // TOG-6491. The restore script that can wipe a database: three refusals
+    // (no --force, no TWO_RESTORE_URL, no fallback to TWO_DATABASE_URL), a
+    // dry run that writes nothing, and a target + --force restore of a canned
+    // dump with identical rows back. Counted from the 5 top-level test()
+    // blocks; 5/5 green in CI postgres runs 36344199113 and 36351823205.
+    file: 'test/e2e.pgrestore.test.ts',
+    minTests: 5,
+    why: 'the pg-restore safety refusals - without this floor a silent skip re-opens the wrong-database data-loss gap',
+  },
+  {
+    // TOG-7709. The web-views CLI executed end to end through the real npm
+    // entry: `npm run web:views` applies all 9 views, a hardcoded column
+    // fixture pins every view's exact shape (the code asserting against
+    // itself is the gap this closes), and --status changes nothing. Counted
+    // from the 3 top-level test() blocks; 3/3 green on first local run
+    // against Postgres 18.4, CI's postgres job confirms on merge.
+    file: 'test/e2e.webviews.test.ts',
+    minTests: 3,
+    why: 'the web-views contract CLI itself plus the exact web_v1 column fixture - without this floor a silent column drift breaks two-web',
+  },
+  {
     file: 'test/e2e.backup.test.ts',
     minTests: 7,
     why: 'the dump/restore round trip - the only thing standing behind a restore',
@@ -61,6 +107,15 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     why: 'a HOT key reloading without a restart, and the schema-level refusal of every env-only key',
   },
   {
+    // TOG-3471. Provenance-guarded deletion and cleanup recovery, atomic caps,
+    // serialized durable ownership, and permission refusal all need a real
+    // Postgres to enforce. A run that quietly stopped including this file
+    // would leave those guarantees unverified and green.
+    file: 'test/unit.tempvoice.test.ts',
+    minTests: 86,
+    why: 'provenance-guarded deletion and cleanup recovery, atomic caps, serialized durable ownership, and permission refusal',
+  },
+  {
     // TOG-3481. Registered for the same reason as the suite above: this is the
     // only place the reward probe's "writes nothing" property is enforced
     // rather than asserted by reading the source, and it needs a real Postgres
@@ -70,6 +125,15 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     file: 'test/e2e.levelrewardprobe.test.ts',
     minTests: 8,
     why: 'the reward-role probe writing nothing, proved by a database that refuses the write',
+  },
+  {
+    // TOG-4444. The staging reward-role apply path: grant/readback/revoke
+    // through the CLI, its audit row, and the triggers that refuse a
+    // reward-config write or a live-guild audit row. Floor is the file's test
+    // count as written; not yet measured against a Postgres run.
+    file: 'test/e2e.levelrewardroleapply.test.ts',
+    minTests: 10,
+    why: 'the staging reward-role apply writing only the staging guild, proved by a database that refuses the rest',
   },
   {
     file: 'test/e2e.stagingrestart.test.ts',
@@ -87,6 +151,98 @@ export const POSTGRES_SUITES: ReadonlyArray<{ file: string; minTests: number; wh
     minTests: 8,
     why: 'the settings-service startup injection and the signed settings round trip, or the TOG-4104 gap re-opens unnoticed',
   },
+  {
+    // TOG-5689. The RUNBOOK "Is it alive?" checks as an executable script: the
+    // ready-line shape, health-before-ready ordering and one-JSON-object-per-line
+    // logs against the mock harness, with host-only checks listed as skipped.
+    // Measured 2026-09-27 against Postgres 18.4 (embedded), at this commit.
+    file: 'test/e2e.runbook-health.test.ts',
+    minTests: 3,
+    why: 'the runbook liveness verdict going green against the mock harness, or its skips going unlisted',
+  },
+  {
+    // TOG-7198. The moderation kill-switch flip cycle: all nine verbs execute
+    // through the live signed endpoint, all nine refuse at the allowlist gate
+    // with zero Discord calls after a disable restart, and all nine recover
+    // on re-enable. Needs a real Postgres for the warn row and the durable
+    // idempotency claim. A run that quietly stopped including this file would
+    // leave the mid-flow disable unproved while the static gating in PR #216
+    // stays green.
+    // Measured 2026-09-27 against Postgres 17.11, at this commit.
+    file: 'test/e2e.moderation-killswitch-flip.test.ts',
+    minTests: 3,
+    why: 'the moderation kill-switch refuse/recover cycle through the live endpoint, or a half-disabled slice ships unnoticed',
+  },
+  {
+    // TOG-6481. The voice-sessions CLI executed end to end through the real
+    // npm entry: paired + orphan starts count as sessions, known-start ends
+    // average to 20m over 2 measured, and the two startKnown:false ends are
+    // excluded from the mean and attributed to the one blind window. Counted
+    // from the 2 top-level test() blocks; CI's postgres job confirms the
+    // count on the first run after this commit.
+    file: 'test/e2e.voicesessions-cli.test.ts',
+    minTests: 2,
+    why: 'the voice-sessions averages CLI itself, not just the helpers underneath it - without this floor a silent skip re-opens the startKnown averaging gap',
+  },
+  {
+    // TOG-9993. The voice-reconcile sweep run twice end to end through the
+    // real npm entry: byte-identical reports (3 resolved, 4 flagged, 1
+    // complete) and an unchanged events table. Read-only by design, so the
+    // double run is the property; without this floor a future write path or
+    // unstable output would stay green while every re-run drifted. Counted
+    // from the 2 top-level test() blocks; CI's postgres job confirms the
+    // count on the first run after this commit.
+    file: 'test/e2e.voicereconcile-idempotency.test.ts',
+    minTests: 2,
+    why: 'the voice-reconcile idempotency proof itself - without this floor a silent skip re-opens the double-run drift gap',
+  },
+  {
+    // TOG-6493. The audit kill switch operated end to end through the real
+    // CLI: disengaged status on a fresh schema, halt engages and a second
+    // halt changes nothing, seeded pending rows are reported honestly, and
+    // resume disengages without dropping evidence. Counted from the 3
+    // top-level test() blocks; CI's postgres job confirms the count on the
+    // first run after this commit.
+    file: 'test/e2e.auditswitch.test.ts',
+    minTests: 3,
+    why: 'the audit halt/resume/status CLI path itself, not just the helpers underneath it - without this floor a silent skip re-opens the audit-script gap',
+  },
+  {
+    // TOG-6488. The presence-trend CLI executed end to end through the real
+    // script: closed text pins every seeded bucket row plus the tally and
+    // verdict lines, --days slices the table but never the verdict, --json
+    // is exactly one object with the count and verdict, --web-live on three
+    // qualifying days fires with exit 2, and an empty window explains
+    // itself. Counted from the 5 top-level test() blocks; CI's postgres job
+    // confirms the count on the first run after this commit.
+    file: 'test/e2e.presencetrend-cli.test.ts',
+    minTests: 5,
+    why: 'the presence-trend output CLI itself, not just the helpers underneath it - without this floor a silent skip re-opens the unpinned staffing/event-slot numbers gap',
+  },
+  {
+    // TOG-9985. The moderation disable-preflight script executed end to end
+    // through the real script: exit 0 CLEAR on empty state (plain and
+    // --json), exit 1 REFUSED for each partial shape (unban-only,
+    // lockdown-only, both plus a running claim with hand-release SQL) with
+    // --json counts and stranded id lists, and exit 2 could-not-tell for a
+    // missing URL, an unreachable database, a non-postgres URL, and a schema
+    // without the tables. Counted from the 10 top-level test() blocks; CI's
+    // postgres job confirms the count on the first run after this commit.
+    file: 'test/e2e.moderation-disable-preflight.test.ts',
+    minTests: 10,
+    why: 'the moderation-disable-preflight exits themselves, not just the library underneath them - without this floor a silent skip re-opens the wave-through-disable gap',
+  },
+  {
+    // TOG-9998. The dedupe-events repair script run end to end through the
+    // real script: --dry-run counts without deleting, the real run deletes
+    // exactly the copies (keeping the earliest of each cluster) and a second
+    // run deletes nothing with a byte-identical digest. Counted from the 2
+    // top-level test() blocks; CI's postgres job confirms the count on the
+    // first run after this commit.
+    file: 'test/e2e.dedupeevents.test.ts',
+    minTests: 2,
+    why: 'the dedupe-events duplicate-detection and idempotent-delete proof itself - without this floor a silent skip re-opens the phantom-join count gap',
+  },
 ];
 
 /**
@@ -103,10 +259,23 @@ export interface FileTally {
   failed: number;
 }
 
-/** Reduce reporter rows to a per-file tally, keyed by repo-relative path. */
+/** JSON reports are runtime input; a TypeScript cast is not validation. */
+function isReportedTest(row: unknown): row is ReportedTest {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return false;
+  const point = row as Partial<ReportedTest>;
+  return typeof point.file === 'string' && point.file.trim() !== '' &&
+    typeof point.name === 'string' && typeof point.nesting === 'number' &&
+    Number.isInteger(point.nesting) && point.nesting >= 0 &&
+    (point.type === 'test' || point.type === 'suite') &&
+    (point.status === 'pass' || point.status === 'fail') &&
+    typeof point.skip === 'boolean' && typeof point.todo === 'boolean';
+}
+
+/** Reduce valid, non-TODO reporter rows to a per-file tally, keyed by repo-relative path. */
 export function tally(rows: ReportedTest[], root: string = ROOT): Map<string, FileTally> {
   const out = new Map<string, FileTally>();
   for (const row of rows) {
+    if (!isReportedTest(row) || row.todo) continue;
     // The reporter records absolute paths; the manifest is repo-relative so it
     // reads like the file listing and survives being run from anywhere.
     const key = row.file.startsWith(`${root}/`) ? row.file.slice(root.length + 1) : row.file;
@@ -137,8 +306,20 @@ export function check(
   const root = opts.root ?? ROOT;
   const required = opts.required ?? POSTGRES_SUITES;
   const maySkip = opts.maySkip ?? MAY_SKIP;
-  const byFile = tally(rows, root);
   const problems: string[] = [];
+  for (const [index, row] of rows.entries()) {
+    if (!isReportedTest(row)) {
+      problems.push(
+        `malformed report test point #${index + 1}: expected a non-empty file, string name, ` +
+          'non-negative integer nesting, type test/suite, status pass/fail and boolean skip/todo.',
+      );
+    } else if (row.todo) {
+      problems.push(`${row.file}: TODO ${row.type} "${row.name}" does not prove execution (test point #${index + 1}).`);
+    }
+  }
+  // Do not let placeholders or malformed JSON rows manufacture a passing floor.
+  if (problems.length > 0) return problems;
+  const byFile = tally(rows, root);
 
   for (const suite of required) {
     const t = byFile.get(suite.file);
@@ -202,7 +383,7 @@ export function annotations(
   const out: string[] = [];
 
   for (const row of rows) {
-    if (row.status !== 'fail' || row.type === 'suite') continue;
+    if (!isReportedTest(row) || row.todo || row.status !== 'fail' || row.type === 'suite') continue;
     const file = row.file.startsWith(`${root}/`) ? row.file.slice(root.length + 1) : row.file;
     out.push(`::error file=${esc(file)},title=Failing test::${esc(`${file} > ${row.name}`)}`);
   }
@@ -246,6 +427,10 @@ const invokedDirectly =
   process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 
 if (invokedDirectly) {
+  if (process.argv.includes('--help')) {
+    console.log('Usage: node scripts/require-suites.ts [--results <report.ndjson>]');
+    process.exit(0);
+  }
   const at = process.argv.indexOf('--results');
   const existing = at >= 0 ? process.argv[at + 1] : undefined;
 
@@ -256,9 +441,42 @@ if (invokedDirectly) {
   if (existing) {
     resultsPath = existing;
   } else {
-    if (!process.env.TWO_TEST_DATABASE_URL?.trim()) {
-      // Fail before spawning dozens of files that all require the same URL.
+    // Fail before spawning dozens of files that all require the same URL —
+    // and refuse a non-test host before any migration runs (TOG-9656). The
+    // allowlist is inline here, not imported, because
+    // test/unit.restartstorageci.test.ts executes this file from a bare
+    // fixture tree containing only this file plus test-report.ts. Mirrors
+    // scripts/test-db-guard.ts, including the query-string refusal:
+    // node-postgres promotes ?host=/?port= over the hostname, so a query
+    // string bypasses any hostname allowlist.
+    const testDbUrl = process.env.TWO_TEST_DATABASE_URL?.trim() ?? '';
+    const allowedTestDbHosts = new Set(['agent-testdb', '127.0.0.1', 'localhost', '::1', '[::1]', 'postgres']);
+    let testDbHost = '';
+    let testDbHasQuery = false;
+    try {
+      const parsedTestDbUrl = new URL(testDbUrl);
+      testDbHost = parsedTestDbUrl.hostname.toLowerCase().replace(/\.$/, '');
+      testDbHasQuery = parsedTestDbUrl.search !== '';
+    } catch {
+      testDbHost = '';
+    }
+    if (!testDbUrl) {
       console.error('require-suites: TWO_TEST_DATABASE_URL is not set. This suite requires Postgres.');
+      process.exit(1);
+    }
+    if (testDbHasQuery) {
+      console.error(
+        'require-suites: TWO_TEST_DATABASE_URL carries a query string, which node-postgres promotes over ' +
+          'the hostname (?host=/?port= retarget the connection), refusing to run. Pass a bare database URL.',
+      );
+      process.exit(1);
+    }
+    if (!allowedTestDbHosts.has(testDbHost)) {
+      console.error(
+        `require-suites: TWO_TEST_DATABASE_URL host "${testDbHost || '(unparsable)'}" is not an isolated test ` +
+          'database, refusing to run. Tests may only target agent-testdb, 127.0.0.1/localhost, or the CI ' +
+          '"postgres" service container; production and staging hosts are never valid test targets.',
+      );
       process.exit(1);
     }
     resultsPath = join(tmpdir(), `two-bot-results-${process.pid}.ndjson`);

@@ -5,6 +5,10 @@
  *   DISCORD_BOT_TOKEN=... DISCORD_GUILD_ID=... node scripts/gate-report.ts
  *   node scripts/gate-report.ts --months 6     # cohort table depth, default 14
  *
+ * TESTING. The roster read honors DISCORD_API_BASE (default
+ * https://discord.com/api/v10) so test/e2e.gatereport.test.ts can point it at
+ * a loopback stub. Production never sets it.
+ *
  * WHY THIS EXISTS
  *
  * The server runs Discord membership screening, so a new arrival lands with
@@ -28,7 +32,12 @@
  * It changes nothing, messages nobody, and stores nothing: display names are
  * never fetched and only snowflakes are ever printed. See docs/PRIVACY.md.
  */
-const API = 'https://discord.com/api/v10';
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/gate-report.ts [--months <count>]');
+  process.exit(0);
+}
+
+const API = process.env.DISCORD_API_BASE ?? 'https://discord.com/api/v10';
 const TOKEN = process.env.DISCORD_BOT_TOKEN ?? process.env.DISCORD_TOKEN;
 const GUILD = process.env.DISCORD_GUILD_ID;
 
@@ -79,6 +88,16 @@ console.log(`  roster            ${all.length} (${humans.length} human, ${all.le
 console.log(`  cleared the gate  ${humans.length - stuck.length}`);
 console.log(`  stuck at the gate ${stuck.length}   <- cannot type, react or click. Never onboarded.`);
 console.log(`  gate conversion   ${pct(humans.length - stuck.length, humans.length).trim()} of humans on the roster today\n`);
+
+if (humans.length === 0) {
+  // An empty roster is "nobody to convert", not a zero-percent conversion:
+  // the cohort table would print a bare header and the quiet-days line would
+  // count from the epoch. Say so and stop.
+  console.log('  no humans on the roster - no cohorts, no arrival rate, nothing to convert.\n');
+  console.log(`Ceiling: onboarding can only ever reach the 0 members who cleared the gate.`);
+  console.log('Members who hit the gate and left are not on the roster, so these rates are upper bounds.');
+  process.exit(0);
+}
 
 // Cohort table. The gate is bursty rather than a steady leak, and a single
 // blended percentage hides that completely.

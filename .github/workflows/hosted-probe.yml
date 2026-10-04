@@ -1,0 +1,16 @@
+name: hosted-probe
+
+# TOG-4828: smallest reproducible hosted-CI run for one two-bot package.
+# bash+grep only: no node/npm/DB. Dispatch on demand; safe for forks because
+# workflow_dispatch requires write access, so no fork-gate job is needed here.
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - run: ./scripts/ci/check-src-snowflakes.sh
+      - run: ./scripts/ci/check-src-snowflakes.test.sh

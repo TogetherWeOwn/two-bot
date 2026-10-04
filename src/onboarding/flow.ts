@@ -53,7 +53,8 @@ export async function decidePrompt(store: EventStore, i: PromptInput): Promise<P
  */
 export interface Destination {
   pick: GamePick;
-  channelId: string;
+  /** null when neither the primary nor the fallback is visible. */
+  channelId: string | null;
   /** true when we had to fall back because the purpose-built room is dark. */
   degraded: boolean;
 }
@@ -65,7 +66,10 @@ export function resolveDestination(
   if (pick.primaryChannelId && visible(pick.primaryChannelId)) {
     return { pick, channelId: pick.primaryChannelId, degraded: false };
   }
-  return { pick, channelId: pick.fallbackChannelId, degraded: !!pick.primaryChannelId };
+  if (visible(pick.fallbackChannelId)) {
+    return { pick, channelId: pick.fallbackChannelId, degraded: !!pick.primaryChannelId };
+  }
+  return { pick, channelId: null, degraded: false };
 }
 
 export interface SelectionResult {
@@ -86,9 +90,15 @@ export function planSelection(
   keys: string[],
   visible: (channelId: string) => boolean,
 ): SelectionResult {
+  // Discord redelivery, double-clicks and stale panel resubmissions can hand
+  // us the same key twice. Dedupe up front (first occurrence wins, order
+  // preserved) so roleIds, degradedCount and unknownKeys each count a repeated
+  // key once. Mirrors planSession()'s `seen` set, extended to unknown keys so
+  // the unknown report does not repeat either.
+  const dedupedKeys = [...new Set(keys)];
   const picks: GamePick[] = [];
   const unknownKeys: string[] = [];
-  for (const k of keys) {
+  for (const k of dedupedKeys) {
     const p = pickByKey(k);
     if (p) picks.push(p);
     else unknownKeys.push(k);
@@ -98,7 +108,7 @@ export function planSelection(
 
   const channelIds: string[] = [];
   for (const d of destinations) {
-    if (!channelIds.includes(d.channelId)) channelIds.push(d.channelId);
+    if (d.channelId !== null && !channelIds.includes(d.channelId)) channelIds.push(d.channelId);
   }
 
   return {
@@ -160,7 +170,10 @@ export class OnboardingRecorder {
     return e;
   }
 
-  async routed(guildId: string, memberId: string, result: SelectionResult): Promise<FunnelEvent> {
+  async routed(guildId: string, memberId: string, result: SelectionResult): Promise<FunnelEvent | null> {
+    // No visible destination means no successful route, even though roles were saved.
+    if (!result.channelIds.length) return null;
+    const unavailable = result.destinations.filter((d) => d.channelId === null).map((d) => d.pick.key);
     const e: FunnelEvent = {
       guildId,
       memberId,
@@ -172,6 +185,7 @@ export class OnboardingRecorder {
         // Surfaced in the weekly numbers. A non-zero total here means members
         // are being sent to the hub because the real room is still dark.
         degraded: result.degradedCount,
+        ...(unavailable.length ? { unavailable } : {}),
       },
     };
     await this.store.record(e);

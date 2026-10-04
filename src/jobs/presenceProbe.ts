@@ -16,7 +16,7 @@
  * `scripts/presence-trend.ts`, which prints to a terminal.
  */
 import type { Db } from '../store/db.ts';
-import { DiscordRest, fetchAllMembers } from '../discord/rest.ts';
+import { DiscordRest, fetchAllMembersCapped } from '../discord/rest.ts';
 import { nowIso } from '../core/events.ts';
 import { log } from '../core/log.ts';
 import type { PresenceReading } from '../analytics/presence.ts';
@@ -70,6 +70,27 @@ export async function fetchPresenceCount(
 }
 
 /**
+ * Hard ceiling on bot-floor member scans, in member-list requests (TOG-7206).
+ *
+ * 11 requests cover a guild of up to 10,000 members: 10 full 1000-member
+ * pages plus the short-or-empty page that proves the scan is complete. (A
+ * ceiling of 10 would truncate a guild of exactly 10,000 - after 10 full
+ * pages the scan cannot know nothing remains without asking once more.)
+ * Beyond that the scan stops and the cycle records no floor rather than a
+ * partial count: a truncated roster reduced to a number would silently report
+ * a small floor for a large guild. At most one scan a day. Raise this only
+ * after measuring the scan again - see
+ * `test/unit.presenceprobecost.test.ts` for the current numbers.
+ */
+export const BOT_FLOOR_MAX_PAGES = 11;
+
+export type TruncatedScanReason = 'truncated';
+
+export interface BotFloorScanFailure {
+  reason: 'discord_read_failed' | TruncatedScanReason;
+}
+
+/**
  * Count members whose account is a bot.
  *
  * Returns a COUNT and nothing else. The member list necessarily passes through
@@ -79,15 +100,30 @@ export async function fetchPresenceCount(
  * being inlined into the cycle below, and there is a test that a member id
  * never appears in the value it hands back.
  *
- * This uses the GuildMembers intent the bot ALREADY holds
- * (src/discord/client.ts:22-28). It adds nothing.
+ * `maxPages` is REQUIRED: the scan refuses to run without an explicit ceiling
+ * (TOG-7206). Omit it and the call throws instead of paging the whole roster.
+ * A scan that hits the ceiling returns null with reason `truncated` - never a
+ * partial count - and the caller keeps the presence reading with a NULL floor
+ * rather than losing the cycle. This uses the GuildMembers intent the bot
+ * ALREADY holds (src/discord/client.ts:22-28). It adds nothing.
  */
-export async function countBotFloor(rest: DiscordRest, guildId: string): Promise<number | null> {
-  const members = await fetchAllMembers(rest, guildId);
-  if (members.length === 0) return null; // an empty read is a failed read here
+export async function countBotFloor(
+  rest: DiscordRest,
+  guildId: string,
+  opts: { maxPages: number },
+): Promise<{ floor: number | null; failure?: BotFloorScanFailure }> {
+  const scan = await fetchAllMembersCapped(rest, guildId, { maxPages: opts.maxPages });
+  if (!scan) return { floor: null, failure: { reason: 'discord_read_failed' } };
+  if (scan.truncated) {
+    // A partial roster is a wrong count, not a small count. Refuse it loudly
+    // so a growing guild fails visible instead of drifting the floor down.
+    log.error('presence_probe_bot_floor_truncated', { guildId, maxPages: opts.maxPages });
+    return { floor: null, failure: { reason: 'truncated' } };
+  }
+  if (scan.members.length === 0) return { floor: null, failure: { reason: 'discord_read_failed' } };
   let bots = 0;
-  for (const m of members) if (m.user?.bot === true) bots++;
-  return bots;
+  for (const m of scan.members) if (m.user?.bot === true) bots++;
+  return { floor: bots };
 }
 
 /** Insert one reading. `?` placeholders: valid in both drivers. See driver.ts. */
@@ -95,27 +131,44 @@ export async function recordReading(
   db: Db,
   guildId: string,
   reading: PresenceReading,
+  botFloorScanTruncated = false,
 ): Promise<void> {
   await db
     .prepare(
-      `INSERT INTO presence_probe (guild_id, observed_at, approximate_presence_count, bot_floor)
-       VALUES (?, ?, ?, ?)
+      `INSERT INTO presence_probe
+         (guild_id, observed_at, approximate_presence_count, bot_floor, bot_floor_scan_truncated)
+       VALUES (?, ?, ?, ?, ?)
        ON CONFLICT (guild_id, observed_at) DO NOTHING`,
     )
-    .run(guildId, reading.observedAt, reading.presence, reading.botFloor);
+    .run(guildId, reading.observedAt, reading.presence, reading.botFloor, botFloorScanTruncated);
 }
 
-/** The whole series for a guild, oldest first. */
-export async function readSeries(db: Db, guildId: string): Promise<PresenceReading[]> {
+/**
+ * The series for a guild, oldest first.
+ *
+ * `since` is an ISO-8601 lower bound applied in the query (TOG-7206): the
+ * trend report's `--days` window used to pull the whole series and slice in
+ * memory, so years of hourly rows crossed the wire for a 14-day table. The
+ * default with no bound preserves the old behavior for callers that genuinely
+ * want everything. The floor lookup in `latestBotFloor` still sees the whole
+ * passed series - callers that window the query take the newest floor in
+ * WINDOW, which is the documented tradeoff; the collector rescans daily, so
+ * any 14-day window holds one.
+ */
+export async function readSeries(
+  db: Db,
+  guildId: string,
+  opts: { since?: string } = {},
+): Promise<PresenceReading[]> {
   const rows = await db
     .prepare(
       `SELECT observed_at, approximate_presence_count, bot_floor
          FROM presence_probe
-        WHERE guild_id = ?
+        WHERE guild_id = ?${opts.since ? ' AND observed_at >= ?' : ''}
         ORDER BY observed_at ASC`,
     )
     .all<{ observed_at: string; approximate_presence_count: number; bot_floor: number | null }>(
-      guildId,
+      ...(opts.since ? [guildId, opts.since] : [guildId]),
     );
   return rows.map((r) => ({
     observedAt: r.observed_at,
@@ -135,6 +188,17 @@ export async function lastBotFloorAt(db: Db, guildId: string): Promise<string | 
   return row?.at ?? null;
 }
 
+/** Successful and truncated scans both consume the daily roster budget. */
+async function lastBotFloorScanAt(db: Db, guildId: string): Promise<string | null> {
+  const row = await db
+    .prepare(
+      `SELECT MAX(observed_at) AS at FROM presence_probe
+        WHERE guild_id = ? AND (bot_floor IS NOT NULL OR bot_floor_scan_truncated)`,
+    )
+    .get<{ at: string | null }>(guildId);
+  return row?.at ?? null;
+}
+
 export interface ProbeCycleDeps {
   db: Db;
   rest: DiscordRest;
@@ -142,6 +206,13 @@ export interface ProbeCycleDeps {
   /** Injected so tests do not depend on the wall clock. */
   now?: () => string;
   botFloorMaxAgeMs?: number;
+  /**
+   * REQUIRED page ceiling for the bot-floor member scan (TOG-7206). There is
+   * a module default for the scheduler, but the cycle itself takes no
+   * default: a scan without an explicit ceiling must fail at compile time,
+   * not page 100k member objects at runtime.
+   */
+  botFloorMaxPages: number;
 }
 
 export interface ProbeCycleResult {
@@ -171,21 +242,34 @@ export async function runProbeCycle(deps: ProbeCycleDeps): Promise<ProbeCycleRes
     return { recorded: false, presence: null, botFloor: null, observedAt };
   }
 
-  // Rescan the floor only when the newest one we hold has aged out.
+  // A truncated roster is not a floor, but retrying it hourly costs the same
+  // full scan again. Persist its cadence with the reading, never a partial floor.
   let botFloor: number | null = null;
-  const lastAt = await lastBotFloorAt(deps.db, deps.guildId);
+  let botFloorScanTruncated = false;
+  const lastAt = await lastBotFloorScanAt(deps.db, deps.guildId);
   const stale = lastAt === null || new Date(observedAt).getTime() - new Date(lastAt).getTime() >= maxAge;
   if (stale) {
-    botFloor = await countBotFloor(deps.rest, deps.guildId);
-    if (botFloor === null) {
-      // A failed member listing must not lose the presence reading we already
-      // have. NULL here means "not rescanned", which is the normal state of
-      // most rows anyway, so the series is unharmed.
-      log.error('presence_probe_bot_floor_failed', { guildId: deps.guildId });
+    const scan = await countBotFloor(deps.rest, deps.guildId, { maxPages: deps.botFloorMaxPages });
+    botFloor = scan.floor;
+    if (scan.failure) {
+      // A failed or truncated member listing must not lose the presence
+      // reading we already have. NULL here means "not rescanned", which is
+      // the normal state of most rows anyway, so the series is unharmed.
+      // Truncation is already logged with its ceiling at the scan site;
+      // a plain read failure is logged here.
+      if (scan.failure.reason === 'truncated') {
+        botFloorScanTruncated = true;
+        log.error('presence_probe_bot_floor_truncated_kept_presence', {
+          guildId: deps.guildId,
+          maxPages: deps.botFloorMaxPages,
+        });
+      } else {
+        log.error('presence_probe_bot_floor_failed', { guildId: deps.guildId });
+      }
     }
   }
 
-  await recordReading(deps.db, deps.guildId, { observedAt, presence, botFloor });
+  await recordReading(deps.db, deps.guildId, { observedAt, presence, botFloor }, botFloorScanTruncated);
 
   // Aggregates only. There is no member id in this log line and there must
   // never be one - docs/PRIVACY.md.
@@ -209,11 +293,22 @@ export interface PresenceProbeHandle {
  * alive. It is a background instrument for an internal question, and it does
  * not get a vote on the bot's lifecycle.
  */
-export function startPresenceProbe(deps: ProbeCycleDeps & { intervalMs?: number }): PresenceProbeHandle {
+export function startPresenceProbe(
+  deps: Omit<ProbeCycleDeps, 'botFloorMaxPages'> & {
+    intervalMs?: number;
+    botFloorMaxPages?: number;
+  },
+): PresenceProbeHandle {
   const intervalMs = deps.intervalMs ?? PRESENCE_PROBE_INTERVAL_MS;
+  // The scheduler keeps its default so the single production wiring in
+  // src/index.ts needs no ceiling arithmetic; everything else names its own.
+  const cycleDeps: ProbeCycleDeps = {
+    ...deps,
+    botFloorMaxPages: deps.botFloorMaxPages ?? BOT_FLOOR_MAX_PAGES,
+  };
 
   const tick = () => {
-    void runProbeCycle(deps).catch((err: unknown) => {
+    void runProbeCycle(cycleDeps).catch((err: unknown) => {
       log.error('presence_probe_failed', { err: String(err) });
     });
   };

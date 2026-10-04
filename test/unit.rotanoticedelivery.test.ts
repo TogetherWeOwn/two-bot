@@ -415,6 +415,27 @@ test('halt while recovering never clears an ambiguous previous POST boundary', a
   assert.equal((await store.get(entryId))!.deliveryState, 'quarantined');
 });
 
+test('halt while recovering holds without burning a delivery attempt', async () => {
+  await enroll();
+  const { channel, sent } = fakeChannel({ send: () => { throw new Error('unknown outcome'); } });
+  const [first] = await delivery(channel).runDue(DUE);
+  const entryId = first.entryId;
+  const attemptsBefore = (await store.get(entryId))!.deliveryAttempts;
+  assert.equal(attemptsBefore, 1);
+  const boundary = (await store.get(entryId))!.deliverySearchBefore;
+  assert.ok(boundary);
+  await expireClaim(entryId);
+  await store.engageDeliveryHalt('fixture');
+  assert.equal((await delivery(channel).runDue(DUE))[0].status, 'held');
+  const held = (await store.get(entryId))!;
+  assert.equal(held.deliveryState, 'pending');
+  assert.equal(held.deliveryLastError, 'audit_kill_switch_held');
+  assert.equal(held.deliveryAttempts, attemptsBefore, 'a kill-switch hold is not an attempt');
+  assert.equal(held.deliverySearchBefore, boundary, 'the ambiguous POST boundary must survive the hold');
+  assert.equal(sent.length, 1, 'no resend happened anywhere');
+  await store.disengageDeliveryHalt();
+});
+
 test('changed configured destination cannot redirect an existing durable notice', async () => {
   await enroll();
   const { channel, sent } = fakeChannel({ send: () => { throw new Error('unknown outcome'); } });

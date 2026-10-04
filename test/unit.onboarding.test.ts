@@ -45,6 +45,7 @@ async function freshStore(): Promise<EventStore> {
 
 const seeEverything = () => true;
 const seeNothing = () => false;
+const seeHub = (channelId: string) => channelId === GAME_HUB_CHANNEL_ID;
 
 test('catalog ids are well formed and unique', () => {
   const keys = new Set<string>();
@@ -118,9 +119,9 @@ test('a visible dedicated channel is used and is not flagged degraded', () => {
   assert.equal(d.degraded, false);
 });
 
-test('a dark dedicated channel falls back to the hub and is flagged degraded', () => {
+test('a dark dedicated channel falls back to the visible hub and is flagged degraded', () => {
   const shooters = pickByKey('shooters')!;
-  const d = resolveDestination(shooters, seeNothing);
+  const d = resolveDestination(shooters, seeHub);
   assert.equal(d.channelId, GAME_HUB_CHANNEL_ID, 'must not link a channel they cannot open');
   assert.equal(d.degraded, true, 'falling back has to be visible in the numbers');
 });
@@ -129,17 +130,63 @@ test('a pick with no dedicated room is not counted as degraded', () => {
   // Routing Rocket League to the hub is the intended destination, not a
   // failure, so it must not inflate the degraded count the CEO is watching.
   const rl = pickByKey('rocketleague')!;
-  const d = resolveDestination(rl, seeNothing);
+  const d = resolveDestination(rl, seeHub);
   assert.equal(d.channelId, GAME_HUB_CHANNEL_ID);
   assert.equal(d.degraded, false);
 });
 
 test('planSelection dedupes channels and reports unknown keys', () => {
-  const plan = planSelection(['shooters', 'rocketleague', 'fallguys', 'not-a-game'], seeNothing);
+  const plan = planSelection(['shooters', 'rocketleague', 'fallguys', 'not-a-game'], seeHub);
   assert.deepEqual(plan.unknownKeys, ['not-a-game']);
   assert.equal(plan.roleIds.length, 3);
   assert.deepEqual(plan.channelIds, [GAME_HUB_CHANNEL_ID], 'three picks, one shared room, one link');
   assert.equal(plan.degradedCount, 1, 'only the shooters fallback counts as degraded');
+});
+
+test('planSelection dedupes repeated keys (roleIds, degradedCount, unknownKeys)', () => {
+  // Discord redelivery / double-click / stale resubmission must not grant or
+  // count the same pick twice. Refs TOG-7438.
+  const shooters = pickByKey('shooters')!;
+  const repeated = planSelection(['shooters', 'shooters'], seeHub);
+  assert.deepEqual(repeated.roleIds, [shooters.roleId]);
+  assert.equal(repeated.degradedCount, 1, 'one dark pick counts once');
+  assert.deepEqual(repeated.channelIds, [GAME_HUB_CHANNEL_ID]);
+  assert.deepEqual(repeated.destinations.map((d) => d.pick.key), ['shooters']);
+
+  const unknown = planSelection(['nonsense', 'nonsense'], seeNothing);
+  assert.deepEqual(unknown.unknownKeys, ['nonsense']);
+  assert.deepEqual(unknown.roleIds, []);
+  assert.equal(unknown.degradedCount, 0);
+});
+
+test('invisible primary and fallback destinations retain roles but provide no route', () => {
+  const plan = planSelection(['shooters', 'rocketleague'], seeNothing);
+  assert.deepEqual(plan.roleIds, ['shooters', 'rocketleague'].map((k) => pickByKey(k)!.roleId));
+  assert.deepEqual(plan.channelIds, []);
+  assert.deepEqual(plan.destinations.map((d) => d.channelId), [null, null]);
+  assert.equal(plan.degradedCount, 0, 'unavailable is not a successful fallback');
+});
+
+test('an unavailable selection records roles but not a successful route', async () => {
+  const store = await freshStore();
+  const recorder = new OnboardingRecorder(store);
+  const plan = planSelection(['shooters', 'rocketleague'], seeNothing);
+  const selected = await recorder.selected(GUILD, MEMBER, plan);
+  assert.deepEqual(selected.metadata, { picks: ['shooters', 'rocketleague'] });
+  assert.equal(await recorder.routed(GUILD, MEMBER, plan), null);
+  assert.equal(await store.countByType('channel_routed'), 0);
+  assert.equal(await recorder.timeToRouteSeconds(GUILD, MEMBER), null);
+});
+
+test('partial routing metadata includes only visible channels and names unavailable picks', async () => {
+  const store = await freshStore();
+  const recorder = new OnboardingRecorder(store);
+  const shooters = pickByKey('shooters')!;
+  const plan = planSelection(['shooters', 'rocketleague'], (id) => id === shooters.primaryChannelId);
+  const routed = await recorder.routed(GUILD, MEMBER, plan);
+  assert.deepEqual(routed?.metadata, {
+    channels: [shooters.primaryChannelId], degraded: 0, unavailable: ['rocketleague'],
+  });
 });
 
 test('an empty selection plans nothing rather than throwing', () => {

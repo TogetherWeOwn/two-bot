@@ -91,10 +91,13 @@ export function sessionWelcomeText(memberMention: string): string {
  * Pure. `visible` is supplied by the adapter from Discord's own permission
  * check - we never hand someone a link to a room they cannot open.
  *
- * The invalid/stale contract from TOG-1654: any key we do not know is dropped
- * from the plan, reported in `unknownKeys`, and the caller must offer a retry.
- * An empty or fully-unknown submission is NOT routed anywhere - the ack says
- * so and points back at the picker.
+ * The invalid/stale contract from TOG-1654 (fixed TOG-8768): any key we do
+ * not know is dropped from the plan and reported in `unknownKeys`, but valid
+ * picks in the same submission still route - one stale key no longer sinks the
+ * whole submission. Only an empty or fully-unknown submission is routed
+ * nowhere: the ack says so and points back at the picker. A partially-stale
+ * submission routes the valid picks and the ack carries a retry note for the
+ * stale part.
  */
 export interface SessionPlan {
   picks: SessionPick[];
@@ -110,29 +113,27 @@ export function planSession(
   visible: (channelId: string) => boolean,
   catalog: SessionPick[] = SESSION_PICKS,
 ): SessionPlan {
-  const picks: SessionPick[] = [];
   const unknownKeys: string[] = [];
-  const seen = new Set<string>();
+  const wanted = new Set<string>();
   for (const k of keys) {
     const p = pickByKey(k, catalog);
     if (!p) {
       unknownKeys.push(k);
       continue;
     }
-    if (seen.has(p.key)) continue;
-    seen.add(p.key);
-    picks.push(p);
+    wanted.add(p.key);
   }
+  // Catalog order: the interface promises channelIds in catalog order, so
+  // resolve picks by walking the catalog, not the submission.
+  const picks: SessionPick[] = catalog.filter((p) => wanted.has(p.key));
 
   const channelIds: string[] = [];
   const unavailable: SessionPick[] = [];
-  if (unknownKeys.length === 0) {
-    for (const p of picks) {
-      if (visible(p.channelId)) {
-        if (!channelIds.includes(p.channelId)) channelIds.push(p.channelId);
-      } else {
-        unavailable.push(p);
-      }
+  for (const p of picks) {
+    if (visible(p.channelId)) {
+      if (!channelIds.includes(p.channelId)) channelIds.push(p.channelId);
+    } else {
+      unavailable.push(p);
     }
   }
   return { picks, channelIds, unavailable, unknownKeys };
@@ -146,20 +147,25 @@ export function planSession(
  * handler.
  */
 export function sessionAckText(plan: SessionPlan): string {
-  if (plan.unknownKeys.length) {
-    return [
-      "That option is gone or stale - the panel was probably replaced by a newer one.",
-      'Nothing was changed. Open the picker again and choose afresh.',
-    ].join('\n');
-  }
   const links = plan.channelIds.map((id) => `<#${id}>`).join(' and ');
   if (!links) {
+    if (plan.unknownKeys.length) {
+      return [
+        "That option is gone or stale - the panel was probably replaced by a newer one.",
+        'Nothing was changed. Open the picker again and choose afresh.',
+      ].join('\n');
+    }
     return [
       'Those rooms are not open to you right now.',
       'Nothing was changed - try again in a moment, or say hello in the welcome channel and someone will grab you.',
     ].join('\n');
   }
-  return `On it - head to ${links}.`;
+  let ack = `On it - head to ${links}.`;
+  if (plan.unknownKeys.length) {
+    ack +=
+      ' One choice was gone or stale, so I skipped it - open the picker again if you want to re-pick that part.';
+  }
+  return ack;
 }
 
 /**

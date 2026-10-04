@@ -32,7 +32,7 @@ TWO_HOST_PORT="$PORT" \
 TWO_HOST_CHANNEL_KEYS="qa-throwaway:$CHANNEL_ID" \
 TWO_INTERNAL_ROLE_KEYS="$ROLE_KEY:$ROLE_ID" \
 TWO_HOST_SCHEMA="$SCHEMA" \
-node scripts/internal-actions-host-real.ts >"$OUT/host-boot.log" 2>&1 &
+node scripts/internal-actions-host-real.ts --live >"$OUT/host-boot.log" 2>&1 &
 HOST_PID=$!
 trap 'kill -TERM $HOST_PID 2>/dev/null; wait $HOST_PID 2>/dev/null' EXIT
 

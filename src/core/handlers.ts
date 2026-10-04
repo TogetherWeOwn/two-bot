@@ -1,4 +1,5 @@
 import { MESSAGE_RUNGS, nowIso, type FunnelEvent } from './events.ts';
+import { observeMembership } from './membershipClock.ts';
 import type { EventStore } from '../store/eventStore.ts';
 import { VoiceSessionTracker } from './voiceSessions.ts';
 import { log } from './log.ts';
@@ -20,6 +21,8 @@ export interface JoinInput {
   /** Attribution from the invite tracker, e.g. 'invite:aB3xY9'. */
   source: string;
   occurredAt?: string;
+  /** Live dispatch order, captured by the adapter before asynchronous attribution. */
+  observedAt?: string;
   inviterId?: string | null;
   sourceEventId?: string;
 }
@@ -85,6 +88,7 @@ export class FunnelHandlers {
   }
 
   async onJoin(i: JoinInput): Promise<FunnelEvent | null> {
+    const observedAt = i.observedAt ?? observeMembership();
     const occurredAt = i.occurredAt ?? nowIso();
     if (this.communityFacts) {
       await this.communityFacts.recordMemberJoin({
@@ -106,7 +110,7 @@ export class FunnelHandlers {
       source: i.source,
       metadata: i.inviterId ? { inviterId: i.inviterId } : undefined,
     };
-    const r = await this.store.record(e);
+    const r = await this.store.record(e, { membershipObservedAt: observedAt });
     log.info('member_join', { memberId: i.memberId, source: i.source, inserted: r.inserted });
     return e;
   }
@@ -266,23 +270,43 @@ export class FunnelHandlers {
     const at = i.occurredAt ?? nowIso();
     const open = this.voiceSessions.end(i.guildId, i.memberId);
 
+    // TOG-7512: validate the leave timestamp up front. Date.parse of garbage
+    // is NaN, and NaN survives Math.max/Math.round (still !== null, so the
+    // leveling branch fired) while JSON.stringify(NaN) stores null - a row
+    // claiming a KNOWN start with NO measured duration. An unparseable leave
+    // is an unmeasurable session: the bot-down unknown-start row, not a
+    // measured-but-empty one. The tracker entry is still closed above - the
+    // member left, we just cannot say when.
+    const leaveMs = Date.parse(at);
+    const startMs = open ? Date.parse(open.startedAt) : NaN;
+    // Both endpoints must parse: a garbage leave timestamp is the TOG-7512
+    // case, and a garbage start (from a malformed join) is equally
+    // unmeasurable - either way the honest row is the bot-down unknown-start
+    // one, never startKnown:true with a null duration.
+    const startKnown = open !== null && Number.isFinite(leaveMs) && Number.isFinite(startMs);
+    const startedAt = startKnown && open ? open.startedAt : null;
+    // An unparseable leave has no time to stamp: file it at processing time.
+    // Storing the raw garbage in occurred_at would throw on Postgres
+    // (timestamptz), so "no throw" has to hold on both backends.
+    const endAt = Number.isFinite(leaveMs) ? at : nowIso();
+
     // Clamp at zero. The start timestamp and this one can come from different
     // clocks, and a negative duration in a column people will average is worse
     // than a zero.
-    const durationSeconds = open
-      ? Math.max(0, Math.round((Date.parse(at) - Date.parse(open.startedAt)) / 1000))
+    const durationSeconds = startKnown
+      ? Math.max(0, Math.round((leaveMs - startMs) / 1000))
       : null;
 
     if (this.communityFacts) {
-      const sessionKey = open?.sessionKey ?? `${i.guildId}:${i.memberId}:unknown-start:${at}:${i.channelId}`;
+      const sessionKey = open?.sessionKey ?? `${i.guildId}:${i.memberId}:unknown-start:${endAt}:${i.channelId}`;
       await this.communityFacts.recordVoiceEnded({
         guildId: i.guildId,
         actorId: i.memberId,
         isBot: i.isBot,
         sessionKey,
         channelId: open?.channelId ?? i.channelId,
-        occurredAt: at,
-        startedAt: open?.startedAt ?? null,
+        occurredAt: endAt,
+        startedAt,
         durationSeconds,
       });
     }
@@ -292,13 +316,14 @@ export class FunnelHandlers {
       guildId: i.guildId,
       memberId: i.memberId,
       eventType: 'voice_session_end',
-      occurredAt: at,
+      occurredAt: endAt,
       source: `channel:${open?.channelId ?? i.channelId}`,
       metadata: {
-        // False means the bot came up mid-session. Filter on it before
-        // averaging durations - see src/core/voiceSessions.ts.
-        startKnown: open !== null,
-        startedAt: open?.startedAt ?? null,
+        // False means the bot came up mid-session - or the leave timestamp was
+        // unparseable (TOG-7512), which is equally unmeasurable. Filter on it
+        // before averaging durations - see src/core/voiceSessions.ts.
+        startKnown,
+        startedAt,
         durationSeconds,
       },
     };
@@ -308,31 +333,72 @@ export class FunnelHandlers {
         i.guildId,
         i.memberId,
         durationSeconds,
-        at,
+        endAt,
         open?.channelId ?? i.channelId,
       );
       if (award.leveledUp) await i.onLevelUp?.(award.level);
     }
     // Leaving at T proves they were still there at T, so recency moves too.
-    await this.store.touchActivity(i.guildId, i.memberId, at);
+    // A malformed T has no time to prove: recency moves to the processing
+    // time we stamped the row with, never the raw garbage (which would throw
+    // on Postgres timestamptz and corrupt the projection on sqlite).
+    await this.store.touchActivity(i.guildId, i.memberId, endAt);
     log.info('voice_session_end', {
       memberId: i.memberId,
       channelId: e.source,
       durationSeconds,
-      startKnown: open !== null,
+      startKnown,
     });
     return e;
   }
 
-  async onLeave(guildId: string, memberId: string, occurredAt?: string): Promise<FunnelEvent | null> {
+  /**
+   * A member left the server (TOG-6122).
+   *
+   * A server-leave is also a voice-leave: Discord drops them from voice at
+   * the same instant, but no VoiceStateUpdate follows, so without this the
+   * tracker entry stays open (leaking until the next ShardResume clear) and
+   * the member gets NO voice_session_end row at all. Worse, a later voice
+   * leave for a rejoined session reuses the stale start and invents a
+   * duration spanning the member's absence.
+   *
+   * The end is credited to the open channel with the duration measured to
+   * leave time. `isBot` is unknown on this path - the gateway hands
+   * GuildMemberRemove no reliable bot flag at this layer - so the voice half
+   * is read from the tracker, not from a parameter: the only session we can
+   * close is one we saw start, and starts are only recorded for non-bots.
+   */
+  async onLeave(
+    guildId: string,
+    memberId: string,
+    occurredAt?: string,
+    opts: { isBot?: boolean; observedAt?: string } = {},
+  ): Promise<FunnelEvent | null> {
+    const observedAt = opts.observedAt ?? observeMembership();
+    const at = occurredAt ?? nowIso();
+    // Close any open voice session first, while the member row still reads
+    // pre-leave: the end proves presence up to the leave instant, and the
+    // member_leave row below is what marks them gone. No open session means
+    // no write - this is a no-op for the overwhelmingly common case, and a
+    // repeated GuildMemberRemove is idempotent: the second call peeks null.
+    const open = this.voiceSessions.peek(guildId, memberId);
+    if (open) {
+      await this.onVoiceLeave({
+        guildId,
+        memberId,
+        isBot: opts.isBot ?? false,
+        channelId: open.channelId,
+        occurredAt: at,
+      });
+    }
     const e: FunnelEvent = {
       guildId,
       memberId,
       eventType: 'member_leave',
-      occurredAt: occurredAt ?? nowIso(),
+      occurredAt: at,
       source: 'gateway',
     };
-    await this.store.record(e);
+    await this.store.record(e, { membershipObservedAt: observedAt });
     return e;
   }
 

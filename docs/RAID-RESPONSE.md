@@ -12,7 +12,7 @@ This is the working document for TWO-56.
 |---|---|---|---|---|
 | 2025-07-06 | 1,015 | 56 minutes | 976, a month later | 11 |
 | 2025-09-12 | 15 | 6 seconds | 11 | 4 |
-| 2025-12-15 | 15 | 11 seconds | none | 15 |
+| 2025-12-15 | 15 | 7 seconds | none | 15 |
 
 None of the 1,045 has ever posted a message or entered a voice channel.
 
@@ -111,11 +111,12 @@ Set `DISCORD_STAFF_ALERT_CHANNEL_ID` to a **staff-only** channel — the alert
 lists member IDs and must not be readable by members. The bot needs View Channel
 and Send Messages there, and nothing else.
 
-The chosen route is `🔧〢updates-and-changes`, channel
-`1138590808715571300`: it is staff-only and already Discord's
-`safety_alerts_channel_id`. `.env.example` carries that value for deploys to
-copy. Left empty, the detector still runs but the alert goes to the process log
-only, which nobody reads at 21:16 on a Monday.
+The chosen route is the staff-only channel already configured as Discord's
+`safety_alerts_channel_id` — ask the operator for the channel id and set
+`DISCORD_STAFF_ALERT_CHANNEL_ID` to it at deploy time (`.env.example` leaves it
+blank; never commit the live id here). Left empty, the detector still runs but
+the alert goes to the process log only, which nobody reads at 21:16 on a
+Monday.
 
 The detector goes live with the bot itself (TWO-11). Until the bot is deployed,
 nothing is watching in real time.
@@ -167,12 +168,14 @@ permission thirty times.
 Exit codes: `0` clean · `1` aborted, or some accounts failed · `2` refused to
 start (bad list, count mismatch, no token).
 
-The dry run also cross-checks against `data/server-audit-2026-08-19.json`. That
-file holds **no member roster** — its own `note` says so, and pointing
-`--ids-from` at it gets a specific error rather than an empty run. What it does
+The dry run also cross-checks against `audit/summary.json`. That
+file holds **no member roster** — pointing `--ids-from` at an audit snapshot
+gets a specific error rather than an empty run. What it does
 hold is the envelope: 84 human members, 31 stuck at the rules gate. Every
 confirmed raid account was pending at that gate, so a target list longer than 31
-is flagged as containing something that evidence does not explain.
+is flagged as containing something that evidence does not explain. Pass
+`--context <path>` to cross-check against a different snapshot (e.g. a local
+copy of the retired `data/server-audit-<date>.json` full dump from history).
 
 Execution itself is TOG-411, and it is blocked: the Discord credentials for this
 server are not held by this company (TOG-432). `--execute` without a token says

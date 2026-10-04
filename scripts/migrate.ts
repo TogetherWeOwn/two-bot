@@ -18,6 +18,11 @@
 import { openDb, isPostgresSpec } from '../src/store/db.ts';
 import { loadMigrations, migrate } from '../src/store/migrate.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/migrate.ts [--status]');
+  process.exit(0);
+}
+
 const args = new Set(process.argv.slice(2));
 const statusOnly = args.has('--status');
 

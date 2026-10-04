@@ -156,9 +156,9 @@ function idsFromJson(text: string, sourceName: string): { line: number; value: s
   }
 
   // The one wrong file an operator is most likely to reach for, named
-  // explicitly rather than failing as "no ids found". It is the only committed
-  // JSON in data/ and it is about channels and roles, not people — its own
-  // `note` field says so.
+  // explicitly rather than failing as "no ids found". An audit snapshot is
+  // about channels and roles, not people — the retired committed one's own
+  // `note` field said so.
   if (isRecord(doc) && 'channels' in doc && 'roles' in doc && 'summary' in doc) {
     throw new Error(
       `${sourceName} is a server audit snapshot, not a target list. It contains no ` +
@@ -426,10 +426,15 @@ export interface AuditContext {
 }
 
 /**
- * The committed `data/server-audit-2026-08-19.json` carries no member roster —
- * it says so itself — so it can never *be* the target list. What it can do is
- * bound one: it recorded 84 human members and 31 of them stuck at the rules
- * gate, and every raid account confirmed on 2026-08-19 was one of those 31.
+ * The committed `audit/summary.json` carries no member roster — so it can
+ * never *be* the target list. What it can do is bound one: it recorded 84
+ * human members and 31 of them stuck at the rules gate, and every raid
+ * account confirmed on 2026-08-19 was one of those 31.
+ *
+ * Two shapes are accepted: the committed summary carries its guild/members
+ * tables at top level, while the retired full snapshot
+ * (`data/server-audit-<date>.json`, removed from HEAD by TOG-8963 but still
+ * in history for operators with a local copy) wrapped them in `summary`.
  */
 export function readAuditContext(path: string): AuditContext | null {
   let doc: unknown;
@@ -439,9 +444,9 @@ export function readAuditContext(path: string): AuditContext | null {
     return null;
   }
   if (!isRecord(doc)) return null;
-  const summary = isRecord(doc.summary) ? doc.summary : null;
-  const members = summary && isRecord(summary.members) ? summary.members : null;
-  const guild = summary && isRecord(summary.guild) ? summary.guild : null;
+  const summary = isRecord(doc.summary) ? doc.summary : doc;
+  const members = isRecord(summary.members) ? summary.members : null;
+  const guild = isRecord(summary.guild) ? summary.guild : null;
   if (!members || !guild) return null;
   return {
     collectedAt: String(doc.collected_at ?? ''),

@@ -1,0 +1,86 @@
+name: release
+
+# release-please (TOG-9865): CHANGELOG.md + SemVer tags + GitHub Releases from
+# Conventional Commits on main. Manifest mode: release-please-config.json +
+# .release-please-manifest.json, release-type node. New repos start at 0.1.0
+# and stay 0.x until production cutover; 1.0.0 = cutover.
+#
+# Required-checks fix: PRs opened with GITHUB_TOKEN trigger no workflows, so
+# the required `check` / `gitleaks` / `pr-lint` would never run on the release
+# PR and it could never merge. The dispatch job below calls `gh workflow run`
+# (workflow_dispatch IS allowed from GITHUB_TOKEN) for ci / secret-scan on the
+# release branch, plus the pr-lint dispatch path that validates the open PR
+# via the API. The check runs land on the PR head SHA, which is what required
+# checks match on. No App key or PAT in Actions secrets.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: release-please
+    # Execute the trusted normalizer only from reviewed main, even on dispatch.
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      pr: ${{ steps.normalize.outputs.result }}
+    steps:
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # A nonzero manifest seed invents a prior tag even when none was published.
+      # Repair on every run, even when generation is a no-op after a failed write.
+      # Dispatch only after repair; manual edits are overwritten next generation.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Normalize first-release links
+        id: normalize
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          PR_JSON: ${{ steps.release.outputs.pr }}
+        with:
+          script: |
+            const normalize = require('./scripts/ci/normalize-release.cjs');
+            const pr = process.env.PR_JSON ? JSON.parse(process.env.PR_JSON) : undefined;
+            return await normalize({github, repo: context.repo, pr});
+
+  dispatch-checks:
+    name: dispatch-checks
+    needs: release-please
+    if: needs.release-please.outputs.pr != '' && needs.release-please.outputs.pr != 'null'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No checkout in this job: gh needs the repo named explicitly.
+          GH_REPO: ${{ github.repository }}
+          PR_JSON: ${{ needs.release-please.outputs.pr }}
+        run: |
+          set -euo pipefail
+          read -r PR_NUMBER HEAD_BRANCH < <(python3 -c "
+          import json, os
+          pr = json.loads(os.environ['PR_JSON'])
+          print(pr['number'], pr['headBranchName'])
+          ")
+          echo "Release PR #$PR_NUMBER on branch $HEAD_BRANCH; dispatching required checks."
+          gh workflow run ci.yml --ref "$HEAD_BRANCH"
+          gh workflow run secret-scan.yml --ref "$HEAD_BRANCH"
+          gh workflow run pr-lint.yml --ref "$HEAD_BRANCH" -f pr_number="$PR_NUMBER"

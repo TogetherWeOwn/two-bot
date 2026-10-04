@@ -58,6 +58,15 @@ test('planSession: both keys -> both destinations, deduped and ordered', () => {
   assert.deepEqual(plan.unavailable, []);
 });
 
+test('planSession: channelIds follow catalog order regardless of submission order (TOG-7439)', () => {
+  const plan = planSession(['join-voice', 'find-players'], anyVisible);
+  assert.deepEqual(plan.channelIds, [LOOKING_TO_PLAY_CHANNEL_ID, LOBBY_VOICE_CHANNEL_ID]);
+  assert.deepEqual(
+    plan.picks.map((p) => p.key),
+    ['find-players', 'join-voice'],
+  );
+});
+
 test('planSession: re-selecting the same option is idempotent', () => {
   const once = planSession(['find-players'], anyVisible);
   const twice = planSession(['find-players', 'find-players'], anyVisible);
@@ -73,18 +82,24 @@ test('planSession: an invisible destination is withheld, not linked', () => {
   assert.doesNotMatch(sessionAckText(plan), new RegExp(LOBBY_VOICE_CHANNEL_ID));
 });
 
-test('planSession: unknown and stale keys are reported, never routed', () => {
-  // A stale panel from before an option was renamed or removed.
+test('planSession: a stale key no longer sinks the valid picks (TOG-8768)', () => {
+  // A stale panel from before an option was renamed or removed: the stale key
+  // is reported, but the valid pick routes alongside it - like planSelection.
   const plan = planSession(['survival', 'find-players'], anyVisible);
   assert.deepEqual(plan.unknownKeys, ['survival']);
-  assert.deepEqual(plan.channelIds, [], 'any stale key invalidates the whole submission');
-  assert.match(sessionAckText(plan), /stale/i);
-  assert.doesNotMatch(sessionAckText(plan), new RegExp(LOOKING_TO_PLAY_CHANNEL_ID));
+  assert.deepEqual(plan.channelIds, [LOOKING_TO_PLAY_CHANNEL_ID]);
+  const ack = sessionAckText(plan);
+  assert.match(ack, new RegExp(`<#${LOOKING_TO_PLAY_CHANNEL_ID}>`), 'valid pick must still link');
+  assert.match(ack, /stale/i, 'the stale part must still surface a retry note');
+  assert.doesNotMatch(ack, /nothing was changed/i, 'must not claim nothing changed when a pick routed');
+});
 
-  // Entirely unknown: nothing routed at all.
+test('planSession: an entirely unknown submission routes nothing and offers a retry', () => {
   const none = planSession(['nonsense'], anyVisible);
   assert.deepEqual(none.channelIds, []);
   assert.deepEqual(none.unknownKeys, ['nonsense']);
+  assert.match(sessionAckText(none), /stale/i);
+  assert.match(sessionAckText(none), /nothing was changed/i);
 });
 
 test('sessionAckText: an all-unknown submission offers a retry, not silence', () => {

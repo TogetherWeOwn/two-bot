@@ -238,6 +238,218 @@ describe('backup round trip', () => {
         G, 'm1', 'colors', 'released-claim', 4, '2026-08-01T12:00:00.000Z',
         'self-role-event-1', 'red', true, '0000000000001:self-role-event-1',
       );
+    // TOG-9074: everything below was silently omitted from the backup before
+    // v4 - leveling, scorecard, settings, RSVP/LFG/feed, temp voice, and the
+    // rest. One row per table keeps the round trip honest without slowing it.
+    await harness.db
+      .prepare(
+        `INSERT INTO guild_counters (guild_id, human_member_count, human_member_count_at, online_count, online_count_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(G, 120, '2026-08-09T00:00:00.000Z', null, null);
+    await harness.db
+      .prepare(
+        `INSERT INTO counter_snapshots (guild_id, human_member_count, human_member_count_at, online_count, online_count_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(G, 120, '2026-08-09T00:00:00.000Z', null, null);
+    await harness.db
+      .prepare(`UPDATE rank_ladder SET role_id = ? WHERE rank_key = 'soldier'`)
+      .run('role-soldier');
+    await harness.db
+      .prepare(`INSERT INTO member_ranks (guild_id, member_id, rank_key, updated_at) VALUES (?, ?, ?, ?)`)
+      .run(G, 'm1', 'soldier', '2026-08-01T12:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO rank_snapshots (guild_id, rank_key, member_count, holders_count, snapshot_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(G, 'soldier', 10, 25, '2026-08-09T00:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO scheduled_events (guild_id, event_id, name, starts_at, channel_id, description, status, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(G, 'event-1', 'Game night', '2026-08-15T19:00:00.000Z', 'c1', 'weekly games', 'scheduled', '2026-08-01T12:00:00.000Z');
+    await harness.db
+      .prepare(`INSERT INTO member_exclusions (guild_id, member_id, reason, updated_at) VALUES (?, ?, ?, ?)`)
+      .run(G, 'raid-1', 'raid', '2026-08-01T12:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO presence_probe (guild_id, observed_at, approximate_presence_count, bot_floor)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(G, '2026-08-09T00:00:00.000Z', 27, 23);
+    await harness.db
+      .prepare(`UPDATE web_contract_meta SET guild_id = ? WHERE singleton = TRUE`)
+      .run(G);
+    await harness.db
+      .prepare(
+        `INSERT INTO xp_awards (guild_id, member_id, source, xp, occurred_at, channel_id)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(G, 'm1', 'message', 5, '2026-08-01T10:00:00.000Z', 'c1');
+    await harness.db
+      .prepare(
+        `INSERT INTO member_levels (guild_id, member_id, xp, message_xp, voice_xp, imported_xp, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(G, 'm1', 15, 5, 10, 0, '2026-08-01T10:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO xp_cooldowns (guild_id, member_id, source, last_awarded_at)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(G, 'm1', 'message', '2026-08-01T10:00:00.000Z');
+    await harness.db
+      .prepare(`INSERT INTO level_role_rewards (guild_id, level, role_id) VALUES (?, ?, ?)`)
+      .run(G, 5, 'role-level-5');
+    await harness.db
+      .prepare(
+        `INSERT INTO level_import_runs
+           (guild_id, source, source_rows, unique_members, inserted, updated, unchanged,
+            duplicate_rows, total_imported_xp, imported_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(G, 'mee6', 100, 90, 80, 5, 5, 0, 8000, '2026-08-01T10:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO community_facts
+           (guild_id, event_type, source_event_id, actor_id, occurred_at, recorded_at,
+            source, classifier_version, classification, matched_rule, metadata, idempotency_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        G, 'message_created', 'evt-1', 'm1', '2026-08-01T10:00:00.000Z', '2026-08-01T10:00:01.000Z',
+        'collector', 'v3', 'eligible_human', 'human-rule', '{"channel":"c1"}', 'fact-key-1',
+      );
+    await harness.db
+      .prepare(
+        `INSERT INTO community_stream_heartbeats (guild_id, stream, covered_from, covered_through, updated_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(G, 'message_created', '2026-08-01T00:00:00.000Z', '2026-08-08T00:00:00.000Z', '2026-08-08T00:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO community_scorecard_runs
+           (guild_id, week_start, week_end, classifier_version, watermark, input_count, input_hash,
+            idempotency_key, revision, run_status, coverage_state, evidence_state,
+            scorecard_json, intervention_code, generated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        G, '2026-07-27', '2026-08-03', 'v3', 42, 100, 'deadbeef',
+        'run-key-1', 1, 'completed', 'complete', 'sufficient',
+        '{"score":7}', 'NONE', '2026-08-03T00:00:00.000Z',
+      );
+    await harness.db
+      .prepare(
+        `INSERT INTO community_scorecard_alerts (guild_id, week_start, alert_key, created_at)
+         VALUES (?, ?, ?, ?)`,
+      )
+      .run(G, '2026-07-27', 'drop-week-1', '2026-08-03T00:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO guild_settings (guild_id, key, value, version, updated_at, updated_by)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(G, 'welcome.message', { text: 'hello' }, 3, '2026-08-01T12:00:00.000Z', 'admin-1');
+    await harness.db
+      .prepare(
+        `INSERT INTO guild_settings_audit (guild_id, key, old_value, new_value, actor, at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(G, 'welcome.message', null, { text: 'hello' }, 'admin-1', '2026-08-01T12:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO event_rsvps (guild_id, event_id, user_id, status, responded_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(G, 'event-1', 'm1', 'going', '2026-08-02T10:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO lfg_posts
+           (id, guild_id, channel_id, message_id, title, starts_at, status, created_by, created_at, closed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('lfg-1', G, 'c1', 'msg-1', 'Dungeon run', '2026-08-15T19:00:00.000Z', 'open', 'm0', '2026-08-01T12:00:00.000Z', null);
+    await harness.db
+      .prepare(
+        `INSERT INTO lfg_roles (lfg_id, role_key, label, slots, position)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run('lfg-1', 'tank', 'Tank', 1, 0);
+    await harness.db
+      .prepare(`INSERT INTO lfg_signups (lfg_id, user_id, role_key, joined_at) VALUES (?, ?, ?, ?)`)
+      .run('lfg-1', 'm1', 'tank', '2026-08-02T10:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO feed_relays
+           (id, guild_id, channel_id, kind, source, enabled, last_checked_at, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('feed-1', G, 'c1', 'rss', 'https://example.com/feed', true, null, 'staff', '2026-08-01T12:00:00.000Z', '2026-08-01T12:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO feed_deliveries (feed_id, item_key, nonce, state, message_id, first_seen_at, delivered_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('feed-1', 'item-1', 'nonce-1', 'delivered', 'msg-2', '2026-08-02T10:00:00.000Z', '2026-08-02T10:01:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO temp_voice_channels
+           (id, guild_id, channel_id, generator_id, category_id, owner_id, created_by, name,
+            created_at, last_renamed_at, empty_since)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('vc-1', G, 'chan-vc-1', 'gen-1', 'cat-1', 'm1', 'm1', "m1's room", '2026-08-01T12:00:00.000Z', null, null);
+    await harness.db
+      .prepare(`INSERT INTO temp_voice_creates (guild_id, user_id, last_created_at) VALUES (?, ?, ?)`)
+      .run(G, 'm1', '2026-08-01T12:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO temp_voice_audit (id, guild_id, actor_id, channel_id, action, outcome, reason, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('vc-audit-1', G, 'm1', 'chan-vc-1', 'create', 'ok', null, '2026-08-01T12:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO announcements_audit_log (id, guild_id, actor_id, action, target_key, outcome, reason, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('ann-1', G, 'staff', 'announce.post', 'feed-1', 'ok', null, '2026-08-02T10:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO invite_campaigns (slug, invite_code, label, disabled_at, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run('launch-week', 'abc123', 'Launch week post', null, '2026-08-01T12:00:00.000Z');
+    await harness.db
+      .prepare(`INSERT INTO audit_kill_switch (id, engaged_at, engaged_by) VALUES (?, ?, ?)`)
+      .run(1, '2026-08-01T12:00:00.000Z', 'owner');
+    await harness.db
+      .prepare(
+        `INSERT INTO internal_action_log
+           (request_id, key_id, action, idempotency_key, outcome, code, status, reason, duration_ms, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('req-1', 'key-1', 'ping', 'idem-1', 'assigned', null, 200, 'ok', 5, '2026-08-01T12:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO internal_discord_events (guild_id, event_key, discord_event_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(G, 'evt-key-1', 'discord-1', '2026-08-01T12:00:00.000Z', '2026-08-01T12:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO internal_idempotency
+           (key_id, idempotency_key, action, request_hash, state, outcome, result_json, claimed_at, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('key-1', 'idem-1', 'ping', 'deadbeef', 'done', 'ok', '{"pong":true}', '2026-08-01T12:00:00.000Z', '2026-08-01T12:00:01.000Z');
+    await harness.db
+      .prepare(`INSERT INTO internal_nonces (key_id, nonce, seen_at) VALUES (?, ?, ?)`)
+      .run('key-1', 'nonce-1', '2026-08-01T12:00:00.000Z');
   }
 
   async function counts(): Promise<Record<string, number>> {
@@ -291,6 +503,32 @@ describe('backup round trip', () => {
     assert.equal(manifest.tables.find((t) => t.name === 'join_risk_flags')?.count, 1);
     assert.equal(manifest.tables.find((t) => t.name === 'self_role_audit')?.count, 1);
     assert.equal(manifest.tables.find((t) => t.name === 'self_role_panel_claims')?.count, 1);
+    // TOG-9074: the tables the v3 backup silently omitted must be in the v4
+    // manifest with their rows - one row each from seed().
+    for (const name of [
+      'guild_counters', 'counter_snapshots', 'member_ranks',
+      'rank_snapshots', 'scheduled_events', 'member_exclusions',
+      'presence_probe', 'web_contract_meta',
+      'xp_awards', 'member_levels', 'xp_cooldowns',
+      'level_role_rewards', 'level_import_runs',
+      'community_facts', 'community_stream_heartbeats',
+      'community_scorecard_runs', 'community_scorecard_alerts',
+      'guild_settings', 'guild_settings_audit',
+      'event_rsvps', 'lfg_posts', 'lfg_roles', 'lfg_signups',
+      'feed_relays', 'feed_deliveries',
+      'temp_voice_channels', 'temp_voice_creates', 'temp_voice_audit',
+      'announcements_audit_log', 'invite_campaigns', 'audit_kill_switch',
+      'internal_action_log', 'internal_discord_events',
+      'internal_idempotency', 'internal_nonces',
+    ] as const) {
+      assert.equal(
+        manifest.tables.find((t) => t.name === name)?.count, 1,
+        `${name} is missing from the dump manifest - the backup silently drops it`,
+      );
+    }
+    // rank_ladder carries only its five migration seed rows; the seed updates
+    // one role_id rather than inserting.
+    assert.equal(manifest.tables.find((t) => t.name === 'rank_ladder')?.count, 5);
 
     // Lose everything, exactly as a dead disk would.
     await harness.db.exec(`TRUNCATE ${DUMP_TABLES.join(', ')} RESTART IDENTITY`);
@@ -340,6 +578,52 @@ describe('backup round trip', () => {
     assert.deepEqual(processed.map((row) => row.message_id), [
       'automod-message-1', 'automod-message-2', 'automod-message-3',
     ]);
+
+    // TOG-9074: spot-check the formerly-omitted tables by value, not just by
+    // count - JSONB survival, the kill-switch row, and the FK chains.
+    const setting = await harness.db
+      .prepare(`SELECT key, value, version, updated_by FROM guild_settings WHERE guild_id = ?`)
+      .get(G);
+    assert.deepEqual({ ...setting }, {
+      key: 'welcome.message', value: { text: 'hello' }, version: 3, updated_by: 'admin-1',
+    });
+    const killSwitch = await harness.db
+      .prepare(`SELECT id, engaged_by FROM audit_kill_switch`)
+      .get();
+    assert.deepEqual({ ...killSwitch }, { id: 1, engaged_by: 'owner' });
+    const signup = await harness.db
+      .prepare(`SELECT l.user_id, r.label FROM lfg_signups l JOIN lfg_roles r
+                ON r.lfg_id = l.lfg_id AND r.role_key = l.role_key`)
+      .get();
+    assert.deepEqual({ ...signup }, { user_id: 'm1', label: 'Tank' });
+    const delivery = await harness.db
+      .prepare(`SELECT state, message_id FROM feed_deliveries WHERE feed_id = 'feed-1'`)
+      .get();
+    assert.deepEqual({ ...delivery }, { state: 'delivered', message_id: 'msg-2' });
+    const voice = await harness.db
+      .prepare(`SELECT owner_id, name FROM temp_voice_channels WHERE id = 'vc-1'`)
+      .get();
+    assert.deepEqual({ ...voice }, { owner_id: 'm1', name: "m1's room" });
+    const run = await harness.db
+      .prepare(`SELECT intervention_code, evidence_state FROM community_scorecard_runs`)
+      .get();
+    assert.deepEqual({ ...run }, { intervention_code: 'NONE', evidence_state: 'sufficient' });
+    const level = await harness.db
+      .prepare(`SELECT xp, message_xp, voice_xp FROM member_levels WHERE guild_id = ?`)
+      .get(G);
+    assert.deepEqual({ ...level }, { xp: 15, message_xp: 5, voice_xp: 10 });
+    const fact = await harness.db
+      .prepare(`SELECT classification, matched_rule FROM community_facts`)
+      .get();
+    assert.deepEqual({ ...fact }, { classification: 'eligible_human', matched_rule: 'human-rule' });
+    const ladder = await harness.db
+      .prepare(`SELECT role_id FROM rank_ladder WHERE rank_key = 'soldier'`)
+      .get();
+    assert.equal(ladder?.role_id, 'role-soldier');
+    const meta = await harness.db
+      .prepare(`SELECT guild_id FROM web_contract_meta WHERE singleton = TRUE`)
+      .get();
+    assert.equal(meta?.guild_id, G);
   });
 
   test('the id sequence resumes past the restored rows', async () => {
@@ -364,6 +648,97 @@ describe('backup round trip', () => {
       Number(r.eventId) > Number(max!.n),
       `new id ${r.eventId} should be past the restored max ${max!.n}`,
     );
+  });
+
+  test('every BIGSERIAL sequence resumes past its restored rows (TOG-9074)', async () => {
+    await seed();
+    const file = join(dir, 'sequences.ndjson.gz');
+    const manifest = await dump(harness.db, file);
+    assert.ok(Object.keys(manifest.sequences).length >= 6, 'expected a sequence mark per BIGSERIAL table');
+    await harness.db.exec(`TRUNCATE ${DUMP_TABLES.join(', ')} RESTART IDENTITY`);
+    await restore(harness.db, file);
+
+    // One direct insert per sequence table; each must land past the restored max.
+    const cases: Array<{ table: string; sql: string; args: unknown[] }> = [
+      {
+        table: 'xp_awards',
+        sql: `INSERT INTO xp_awards (guild_id, member_id, source, xp, occurred_at) VALUES (?, ?, ?, ?, ?) RETURNING id`,
+        args: [G, 'after-restore', 'message', 5, '2026-08-20T10:00:00.000Z'],
+      },
+      {
+        table: 'level_import_runs',
+        sql: `INSERT INTO level_import_runs
+                (guild_id, source, source_rows, unique_members, inserted, updated, unchanged,
+                 duplicate_rows, total_imported_xp, imported_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+        args: [G, 'mee6', 10, 9, 8, 1, 0, 0, 800, '2026-08-20T10:00:00.000Z'],
+      },
+      {
+        table: 'community_facts',
+        sql: `INSERT INTO community_facts
+                (guild_id, event_type, source_event_id, occurred_at, source,
+                 classifier_version, classification, matched_rule, idempotency_key)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+        args: [G, 'message_created', 'evt-after', '2026-08-20T10:00:00.000Z', 'collector', 'v3', 'bot', 'bot-rule', 'fact-key-after'],
+      },
+      {
+        table: 'community_scorecard_runs',
+        sql: `INSERT INTO community_scorecard_runs
+                (guild_id, week_start, week_end, classifier_version, watermark, input_count, input_hash,
+                 idempotency_key, revision, run_status, coverage_state, evidence_state,
+                 scorecard_json, intervention_code, generated_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+        args: [G, '2026-08-03', '2026-08-10', 'v3', 43, 50, 'cafef00d', 'run-key-after', 1, 'completed', 'complete', 'sufficient', '{}', 'NONE', '2026-08-10T00:00:00.000Z'],
+      },
+      {
+        table: 'guild_settings_audit',
+        sql: `INSERT INTO guild_settings_audit (guild_id, key, old_value, new_value, actor) VALUES (?, ?, ?, ?, ?) RETURNING id`,
+        args: [G, 'welcome.message', { text: 'hello' }, { text: 'hi' }, 'admin-1'],
+      },
+    ];
+    for (const c of cases) {
+      const before = await harness.db.prepare(`SELECT MAX(id) AS n FROM ${c.table}`).get<{ n: number }>();
+      const row = await harness.db.prepare(c.sql).get<{ id: number }>(...c.args);
+      assert.ok(
+        Number(row!.id) > Number(before!.n),
+        `${c.table}: new id ${row!.id} should be past the restored max ${before!.n}`,
+      );
+    }
+  });
+
+  test('target-time rows do not survive a restore: no source/target mixing (TOG-9074)', async () => {
+    await seed();
+    const file = join(dir, 'nomix.ndjson.gz');
+    await dump(harness.db, file);
+    const sourceCounts = await counts();
+
+    // Simulate a target that kept living after the backup was taken: extra
+    // rows in both an old table and a formerly-undumped one.
+    await harness.db
+      .prepare(
+        `INSERT INTO moderation_warnings (id, guild_id, user_id, actor_id, reason, request_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('warn-target-time', G, 'm9', 'staff', 'after backup', 'req-target', '2026-08-20T10:00:00.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO guild_settings (guild_id, key, value, version, updated_at, updated_by)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(G, 'target.only', { v: 1 }, 1, '2026-08-20T10:00:00.000Z', 'admin-1');
+    await harness.db
+      .prepare(
+        `INSERT INTO xp_awards (guild_id, member_id, source, xp, occurred_at) VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(G, 'm9', 'voice', 7, '2026-08-20T10:00:00.000Z');
+
+    const report = await restore(harness.db, file);
+    assert.ok(report.ok, 'restore reported a count mismatch');
+    assert.deepEqual(await counts(), sourceCounts, 'the restore must reproduce the source, not merge with the target');
+    const stray = await harness.db
+      .prepare(`SELECT key FROM guild_settings WHERE guild_id = ? AND key = 'target.only'`)
+      .get(G);
+    assert.equal(stray, undefined, 'a target-time settings row survived the restore');
   });
 
   test('idempotency survives the round trip, so a replayed join is still one join', async () => {

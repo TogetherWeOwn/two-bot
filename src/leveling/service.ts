@@ -18,7 +18,7 @@ export interface LevelProfile {
   messageXp: number;
   voiceXp: number;
   importedXp: number;
-  rank: number;
+  rank: number | null;
   memberCount: number;
   nextLevelXp: number;
 }
@@ -113,6 +113,10 @@ export class LevelingService {
     occurredAt: string,
     channelId?: string,
   ): Promise<XpAward> {
+    // TOG-7512: a non-finite duration must award nothing. Math.floor(NaN) is
+    // NaN, and NaN slips past the `amount <= 0` guard in award(), so without
+    // this an unmeasurable session could write garbage XP.
+    if (!Number.isFinite(durationSeconds)) return this.currentAward(guildId, memberId);
     const minutes = Math.floor(Math.max(0, durationSeconds) / 60);
     return this.award(
       guildId,
@@ -133,7 +137,10 @@ export class LevelingService {
     channelId?: string,
   ): Promise<XpAward> {
     const at = isoOrThrow(occurredAt);
-    if (amount <= 0) return this.currentAward(guildId, memberId);
+    // TOG-7512: NaN slips past `amount <= 0` (every comparison on NaN is
+    // false), so a non-finite amount must be refused explicitly - no write,
+    // no cooldown claim, current totals back.
+    if (!Number.isFinite(amount) || amount <= 0) return this.currentAward(guildId, memberId);
     const cooldownSeconds = source === 'message' ? MESSAGE_COOLDOWN_SECONDS : VOICE_COOLDOWN_SECONDS;
 
     try {
@@ -241,14 +248,14 @@ export class LevelingService {
         memberId,
       );
     const xp = Number(row?.xp ?? 0);
-    const ranked = await this.db
+    const ranked = row ? await this.db
       .prepare(
         `SELECT COUNT(*) AS rank
            FROM member_levels
           WHERE guild_id = ?
             AND (xp > ? OR (xp = ? AND member_id < ?))`,
       )
-      .get<{ rank: number }>(guildId, xp, xp, memberId);
+      .get<{ rank: number }>(guildId, xp, xp, memberId) : undefined;
     const total = await this.db
       .prepare(`SELECT COUNT(*) AS count FROM member_levels WHERE guild_id = ?`)
       .get<{ count: number }>(guildId);
@@ -261,7 +268,7 @@ export class LevelingService {
       messageXp: Number(row?.message_xp ?? 0),
       voiceXp: Number(row?.voice_xp ?? 0),
       importedXp: Number(row?.imported_xp ?? 0),
-      rank: Number(ranked?.rank ?? 0) + 1,
+      rank: row ? Number(ranked?.rank ?? 0) + 1 : null,
       memberCount: Number(total?.count ?? 0),
       nextLevelXp: totalXpForLevel(level + 1),
     };

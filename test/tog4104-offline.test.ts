@@ -31,15 +31,22 @@ test('TOG-4104 shipped proof, recovery and operator wrapper fixtures', async () 
     'concurrent mate drift before mutation is not overwritten',
     'concurrent writer before cleanup is not silently overwritten or reported PASS',
     'cache lag cannot turn a presence-only read into a successful roundtrip',
-    ...['wrong app', 'wrong runtime', 'missing runtime', 'missing source', 'wrong guild',
-      'missing guild', 'missing flag', 'malformed signing key', 'no exclusive window',
-      'public endpoint', 'URL credentials'].map((name) => `${name} refuses before mutation`),
+    'container resource UUID grounds the app check without a forwarded app UUID',
+    'own private interface address passes the URL check with full roundtrip',
+    ...['wrong app', 'neither app UUID matches', 'malformed runtime', 'missing runtime', 'missing source',
+      'wrong guild', 'missing guild', 'missing flag', 'malformed signing key', 'no exclusive window',
+      'public endpoint', 'foreign private endpoint', 'DNS endpoint', 'URL credentials']
+      .map((name) => `${name} refuses before mutation`),
     'malformed stored value refuses rather than writes an unreviewed recovery value',
     'redirect is not followed with signing headers',
-    'unwired settings endpoint refuses before mutation with an explicit HOLD reason',
-    ...['run', 'recover'].map((mode) => `wrapper holds ${mode} before any Docker operation`),
-    ...['wrong runtime', 'wrong container', 'stopped container']
+    'unwired settings endpoint refuses before mutation with a settings-unavailable reason',
+    ...['run', 'recover'].map((mode) => `wrapper runs ${mode} through the immutable container ID`),
+    ...['malformed runtime', 'missing runtime declaration']
+      .map((name) => `wrapper refuses ${name} before any Docker operation`),
+    'wrapper refuses a touched surface after inspection but before copying',
+    ...['wrong container', 'stopped container', 'wrong image', 'missing image receipt']
       .map((name) => `wrapper refuses ${name} before copying or executing`),
+    'wrapper refuses unresolvable container address before copying or executing',
     'wrapper rejects dirty packet even with approved SHA',
     'wrapper requires explicit writer exclusion and full pinned source',
   ];

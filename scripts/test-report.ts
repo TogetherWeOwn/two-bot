@@ -24,6 +24,18 @@
  * if a human also needs to read the run.
  */
 
+// Test reporter library (default-exported reporter generator). Importing this
+// file never reads argv and never exits; the block below only runs on direct
+// invocation.
+const isMain = typeof process.argv[1] === 'string' && import.meta.url === `file://${process.argv[1]}`;
+if (isMain) {
+  console.log('usage: node --test --test-reporter=./scripts/test-report.ts --test-reporter-destination=<results.ndjson> ...');
+  console.log('');
+  console.log('A node:test reporter that writes one JSON object per test point.');
+  console.log('Not invoked directly: it runs as a --test-reporter. No token, no network, no side effects on --help.');
+  process.exit(process.argv.includes('--help') ? 0 : 2);
+}
+
 /** One test point: a `test()`, or a `describe()` suite. */
 export interface ReportedTest {
   /** Absolute path of the file the test was declared in. */

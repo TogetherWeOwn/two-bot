@@ -1,3 +1,5 @@
+import { log } from '../core/log.ts';
+
 export type DiscordJsonResult<T> = { status: number; body: T | null };
 
 export interface DiscordRequestOptions {
@@ -42,7 +44,7 @@ export async function requestDiscordJson<T>(
     const body = (await response.json().catch(() => null)) as T | null;
     if (response.status !== 429 || attempt >= maxRetries) return { status: response.status, body };
     const retry = discordRetryAfterMs(response.headers, body, maxRetryAfterMs);
-    console.log(`  ... Discord rate limited, retrying in ${retry}ms (${attempt + 1}/${maxRetries})`);
+    log.debug('discord_rate_limited_retry', { retryAfterMs: retry, attempt: attempt + 1, maxRetries });
     await sleep(retry);
   }
 }

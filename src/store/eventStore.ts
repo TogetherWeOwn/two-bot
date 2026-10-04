@@ -1,6 +1,7 @@
 import type { Db } from './driver.ts';
 import {
   idempotencyKey,
+  isMeasurableGateClearing,
   MESSAGE_RUNGS,
   type EventType,
   type FunnelEvent,
@@ -11,6 +12,54 @@ export interface RecordResult {
   /** false when this exact event was already on file - not an error. */
   inserted: boolean;
   eventId: number | null;
+}
+
+/**
+ * Normalize an ISO-8601 UTC timestamp to a fixed-width 6-digit fraction so
+ * lexicographic comparison is chronological. Postgres `timestamptz`
+ * preserves microseconds; `Date.parse` does not (millisecond precision), so
+ * the membership clock's same-millisecond observations (e.g. `...000001Z`
+ * vs `...000002Z`) would compare equal and ordering would collapse.
+ */
+function normalizeIso(s: string): string {
+  const m = /^(.+T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z)$/.exec(s);
+  if (!m) return s;
+  return `${m[1]}.${(m[2] ?? '').padEnd(6, '0').slice(0, 6)}Z`;
+}
+
+/** Canonicalize a text-cast occurrence without losing its sub-millisecond digits. */
+function membershipOccurrenceIso(s: string): string {
+  // PostgreSQL text includes a space and session offset; SQLite stores ISO UTC.
+  // Date converts the offset, but only the original text retains microseconds.
+  const iso = new Date(s).toISOString();
+  const fraction = /[T ]\d{2}:\d{2}:\d{2}\.(\d+)/.exec(s)?.[1] ?? '';
+  const micros = fraction.padEnd(6, '0').slice(3, 6);
+  return /[1-9]/.test(micros) ? iso.replace('Z', `${micros}Z`) : iso;
+}
+
+/** Chronological comparison of ISO-8601 UTC timestamps; see normalizeIso. */
+function compareIso(a: string, b: string): number {
+  const na = normalizeIso(a);
+  const nb = normalizeIso(b);
+  return na < nb ? -1 : na > nb ? 1 : 0;
+}
+
+/** Live dispatch order when supplied, otherwise historical occurrence time. */
+function membershipOrderedAt(occurredAt: string, metadata: string | null): string {
+  if (metadata) {
+    try {
+      const parsed = JSON.parse(metadata) as { membershipObservedAt?: unknown };
+      if (
+        typeof parsed.membershipObservedAt === 'string' &&
+        Number.isFinite(Date.parse(parsed.membershipObservedAt))
+      ) {
+        return parsed.membershipObservedAt;
+      }
+    } catch {
+      /* not JSON - fall through to occurrence time */
+    }
+  }
+  return occurredAt;
 }
 
 /**
@@ -39,8 +88,15 @@ export class EventStore {
     this.db = db;
   }
 
-  async record(e: FunnelEvent): Promise<RecordResult> {
+  async record(e: FunnelEvent, opts: { membershipObservedAt?: string } = {}): Promise<RecordResult> {
     const key = idempotencyKey(e);
+    const observedAt = opts.membershipObservedAt;
+    if (observedAt !== undefined && (
+      !['member_join', 'member_leave'].includes(e.eventType) ||
+      !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3,6}Z$/.test(observedAt) ||
+      !Number.isFinite(Date.parse(observedAt))
+    )) throw new Error('membershipObservedAt requires a membership event and a valid UTC timestamp');
+    const metadata = observedAt === undefined ? e.metadata : { ...e.metadata, membershipObservedAt: observedAt };
 
     return this.db.transaction(async (tx) => {
       // Insert first and let the unique index arbitrate. A SELECT-then-INSERT
@@ -59,7 +115,7 @@ export class EventStore {
           e.guildId,
           e.occurredAt,
           e.source,
-          e.metadata ? JSON.stringify(e.metadata) : null,
+          metadata ? JSON.stringify(metadata) : null,
           key,
         );
 
@@ -68,6 +124,50 @@ export class EventStore {
         const existing = await tx
           .prepare(`SELECT id FROM events WHERE idempotency_key = ?`)
           .get<{ id: number }>(key);
+        if (existing && observedAt !== undefined) {
+          // A live redelivery reconfirms presence, not attribution or occurrence.
+          //
+          // Atomic maximum, portably: the previous single-statement jsonb
+          // conditional broke the offline SQLite probes (near "FOR"/"::"
+          // syntax errors), and a plain read-modify-write lets a paused older
+          // observation overwrite a newer commit. So the UPDATE is a
+          // compare-and-swap on the exact metadata string just read - a
+          // concurrent commit makes it match zero rows instead of clobbering -
+          // with bounded optimistic retries. On exhaustion, a portable no-op
+          // UPDATE locks the event row before the final read, so contention
+          // cannot silently discard an observation. No FOR UPDATE, casts, or
+          // CTEs: the offline SQLite probes run behind the same Db surface.
+          for (let attempt = 0; attempt <= 5; attempt++) {
+            if (attempt === 5) {
+              await tx.prepare(`UPDATE events SET id = id WHERE id = ?`).run(existing.id);
+            }
+            const cur = await tx
+              .prepare(`SELECT metadata FROM events WHERE id = ?`)
+              .get<{ metadata: string | null }>(existing.id);
+            let stored: string | null = null;
+            let base: Record<string, unknown> = {};
+            if (cur?.metadata) {
+              try {
+                base = JSON.parse(cur.metadata) as Record<string, unknown>;
+                if (typeof base.membershipObservedAt === 'string') stored = base.membershipObservedAt;
+              } catch {
+                base = {};
+                stored = null;
+              }
+            }
+            if (stored !== null && compareIso(stored, observedAt) >= 0) break;
+            const next = JSON.stringify({ ...base, membershipObservedAt: observedAt });
+            const swapped = await tx.prepare(
+              `UPDATE events SET metadata = ? WHERE id = ?
+                AND COALESCE(metadata, '') = COALESCE(?, '')`,
+            ).run(next, existing.id, cur?.metadata ?? null);
+            if (swapped.changes > 0) break;
+            if (attempt === 5) throw new Error('Membership observation update failed while holding its event lock');
+            // Someone committed between our read and write; re-read and
+            // converge on the max rather than clobbering it.
+          }
+          await this.project(tx, e);
+        }
         return { inserted: false, eventId: existing ? Number(existing.id) : null };
       }
 
@@ -109,10 +209,8 @@ export class EventStore {
 
     switch (e.eventType) {
       case 'member_join':
-        await set('joined_at', e.occurredAt);
-        await set('join_source', e.source);
-        await set('left_at', null);
-        await set('inactive_flagged_at', null);
+      case 'member_leave':
+        await this.projectMembership(db, e.guildId, e.memberId);
         break;
       case 'gate_cleared':
         // Earliest wins. A rejoin re-screens the member and the live listener
@@ -141,12 +239,86 @@ export class EventStore {
       case 'member_inactive':
         await set('inactive_flagged_at', e.occurredAt);
         break;
-      case 'member_leave':
-        await set('left_at', e.occurredAt);
-        break;
       case 'invite_click':
         break;
     }
+  }
+
+  private async projectMembership(db: Db, guildId: string, memberId: string): Promise<void> {
+    // Attribution follows actual join time; presence follows live dispatch order
+    // when supplied, otherwise historical occurrence time. Neither rewrites history.
+    // Inactivity resets on the latest actual join establishing a newer membership
+    // spell, independent of whether a newer leave currently wins presence.
+    // Reconfirming presence is not activity: a duplicate observation keeps the
+    // original occurrence, so it cannot clear a later flag.
+    //
+    // Portable by design: the offline SQLite probes run this same code behind
+    // the narrow Db surface, so no `FOR UPDATE`, `::` casts, CTEs, or
+    // UPDATE..FROM. The no-op UPDATE below takes the member row lock on
+    // Postgres - so a competing transaction that committed while we waited is
+    // visible to the reads that follow - and is a harmless no-op on SQLite.
+    // Ordering ties mirror the previous single-statement form exactly: latest
+    // join wins on occurrence with the earliest row breaking ties; presence
+    // wins on observation order with a leave breaking ties, then the newest row.
+    await db.prepare(
+      `UPDATE members SET member_id = member_id WHERE guild_id = ? AND member_id = ?`,
+    ).run(guildId, memberId);
+    // Standard text casts work on both backends and bypass the Postgres driver's
+    // millisecond-only timestamptz parser. Keep the precision local to membership.
+    const rows = (await db.prepare(
+      `SELECT id, event_type, CAST(occurred_at AS TEXT) AS occurred_at, source, metadata FROM events
+        WHERE guild_id = ? AND member_id = ?
+          AND event_type IN ('member_join', 'member_leave')`,
+    ).all<{
+      id: number; event_type: string; occurred_at: string; source: string; metadata: string | null;
+    }>(guildId, memberId)).map((r) => ({ ...r, occurred_at: membershipOccurrenceIso(r.occurred_at) }));
+    if (rows.length === 0) return;
+    let latestJoin: (typeof rows)[number] | undefined;
+    let latestPresence: (typeof rows)[number] | undefined;
+    let latestOrdered = '';
+    for (const r of rows) {
+      if (r.event_type === 'member_join') {
+        if (
+          !latestJoin || compareIso(r.occurred_at, latestJoin.occurred_at) > 0 ||
+          (compareIso(r.occurred_at, latestJoin.occurred_at) === 0 && r.id < latestJoin.id)
+        ) {
+          latestJoin = r;
+        }
+      }
+      const ordered = normalizeIso(membershipOrderedAt(r.occurred_at, r.metadata));
+      if (
+        !latestPresence || ordered > latestOrdered ||
+        (ordered === latestOrdered &&
+          ((r.event_type === 'member_leave') !== (latestPresence.event_type === 'member_leave')
+            ? r.event_type === 'member_leave'
+            : r.id > latestPresence.id))
+      ) {
+        latestPresence = r;
+        latestOrdered = ordered;
+      }
+    }
+    const current = await db.prepare(
+      `SELECT CAST(inactive_flagged_at AS TEXT) AS inactive_flagged_at FROM members
+        WHERE guild_id = ? AND member_id = ?`,
+    ).get<{ inactive_flagged_at: string | null }>(guildId, memberId);
+    const flag = current?.inactive_flagged_at == null ? null : membershipOccurrenceIso(current.inactive_flagged_at);
+    const cleared =
+      flag !== null && latestJoin && compareIso(flag, latestJoin.occurred_at) <= 0 ? null : flag;
+    await db.prepare(
+      `UPDATE members SET
+         joined_at = COALESCE(?, joined_at),
+         join_source = COALESCE(?, join_source),
+         left_at = ?,
+         inactive_flagged_at = ?
+       WHERE guild_id = ? AND member_id = ?`,
+    ).run(
+      latestJoin?.occurred_at ?? null,
+      latestJoin?.source ?? null,
+      latestPresence?.event_type === 'member_leave' ? (latestPresence?.occurred_at ?? null) : null,
+      cleared,
+      guildId,
+      memberId,
+    );
   }
 
   /**
@@ -305,6 +477,43 @@ export class EventStore {
       .get<{ a: string | null; b: string | null }>(from, to, guildId, memberId, from, to);
     if (!row?.a || !row?.b) return null;
     return (Date.parse(row.b) - Date.parse(row.a)) / 1000;
+  }
+
+  /**
+   * Seconds from `member_join` to `gate_cleared` for one member, or null when
+   * there is no measurable clearing on file (TOG-6474).
+   *
+   * A backfilled clearing (`source` starting with `backfill:`, or
+   * `metadata.timestampIsJoinTime` - see `isMeasurableGateClearing`) says THAT
+   * the member is through the gate, never WHEN: its `occurred_at` is the join
+   * time, a placeholder. Feeding it to time-to-clear arithmetic would print
+   * members clearing in 0s. Such rows still count toward conversion - that is
+   * what the binary is for - they just never feed timing.
+   *
+   * The generic `secondsBetween` above stays source-blind on purpose: its
+   * other pairs (join -> channel_routed, join -> first_message) have no
+   * placeholder rows, so the exclusion belongs to the gate pair, not to it.
+   */
+  async timeToGateClearSeconds(guildId: string, memberId: string): Promise<number | null> {
+    const row = await this.db
+      .prepare(
+        `SELECT source, metadata, occurred_at FROM events
+         WHERE guild_id = ? AND member_id = ? AND event_type = 'gate_cleared'
+         ORDER BY occurred_at ASC
+         LIMIT 1`,
+      )
+      .get<{ source: string; metadata: string | null; occurred_at: string }>(guildId, memberId);
+    if (!row) return null;
+    let metadata: Record<string, unknown> | null = null;
+    if (row.metadata) {
+      try {
+        metadata = JSON.parse(row.metadata) as Record<string, unknown>;
+      } catch {
+        metadata = null;
+      }
+    }
+    if (!isMeasurableGateClearing(row.source, metadata)) return null;
+    return this.secondsBetween(guildId, memberId, 'member_join', 'gate_cleared');
   }
 
   /** Distinct members who reached a given stage. Repeatable events count once. */

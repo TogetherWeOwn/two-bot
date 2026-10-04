@@ -21,6 +21,11 @@ import { setLogLevel } from '../src/core/log.ts';
 import { DiscordRest } from '../src/discord/rest.ts';
 import { findEarlyMessages, writeEarlyMessages } from '../src/backfill/messages.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/backfill-messages.ts [--dry-run] [--max-pages=<count>] [--since=<ISO timestamp>]');
+  process.exit(0);
+}
+
 const argv = process.argv.slice(2);
 const flag = (name: string): string | null => {
   const hit = argv.find((a) => a === `--${name}` || a.startsWith(`--${name}=`));
@@ -78,6 +83,7 @@ console.log(`  members who ever posted ${pad(summary.authorsSeen)}`);
 // The number TWO-95 is about: these are the members AM7 can now judge on the
 // agreed 3+ bar instead of the "posted at all" proxy.
 console.log(`  members with 3+ posts   ${pad(summary.authorsWithFullLadder)}   (AM7 text bar, exactly)`);
+console.log(`  malformed rows refused  ${pad(summary.malformed)}   (counted, never laddered)`);
 console.log(`  oldest message reached  ${summary.scannedBackTo?.slice(0, 10) ?? 'n/a'}`);
 
 if (!dryRun) {

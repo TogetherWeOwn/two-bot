@@ -34,6 +34,8 @@ import { DryRunTransport, type HarnessTransport } from '../src/e2e/transport.ts'
 import { DiscordKicker } from '../src/discord/kick.ts';
 import { readSecret } from '../src/core/credentials.ts';
 import { TWO_STAGING_GUILD_ID } from '../src/staging/spec.ts';
+import { E2eSelftestError, runSelftestProbe } from '../src/e2e/selftest.ts';
+import { startMockDiscord } from '../tools/mock-discord/server.ts';
 
 const DEFAULT_ASSERTION_TIMEOUT_MS = 15_000;
 
@@ -125,8 +127,43 @@ async function killSwitch(): Promise<number> {
   return result.complete ? 0 : 1;
 }
 
+/**
+ * Self-test: boot tools/mock-discord, run one canned probe, report pass.
+ * No credential, no live Discord, no writes - the probe is a single GET.
+ * `--selftest-base <url>` skips the boot and probes that base instead, so a
+ * broken mock URL fails with the same named error the boot path reports.
+ */
+async function selftest(): Promise<number> {
+  const override = arg('selftest-base');
+  const mock = override ? null : await startMockDiscord();
+  try {
+    const apiBase = override ?? mock!.apiBase;
+    const result = await runSelftestProbe({ apiBase });
+    console.log(`  ok   ${result.probe} -> ${result.gatewayUrl}`);
+    console.log('\nself-test passed\n');
+    return 0;
+  } catch (err) {
+    const code = err instanceof E2eSelftestError ? err.code : 'mock_probe_failed';
+    console.error(`  FAIL  gateway-bot -> ${code}`);
+    console.error(`\nself-test FAILED (${code})\n`);
+    return 1;
+  } finally {
+    await mock?.close();
+  }
+}
+
 async function main(): Promise<number> {
+  if (flag('help')) {
+    console.log('usage: node scripts/e2e-harness.ts [--dry-run] [--flow <key>] [--out <file>] [--timeout-ms <n>] [--no-pace] [--kill-switch --reason "<why>"] [--selftest]');
+    console.log('');
+    console.log('Drive the end-to-end member flows against TWO Staging (TOG-3978).');
+    console.log('  --dry-run   no credential, no session, no network; proves step sequence and pacing only');
+    console.log('  --selftest  boot tools/mock-discord, run one canned probe, report pass; no credential, no live Discord');
+    console.log('Live flows need TWO_E2E_ACCOUNT_ID, TWO_E2E_STAFF_ROLE_ID and a user credential; --help needs none.');
+    return 0;
+  }
   if (flag('kill-switch')) return killSwitch();
+  if (flag('selftest')) return selftest();
 
   const dryRun = flag('dry-run');
   const only = arg('flow');

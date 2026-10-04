@@ -27,11 +27,22 @@
  *
  * WORKS WITHOUT A DEPLOYED BOT. Reads only the database, so it runs off
  * whatever `npm run capture` has written. It needs no token and no host.
+ *
+ * Scoped to one guild (TOG-9555): every events/members collect query below
+ * carries a `guild_id = ?` predicate bound to DISCORD_GUILD_ID, so a database
+ * holding several guilds reports only this server's numbers. The two
+ * invite_campaigns / invite_snapshots reads are exempt and marked exempt
+ * where they appear, matching the funnel precedent (TOG-8738).
  */
 import { openDb } from '../src/store/db.ts';
 import { ANOMALIES, excludeClause, windowBounds } from '../src/analytics/anomalies.ts';
 import { collapseCrossSourceDuplicates } from '../src/backfill/dedupe.ts';
 import { rollUp, rate, type JoinRecord, type AttributionRow } from '../src/analytics/attribution.ts';
+
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/attribution.ts [days|all] [--csv]');
+  process.exit(0);
+}
 
 const argv = process.argv.slice(2);
 const csv = argv.includes('--csv');
@@ -48,6 +59,13 @@ if (!databaseUrl) {
   console.error('attribution: TWO_DATABASE_URL is not set.');
   process.exit(1);
 }
+// TOG-9555: one server per report. Without the guild the collects below would
+// sum every guild in the database, the same bug f0caf422 fixed for funnel.
+const guildId = process.env.DISCORD_GUILD_ID?.trim() ?? '';
+if (!guildId) {
+  console.error('DISCORD_GUILD_ID is not set - there is no server to report on.');
+  process.exit(1);
+}
 const nowMs = Date.now();
 // Postgres rejects year 0000 (`date/time field value out of range`). The real
 // server has no pre-1970 joins, and this is only a lower bound, so 1970-01-01
@@ -61,10 +79,11 @@ const joinExcl = excludeClause('member_join');
 const joinEvents = await db
   .prepare(
     `SELECT member_id, occurred_at, source, metadata FROM events
-      WHERE event_type='member_join' AND member_id IS NOT NULL AND occurred_at >= ?${joinExcl.sql}
+      WHERE event_type='member_join' AND guild_id = ? AND member_id IS NOT NULL AND occurred_at >= ?${joinExcl.sql}
       ORDER BY occurred_at`,
   )
   .all<{ member_id: string; occurred_at: string; source: string; metadata: string | null }>(
+    guildId,
     since,
     ...joinExcl.params,
   );
@@ -104,7 +123,7 @@ const memberRows = await db
   .prepare(
     `SELECT member_id, first_message_at, third_message_at, first_voice_at, last_active_at,
             left_at, is_bot
-       FROM members`,
+       FROM members WHERE guild_id = ?`,
   )
   .all<{
     member_id: string;
@@ -114,7 +133,7 @@ const memberRows = await db
     last_active_at: string | null;
     left_at: string | null;
     is_bot: number;
-  }>();
+  }>(guildId);
 const byMember = new Map(memberRows.map((m) => [m.member_id, m]));
 
 const records: JoinRecord[] = [];
@@ -152,13 +171,17 @@ for (const e of kept) {
 const clickRows = await db
   .prepare(
     `SELECT source, COUNT(*) AS n FROM events
-      WHERE event_type='invite_click' AND occurred_at >= ? GROUP BY source`,
+      WHERE event_type='invite_click' AND guild_id = ? AND occurred_at >= ? GROUP BY source`,
   )
-  .all<{ source: string; n: number }>(since);
+  .all<{ source: string; n: number }>(guildId, since);
 const clicksBySource = new Map(clickRows.map((r) => [r.source, Number(r.n)]));
 
 // Which zero this is matters. "No tracked link exists" and "the link is live and
 // nobody clicked it" are opposite problems with opposite fixes.
+//
+// EXEMPT from guild scoping: invite_campaigns has no guild column
+// (migrations/0006) - campaigns are server-global config, so this count is
+// the table size by construction. Matches the funnel precedent (TOG-8738).
 const trackedLinks = await db
   .prepare(`SELECT COUNT(*) AS n FROM invite_campaigns`)
   .get<{ n: number }>()
@@ -167,6 +190,9 @@ const trackedLinks = await db
 
 // --- every live code, including the ones producing nothing -------------------
 
+// EXEMPT from guild scoping like the invite_campaigns read above: snapshot
+// codes feed the always-show list, not the counts. Matches the funnel
+// precedent (TOG-8738), which exempts its invite reads the same way.
 const codes = await db
   .prepare(`SELECT code, uses, channel_id, updated_at FROM invite_snapshots ORDER BY code`)
   .all<{ code: string; uses: number; channel_id: string | null; updated_at: string }>();
@@ -186,17 +212,20 @@ const alwaysShow = codes.map((c) => `invite:${c.code}`);
 // moving last_active_at forward with no bot running. Voice has no such path. So
 // if the newest voice signal is far behind the newest signal of any kind, the
 // gap is missing voice capture rather than a quiet server. Comparing the two
-// avoids the false alarm from reading voice alone, where a stale date only
-// means "nobody entered voice for the first time lately".
+// avoids the false alarm from reading voice alone on a quiet server. Repeat
+// session starts and ends measure ongoing capture; first-ever events also
+// cover older history, but alone only tell us when someone first entered
+// voice. Ends count because a leave proves presence even when the start row
+// is missing (bot-down unknown-start sessions still advance activity).
 const VOICE_LAG_DAYS = 30;
 const lastVoiceAt =
   (
     await db
-      .prepare(`SELECT MAX(occurred_at) AS t FROM events WHERE event_type='first_voice_session'`)
-      .get<{ t: string | null }>()
+      .prepare(`SELECT MAX(occurred_at) AS t FROM events WHERE event_type IN ('first_voice_session', 'voice_session_start', 'voice_session_end') AND guild_id = ?`)
+      .get<{ t: string | null }>(guildId)
   )?.t ?? null;
 const lastAnyActivityAt =
-  (await db.prepare(`SELECT MAX(last_active_at) AS t FROM members`).get<{ t: string | null }>())
+  (await db.prepare(`SELECT MAX(last_active_at) AS t FROM members WHERE guild_id = ?`).get<{ t: string | null }>(guildId))
     ?.t ?? null;
 const daysAgo = (iso: string | null): number | null =>
   iso ? Math.floor((nowMs - Date.parse(iso)) / 86_400_000) : null;
@@ -213,16 +242,16 @@ const realMembers = Number(
     await db
       .prepare(
         `SELECT COUNT(*) AS n FROM members
-          WHERE NOT is_bot AND left_at IS NULL${memberExcl.sql}`,
+          WHERE guild_id = ? AND NOT is_bot AND left_at IS NULL${memberExcl.sql}`,
       )
-      .get<{ n: number }>(...memberExcl.params)
+      .get<{ n: number }>(guildId, ...memberExcl.params)
   )?.n ?? 0,
 );
 const discordMembers = Number(
   (
     await db
-      .prepare(`SELECT COUNT(*) AS n FROM members WHERE NOT is_bot AND left_at IS NULL`)
-      .get<{ n: number }>()
+      .prepare(`SELECT COUNT(*) AS n FROM members WHERE guild_id = ? AND NOT is_bot AND left_at IS NULL`)
+      .get<{ n: number }>(guildId)
   )?.n ?? 0,
 );
 

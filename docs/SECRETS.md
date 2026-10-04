@@ -44,7 +44,19 @@ whoever owns the box (TWO-79), not by a config file. The full accounting is the
 | Discord bot token | `discord_token` | `DISCORD_BOT_TOKEN`, then `DISCORD_TOKEN` |
 | Postgres URL | `database_url` | `TWO_DATABASE_URL` |
 | Internal-actions signing keys | `internal_keys` | `TWO_INTERNAL_KEYS` |
+| Staging bot token (Owen QA Test) | `discord_staging_token` | `DISCORD_STAGING_BOT_TOKEN` |
+| Moderation audit MAC secret | `moderation_audit_secret` | `TWO_MODERATION_AUDIT_SECRET` |
 | e2e test-account token | `two_e2e_user_token` | `TWO_E2E_USER_TOKEN` |
+
+`discord_staging_token` is wired only in
+`deploy/two-bot-guild-config-backup.service` — the staging snapshot is the only
+systemd unit that needs the staging bot, so the live bot unit never sees it.
+`moderation_audit_secret` is deliberately **env-only**: the MAC markers are not
+minted unless the secret is provisioned, `null` is the safe default, and wiring
+a `LoadCredential` for it is deferred until MAC enforcement lands. A missing
+source file fails a unit at start, so an unwired-until-needed secret stays out
+of every unit. `two_e2e_user_token` never runs under systemd at all — the e2e
+harness is staging-only and on-demand (TOG-3978 conditions below).
 
 The credential wins when present. The environment fallback is what makes local
 development, CI and the one-off scripts keep working unchanged — none of those
@@ -78,18 +90,31 @@ Scoped to what the funnel actually needs. Not Administrator.
 - Message Content Intent — **leave OFF.** We count that a message happened; we
   never read it.
 
-**OAuth2 scopes:** `bot`
+**OAuth2 scopes:** `bot applications.commands` — the second scope is what
+lets `guild.commands.set` (`src/discord/commandRegistry.ts`) publish slash
+commands. Inviting with `bot` alone registers the bot but 403s command
+registration. Matches the staging invite in `src/staging/spec.ts`.
 
 **Permissions:** `View Channels`, `Manage Server`, `Manage Roles`,
-`Manage Events`, `Create Instant Invite`, `Send Messages`.
+`Manage Events`, `Create Instant Invite`, `Send Messages`, `Manage Channels`.
 
-**Permission integer: `8858373153`** (verified against `discord.js`'s own
-`PermissionFlagsBits` constants, not hand-computed). Apply/invite URL, using
+**Permission integer: `8858373169`** (verified against `discord.js`'s own
+`PermissionFlagsBits` constants, not hand-computed; `8858373153 + 2^4` for
+Manage Channels). Apply/invite URL, using
 the live application id:
 
 ```
-https://discord.com/api/oauth2/authorize?client_id=1539711683898118154&permissions=8858373153&scope=bot
+https://discord.com/api/oauth2/authorize?client_id=1539711683898118154&permissions=8858373169&scope=bot%20applications.commands
 ```
+
+`Manage Channels` is the uncomfortable new one, so to be explicit about why:
+`tickets.open` (`src/discord/tickets.ts:381`, `guild.channels.create`) needs
+guild-level Manage Channels (bit 4), and `tickets.close` plus the
+open-failure rollback delete the channel — measured in staging
+(throwaway channel-create HTTP 201 with bit 4
+present; all four staging category overwrite lists empty, so no category grant
+substitutes). Bit 4 also permits channel deletion, so it is granted
+deliberately and recorded here — not widened silently.
 
 `Manage Server` is the uncomfortable one, so to be explicit about why: it is the
 only permission that allows reading the server's invite list, and reading invite
@@ -114,8 +139,9 @@ breaks even when every bit above is correctly granted.
 ## Not needed, not requested
 
 The bot does not ask for and must not be given: Administrator, Kick Members,
-Ban Members, or Manage Channels. It is a read-and-record service plus the four
-internal-actions bits above — nothing that lets it moderate the server.
+or Ban Members. It is a read-and-record service plus the four
+internal-actions bits above and Manage Channels for tickets — nothing that lets it moderate the server
+beyond opening and deleting its own ticket channels.
 
 ## Checking it is right
 
@@ -142,8 +168,8 @@ DISCORD_TOKEN=... DISCORD_GUILD_ID=... npm run verify:grant
 ```
 
 It exits non-zero on any missing bit, any extra bit, and on Administrator
-specifically, so exit 0 means the live grant is bit-for-bit `8858373153` and
-nothing more. `npm run verify:grant:selftest` runs its six cases offline with
+specifically, so exit 0 means the live grant is bit-for-bit `8858373169` and
+nothing more. `npm run verify:grant:selftest` runs its seven cases offline with
 no token and no network; CI runs it on every PR.
 
 ## Current state
@@ -174,7 +200,9 @@ and one-click join (TWO-57) additionally needs `Manage Events` and
 
 **TOG-64 reconciled this** (2026-09-02): the target grant is the six-bit set
 above, permission integer `8858373153`, not the two-bit set this section used
-to describe. `scripts/preflight.ts` now asserts all four internal-actions bits
+to describe. **Extended** (2026-09-26): tickets need Manage
+Channels (bit 4), so the target is now the seven-bit set, permission integer
+`8858373169`. `scripts/preflight.ts` now asserts all four internal-actions bits
 explicitly. Applying it — via the invite URL above, re-inviting the bot with
 the new permissions — is still a Discord-portal change gated on whoever
 administers the server; this repo cannot execute it. After applying it, run
