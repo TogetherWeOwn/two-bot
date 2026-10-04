@@ -4,6 +4,7 @@ import { buildDashboard, countBySource, labelSource } from '../src/analytics/das
 import type { Db } from '../src/store/driver.ts';
 
 const NOW = new Date('2026-03-02T12:00:00.000Z');
+const GUILD = 'guild-1';
 // Joins land strictly inside the current window: dashboard windows are
 // [weekStart, generatedAt), so a join stamped exactly at `now` reads as the future.
 const AT = new Date(NOW.getTime() - 1).toISOString();
@@ -62,7 +63,7 @@ for (const sources of [
   ['ambiguous', 'unknown', 'backfill:log:member-join'],
 ]) {
   test(`unattributed dashboard joins remain counted: ${sources.join(', ')}`, async () => {
-    const d = await buildDashboard(fakeDb(sources), { now: NOW, weeks: 2, anomalies: [] });
+    const d = await buildDashboard(fakeDb(sources), { guildId: GUILD, now: NOW, weeks: 2, anomalies: [] });
     assert.equal(d.thisWeek.joins, sources.length);
     assert.equal(d.thisWeek.net, sources.length);
     assert.equal(d.realHumans, sources.length);
@@ -84,7 +85,7 @@ for (const sources of [
 for (const source of ['invite:a', 'vanity']) {
   test(`known ${source} suppresses the no-known-source caveat`, async () => {
     const d = await buildDashboard(fakeDb(['ambiguous:a+b', source]), {
-      now: NOW, weeks: 2, anomalies: [],
+      guildId: GUILD, now: NOW, weeks: 2, anomalies: [],
     });
     assert.equal(d.thisWeek.joins, 2);
     assert.equal(d.sourcesAllTime.filter((row) => !row.unattributed).length, 1);
