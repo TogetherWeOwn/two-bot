@@ -2,7 +2,7 @@
 
 > APPROVED copy — CPO sign-off 2026-09-27 (confirmation accepted, accuracy
 > spot-checked against `src/onboarding/session.ts` + `src/discord/sessionWelcome.ts`).
-> Follow-up to [TOG-4823](/TOG/issues/TOG-4823). No live-guild action in this pack.
+> Follow-up to the pack 1 welcome copy. No live-guild action in this pack.
 >
 > This file is the source of truth. The short help post
 > (`docs/COMMUNITY_HELP_POST.md`, same pack) is the pinned summary of it.
@@ -95,7 +95,7 @@ what's stored lives in `docs/PRIVACY.md`.
   filling the help post's `<link added on publish>` are live-guild steps at
   publish time, outside this docs pack.
 - **Option B (deferred):** append `Stuck? See the pinned help post 👆` to the
-  welcome text. Touches the [TOG-93](/TOG/issues/TOG-93) one-message shape —
+  welcome text. Touches the one-message shape of the welcome post —
   deferred to the week-4 metrics read per CPO.
 
 ## Acceptance for this file
