@@ -83,7 +83,7 @@ def main():
                       f"{'; '.join(errs)}. Merge PRs with squash and the PR title as the "
                       "commit title.")
             if not require_card_ref:
-                hit = re.search(r"\bTOG-\d+\b", message)
+                hit = re.search(r"\bTOG-\d+\b", (c.get("message") or ""))
                 if hit:
                     print(f"::warning title=Internal reference::Commit {c.get('id', '')[:10]} holds "
                           f"internal tracker ID {hit.group(0)}. Public history carries no "
