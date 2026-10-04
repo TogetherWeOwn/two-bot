@@ -359,7 +359,7 @@ test('with no joins at all the page still renders, and says nothing rather than 
   const d = await buildDashboard(t.db, { guildId: GUILD, now: NOW, weeks: 4, anomalies: TEST_ANOMALIES });
   assert.equal(d.thisWeek.joins, 0);
   assert.equal(d.retentionOverall.d7, null, 'no cohort at all is not 0% retention');
-  assert.ok(d.caveats.some((c) => c.includes('No join has an invite source yet')));
+  assert.ok(d.caveats.some((c) => c.includes('No join has a known invite source yet')));
 
   const html = renderHtml(d);
   assert.ok(html.startsWith('<!doctype html>'));

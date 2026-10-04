@@ -139,7 +139,7 @@ for (const g of targets) {
   if (has(3n)) {
     // Administrator implies every other permission, so the checks below would
     // all pass regardless. Working, but far more access than we asked for.
-    warn('bot has Administrator', 'target is the six-bit grant in docs/SECRETS.md, not Administrator');
+    warn('bot has Administrator', 'target is the seven-bit grant in docs/SECRETS.md, not Administrator');
   }
   if (has(5n)) pass('Manage Server', 'invite attribution possible');
   else fail('missing Manage Server', 'every join will be attributed "unknown"');
@@ -161,7 +161,10 @@ for (const g of targets) {
     else fail(`missing ${name}`, `${action} will 403`);
   }
 
-  for (const [bit, name] of [[1n, 'Kick Members'], [2n, 'Ban Members'], [4n, 'Manage Channels']] as const) {
+  // Manage Channels is NOT in this list: tickets.open creates the channel and
+  // tickets.close deletes it - flagging it here would false-positive
+  // on the intended seven-bit grant.
+  for (const [bit, name] of [[1n, 'Kick Members'], [2n, 'Ban Members']] as const) {
     if (has(bit) && !has(3n)) warn(`bot has ${name}`, 'not needed by this bot');
   }
 
@@ -179,7 +182,7 @@ for (const g of targets) {
   //    log-only when the bot cannot post (raidAlert.ts, 'raid_alert_undeliverable'),
   //    so a misconfigured channel is not a crash - it is a raid nobody hears
   //    about. Resolve the effective overwrites the way Discord does rather than
-  //    trusting the guild-level bits above: the six-bit grant is guild-wide and
+  //    trusting the guild-level bits above: the seven-bit grant is guild-wide and
   //    says nothing about one channel's @everyone deny.
   if (alertChannelId) {
     const ch = await api(`/channels/${alertChannelId}`);

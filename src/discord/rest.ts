@@ -47,8 +47,14 @@ export class DiscordRest {
    * Retries 429 and 5xx.
    */
   async get<T>(path: string, attempt = 0): Promise<T | null> {
+    return (await this.getObserved<T>(path, attempt))?.data ?? null;
+  }
+
+  /** Request-start evidence, not body completion; retries stamp their own request. */
+  async getObserved<T>(path: string, attempt = 0): Promise<{ data: T; observedAt: string } | null> {
     await this.pace();
     this.requests++;
+    const observedAt = new Date().toISOString();
     let res: Response;
     try {
       res = await this.fetchImpl(`${this.base}${path}`, {
@@ -57,14 +63,14 @@ export class DiscordRest {
     } catch (err) {
       if (attempt >= 4) throw err;
       await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
-      return this.get<T>(path, attempt + 1);
+      return this.getObserved<T>(path, attempt + 1);
     }
 
     if (res.status === 429) {
       const retryAfter = Number(res.headers.get('retry-after') ?? '1');
       log.debug('rate_limited', { path, retryAfter });
       await new Promise((r) => setTimeout(r, retryAfter * 1000 + 250));
-      return this.get<T>(path, attempt);
+      return this.getObserved<T>(path, attempt);
     }
     if (res.status === 403 || res.status === 404) {
       log.debug('rest_inaccessible', { path, status: res.status });
@@ -73,13 +79,13 @@ export class DiscordRest {
     if (res.status >= 500) {
       if (attempt >= 4) return null;
       await new Promise((r) => setTimeout(r, 500 * 2 ** attempt));
-      return this.get<T>(path, attempt + 1);
+      return this.getObserved<T>(path, attempt + 1);
     }
     if (!res.ok) {
       log.error('rest_failed', { path, status: res.status });
       return null;
     }
-    return (await res.json()) as T;
+    return { data: (await res.json()) as T, observedAt };
   }
 }
 
@@ -211,6 +217,40 @@ export async function fetchAllMembersStrict(
   // `pageMembers` never truncates with an infinite limit, so this is null on
   // failure and the full roster otherwise - exactly the old contract.
   return scan?.members ?? null;
+}
+
+/**
+ * Page a guild's full member list, carrying each page's request-start evidence.
+ *
+ * Neither a paginated scan nor one streamed response is an atomic snapshot.
+ * A member can leave after the server builds the page but before the body
+ * finishes downloading. Request-start is a conservative bound that cannot
+ * outrank a gateway departure during the request (TOG-10212). A returned
+ * joined_at later than that bound proves a genuinely newer membership spell;
+ * capture uses that occurrence rather than backdating the new join. Callers
+ * that only need history keep the observation-free helpers above.
+ *
+ * Returns null on a failed page, like `fetchAllMembersStrict`.
+ */
+export async function fetchAllMembersObserved(
+  rest: DiscordRest,
+  guildId: string,
+): Promise<Array<{ member: RawMember; observedAt: string }> | null> {
+  const out: Array<{ member: RawMember; observedAt: string }> = [];
+  let after = '0';
+  for (;;) {
+    const page = await rest.getObserved<RawMember[]>(
+      `/guilds/${guildId}/members?limit=1000&after=${after}`,
+    );
+    if (!page) return null;
+    const { data: batch, observedAt } = page;
+    if (batch.length === 0) return out;
+    for (const member of batch) out.push({ member, observedAt });
+    const last = batch[batch.length - 1]?.user?.id;
+    if (!last) return null;
+    if (batch.length < 1000) return out;
+    after = last;
+  }
 }
 
 export interface ScanResult {

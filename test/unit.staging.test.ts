@@ -343,6 +343,8 @@ test('the invite carries every permission the internal actions need', () => {
     { action: 'announcement.post', name: 'Send Messages', bit: 1n << 11n },
     { action: 'event.upsert', name: 'Manage Events', bit: 1n << 33n },
     { action: 'automod.timeout', name: 'Moderate Members', bit: 1n << 40n },
+    { action: 'tickets.open', name: 'Manage Channels', bit: 1n << 4n },
+    { action: 'tickets.close', name: 'Manage Channels', bit: 1n << 4n },
   ];
   const missing = REQUIRED.filter((p) => !(STAGING_INVITE_PERMISSIONS & p.bit)).map(
     (p) => `${p.action} needs ${p.name}`,
@@ -421,8 +423,8 @@ test('the invite is the low-bit set plus events and timeout permissions', () => 
     STAGING_INVITE_PERMISSIONS,
     BigInt(STAGING_PERMISSIONS) | (1n << 33n) | (1n << 40n) | (1n << 44n),
   );
-  assert.equal(STAGING_PERMISSIONS, 268528832, 'the low-bit set adds Manage Messages and View Audit Log');
-  assert.equal(STAGING_INVITE_PERMISSIONS, 18700556135616n);
+  assert.equal(STAGING_PERMISSIONS, 268528848, 'the low-bit set adds Manage Messages, View Audit Log, and Manage Channels');
+  assert.equal(STAGING_INVITE_PERMISSIONS, 18700556135632n);
 });
 
 test('the invite url carries the wider set, not the onboarding one', () => {
@@ -443,9 +445,9 @@ test('describePermissions reports the events bits as missing when they are', () 
   // events bits were absent from PERMISSION_BITS entirely, so a guild that
   // could not run event.upsert verified GREEN - a verifier certifying a
   // configuration we had already measured as broken.
-  const onboardingOnly = BigInt(STAGING_PERMISSIONS);
+  const onboardingOnly = BigInt(STAGING_PERMISSIONS) & ~(1n << 33n) & ~(1n << 40n) & ~(1n << 44n) & ~(1n << 4n);
   const { missing } = describePermissions(onboardingOnly);
-  assert.deepEqual(missing, ['Manage Events', 'Moderate Members', 'Create Events']);
+  assert.deepEqual(missing, ['Manage Channels', 'Manage Events', 'Moderate Members', 'Create Events']);
 
   const everything = describePermissions(STAGING_INVITE_PERMISSIONS);
   assert.deepEqual(everything.missing, []);

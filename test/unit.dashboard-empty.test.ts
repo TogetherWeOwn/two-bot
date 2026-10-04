@@ -119,7 +119,7 @@ describe('dashboard empty-state (fresh database)', () => {
     assert.ok(html.includes('No channel activity'), 'channel section names its empty state');
     assert.ok(html.includes('audit:collect'), 'the channel section names its next command');
     assert.ok(
-      d.caveats.some((c) => c.includes('No join has an invite source yet')),
+      d.caveats.some((c) => c.includes('No join has a known invite source yet')),
       'the invite caveat fires on empty',
     );
   });
