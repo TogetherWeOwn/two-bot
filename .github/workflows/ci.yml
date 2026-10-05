@@ -50,7 +50,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.event.pull_request.base.sha || github.sha }}
           persist-credentials: false
@@ -73,7 +73,7 @@ jobs:
       # at the workspace root. No candidate actions/scripts are invoked.
       # https://github.com/actions/checkout/tree/v5#fetch-only-the-root-files-and-github-and-src-folder
       - name: Read candidate workflows
-        uses: actions/checkout@v7
+        uses: actions/checkout@v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: candidate
@@ -103,7 +103,7 @@ jobs:
           --health-retries 10
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       # Needs neither node nor the database, so it runs before both and a PR
       # that hardcodes a guild id fails in seconds instead of after `npm ci`.
@@ -183,7 +183,7 @@ jobs:
       TWO_WEB_RO_PASSWORD: ci-throwaway-not-a-secret
 
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
       # Five runners share one host, so Docker assigns an unused host port
       # instead of every job fighting over 5432. Set the database URLs at
