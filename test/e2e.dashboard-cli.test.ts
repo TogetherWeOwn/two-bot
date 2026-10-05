@@ -376,7 +376,7 @@ test('--json reports every documented panel with the fixture numbers', async () 
   assert.ok(d.caveats.some((c) => c.includes('before we started watching the gate')));
   assert.ok(d.caveats.some((c) => c.includes('are in the server right now')));
   assert.ok(
-    !d.caveats.some((c) => c.includes('No join has an invite source yet')),
+    !d.caveats.some((c) => c.includes('No join has a known invite source yet')),
     'attributed joins silence the no-source caveat',
   );
 });

@@ -1,4 +1,5 @@
 import { MESSAGE_RUNGS, nowIso, type FunnelEvent } from './events.ts';
+import { observeMembership } from './membershipClock.ts';
 import type { EventStore } from '../store/eventStore.ts';
 import { VoiceSessionTracker } from './voiceSessions.ts';
 import { log } from './log.ts';
@@ -20,6 +21,8 @@ export interface JoinInput {
   /** Attribution from the invite tracker, e.g. 'invite:aB3xY9'. */
   source: string;
   occurredAt?: string;
+  /** Live dispatch order, captured by the adapter before asynchronous attribution. */
+  observedAt?: string;
   inviterId?: string | null;
   sourceEventId?: string;
 }
@@ -85,6 +88,7 @@ export class FunnelHandlers {
   }
 
   async onJoin(i: JoinInput): Promise<FunnelEvent | null> {
+    const observedAt = i.observedAt ?? observeMembership();
     const occurredAt = i.occurredAt ?? nowIso();
     if (this.communityFacts) {
       await this.communityFacts.recordMemberJoin({
@@ -106,7 +110,7 @@ export class FunnelHandlers {
       source: i.source,
       metadata: i.inviterId ? { inviterId: i.inviterId } : undefined,
     };
-    const r = await this.store.record(e);
+    const r = await this.store.record(e, { membershipObservedAt: observedAt });
     log.info('member_join', { memberId: i.memberId, source: i.source, inserted: r.inserted });
     return e;
   }
@@ -368,8 +372,9 @@ export class FunnelHandlers {
     guildId: string,
     memberId: string,
     occurredAt?: string,
-    opts: { isBot?: boolean } = {},
+    opts: { isBot?: boolean; observedAt?: string } = {},
   ): Promise<FunnelEvent | null> {
+    const observedAt = opts.observedAt ?? observeMembership();
     const at = occurredAt ?? nowIso();
     // Close any open voice session first, while the member row still reads
     // pre-leave: the end proves presence up to the leave instant, and the
@@ -393,7 +398,7 @@ export class FunnelHandlers {
       occurredAt: at,
       source: 'gateway',
     };
-    await this.store.record(e);
+    await this.store.record(e, { membershipObservedAt: observedAt });
     return e;
   }
 

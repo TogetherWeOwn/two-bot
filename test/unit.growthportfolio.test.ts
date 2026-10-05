@@ -365,3 +365,182 @@ test('PAID is held while it is locked, whatever the table says', () => {
   assert.equal(a.verdict, 'HOLD');
   assert.match(a.reason, /locked/);
 });
+
+test('EXP-004 holds before the second night and rebooks a producing partner', () => {
+  const part = channel('PART');
+  const zero = killable({ channelId: 'PART', joins: 6 });
+
+  // No night run yet: the per-night unit has no data, so nothing is decidable.
+  const norun = assess(part, zero, {});
+  assert.equal(norun.verdict, 'HOLD');
+  assert.match(norun.reason, /no joint night has been run/);
+
+  // One scoreless night is not a partner verdict: judged at the second night.
+  const mid = assess(part, zero, { partnerNights: 1, partnersWithZeroAm30: 0 });
+  assert.equal(mid.verdict, 'HOLD');
+  assert.match(mid.reason, /not judged until the second night/);
+
+  // A night that produced is booked again, whatever earlier partners did.
+  const producing = assess(
+    part,
+    { ...zero, am30: 2, am30Eligible: 2 },
+    { partnerNights: 1, partnersWithZeroAm30: 0 },
+  );
+  assert.equal(producing.verdict, 'CONTINUE');
+  assert.match(producing.reason, /second night/);
+});
+
+test('EXP-004 never kills a producing channel on exhausted partners', () => {
+  // Three dead partners AND a live one: the `win.am30 === 0` conjunction is
+  // load-bearing - without it the channel dies the very week it succeeds.
+  const a = assess(
+    channel('PART'),
+    killable({ channelId: 'PART', joins: 6, am30: 2, am30Eligible: 6 }),
+    { partnerNights: 2, partnersWithZeroAm30: 3 },
+  );
+  assert.equal(a.verdict, 'CONTINUE');
+});
+
+test('EXP-003 holds exactly at the ask bar', () => {
+  // `creators < minCreators` kills, so equality must continue: the bar is met,
+  // not missed. Pins the boundary the ask-failed test leaves open.
+  const a = assess(
+    channel('REF'),
+    killable({ channelId: 'REF', joins: 9 }),
+    { referralLinkCreators: 3 },
+  );
+  assert.equal(a.verdict, 'CONTINUE');
+  assert.match(a.reason, /ask held/);
+});
+
+test('EXP-005 holds before the output check and continues a producing channel', () => {
+  const cont = channel('CONT-YTSHORTS');
+  const zero = killable({ channelId: 'CONT-YTSHORTS', joins: 8 });
+
+  // Week 2 with no clips is not an output failure: the check runs at week 4.
+  const early = assess(cont, zero, { weeksLive: 2 });
+  assert.equal(early.verdict, 'HOLD');
+  assert.match(early.reason, /2 of 8 weeks/);
+
+  // Exactly week 4 with no output fails the output check, not the AM30 one.
+  const boundary = assess(cont, zero, { weeksLive: 4 });
+  assert.equal(boundary.verdict, 'KILL-no-traffic');
+  assert.match(boundary.reason, /OUTPUT at 4 weeks/);
+
+  // Matured and producing: the override expires and the standing rule continues.
+  const producing = assess(
+    cont,
+    { ...zero, outputProduced: true, am30: 3, am30Eligible: 3 },
+    { weeksLive: 8 },
+  );
+  assert.equal(producing.verdict, 'CONTINUE');
+  assert.match(producing.reason, /Producing; ranked/);
+});
+
+test('cash counts as sustained effort, and the hours bar is exact', () => {
+  // Half an hour but real spend: effort was put in, so 0 AM30 is a result.
+  const spent = assess(
+    channel('LIST-DISCADIA'),
+    killable({ joins: 9, agentHours: 0.5, cashPence: 500 }),
+  );
+  assert.equal(spent.verdict, 'KILL-no-activation');
+
+  // Exactly at the bar is sustained: `<` holds below it, never on it.
+  const exact = assess(
+    channel('LIST-DISCADIA'),
+    killable({ joins: 9, agentHours: SUSTAINED_EFFORT_HOURS }),
+  );
+  assert.equal(exact.verdict, 'KILL-no-activation');
+});
+
+test('mixed and cash-only effort both count as recorded', () => {
+  const mixed = windowOf('LIST-DISCADIA', [
+    week({ agentHours: null, cashPence: null }),
+    week({ weekStart: '2026-09-14', agentHours: 1, cashPence: 0 }),
+  ]);
+  assert.equal(mixed.effortUnrecorded, false, 'one recorded week ends the absence');
+  assert.equal(mixed.agentHours, 1);
+
+  // Spend with no hours logged is still a measurement, not an absence.
+  const cashOnly = windowOf('LIST-DISCADIA', [week({ agentHours: null, cashPence: 100 })]);
+  assert.equal(cashOnly.effortUnrecorded, false);
+  assert.equal(cashOnly.cashPence, 100);
+});
+
+test('the bump bar is exact and a missing count is zero', () => {
+  // Exactly half the bumps: `below` drops the week, `at` keeps it.
+  assert.equal(weekIsValid(week({ bumpsExpected: 10, bumpsDone: 5 })).valid, true);
+  assert.equal(weekIsValid(week({ bumpsExpected: 10, bumpsDone: 4 })).valid, false);
+  // No count reported is no bumps done, not an exemption.
+  assert.equal(weekIsValid(week({ bumpsExpected: 14 })).valid, false);
+});
+
+test('cost-per-AM30 divides the pair once there is a denominator', () => {
+  const c = costPerAm30(killable({ agentHours: 9, cashPence: 300, am30: 3 }));
+  assert.equal(c.hoursPerAm30, 3);
+  assert.equal(c.cashPencePerAm30, 100);
+  assert.equal(c.am30, 3);
+});
+
+test('only free channels can earn the right to ask', () => {
+  const mk = (id: string, am30: number, cashPerAm30: number | null): Assessment => ({
+    channelId: id,
+    experiment: 'EXP-008',
+    verdict: 'CONTINUE',
+    reason: '',
+    cost: { hoursPerAm30: am30 ? 1 : null, cashPencePerAm30: cashPerAm30, am30 },
+    costIsHard: true,
+  });
+
+  // PAID at 5 AM30 and the homepage bucket at 9 are both above the bar and
+  // both ineligible: one carries cash, the other is not a channel at all.
+  const s = paidAskStatus([
+    mk('PAID', 5, 500),
+    mk('WEB-HOMEPAGE', 9, 0),
+    mk('LIST-DISCADIA', 1, 0),
+  ]);
+  assert.equal(s.earned, false);
+  assert.deepEqual(s.qualifying, []);
+  assert.equal(s.bestFreeAm30, 1);
+  assert.match(s.detail, /LOCKED/);
+});
+
+test('a channel-kind input with the never rule is still not a bet', () => {
+  // No registered channel pairs kind 'channel' with rule 'never', so the
+  // switch arm has no registered caller - pin it with a synthetic input.
+  const synth: RegisteredChannel = {
+    id: 'SYNTH',
+    experiment: 'EXP-006',
+    label: 'synthetic unkillable channel',
+    killRule: { kind: 'never' },
+    activationTier: 'unknown',
+    kind: 'channel',
+  };
+  const a = assess(synth, killable({ channelId: 'SYNTH', joins: 40, agentHours: 50 }));
+  assert.equal(a.verdict, 'NOT-A-BET');
+  assert.match(a.reason, /unkillable/);
+});
+
+test('equal costs break ties by channel id, deterministically', () => {
+  const mk = (id: string): Assessment => ({
+    channelId: id,
+    experiment: 'EXP-002',
+    verdict: 'CONTINUE',
+    reason: '',
+    cost: { hoursPerAm30: 2, cashPencePerAm30: 0, am30: 3 },
+    costIsHard: true,
+  });
+  const r = rankPortfolio([mk('B'), mk('A')]);
+  assert.deepEqual(r.ordered.map((a) => a.channelId), ['A', 'B']);
+  assert.equal(r.scale?.channelId, 'A');
+});
+
+test('allocation reports uncheckable when recorded hours sum to zero', () => {
+  // Hours WERE recorded (all zeros), so this is not the unrecorded case - but
+  // shares over a zero total are meaningless, and must say so.
+  const a = effortAllocation([
+    killable({ channelId: 'REF', agentHours: 0, effortUnrecorded: false }),
+  ]);
+  assert.equal(a.recorded, false);
+  assert.match(a.findings[0], /cannot be checked/);
+});

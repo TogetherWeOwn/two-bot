@@ -31,6 +31,11 @@ import {
 import { loadMigrations, MIGRATIONS_DIR } from '../src/store/migrate.ts';
 import type { EventType } from '../src/core/events.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/staging-doctor.ts');
+  process.exit(0);
+}
+
 const LABEL: Record<ReadinessCheck['status'], string> = {
   ok: 'ok     ',
   fix: 'FIX    ',

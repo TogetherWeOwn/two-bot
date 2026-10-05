@@ -18,6 +18,11 @@ import {
   stagingGuildId,
 } from '../src/staging/spec.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/guild-config-restore.ts --snapshot <file> [--confirm-staging-guild --apply] [--evidence <file>]');
+  process.exit(0);
+}
+
 function die(message: string, code = 1): never {
   console.error(`guild-config-restore: ${message}`);
   process.exit(code);

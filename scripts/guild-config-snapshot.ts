@@ -7,6 +7,11 @@ import { checkStagingToken, stagingGuildId, STAGING_BOT_APPLICATION_ID } from '.
 import { buildUploadArgv } from '../src/store/uploadCmd.ts';
 import { readSecret } from '../src/core/credentials.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/guild-config-snapshot.ts');
+  process.exit(0);
+}
+
 function die(message: string): never {
   console.error(`guild-config-snapshot: ${message}`);
   process.exit(1);

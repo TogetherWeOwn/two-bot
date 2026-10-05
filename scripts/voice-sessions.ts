@@ -35,6 +35,11 @@ import {
   summarizeVoiceDurations,
 } from '../src/core/voiceSessions.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/voice-sessions.ts [days] [--offset=<hours>]');
+  process.exit(0);
+}
+
 const args = process.argv.slice(2);
 const days = Number(args.find((a) => /^\d+$/.test(a)) ?? 90);
 const offsetHours = Number(args.find((a) => a.startsWith('--offset='))?.split('=')[1] ?? 0);
@@ -45,17 +50,22 @@ if (!databaseUrl) {
   console.error('voice-sessions: TWO_DATABASE_URL is not set.');
   process.exit(1);
 }
+const guildId = process.env.DISCORD_GUILD_ID?.trim();
+if (!guildId) {
+  console.error('voice-sessions: DISCORD_GUILD_ID is not set.');
+  process.exit(1);
+}
 const since = new Date(Date.now() - days * 86_400_000).toISOString();
 const db = await openDb(databaseUrl);
 
 const starts = await db
   .prepare(
     `SELECT member_id, occurred_at, source FROM events
-      WHERE event_type = 'voice_session_start' AND member_id IS NOT NULL
+      WHERE guild_id = ? AND event_type = 'voice_session_start' AND member_id IS NOT NULL
         AND occurred_at >= ?
       ORDER BY occurred_at`,
   )
-  .all<{ member_id: string; occurred_at: string; source: string }>(since);
+  .all<{ member_id: string; occurred_at: string; source: string }>(guildId, since);
 
 const rows: SessionRow[] = starts.map((r) => ({ memberId: r.member_id, occurredAt: r.occurred_at }));
 
@@ -65,9 +75,11 @@ if (rows.length === 0) {
   // Never let a zero pass as an answer. A zero here has two very different
   // causes and the fix is different for each, so name both.
   const anyEver = await db
-    .prepare(`SELECT COUNT(*) AS n FROM events WHERE event_type = 'voice_session_start'`)
-    .get<{ n: number }>();
-  const totalEvents = await db.prepare(`SELECT COUNT(*) AS n FROM events`).get<{ n: number }>();
+    .prepare(`SELECT COUNT(*) AS n FROM events WHERE guild_id = ? AND event_type = 'voice_session_start'`)
+    .get<{ n: number }>(guildId);
+  const totalEvents = await db
+    .prepare(`SELECT COUNT(*) AS n FROM events WHERE guild_id = ?`)
+    .get<{ n: number }>(guildId);
   console.log('  No voice sessions on file for this window.');
   console.log(`    voice_session_start rows, all time: ${Number(anyEver?.n ?? 0)}`);
   console.log(`    events on file, all time:           ${Number(totalEvents?.n ?? 0)}`);
@@ -168,7 +180,7 @@ const heartbeats = await db
       WHERE guild_id = ? AND recorded_at >= ?
       ORDER BY recorded_at`,
   )
-  .all<{ at: string }>(process.env.DISCORD_GUILD_ID?.trim() ?? '', since)
+  .all<{ at: string }>(guildId, since)
   .catch(() => [] as Array<{ at: string }>);
 
 // No write history for this guild yet (a fresh database): the voice-session
@@ -183,9 +195,9 @@ const heartbeatAt =
 const ends = await db
   .prepare(
     `SELECT occurred_at, metadata FROM events
-      WHERE event_type = 'voice_session_end' AND occurred_at >= ?`,
+      WHERE guild_id = ? AND event_type = 'voice_session_end' AND occurred_at >= ?`,
   )
-  .all<{ occurred_at: string; metadata: string | null }>(since);
+  .all<{ occurred_at: string; metadata: string | null }>(guildId, since);
 // One parse for both jobs below: the reconcile counts the unknown starts,
 // the average excludes them. Both go through the shared helper (TOG-5684).
 const durationRows = ends.map((r) => parseVoiceEndMetadata(r.metadata));

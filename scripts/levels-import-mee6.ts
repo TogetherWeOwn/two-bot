@@ -17,6 +17,11 @@ import {
   type ImportManifest,
 } from '../src/leveling/importManifest.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/levels-import-mee6.ts [import] --guild <snowflake> --file <export.json> [--apply] [--allow-lower] [--manifest <path>] [--allow-live-guild]\nUsage: node scripts/levels-import-mee6.ts inventory --guild <snowflake>');
+  process.exit(0);
+}
+
 function usage(): never {
   console.error(
     'Usage: node scripts/levels-import-mee6.ts [import] --guild <snowflake> --file <export.json>\n' +

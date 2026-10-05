@@ -31,6 +31,8 @@
  * backup at an unpleasant hour.
  */
 import { createReadStream, createWriteStream } from 'node:fs';
+import { rename, rm } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { createGunzip, createGzip } from 'node:zlib';
 import { createInterface } from 'node:readline';
 import { once } from 'node:events';
@@ -174,6 +176,15 @@ function assertDumpTable(name: unknown, where: string): asserts name is DumpTabl
   }
 }
 
+/**
+ * A JSON object with string keys - the only record shape the dump format
+ * allows. Rules out null, arrays and primitives in one check, so a crafted
+ * line like `42` or `"str"` cannot slide past the kind dispatch below.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 export const DUMP_VERSION = 4;
 
 export interface DumpTableInfo {
@@ -293,10 +304,17 @@ function orderFor(table: DumpTable, columns: string[]): string {
  * produce a backup whose projection disagrees with its own event log.
  */
 export async function dump(db: Db, outPath: string): Promise<DumpManifest> {
+  // Same directory makes publication an atomic rename. The trailing .tmp keeps
+  // even an abandoned partial file out of restore-drill and retention selectors.
+  const tempPath = `${outPath}.${randomUUID()}.tmp`;
   const gz = createGzip({ level: 9 });
-  const written = pipeline(gz, createWriteStream(outPath));
+  const written = pipeline(gz, createWriteStream(tempPath, { flags: 'wx', mode: 0o600 }));
+  // The output can fail while a database read is pending. Observe it immediately;
+  // awaiting the original promise below still propagates the stream failure.
+  void written.catch(() => {});
 
   const write = async (obj: unknown): Promise<void> => {
+    if (gz.destroyed) await written;
     if (!gz.write(JSON.stringify(obj) + '\n')) await once(gz, 'drain');
   };
 
@@ -324,6 +342,19 @@ export async function dump(db: Db, outPath: string): Promise<DumpManifest> {
           .prepare(`SELECT COALESCE(MAX(id), 0) AS n FROM ${name}`)
           .get<{ n: number }>();
         sequences[name] = Number(seq?.n ?? 0);
+      }
+      // The reader refuses marks that are not non-negative safe integers
+      // (validateManifest), so publishing one would hand pg-backup an archive
+      // nothing can read back - and pg-backup rotates good recovery history
+      // for a successful dump. Refuse here, before the manifest line is
+      // written and long before the atomic rename publishes anything: the
+      // existing catch removes the temp file and the destination is untouched.
+      for (const [name, mark] of Object.entries(sequences)) {
+        if (!Number.isSafeInteger(mark) || mark < 0) {
+          throw new Error(
+            `sequence ${name} has a high-water mark the dump format cannot represent: ${String(mark)}`,
+          );
+        }
       }
       const applied = await tx
         .prepare(`SELECT id FROM schema_migrations ORDER BY id`)
@@ -363,9 +394,15 @@ export async function dump(db: Db, outPath: string): Promise<DumpManifest> {
     });
 
     await write({ kind: 'end', rows });
-  } finally {
     gz.end();
     await written;
+    await rename(tempPath, outPath);
+  } catch (error) {
+    gz.destroy();
+    // Wait for the output to close before removing it, including open failures.
+    await written.catch(() => {});
+    await rm(tempPath, { force: true });
+    throw error;
   }
 
   return manifest;
@@ -411,7 +448,11 @@ export async function inspect(inPath: string): Promise<DumpContents> {
 
   for await (const line of rl) {
     if (!line.trim()) continue;
-    const obj = JSON.parse(line);
+    const obj: unknown = JSON.parse(line);
+    // A backup file is bytes off a disk, not a trusted input. Every line must
+    // be an object with a known kind before anything else is believed about
+    // it - a bare `42`, `"str"` or `null` line must not reach the dispatch.
+    if (!isRecord(obj)) throw new Error('dump line is not an object - the file is not a two-bot dump');
     if (sawEnd) throw new Error('dump contains data after its end marker');
     if (obj.kind === 'manifest') {
       if (manifest) throw new Error('dump contains more than one manifest');
@@ -425,12 +466,27 @@ export async function inspect(inPath: string): Promise<DumpContents> {
       if (!manifest.tables.some((table) => table.name === obj.table)) {
         throw new Error(`row table ${obj.table} is not declared in the manifest`);
       }
+      // The row payload is interpolated into INSERTs on restore. It must be
+      // an object; a primitive here would sail through the count checks and
+      // detonate later, past the point where restore has committed.
+      if (!isRecord(obj.data)) {
+        throw new Error(`row in ${obj.table} has a data payload that is not an object`);
+      }
       let buf = buffers.get(obj.table);
       if (!buf) buffers.set(obj.table, (buf = []));
-      buf.push(obj.data as Record<string, unknown>);
+      buf.push(obj.data);
     } else if (obj.kind === 'end') {
+      // Coercion hid shape errors: end.rows of '1' read back as 1 and a
+      // missing count read as 0, both passing a file that is not well-formed.
+      if (!Number.isSafeInteger(obj.rows) || (obj.rows as number) < 0) {
+        throw new Error(`dump end marker has an invalid row count: ${JSON.stringify(obj.rows)}`);
+      }
       sawEnd = true;
-      declaredRows = Number(obj.rows ?? 0);
+      declaredRows = obj.rows as number;
+    } else {
+      // Unknown kinds used to fall through silently, so a file with a
+      // misspelled or foreign record type verified as if it were complete.
+      throw new Error(`dump contains an unknown record kind: ${JSON.stringify(obj.kind)}`);
     }
   }
 
@@ -456,9 +512,30 @@ export async function inspect(inPath: string): Promise<DumpContents> {
 
 function validateManifest(obj: Record<string, unknown>): DumpManifest {
   if (!Array.isArray(obj.tables)) throw new Error('manifest has no table list');
+  // Everything else the writer emits is read back somewhere: createdAt is
+  // reported, eventsSequence/sequences position the id sequences, and
+  // schemaMigrations is .join'ed by both pg-restore verdict paths - where a
+  // missing field crashes after a force restore has already committed. Refuse
+  // the misshapen manifest here, before any transaction opens.
+  if (typeof obj.createdAt !== 'string') {
+    throw new Error('manifest has no createdAt timestamp');
+  }
+  if (!Number.isSafeInteger(obj.eventsSequence) || (obj.eventsSequence as number) < 0) {
+    throw new Error('manifest has an invalid eventsSequence');
+  }
+  if (!isRecord(obj.sequences)) throw new Error('manifest has invalid sequences');
+  for (const [name, mark] of Object.entries(obj.sequences)) {
+    assertDumpTable(name, 'manifest sequence');
+    if (!Number.isSafeInteger(mark) || (mark as number) < 0) {
+      throw new Error(`manifest sequence ${name} has an invalid high-water mark`);
+    }
+  }
+  if (!Array.isArray(obj.schemaMigrations) || obj.schemaMigrations.some((m) => typeof m !== 'string')) {
+    throw new Error('manifest has an invalid schemaMigrations list');
+  }
   const names = new Set<DumpTable>();
   for (const table of obj.tables) {
-    if (!table || typeof table !== 'object') throw new Error('manifest table is not an object');
+    if (!isRecord(table)) throw new Error('manifest table is not an object');
     const row = table as Record<string, unknown>;
     assertDumpTable(row.name, 'manifest table');
     if (names.has(row.name)) throw new Error(`manifest table ${row.name} is duplicated`);

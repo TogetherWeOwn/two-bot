@@ -556,10 +556,14 @@ Off the voice session log, not off a guess:
 ```bash
 cd /opt/two-bot
 # last 90 days, hours bucketed in UTC
-sudo -u twobot --preserve-env=TWO_DATABASE_URL node scripts/voice-sessions.ts 90
+sudo -u twobot --preserve-env=TWO_DATABASE_URL,DISCORD_GUILD_ID node scripts/voice-sessions.ts 90
 # ...or in the timezone most members are actually in
-sudo -u twobot --preserve-env=TWO_DATABASE_URL node scripts/voice-sessions.ts 90 --offset=-5
+sudo -u twobot --preserve-env=TWO_DATABASE_URL,DISCORD_GUILD_ID node scripts/voice-sessions.ts 90 --offset=-5
 ```
+
+The report is scoped to one guild: `DISCORD_GUILD_ID` must be set (the same
+value the bot runs with) or the script exits before touching the database.
+A plain `sudo` env reset discards it, hence the two-variable preserve list.
 
 Two things to read before the recommendation:
 
@@ -648,6 +652,13 @@ sudo systemctl start two-bot
 # 3. Confirm the numbers came back.
 sudo -u twobot --preserve-env=TWO_DATABASE_URL node scripts/funnel.ts 7
 ```
+
+The CLI requires exactly one backup file and exactly one mode: `--force` or
+`--dry-run`, in either order. Unknown options (including a misspelled
+`--dry-run` beside `--force`), duplicate flags, extra files, and combined modes
+fail with a usage error before the backup is read or the target is opened.
+Use `--help` alone for side-effect-free usage. For a filename starting with
+`-`, pass its path with a `./` prefix.
 
 The restore script takes `TWO_RESTORE_URL`, deliberately not `TWO_DATABASE_URL`.
 Restoring wipes the target, and the one mistake you must not be able to make by

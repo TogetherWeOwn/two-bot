@@ -21,6 +21,11 @@ import { setLogLevel } from '../src/core/log.ts';
 import { DiscordRest } from '../src/discord/rest.ts';
 import { findEarlyMessages, writeEarlyMessages } from '../src/backfill/messages.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/backfill-messages.ts [--dry-run] [--max-pages=<count>] [--since=<ISO timestamp>]');
+  process.exit(0);
+}
+
 const argv = process.argv.slice(2);
 const flag = (name: string): string | null => {
   const hit = argv.find((a) => a === `--${name}` || a.startsWith(`--${name}=`));

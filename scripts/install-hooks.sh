@@ -11,6 +11,13 @@
 #
 set -euo pipefail
 
+for arg in "$@"; do
+  if [[ "$arg" == "--help" ]]; then
+    printf '%s\n' 'Usage: bash scripts/install-hooks.sh'
+    exit 0
+  fi
+done
+
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 git rev-parse --git-dir >/dev/null 2>&1 || {

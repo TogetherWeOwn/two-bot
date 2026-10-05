@@ -1,7 +1,11 @@
 /**
  * Temp-voice index audit + EXPLAIN harness (TOG-6476).
  *
- *   TWO_DATABASE_URL=postgres://two:two@127.0.0.1:5432/two_test node scripts/temp-voice-index-bench.ts [guilds]
+ *   TWO_DATABASE_URL=postgres://agent_test@agent-testdb:5432/two_bot_test_tog10236 node scripts/temp-voice-index-bench.ts [guilds]
+ *
+ * TWO_DATABASE_URL must explicitly name an isolated test database. Ambient
+ * DATABASE_URL is ignored; the shared test-host guard refuses nonallowlisted
+ * hosts and query strings before openDb can create or migrate any schema.
  *
  * Follow-up to TOG-5709 (event-store benchmark + index migration):
  * migrations/0036_temp_voice.sql and 0037_temp_voice_owner_transition.sql
@@ -33,81 +37,37 @@
  */
 import { openDb } from '../src/store/db.ts';
 import { TempVoiceStore } from '../src/tempVoice/store.ts';
+import { PER_GUILD, SEED_BASE, seedTempVoiceBenchmark } from './temp-voice-index-bench-seed.ts';
+import { assertTestDatabaseHost } from './test-db-guard.ts';
 
-const spec = process.env.TWO_DATABASE_URL?.trim() ?? process.env.DATABASE_URL?.trim() ?? '';
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/temp-voice-index-bench.ts [guilds]');
+  process.exit(0);
+}
+
+const spec = process.env.TWO_DATABASE_URL?.trim() ?? '';
 if (!spec) {
-  console.error('temp-voice-index-bench: set TWO_DATABASE_URL (or DATABASE_URL) to an isolated database, never production.');
+  console.error('temp-voice-index-bench: set TWO_DATABASE_URL explicitly to an isolated test database; DATABASE_URL is ignored.');
   process.exit(2);
 }
+assertTestDatabaseHost(spec, 'temp-voice-index-bench: TWO_DATABASE_URL');
 const GUILDS = Math.max(1, Number(process.argv[2] ?? 100) || 100);
 if (!Number.isInteger(GUILDS) || GUILDS > 5000) {
   console.error('temp-voice-index-bench: guilds must be an integer 1..5000.');
   process.exit(2);
 }
-if (/prod/i.test(spec)) {
-  console.error('temp-voice-index-bench: refusing a spec that looks like production.');
-  process.exit(2);
-}
 
-const PER_GUILD = 40; // mirrors maxPerGuild default: a full guild
 const schema = `benchtv_${process.pid}_${Date.now().toString(36)}`;
 const db = await openDb(spec, { schema, applicationName: 'two-bot:temp-voice-bench' });
 const store = new TempVoiceStore(db);
 
 const iso = (ms: number) => new Date(ms).toISOString();
-const base = Date.parse('2026-06-01T00:00:00.000Z');
+const base = SEED_BASE;
 
 try {
   // --- seed through the store: the only write path --------------------------
-  // Most rows live (channel attached), ~5% in-flight reservations
-  // (channel_id NULL), ~2% stuck mid owner-transition (pending_owner_id set,
-  // with a pending owner_change journal row, exactly what applyOwnerChange
-  // writes on an interrupted grant).
   const t0 = Date.now();
-  let channels = 0;
-  let audits = 0;
-  const probe = { guild: '', channel: '' };
-  for (let g = 0; g < GUILDS; g++) {
-    const guild = `bench-guild-${g}`;
-    for (let c = 0; c < PER_GUILD; c++) {
-      const owner = `user-${g}-${c % 10}`;
-      const at = iso(base + (g * PER_GUILD + c) * 60_000);
-      const res = await store.reserveIfUnderCaps({
-        guildId: guild,
-        generatorId: `gen-${g}`,
-        categoryId: `cat-${g}`,
-        ownerId: owner,
-        name: `room-${c}`,
-        createdAt: at,
-        maxPerUser: 1000,
-        maxPerGuild: 1000,
-        cooldownSeconds: 0,
-      });
-      if (!res.ok) throw new Error(`bench seed refused: ${res.reason} (guild ${g} channel ${c})`);
-      const channel = `chan-${g}-${c}`;
-      if (c % 20 === 19) {
-        // In-flight reservation: never attached, dropped by boot reconcile.
-        await store.audit({ guildId: guild, actorId: owner, channelId: null, action: 'create', outcome: 'ok' }, at);
-        audits++;
-        continue;
-      }
-      await store.attach(res.row.id, channel);
-      channels++;
-      await store.audit({ guildId: guild, actorId: owner, channelId: channel, action: 'create', outcome: 'ok' }, at);
-      audits++;
-      if (c % 50 === 49) {
-        // Interrupted transition: intent persisted, journal row written.
-        await store.beginOwnerChange(res.row.id, owner, `user-${g}-next`);
-        await store.audit(
-          { guildId: guild, actorId: null, channelId: channel, action: 'owner_change', outcome: 'pending', reason: 'bench seed: interrupted grant' },
-          at,
-        );
-        audits++;
-      }
-      if (g === 0 && c === 0) probe.guild = guild;
-      if (g === 0 && c === 1) probe.channel = channel;
-    }
-  }
+  const { channels, audits, reservations, interruptedTransitions, probe } = await seedTempVoiceBenchmark(store, GUILDS);
   const writeMs = Date.now() - t0;
   // Production autovacuum would have statistics by the time anyone reads; a
   // bulk seed has none, so ANALYZE explicitly for honest plans (same reason
@@ -165,8 +125,8 @@ try {
     .all<{ indexname: string; size: string }>();
 
   // --- report ----------------------------------------------------------------
-  console.log(`\ntemp-voice index bench - ${GUILDS} guilds x ${PER_GUILD} rows, ${channels} live channels, ${audits} audit rows, schema ${schema}\n`);
-  console.log(`  write path  ${String(channels + audits).padStart(7)} rows in ${(writeMs / 1000).toFixed(1)}s`);
+  console.log(`\ntemp-voice index bench - ${GUILDS} guilds x ${PER_GUILD} rows, ${channels} live channels, ${reservations} reservations, ${interruptedTransitions} interrupted transitions, ${audits} audit rows, schema ${schema}\n`);
+  console.log(`  write path  ${String(channels + reservations + audits).padStart(7)} channel-and-audit rows (cooldowns excluded) in ${(writeMs / 1000).toFixed(1)}s`);
   console.log(`  reads:`);
   for (const r of reads) console.log(`    ${r.label.padEnd(33)} ${String(r.ms).padStart(6)}ms  (${r.rows} rows)`);
   console.log(`  plans:`);
