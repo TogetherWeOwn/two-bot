@@ -609,7 +609,14 @@ company is judged on, and an unattributed join is an argument nobody can win.
 target grant as the six-bit set (`View Channels`, `Manage Server`,
 `Manage Roles`, `Manage Events`, `Create Instant Invite`, `Send Messages`),
 permission integer `8858373153`, not the old two-bit `View Channels + Manage
-Server` target this section used to warn against. The bot in the live server
+Server` target this section used to warn against. **Extended (2026-09-26) to a seven-bit set:** `tickets.open` creates a channel and
+`tickets.close` (plus the open-failure rollback) deletes one, both of which
+need guild-level **Manage Channels** (bit 4) — measured in staging
+(throwaway channel-create HTTP 201 with bit 4
+present; no category overwrite substitutes; the old Administrator staging grant
+is gone, so the confound is now explicit bit 4, not Admin). New target integer
+`8858373169`. Bit 4 also permits channel deletion, so it is granted
+deliberately and recorded here — not widened silently. The bot in the live server
 currently holds Administrator; applying the narrower grant is a Discord-portal
 change still pending, gated on whoever administers the server.
 `scripts/preflight.ts` now asserts all four bits below explicitly, so a future
@@ -624,6 +631,7 @@ Invite; they are separate bits.
 | `announcement.post` | View Channel + Send Messages in that channel |
 | `event.upsert` | Manage Events |
 | `guild.add_member` | **Create Instant Invite** |
+| `tickets.open` / `tickets.close` | **Manage Channels** (create + delete; bit 4 also permits channel deletion — granted deliberately, not silently) |
 
 **`v0.3` added two entries to this bill.** `announcement.post` needs View
 Channel + Send Messages in whichever channel `TWO_INTERNAL_CHANNEL_KEYS` names,

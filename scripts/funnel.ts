@@ -177,21 +177,19 @@ const voiceDurationSummary = summarizeVoiceDurations(
 // the table size by construction.
 const trackedLinks = await one(`SELECT COUNT(*) AS n FROM invite_campaigns`).catch(() => 0);
 
-const bySource = (
-  await db
-    .prepare(
-      `SELECT source, COUNT(*) AS n FROM events
-        WHERE event_type='member_join' AND guild_id = ? AND occurred_at >= ?${joinExcl.sql}
-        GROUP BY source ORDER BY n DESC LIMIT 15`,
-    )
-    .all<{ source: string; n: number }>(guildId, since, ...joinExcl.params)
-).map((r) => ({ source: r.source, joins: Number(r.n) }));
+const sourceRows = await db
+  .prepare(
+    `SELECT source, COUNT(*) AS n FROM events
+      WHERE event_type='member_join' AND guild_id = ? AND occurred_at >= ?${joinExcl.sql}
+      GROUP BY source ORDER BY n DESC`,
+  )
+  .all<{ source: string; n: number }>(guildId, since, ...joinExcl.params);
 // Ambiguous (several invites grew at once) and unknown (nothing grew, no
 // vanity URL) are different facts with different fixes (TOG-5681, EVENTS.md),
 // so they get their own lines rather than disappearing into the table above.
-const { ambiguous, unknown } = summarizeAttributionSplit(
-  bySource.map((r) => ({ source: r.source, n: r.joins })),
-);
+// Quality totals cover every source; only the displayed table is capped.
+const { ambiguous, unknown } = summarizeAttributionSplit(sourceRows);
+const bySource = sourceRows.slice(0, 15).map((r) => ({ source: r.source, joins: Number(r.n) }));
 
 // --- join-downtime unknown attribution (TOG-5719) ---------------------------
 //
