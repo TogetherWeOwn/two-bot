@@ -129,14 +129,14 @@
     "@discordjs/collection": "2.1.1",
     "@discordjs/ws": "1.2.3",
     "discord.js": "^14.27.0",
-    "fast-xml-parser": "^5.11.1",
-    "pg": "^8.23.0",
+    "fast-xml-parser": "^5.11.2",
+    "pg": "^8.23.1",
     "undici": "^6.28.1"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "@types/pg": "^8.23.1",
-    "@types/ws": "^8.5.0",
+    "@types/ws": "^8.18.2",
     "typescript": "^5.9.3",
     "ws": "^8.22.0"
   }
