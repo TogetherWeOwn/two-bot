@@ -103,34 +103,33 @@ for (const uses of [5, 6]) {
   });
 }
 
-test('capture retains early counter growth for a deferred join across real tracker runs', () => {
+test('a corroborated lone post-stamp join emits with the observed growth', () => {
+  // The only observed member joined after the stamp, but the invite counters
+  // moved: nothing else in-window competes for the growth, so this is a
+  // genuine new spell rather than a stamp-race artifact and it emits
+  // immediately instead of retaining. (Uncorroborated post-stamp joins with no
+  // growth still defer; see the tests above.)
   const first = capture([member('late', lateAt)], { uses: 6 });
-  assert.deepEqual(first.result.events, []);
-  assert.deepEqual(first.result.snapshots, []);
-  assert.deepEqual(first.result.windowEnds, []);
-  assert.equal(first.result.rows[0].uses, 5);
-  assert.equal(first.result.rows[0].updated_at, since);
-  assert.match(first.output, /retaining previous counters and window/);
+  assert.equal(first.result.events.length, 1);
+  assert.equal(first.result.events[0].memberId, 'late');
+  assert.equal(first.result.events[0].occurredAt, lateAt);
+  assert.equal(first.result.events[0].source, 'invite:fixture');
+  assert.equal(first.result.events[0].metadata?.attribution_exact, true);
+  assert.deepEqual(first.result.events[0].metadata?.window, { from: since, to: capturedAt });
+  assert.deepEqual(first.result.pending, []);
+  assert.equal(first.result.rows[0].uses, 6);
+  assert.equal(first.result.rows[0].updated_at, capturedAt);
+  assert.deepEqual(first.result.windowEnds, [capturedAt]);
 
+  // Replay is idempotent: the recorded join does not re-emit.
   const nextAt = '2026-10-01T10:00:00.000Z';
   const next = capture([member('late', lateAt)], {
     previousRows: first.result.rows, previousEvents: first.result.storedEvents,
-    previousPending: first.result.pending, capturedAt: nextAt, rosterReadAt: nextAt, uses: 6,
+    previousPending: first.result.pending,
+    capturedAt: nextAt, rosterReadAt: nextAt, uses: 6,
   }).result;
-  assert.equal(next.events.length, 1);
-  assert.equal(next.events[0].source, 'invite:fixture');
-  assert.equal(next.events[0].metadata?.attribution_exact, true);
-  assert.deepEqual(next.events[0].metadata?.window, { from: since, to: nextAt });
-  assert.equal(next.rows[0].uses, 6);
-  assert.equal(next.rows[0].updated_at, nextAt);
-
-  const thirdAt = '2026-10-02T10:00:00.000Z';
-  const third = capture([member('late', lateAt)], {
-    previousRows: next.rows, previousEvents: next.storedEvents,
-    capturedAt: thirdAt, rosterReadAt: thirdAt, uses: 6,
-  }).result;
-  assert.deepEqual(third.events, []);
-  assert.equal(third.storedEvents.length, 1);
+  assert.deepEqual(next.events, []);
+  assert.equal(next.storedEvents.length, 1);
 });
 
 test('retaining a window also defers eligible join writes to preserve multi-code attribution', () => {

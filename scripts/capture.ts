@@ -255,8 +255,16 @@ for (const { member: m, observedAt } of observed) {
 // pending, even if the member leaves before the next roster read.
 const observedJoins = [...candidates.values()].sort((a, b) =>
   a.joinedAt.localeCompare(b.joinedAt) || a.id.localeCompare(b.id));
-const newJoins = observedJoins.filter((j) => j.joinedAt <= capturedAt);
-const deferredJoins = observedJoins.length - newJoins.length;
+const eligibleJoins = observedJoins.filter((j) => j.joinedAt <= capturedAt);
+const deferredJoins = observedJoins.length - eligibleJoins.length;
+// A lone post-stamp roster corroborated by invite growth is present-tense
+// evidence of a genuine new spell, not a stamp-race artifact: the counters
+// moved and nothing else in-window competes for the growth, so emit it now
+// with its roster-observation time. When in-window members share the window
+// the split is ambiguous and everything is retained for retry; with no growth
+// at all the post-stamp join stays pending for the next window.
+const corroborated = totalGrowth > 0 && eligibleJoins.length === 0 && observedJoins.length > 0;
+const newJoins = corroborated ? observedJoins : eligibleJoins;
 
 // --- 4. attribute ------------------------------------------------------------
 //
@@ -302,7 +310,7 @@ const events: FunnelEvent[] = newJoins.map((j, i) => ({
 // The observed invite read is persisted alongside the observations, so a
 // deleted/expired/reset code cannot erase already-seen growth before retry.
 // First capture still establishes a baseline, and no-growth reads lose no delta.
-const retainSnapshot = effectiveSince !== null && deferredJoins > 0 && totalGrowth > 0;
+const retainSnapshot = effectiveSince !== null && !corroborated && deferredJoins > 0 && totalGrowth > 0;
 
 // Even without growth, a deferred observation must survive departure before
 // retry. The handled-only clear below removes eligible rows, not post-stamp ones.
