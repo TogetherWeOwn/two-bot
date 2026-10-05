@@ -112,6 +112,10 @@ function botCanPost(client: Client, channelId: string, guildId: string): GuildTe
 export function registerSessionWelcome(client: Client, deps: SessionWelcomeDeps): void {
   const { recorder } = deps;
   const prompting = new Map<string, Promise<void>>();
+  // Delivery is in-memory and separate from persistence: once target.send
+  // resolves, the public welcome is out even if the prompted-event write
+  // below rejects. Queued callbacks must recover recording without resending.
+  const delivered = new Map<string, string>();
 
   async function promptMember(member: GuildMember): Promise<void> {
     if (member.guild.id !== deps.guildId) return;
@@ -128,6 +132,14 @@ export function registerSessionWelcome(client: Client, deps: SessionWelcomeDeps)
       // Idempotency half one: a member who has already been welcomed is not
       // welcomed again, no matter how many times pending flips.
       if (await deps.store.hasEvent(member.guild.id, member.id, 'onboarding_prompted')) return;
+
+      const deliveredChannelId = delivered.get(member.id);
+      if (deliveredChannelId) {
+        // The welcome already went out in this process; the earlier attempt
+        // only failed to persist it. Retry recording without a second send.
+        await recorder.prompted(member.guild.id, member.id, deliveredChannelId);
+        return;
+      }
 
       const landingChannelIds = deps.landingChannelIds();
       const target =
@@ -153,6 +165,9 @@ export function registerSessionWelcome(client: Client, deps: SessionWelcomeDeps)
       if (actionChannelId) {
         void deps.onboardingRota?.promptShown({ member, message, variant: 'session', actionChannelId });
       }
+      // Mark delivery before persisting: a recording failure below must not
+      // cause a queued callback to send a second public welcome.
+      delivered.set(member.id, target.id);
       await recorder.prompted(member.guild.id, member.id, target.id);
     } catch (err) {
       log.error('session_welcome_failed', { memberId: member.id, err: String(err) });

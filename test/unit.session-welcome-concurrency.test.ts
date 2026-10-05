@@ -217,6 +217,36 @@ test('an overlapping callback retries after the active attempt fails before deli
     }
   });
 
+test('an overlapping callback recovers recording without resending after delivery',
+  { timeout: 2000 }, async () => {
+    const h = harness();
+    const enteredRecord = barrier();
+    const releaseRecord = barrier();
+    let records = 0;
+    h.hooks.record = async () => {
+      if (++records !== 1) return;
+      enteredRecord.release();
+      await releaseRecord.wait;
+      throw new Error('record failed after delivery');
+    };
+
+    h.join(h.member());
+    await enteredRecord.wait;
+    h.clearGate(h.member());
+    await turn();
+    assert.equal(h.messages.length, 1, 'welcome is already delivered while recording is blocked');
+    assert.equal(h.events.length, 0);
+    releaseRecord.release();
+    await turn();
+    assert.deepEqual(h.checks, ['member', 'member'], 'queued callback rechecks persistence');
+    assertWelcome(h);
+
+    h.clearGate(h.member());
+    await turn();
+    assert.deepEqual(h.checks, ['member', 'member', 'member'], 'later callbacks see the recovered event');
+    assertWelcome(h);
+  });
+
 test('session dry-run retains its welcome behavior with concurrent callbacks', async () => {
   const h = harness(true);
   h.join(h.member());
