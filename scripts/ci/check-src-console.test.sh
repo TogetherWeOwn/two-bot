@@ -15,6 +15,13 @@
 
 set -euo pipefail
 
+for arg in "$@"; do
+  if [[ "$arg" == "--help" ]]; then
+    printf '%s\n' 'Usage: bash scripts/ci/check-src-console.test.sh'
+    exit 0
+  fi
+done
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SCRIPT="$ROOT/scripts/ci/check-src-console.sh"
 WORK="$(mktemp -d)"

@@ -71,12 +71,19 @@ mock.method(DiscordRest.prototype, 'get', async function (path: string) {
   if (path === '/guilds/fixture-guild/invites') {
     return fixture.invites ?? [{ code: 'fixture', uses: fixture.uses }];
   }
-  if (path === '/guilds/fixture-guild/members?limit=1000&after=0') {
-    mock.timers.setTime(Date.parse(fixture.rosterReadAt));
-    return fixture.members;
-  }
   if (path === '/guilds/fixture-guild') return { vanity_url_code: null };
   throw new Error(`Unexpected REST path: ${path}`);
+});
+// scripts/capture.ts reads the roster through fetchAllMembersObserved, which
+// pages via getObserved (request-start bound), not get. Serve the same fixture
+// roster there; observedAt is the roster-read instant from the fixture.
+mock.method(DiscordRest.prototype, 'getObserved', async function (path: string) {
+  calls.push(path);
+  if (path === '/guilds/fixture-guild/members?limit=1000&after=0') {
+    mock.timers.setTime(Date.parse(fixture.rosterReadAt));
+    return { data: fixture.members, observedAt: fixture.rosterReadAt };
+  }
+  throw new Error(`Unexpected observed REST path: ${path}`);
 });
 mock.method(EventStore.prototype, 'record', async (event: FunnelEvent) => {
   const index = storedEvents.findIndex((previous) =>

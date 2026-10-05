@@ -25,7 +25,7 @@
 import { before, after, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -71,17 +71,28 @@ interface CliResult {
   output: string;
 }
 
-async function cli(args: string[], extraEnv: Record<string, string | undefined> = {}): Promise<CliResult> {
+async function cli(
+  args: string[],
+  extraEnv: Record<string, string | undefined> = {},
+  sqlTrace?: string,
+): Promise<CliResult> {
+  const preload = sqlTrace
+    ? ['--import', new URL('./fixtures/pgrestore-sql-trace.mjs', import.meta.url).pathname]
+    : [];
   try {
-    const result = await run('node', [SCRIPT, ...args], {
+    const result = await run('node', [...preload, SCRIPT, ...args], {
       cwd: REPO,
-      env: { ...process.env, ...dbEnv, ...extraEnv },
+      env: { ...process.env, ...dbEnv, ...extraEnv, TWO_RESTORE_SQL_TRACE: sqlTrace },
     });
     return { code: 0, output: result.stdout + result.stderr };
   } catch (error) {
     const err = error as { code?: number; stdout?: string; stderr?: string };
     return { code: err.code ?? -1, output: (err.stdout ?? '') + (err.stderr ?? '') };
   }
+}
+
+function readSqlTrace(file: string): string[] {
+  return readFileSync(file, 'utf8').trim().split('\n').map((line) => JSON.parse(line) as string);
 }
 
 /** Child env with no restore target at all: TWO_RESTORE_URL deleted even if
@@ -117,6 +128,23 @@ async function counts(): Promise<Record<string, number>> {
     out[t] = Number(r?.n ?? 0);
   }
   return out;
+}
+
+/** Full target state, not just counts: a same-size replacement is still a write. */
+async function targetState() {
+  const rows: Record<string, Array<Record<string, unknown>>> = {};
+  for (const table of DUMP_TABLES) {
+    rows[table] = await harness.db
+      .prepare(`SELECT * FROM ${table} ORDER BY to_jsonb(${table})::text`)
+      .all<Record<string, unknown>>();
+  }
+  const ledger = await harness.db
+    .prepare(`SELECT * FROM schema_migrations ORDER BY id`)
+    .all<Record<string, unknown>>();
+  const sequence = await harness.db
+    .prepare(`SELECT last_value, is_called FROM events_id_seq`)
+    .get<{ last_value: number; is_called: boolean }>();
+  return { rows, ledger, sequence };
 }
 
 let dumpSequence = 0;
@@ -183,14 +211,68 @@ test('--dry-run validates the file with no target and writes nothing', { timeout
   assert.deepEqual(await counts(), before, 'a dry run must not write');
 });
 
+test('--dry-run with a configured populated target preserves rows, ledger and sequence', { timeout: 60_000 }, async () => {
+  await seedFixture();
+  const manifestCounts = await counts();
+  const file = join(dir, `configured-target-${++dumpSequence}.ndjson.gz`);
+  await dump(harness.db, file);
+
+  // Make the target different from the backup: a restore must not pass merely
+  // because it replaces the target with identical rows or sequence values.
+  await new EventStore(harness.db).record({
+    guildId: GUILD,
+    memberId: '90000000000000899',
+    eventType: 'member_join',
+    occurredAt: '2026-08-10T10:00:00.000Z',
+    source: 'invite:target-only',
+  });
+  await harness.db.prepare(`UPDATE invite_snapshots SET uses = ? WHERE guild_id = ?`).run(11, GUILD);
+  await harness.db.prepare(`SELECT setval('events_id_seq', ?, false)`).get(4242);
+  const before = await targetState();
+  assert.equal(before.rows.events.length, 4);
+  assert.ok(before.ledger.length > 0, 'the target must have a populated migration ledger');
+  assert.deepEqual(before.sequence, { last_value: 4242, is_called: false });
+
+  const trace = join(dir, 'configured-target-sql.ndjson');
+  const result = await cli(
+    [file, '--dry-run'],
+    { TWO_RESTORE_URL: process.env.TWO_TEST_DATABASE_URL! },
+    trace,
+  );
+  assert.equal(result.code, 0, `configured-target dry run failed: ${result.output}`);
+  assert.deepEqual(
+    readSqlTrace(trace),
+    DUMP_TABLES.map((table) => `SELECT COUNT(*) AS n FROM ${table}`),
+    'the real CLI must only issue count reads: no migration DDL, BEGIN, writes or restore transaction',
+  );
+  assert.match(result.output, /restore: checking configured target/);
+  assert.match(result.output, /rows read and verified\. Nothing was written\./);
+  assert.match(result.output, /DRY RUN VERIFIED/);
+  for (const table of DUMP_TABLES) {
+    assert.match(result.output, new RegExp(
+      `^\\s*${table}\\s+manifest\\s+${manifestCounts[table]}\\s+in file\\s+${manifestCounts[table]}\\s+ok\\s+target now ${before.rows[table].length}$`,
+      'm',
+    ));
+  }
+  assert.deepEqual(await targetState(), before, 'a connected dry run must preserve exact target state');
+});
+
 test('with target + --force restores the canned dump: RESTORE VERIFIED, rows back', { timeout: 120_000 }, async () => {
   const { file, before, seeded } = await cannedDump();
 
+  const trace = join(dir, 'restore-sql.ndjson');
   const result = await cli(
     [file, '--force'],
     { TWO_RESTORE_URL: process.env.TWO_TEST_DATABASE_URL! },
+    trace,
   );
   assert.equal(result.code, 0, `restore failed: ${result.output}`);
+  // Positive control: the recorder must see transaction and migration SQL,
+  // not just Pool.query reads, or the dry-run assertion could miss them.
+  const statements = readSqlTrace(trace);
+  assert.ok(statements.includes('BEGIN'), 'trace must observe checked-out-client transactions');
+  assert.ok(statements.some((sql) => /CREATE TABLE IF NOT EXISTS schema_migrations/.test(sql)));
+  assert.ok(statements.some((sql) => /TRUNCATE/.test(sql)), 'trace must observe restore writes');
   assert.match(result.output, /RESTORE VERIFIED/);
   assert.deepEqual(await counts(), before, 'restored counts must match the dump manifest');
   const after = await harness.db

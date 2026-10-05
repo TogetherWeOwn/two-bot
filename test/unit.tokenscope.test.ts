@@ -19,13 +19,9 @@ import { STAGING_INVITE_PERMISSIONS, stagingInviteUrl } from '../src/staging/spe
 const root = join(import.meta.dirname, '..');
 
 test('every workflow keeps its least-privilege permissions block', () => {
-  // TOG-5054 finding F6: ci.yml still has NO `permissions:` block (repo-default
-  // token for a read-only workflow). The pin to `contents: read` is tracked in
-  // [TOG-5257](/TOG/issues/TOG-5257) and blocked on a principal with the
-  // `workflows` permission; this test asserts the four workflows that already
-  // carry the pin. Re-extend this loop to include 'ci.yml' when TOG-5257
-  // lands - dropping any block re-broadens that workflow's token silently.
-  for (const file of ['secret-scan.yml', 'main-guard.yml', 'plan-watch.yml', 'codeowners.yml']) {
+  // TOG-5054 finding F6, pinned by TOG-5257: ci.yml carries `contents: read`.
+  // Dropping any block re-broadens that workflow's token silently.
+  for (const file of ['ci.yml', 'secret-scan.yml', 'main-guard.yml', 'plan-watch.yml', 'codeowners.yml']) {
     const body = readFileSync(join(root, '.github/workflows', file), 'utf8');
     assert.match(body, /^permissions:/m, `${file} must keep its permissions block`);
   }
@@ -37,7 +33,11 @@ test('every authorized grant bit has a name and a rationale', () => {
   // challenged - both are how an extra bit survives review unnoticed.
   const bits: number[] = [];
   for (let b = 0; b < 64; b++) if ((EXPECTED >> BigInt(b)) & 1n) bits.push(b);
-  assert.deepEqual(bits, [0, 5, 10, 11, 28, 33], 'the live least-privilege set changed - see docs/SECRETS.md');
+  // Bit 4 (Manage Channels): tickets.open creates the channel,
+  // tickets.close deletes it - measured in staging. Bit 4 also
+  // permits channel deletion, so the RATIONALE entry must say so.
+  assert.deepEqual(bits, [0, 4, 5, 10, 11, 28, 33], 'the live least-privilege set changed - see docs/SECRETS.md');
+  assert.match(RATIONALE[4] ?? '', /deletion/i, 'bit 4 rationale must name the channel-deletion power');
   for (const b of bits) {
     assert.ok(NAMES[b], `live bit ${b} has no name in verify-grant.ts`);
     assert.ok(RATIONALE[b], `live bit ${b} has no rationale in verify-grant.ts`);
@@ -63,7 +63,7 @@ test('both invite URLs request the application-commands scope', () => {
   const urls = [...secrets.matchAll(/https:\/\/discord\.com\/api\/oauth2\/authorize\?[^\s)]+/g)].map((m) => m[0]);
   assert.ok(urls.length >= 1, 'expected a live invite URL in docs/SECRETS.md');
   for (const url of urls) {
-    assert.ok(url.includes('permissions=8858373153'), `live invite must carry the six-bit grant: ${url}`);
+    assert.ok(url.includes('permissions=8858373169'), `live invite must carry the seven-bit grant: ${url}`);
     assert.ok(
       url.includes('applications.commands'),
       `live invite must carry the applications.commands scope or slash-command registration 403s: ${url}`,

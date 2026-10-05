@@ -4,6 +4,7 @@
     ".": {
       "release-type": "node",
       "include-component-in-tag": false,
+      "pull-request-header": "## Summary\n\nPublish the next two-bot release from Conventional Commits on main.\n\n## Changes\n\nUpdate CHANGELOG.md, package versions and the release manifest; generated release notes follow below.\n\n## Testing\n\nMetadata-only release; no local runtime test applies. The release workflow dispatches CI, secret-scan and PR lint on this branch after generation. Their results must be green on the exact head before review and merge.\n\n### Release notes",
       "pull-request-footer": "Refs: TOG-9865",
       "changelog-sections": [
         {

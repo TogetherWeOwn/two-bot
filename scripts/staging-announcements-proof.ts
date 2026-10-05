@@ -196,7 +196,22 @@ try {
     inGuild: () => true, guildId: GUILD, channelId: report.channelId, user: { id: APP },
     isStringSelectMenu: () => false, isChatInputCommand: () => true, isRepliable: () => true, commandName: name,
     memberPermissions: { has: () => permitted }, options: { getString: (key: string) => values[key] },
-    reply: async (body: unknown) => { replies.push(body); }, replied: false, deferred: false,
+    replied: false, deferred: false,
+    async deferReply(options: { ephemeral?: boolean }) {
+      assert.deepEqual(options, { ephemeral: true });
+      assert.equal(this.replied || this.deferred, false);
+      this.deferred = true;
+    },
+    async editReply(body: unknown) {
+      assert.equal(this.deferred, true);
+      replies.push(body);
+      this.replied = true;
+    },
+    async reply(body: unknown) {
+      assert.equal(this.replied || this.deferred, false);
+      replies.push(body);
+      this.replied = true;
+    },
   });
   async function dispatch(value: unknown) {
     for (const listener of bus.listeners('interactionCreate')) await listener(value);

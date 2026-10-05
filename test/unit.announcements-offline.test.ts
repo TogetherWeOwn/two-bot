@@ -494,6 +494,44 @@ test('pollFeeds isolates a poison post failure: later items still deliver (TOG-9
   assert.equal(checked?.v, NOW.toISOString(), 'markFeedChecked still runs despite the poison item');
 });
 
+test('pollFeeds reconciles an ambiguous post by nonce instead of duplicating (TOG-9347 B3)', async () => {
+  await reset();
+  let nonceLookups = 0;
+  class AmbiguousDiscord extends FakeDiscord {
+    nonceMessages = new Map<string, string>();
+    override async postMessage(channelId: string, content: string, options: { nonce?: string; components?: unknown[] } = {}): Promise<string> {
+      // Accept-then-reset: Discord stored the message, transport threw.
+      const id = await super.postMessage(channelId, content, options);
+      if (options.nonce) this.nonceMessages.set(options.nonce, id);
+      throw new Error('connection reset after accept');
+    }
+    override async findMessageByNonce(_channelId: string, nonce: string): Promise<string | null> {
+      nonceLookups++;
+      return this.nonceMessages.get(nonce) ?? null;
+    }
+  }
+  const discord = new AmbiguousDiscord();
+  const service = new AnnouncementsService(store, discord, readerFor([
+    { key: 'amb-1', title: 'Ambiguous', url: 'https://example.com/amb' },
+  ]));
+  await service.addFeed({
+    id: 'feed-ambiguous', guildId: GUILD, channelId: CHANNEL, kind: 'rss',
+    source: 'https://example.com/feed.xml', actorId: USER, now: NOW,
+  });
+  assert.equal(await service.pollFeeds(GUILD, NOW), 1, 'recovered send counts as delivered');
+  assert.equal(discord.posts.length, 1, 'one transport attempt, no resend');
+  assert.equal(nonceLookups, 1, 'reconciliation looked up the nonce once');
+  assert.equal(await auditCount('feed.item', 'failed'), 0, 'recovered send is not a failure');
+  const delivery = await db.prepare(
+    `SELECT state, message_id FROM feed_deliveries WHERE feed_id = ?`,
+  ).get<{ state: string; message_id: string }>('feed-ambiguous');
+  assert.equal(delivery?.state, 'delivered');
+  assert.match(delivery?.message_id ?? '', /^\d{17,}$/);
+  // Second poll sends nothing new — no duplicate under the same nonce.
+  assert.equal(await service.pollFeeds(GUILD, NOW), 0);
+  assert.equal(discord.posts.length, 1);
+});
+
 test('pollFeeds skips a keyless item and still delivers the healthy items behind it (TOG-9346 B2b)', async () => {
   await reset();
   const discord = new FakeDiscord();

@@ -24,6 +24,11 @@ import {
   formatUnknownRate,
 } from '../src/analytics/unknownAttribution.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/unknown-attribution.ts [weeks]');
+  process.exit(0);
+}
+
 const rawArgs = process.argv.slice(2);
 const weeks = Number(rawArgs.find((a) => !a.startsWith('-')) ?? 8);
 if (!Number.isFinite(weeks) || weeks <= 0 || !Number.isInteger(weeks)) {

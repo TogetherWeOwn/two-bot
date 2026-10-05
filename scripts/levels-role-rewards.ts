@@ -2,6 +2,11 @@ import { openDb } from '../src/store/db.ts';
 import { LevelingService, type LevelRoleReward } from '../src/leveling/service.ts';
 import { LIVE_GUILD_ID } from '../src/staging/spec.ts';
 
+if (process.argv.includes('--help')) {
+  console.log('Usage: node scripts/levels-role-rewards.ts --guild <snowflake> [--set <level:roleId,...>] [--allow-live-guild]');
+  process.exit(0);
+}
+
 function usage(): never {
   console.error(
     'Usage: node scripts/levels-role-rewards.ts --guild <snowflake> [--set <level:roleId,...>] [--allow-live-guild]\n' +

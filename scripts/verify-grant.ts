@@ -15,7 +15,7 @@
  * Measured on this repo (each grant fed to both scripts, exit codes compared):
  *
  *   grant                     preflight   verify-grant
- *   exact six-bit set             0            0
+ *   exact seven-bit set           0            0
  *   exact + Administrator         0            1   <- the TOG-64 failure
  *   Administrator alone           1            1
  *   dropped Manage Events         1            1
@@ -37,9 +37,12 @@ import { readSecret } from '../src/core/credentials.ts';
 
 const API = 'https://discord.com/api/v10';
 
-/** The intended least-privilege grant for TOG-64. Keep this and the invite
- *  URL in docs/SECRETS.md in lockstep - if you change one, change both. */
-export const EXPECTED = 8858373153n;
+/** The intended least-privilege grant, plus Manage Channels (bit 4)
+ *  for tickets.open/tickets.close: staging measurement showed channel-create
+ *  succeeding with bit 4 present and no category grant substituting for it.
+ *  Keep this and the invite URL in docs/SECRETS.md in lockstep - if you change
+ *  one, change both. */
+export const EXPECTED = 8858373169n;
 
 /** Only the bits this bot has any business holding, by Discord bit position. */
 export const NAMES: Record<number, string> = {
@@ -62,6 +65,7 @@ export const NAMES: Record<number, string> = {
  *  rather than decoding an integer. */
 export const RATIONALE: Record<number, string> = {
   0: 'guild.add_member (TOG-57) - Manage Server does NOT imply it',
+  4: 'tickets.open creates the channel, tickets.close/rollback deletes it - ALSO PERMITS CHANNEL DELETION, granted deliberately, not silently',
   5: 'read the invite list for join attribution',
   10: 'see the channels it posts in',
   11: 'announcement.post - narrow to one channel via a channel overwrite',
@@ -116,6 +120,11 @@ export function report(actual: bigint, log = console.log): boolean {
 // and never touches the network.
 const isMain = process.argv[1] && import.meta.url === `file://${process.argv[1]}`;
 
+if (isMain && process.argv.includes('--help')) {
+  console.log('Usage: node scripts/verify-grant.ts [--selftest]');
+  process.exit(0);
+}
+
 // --- self-test: `node scripts/verify-grant.ts --selftest`, no token needed ---
 if (isMain && process.argv.includes('--selftest')) {
   const cases: [string, bigint, boolean][] = [
@@ -123,6 +132,7 @@ if (isMain && process.argv.includes('--selftest')) {
     ['Administrator only', 8n, false],
     ['expected + Administrator', EXPECTED | 8n, false],
     ['dropped Manage Events (bit 33)', EXPECTED & ~(1n << 33n), false],
+    ['dropped Manage Channels (bit 4)', EXPECTED & ~(1n << 4n), false],
     ['dropped Create Instant Invite', EXPECTED & ~1n, false],
     ['extra Ban Members', EXPECTED | (1n << 2n), false],
   ];
