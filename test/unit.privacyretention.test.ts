@@ -150,6 +150,35 @@ describe('PRIVACY.md retention compliance', () => {
     }
   });
 
+  test('documented erasure removes pending capture arrivals across guilds without removing others', async () => {
+    const doc = readFileSync(join(import.meta.dirname, '..', 'docs/PRIVACY.md'), 'utf8');
+    const deletion = doc.match(/^DELETE FROM capture_pending_joins\s+WHERE member_id = '<id>';$/m)?.[0];
+    assert.ok(deletion, 'member erasure must delete pending observations before capture can replay them');
+    const db = await openDb();
+    try {
+      for (const [guild, id, at] of [
+        [GUILD, MEMBER, '2026-09-30T10:00:01.000Z'],
+        [GUILD, MEMBER, '2026-09-30T11:00:01.000Z'],
+        ['other-guild', MEMBER, '2026-09-30T10:00:01.000Z'],
+        [GUILD, OTHER, '2026-09-30T10:00:01.000Z'],
+      ]) {
+        await db.prepare(
+          `INSERT INTO capture_pending_joins (guild_id, member_id, joined_at) VALUES (?, ?, ?)`,
+        ).run(guild, id, at);
+      }
+      const removed = await db.prepare(deletion.replace("'<id>'", '?')).run(MEMBER);
+      assert.equal(removed.changes, 3);
+      const remaining = await db.prepare(
+        `SELECT guild_id, member_id, joined_at FROM capture_pending_joins`,
+      ).all();
+      assert.deepEqual(remaining, [{
+        guild_id: GUILD, member_id: OTHER, joined_at: '2026-09-30T10:00:01.000Z',
+      }]);
+    } finally {
+      await db.close();
+    }
+  });
+
   test('doc deletion SQL covers every per-member identity column in the schema', async () => {
     // docs/PRIVACY.md lists one DELETE per per-member table. If the schema
     // gains a member-id column this test does not know about, the query
@@ -187,10 +216,12 @@ describe('PRIVACY.md retention compliance', () => {
         xp_cooldowns: ['member_id'],
         member_levels: ['member_id'],
         events: ['member_id'],
+        capture_pending_joins: ['member_id'],
         members: ['member_id'],
         member_ranks: ['member_id'],
         member_exclusions: ['member_id'],
         invite_snapshots: ['inviter_id'],
+        capture_retained_growth: ['inviter_id'],
         community_facts: ['actor_id'],
         automod_violations: ['user_id'],
         automod_processed_messages: ['user_id'],

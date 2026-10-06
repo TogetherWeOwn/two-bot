@@ -68,6 +68,19 @@ describe('backup round trip', () => {
          VALUES (?, ?, ?, ?, ?, ?)`,
       )
       .run(G, 'abc', 12, 'owner', 'c1', '2026-08-09T00:00:00.000Z');
+    for (const at of ['2026-08-09T00:00:01.000Z', '2026-08-10T00:00:01.000Z']) {
+      await harness.db.prepare(
+        `INSERT INTO capture_pending_joins (guild_id, member_id, joined_at) VALUES (?, ?, ?)`,
+      ).run(G, 'pending-member', at);
+    }
+    // The retained invite read travels with the pending observations: without
+    // it a retry after a vanished code re-attributes from surviving codes.
+    await harness.db
+      .prepare(
+        `INSERT INTO capture_retained_growth (guild_id, code, uses, inviter_id, channel_id, observed_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(G, 'abc', 13, 'owner', 'c1', '2026-08-09T00:00:00.000Z');
     // TOG-1659 High 5: the moderation state must survive backup/restore the
     // same way the funnel does - a lost pending unban is a tempban that
     // became permanent.
@@ -464,6 +477,12 @@ describe('backup round trip', () => {
   test('a dump restores to the same contents', async () => {
     await seed();
     const before = await counts();
+    const pendingSql = `SELECT guild_id, member_id, joined_at FROM capture_pending_joins
+                        ORDER BY guild_id, member_id, joined_at`;
+    const pending = await harness.db.prepare(pendingSql).all();
+    const retainedSql = `SELECT guild_id, code, uses, inviter_id, channel_id, observed_at
+                         FROM capture_retained_growth ORDER BY guild_id, code`;
+    const retained = await harness.db.prepare(retainedSql).all();
     const events = await harness.db
       .prepare(`SELECT id, event_type, occurred_at, idempotency_key FROM events ORDER BY id`)
       .all();
@@ -493,6 +512,8 @@ describe('backup round trip', () => {
     const file = join(dir, 'roundtrip.ndjson.gz');
     const manifest = await dump(harness.db, file);
     assert.equal(manifest.tables.find((t) => t.name === 'events')?.count, before.events);
+    assert.equal(manifest.tables.find((t) => t.name === 'capture_pending_joins')?.count, 2);
+    assert.equal(manifest.tables.find((t) => t.name === 'capture_retained_growth')?.count, 1);
     assert.equal(manifest.tables.find((t) => t.name === 'operational_audit_log')?.count, 1);
     assert.equal(manifest.tables.find((t) => t.name === 'tickets')?.count, 1);
     assert.equal(manifest.tables.find((t) => t.name === 'ticket_transcripts')?.count, 1);
@@ -533,10 +554,23 @@ describe('backup round trip', () => {
     // Lose everything, exactly as a dead disk would.
     await harness.db.exec(`TRUNCATE ${DUMP_TABLES.join(', ')} RESTART IDENTITY`);
     assert.equal((await counts()).events, 0);
+    // Restore replaces pending observations too; target-only rows must not leak
+    // into a later capture and fabricate a join after recovery.
+    await harness.db.prepare(
+      `INSERT INTO capture_pending_joins (guild_id, member_id, joined_at) VALUES (?, ?, ?)`,
+    ).run(G, 'target-only', '2026-08-11T00:00:01.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO capture_retained_growth (guild_id, code, uses, inviter_id, channel_id, observed_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(G, 'zzz', 99, null, null, '2026-08-11T00:00:00.000Z');
 
     const report = await restore(harness.db, file);
     assert.ok(report.ok, 'restore reported a count mismatch');
     assert.deepEqual(await counts(), before);
+    assert.deepEqual(await harness.db.prepare(pendingSql).all(), pending);
+    assert.deepEqual(await harness.db.prepare(retainedSql).all(), retained);
 
     // Same rows, same ids, same order - not merely the same number of rows.
     const after = await harness.db
@@ -930,6 +964,71 @@ describe('backup round trip', () => {
       before,
       'the TRUNCATE must have rolled back with the failed INSERT',
     );
+  });
+
+  test('a legacy pre-0040 v4 backup restores with empty pending and retained tables', async () => {
+    // The format version did not change when capture_pending_joins (0040) and
+    // capture_retained_growth (0043) were added, so a backup written by the
+    // previous v4 writer is complete but names neither table. It must restore
+    // — starting both tables empty — rather than invalidate every backup the
+    // previous writer produced. A manifest missing any other table is still
+    // refused (next test).
+    await seed();
+    const file = join(dir, 'legacy-source.ndjson.gz');
+    await dump(harness.db, file);
+    const objs = gunzipSync(readFileSync(file))
+      .toString('utf8')
+      .trimEnd()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    const legacyManifest = objs.find((obj) => obj.kind === 'manifest');
+    assert.deepEqual(legacyManifest.toleratedMissingTables ?? [], []);
+    legacyManifest.tables = legacyManifest.tables.filter(
+      (table: { name: string }) =>
+        table.name !== 'capture_pending_joins' && table.name !== 'capture_retained_growth',
+    );
+    const removedRows = objs.filter(
+      (obj) => obj.kind === 'row' &&
+        (obj.table === 'capture_pending_joins' || obj.table === 'capture_retained_growth'),
+    ).length;
+    const kept = objs.filter(
+      (obj) => !(obj.kind === 'row' &&
+        (obj.table === 'capture_pending_joins' || obj.table === 'capture_retained_growth')),
+    );
+    kept.find((obj) => obj.kind === 'end').rows -= removedRows;
+    const legacy = join(dir, 'legacy-v4.ndjson.gz');
+    writeFileSync(legacy, gzipSync(kept.map((obj) => JSON.stringify(obj)).join('\n') + '\n'));
+
+    const { inspect } = await import('../src/store/dump.ts');
+    const contents = await inspect(legacy);
+    assert.deepEqual(
+      [...(contents.manifest.toleratedMissingTables ?? [])].sort(),
+      ['capture_pending_joins', 'capture_retained_growth'],
+    );
+
+    // Target holds rows the legacy backup never saw; restore must wipe them
+    // (the TOG-9074 mixing rule) and leave both tables empty, not fail.
+    await harness.db.prepare(
+      `INSERT INTO capture_pending_joins (guild_id, member_id, joined_at) VALUES (?, ?, ?)`,
+    ).run(G, 'target-only', '2026-08-11T00:00:01.000Z');
+    await harness.db
+      .prepare(
+        `INSERT INTO capture_retained_growth (guild_id, code, uses, inviter_id, channel_id, observed_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(G, 'zzz', 99, null, null, '2026-08-11T00:00:00.000Z');
+
+    const report = await restore(harness.db, legacy);
+    assert.ok(report.ok, 'legacy restore reported a count mismatch');
+    assert.deepEqual(
+      await harness.db.prepare(`SELECT COUNT(*) AS n FROM capture_pending_joins`).get(),
+      { n: 0 },
+    );
+    assert.deepEqual(
+      await harness.db.prepare(`SELECT COUNT(*) AS n FROM capture_retained_growth`).get(),
+      { n: 0 },
+    );
+    assert.ok((await counts()).events > 0, 'legacy restore lost the funnel rows it did carry');
   });
 
   test('an incomplete current-version dump is refused before it can erase audit data', async () => {

@@ -317,6 +317,30 @@ describe('inspect: files it refuses for shape', () => {
     await assert.rejects(() => inspect(writeDump(duplicate)), /manifest table events is duplicated/);
   });
 
+  test('a legacy pre-0040/pre-0043 v4 backup is tolerated with its new tables empty', async () => {
+    // The format version did not change when the capture tables were added,
+    // so a backup from the previous v4 writer omits them without being
+    // truncated. The reader accepts it and names the tolerated tables; any
+    // other missing table is still refused (previous test).
+    for (const omitted of [
+      ['capture_pending_joins'],
+      ['capture_retained_growth'],
+      ['capture_pending_joins', 'capture_retained_growth'],
+    ]) {
+      const objs = goodDump();
+      const m = objs[0] as ReturnType<typeof manifest>;
+      m.tables = m.tables.filter((table) => !omitted.includes(table.name));
+      const got = await inspect(writeDump(objs));
+      assert.deepEqual([...(got.manifest.toleratedMissingTables ?? [])].sort(), [...omitted].sort());
+      assert.equal(got.rows, 1);
+    }
+  });
+
+  test('a current dump names no tolerated-missing tables', async () => {
+    const got = await inspect(writeDump(goodDump()));
+    assert.deepEqual(got.manifest.toleratedMissingTables ?? [], []);
+  });
+
   test('per-table counts must match even when the aggregate count does', async () => {
     const objs = goodDump();
     const m = objs[0] as ReturnType<typeof manifest>;
