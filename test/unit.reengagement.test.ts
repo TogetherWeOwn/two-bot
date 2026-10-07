@@ -115,6 +115,45 @@ test('raid accounts are kept off the list and counted separately', async () => {
   assert.equal(list.totals.presentHumans, 4, 'they are still in the server, so still in the total');
 });
 
+test('engaged raid-window joiners stay in the population and classify by recency', async () => {
+  const store = new EventStore(harness.db);
+  const joinedAt = '2025-07-06T20:40:00.000Z';
+  await seed(store, 'silent', joinedAt);
+  await seed(store, 'active', joinedAt, daysAgo(2));
+  await seed(store, 'slipping', joinedAt, daysAgo(30));
+  await seed(store, 'dormant', joinedAt);
+  await store.record({ guildId: G, memberId: 'dormant', eventType: 'first_message', occurredAt: daysAgo(90), source: 'channel:c1' });
+  await seed(store, 'lapsed', joinedAt, daysAgo(300));
+  await store.record({ guildId: G, memberId: 'lapsed', eventType: 'first_message', occurredAt: daysAgo(300), source: 'channel:c1' });
+
+  // Engagement must not bypass the present-human and guild filters.
+  await seed(store, 'gone', joinedAt, daysAgo(30));
+  await store.record({ guildId: G, memberId: 'gone', eventType: 'member_leave', occurredAt: daysAgo(1), source: 'gateway' });
+  await seed(store, 'bot', joinedAt, daysAgo(30));
+  await harness.db.prepare('UPDATE members SET is_bot = TRUE WHERE guild_id = ? AND member_id = ?').run(G, 'bot');
+  await store.record({ guildId: 'other', memberId: 'outsider', eventType: 'member_join', occurredAt: joinedAt, source: 'invite:x' });
+  await store.record({ guildId: 'other', memberId: 'outsider', eventType: 'first_voice_session', occurredAt: daysAgo(30), source: 'channel:c1' });
+
+  const before = await harness.db.prepare('SELECT COUNT(*) AS n FROM events').get<{ n: number }>();
+  const list = await buildList(harness.db, G, { now: NOW });
+
+  assert.deepEqual(list.entries.map((e) => [e.memberId, e.segment, e.engagedVia, e.daysQuiet]), [
+    ['slipping', 'slipping', 'voice', 30],
+    ['dormant', 'dormant', 'text', 90],
+    ['lapsed', 'lapsed', 'both', 300],
+  ]);
+  assert.deepEqual(list.counts, { never_engaged: 0, slipping: 1, dormant: 1, lapsed: 1 });
+  assert.equal(list.setAside.raidAccounts, 1, 'only the silent window joiner is set aside');
+  assert.equal(list.totals.stillActive, 1, 'recently engaged window joiners still count');
+  assert.equal(list.totals.presentHumans, 5);
+  assert.equal(
+    list.totals.presentHumans,
+    list.entries.length + list.totals.stillActive + list.setAside.inGracePeriod + list.setAside.raidAccounts,
+    'included and set-aside members account for every present human',
+  );
+  assert.deepEqual(await harness.db.prepare('SELECT COUNT(*) AS n FROM events').get(), before, 'building the list is read-only');
+});
+
 test('a member who left is not somebody we are losing', async () => {
   const store = new EventStore(harness.db);
   await seed(store, 'gone', daysAgo(200));
