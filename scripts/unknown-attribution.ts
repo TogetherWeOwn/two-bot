@@ -70,16 +70,10 @@ const writeSeries = await db
   .catch(() => [] as Array<{ at: string }>);
 const downtimeWindows: DowntimeWindow[] = findBlindWindows(writeSeries.map((r) => r.at));
 
-// Attribution starts at the first capture run: everything before it was
-// reconstructed from the log channels, which never name an invite.
-// `invite_snapshots.updated_at` IS the last capture; the minimum is the first.
-const firstCaptureAt =
-  (
-    await db
-      .prepare(`SELECT MIN(updated_at) AS t FROM invite_snapshots`)
-      .get<{ t: string | null }>()
-      .catch(() => null)
-  )?.t ?? null;
+// Snapshot updated_at is the last refresh, not the first capture. No durable
+// first-capture boundary is recorded, so use the helper's null-boundary behavior:
+// only explicit backfill sources are pre-tracking; unknowns remain actionable.
+const firstCaptureAt = null;
 
 await db.close();
 
@@ -113,7 +107,7 @@ if (t.downtime > 0) {
   console.log('    (downtime is an upper bound - a quiet stretch with no writes reads as a gap)');
 }
 if (firstCaptureAt === null && t.preTracking > 0) {
-  console.log('    (no capture run on file yet - attribution starts at the first capture)');
+  console.log('    (first-capture boundary unavailable - only backfill sources are pre-tracking)');
 }
 if (t.joins === 0) {
   console.log('    (no joins in window - share an invite, then see npm run campaigns)');
