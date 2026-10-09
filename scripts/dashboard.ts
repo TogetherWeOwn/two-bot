@@ -21,7 +21,7 @@ import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { openDb } from '../src/store/db.ts';
 import { formatDashboardSummary } from '../src/analytics/cliFormat.ts';
-import { buildDashboard, type ChannelSnapshot } from '../src/analytics/dashboard.ts';
+import { buildDashboard, validateWeekCount, type ChannelSnapshot } from '../src/analytics/dashboard.ts';
 import { renderHtml } from '../src/analytics/render.ts';
 
 if (process.argv.includes('--help')) {
@@ -36,12 +36,20 @@ const value = (name: string, fallback: string) => {
   return i >= 0 && argv[i + 1] ? argv[i + 1] : fallback;
 };
 
+const weeksIndex = argv.indexOf('--weeks');
+const weeks = Number(weeksIndex < 0 ? '12' : argv[weeksIndex + 1]);
+try {
+  validateWeekCount(weeks);
+} catch (err) {
+  console.error(`dashboard: ${(err as Error).message}`);
+  process.exit(1);
+}
+
 const databaseUrl = process.env.TWO_DATABASE_URL?.trim();
 if (!databaseUrl) {
   console.error('dashboard: TWO_DATABASE_URL is not set.');
   process.exit(1);
 }
-const weeks = Number(value('weeks', '12'));
 const outPath = value('out', './data/dashboard.html');
 const dataDir = process.env.TWO_DATA_DIR || './data';
 
