@@ -1,7 +1,7 @@
 import { after, before, beforeEach, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { ChannelType, Collection, Events, MessageFlags, PermissionsBitField, type ChatInputCommandInteraction, type Client } from 'discord.js';
+import { ChannelType, Collection, Events, MessageFlags, MessageType, PermissionsBitField, type ChatInputCommandInteraction, type Client, type Message } from 'discord.js';
 import { openTestDb, type TestDb } from './helpers/testDb.ts';
 import { CommunityClassifier, loadCommunityClassifierConfig } from '../src/analytics/communityClassifier.ts';
 import { OnboardingRota } from '../src/analytics/onboardingRota.ts';
@@ -118,6 +118,47 @@ for (const type of [ChannelType.GuildText, ChannelType.GuildAnnouncement, Channe
     assert.equal((await acks()).length, type === ChannelType.GuildText ? 1 : 0);
   });
 }
+
+const ANNOUNCEMENT = '666666666666666666';
+const REPLIER = '777777777777777777';
+
+function guildMember(id: string) {
+  return { id, user: { id, bot: false }, pending: false, partial: false, guild: { id: GUILD, ownerId: 'owner' },
+    roles: { cache: new Collection() }, permissions: new PermissionsBitField(0n), isCommunicationDisabled: () => false };
+}
+
+async function eventually<T>(read: () => Promise<T | undefined>): Promise<T | undefined> {
+  for (let i = 0; i < 200; i++) {
+    const value = await read();
+    if (value) return value;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  return undefined;
+}
+
+test('reply to a pre-deploy non-text first row still records the stop and suppresses the notice', async () => {
+  observer = new DiscordOnboardingRota(fixture.db, core, { guildId: GUILD, primaryActorId: PRIMARY,
+    staffActorIds: new Set(), staffRoleIds: new Set(['staff']), humanChannelIds: new Set([CHANNEL, ANNOUNCEMENT]) });
+  const subject = { guildId: GUILD, actorId: SUBJECT, pending: false };
+  await core.rulesAccepted({ ...subject, occurredAt: '2026-09-01T12:00:00.000Z', sourceCohort: 'invite:campaign' });
+  await core.promptShown({ ...subject, occurredAt: '2026-09-01T12:01:00.000Z', promptVariant: 'session', messageId: 'welcome', channelId: CHANNEL });
+  await core.message({ ...subject, occurredAt: FIRST, messageId: ACTION, channelId: ANNOUNCEMENT, eligibleChannel: true });
+  const original = { id: ACTION, guildId: GUILD, channelId: ANNOUNCEMENT, author: guildMember(SUBJECT).user, webhookId: null, system: false };
+  const reply = {
+    id: 'reply', guildId: GUILD, channelId: ANNOUNCEMENT, type: MessageType.Reply, webhookId: null, system: false,
+    author: guildMember(REPLIER).user, member: guildMember(REPLIER), createdTimestamp: Date.parse('2026-09-01T12:10:00.000Z'),
+    reference: { guildId: GUILD, channelId: ANNOUNCEMENT, messageId: ACTION },
+    fetchReference: async () => original,
+    guild: { members: { fetch: async () => guildMember(SUBJECT) } },
+    channel: { id: ANNOUNCEMENT, type: ChannelType.GuildAnnouncement, isDMBased: () => false, isThread: () => false,
+      permissionsFor: () => new PermissionsBitField(['ViewChannel', 'SendMessages']) },
+  } as unknown as Message;
+  await observer.message(reply);
+  const stop = await eventually(() => fixture.db.prepare(
+    "SELECT actor_id FROM community_facts WHERE event_type = 'welcome_rota_replied'").get<{ actor_id: string }>());
+  assert.equal(stop?.actor_id, core.memberId(GUILD, SUBJECT));
+  assert.deepEqual(await core.dueNotices(GUILD, new Date(Date.parse(FIRST) + 60 * 60_000).toISOString()), []);
+});
 
 test('actor authentication and canonical same-guild link checks precede every Discord fetch', async () => {
   await enroll();

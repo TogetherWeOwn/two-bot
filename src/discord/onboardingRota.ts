@@ -163,7 +163,7 @@ export class DiscordOnboardingRota {
     const actor = this.actor(message.member);
     if (!actor || message.guildId !== actor.guildId || message.author.id !== actor.actorId ||
         message.author.bot || message.webhookId || message.system ||
-        message.channel.type !== ChannelType.GuildText ||
+        message.channel.isDMBased() || message.channel.isThread() ||
         !this.config.humanChannelIds.has(message.channelId)) return Promise.resolve();
     const permissions = message.channel.permissionsFor(message.member!);
     if (!permissions?.has(PermissionFlagsBits.ViewChannel | PermissionFlagsBits.SendMessages)) {
@@ -177,7 +177,7 @@ export class DiscordOnboardingRota {
     return this.enqueue(actor.actorId, async () => {
       // true is rejected; null means inspection failed, not acceptance.
       if (await inspection !== false) return;
-      await this.rota.message(input);
+      await this.rota.message({ ...input, eligibleChannel: message.channel.type === ChannelType.GuildText });
       if (message.type !== MessageType.Reply || !reference?.messageId || reference.channelId !== message.channelId ||
           reference.guildId !== actor.guildId) return;
       const repliedTo = await message.fetchReference();
