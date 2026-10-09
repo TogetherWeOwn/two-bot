@@ -489,6 +489,255 @@ describe('web_v1 contract', () => {
     );
   });
 
+  test('contract_meta prefers the recorded guild, then counters, then members', async () => {
+    // TOG-8307: §2 names three guild_id provenances but no test pins the
+    // order. Falling back to the wrong one points the website at a guild the
+    // bot is not in, and a drift that reorders the COALESCE must red here.
+    const G2 = '700000000000000002';
+    await db
+      .prepare(`INSERT INTO members (guild_id, member_id, joined_at, is_bot) VALUES (?, ?, ?, ?)`)
+      .run(GUILD, '111', agoMinutes(60), 0);
+    let row = await db.prepare(`SELECT guild_id FROM ${web}.contract_meta`).get();
+    assert.equal(row?.guild_id, GUILD, 'members are the last resort, but the only one present');
+
+    await db
+      .prepare(
+        `INSERT INTO guild_counters (guild_id, human_member_count, human_member_count_at)
+         VALUES (?, ?, ?)`,
+      )
+      .run(G2, 54, agoMinutes(1));
+    row = await db.prepare(`SELECT guild_id FROM ${web}.contract_meta`).get();
+    assert.equal(row?.guild_id, G2, 'live counters beat the member table');
+
+    await db.prepare(`UPDATE web_contract_meta SET guild_id = ?`).run('999');
+    try {
+      row = await db.prepare(`SELECT guild_id FROM ${web}.contract_meta`).get();
+      assert.equal(row?.guild_id, '999', 'what the bot recorded beats what the data says');
+    } finally {
+      // web_contract_meta is seed, not fixture: reset() does not clear it.
+      await db.prepare(`UPDATE web_contract_meta SET guild_id = NULL`).run();
+    }
+  });
+
+  test('live_counts mixes fresh and stale ceilings independently', async () => {
+    // TOG-8307: the two ceilings (24h membership, 15m presence) are two CASEs
+    // in one view. A drift that couples them - one timestamp gating both -
+    // must red here rather than publish a stale presence as current.
+    const memberAt = agoMinutes(60);
+    const onlineAt = agoMinutes(20);
+    await db
+      .prepare(
+        `INSERT INTO guild_counters (guild_id, human_member_count, human_member_count_at, online_count, online_count_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(GUILD, 54, memberAt, 26, onlineAt);
+
+    const row = await db.prepare(`SELECT * FROM ${web}.live_counts`).get();
+    assert.equal(row?.human_member_count, 54, 'an hour-old membership is still current');
+    assert.equal(row?.online_count, null, 'a 20-minute-old presence is not');
+    assert.equal(row?.counts_updated_at, memberAt);
+    assert.equal(row?.online_updated_at, onlineAt);
+  });
+
+  test('rank_counts ages each rank on its own snapshot', async () => {
+    // TOG-8307: the 24h ceiling is per rank-row (its own snapshot_at), not per
+    // view. A drift that ages the whole ladder on one timestamp must red here.
+    const fresh = agoMinutes(5);
+    const stale = agoMinutes(25 * 60);
+    const insert = db.prepare(
+      `INSERT INTO rank_snapshots (guild_id, rank_key, member_count, holders_count, snapshot_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    );
+    await insert.run(GUILD, 'soldier', 10, 17, fresh);
+    await insert.run(GUILD, 'veteran', 1, 7, stale);
+
+    const rows = await db.prepare(`SELECT * FROM ${web}.rank_counts ORDER BY rank_order`).all();
+    const byKey = new Map(rows.map((r) => [r.rank_key as string, r]));
+    assert.equal(byKey.get('soldier')?.member_count, 10);
+    assert.equal(byKey.get('soldier')?.holders_count, 17);
+    assert.equal(byKey.get('soldier')?.snapshot_at, fresh, 'the timestamp rides along un-nulled');
+    assert.equal(byKey.get('veteran')?.member_count, null, 'one stale rank must not null its neighbours');
+    assert.equal(byKey.get('veteran')?.holders_count, null);
+    assert.equal(byKey.get('veteran')?.snapshot_at, stale);
+  });
+
+  test('rank_counts publishes snapshots as-is; exclusions live at write time', async () => {
+    // TOG-8307: the view carries no exclusion logic - the collector writes
+    // snapshots net of bots and raid accounts, and the view publishes the
+    // numbers untouched. A drift that re-derives counts from the members table
+    // (or re-subtracts exclusions in the view) turns this 6 into a 0.
+    await db
+      .prepare(`INSERT INTO members (guild_id, member_id, joined_at, is_bot) VALUES (?, ?, ?, ?)`)
+      .run(GUILD, 'bot', agoMinutes(60), 1);
+    await db
+      .prepare(`INSERT INTO members (guild_id, member_id, joined_at, is_bot) VALUES (?, ?, ?, ?)`)
+      .run(GUILD, 'raid', agoMinutes(60), 0);
+    await db
+      .prepare(
+        `INSERT INTO member_exclusions (guild_id, member_id, reason, updated_at)
+         VALUES (?, ?, 'raid', ?)`,
+      )
+      .run(GUILD, 'raid', agoMinutes(5));
+    await db
+      .prepare(
+        `INSERT INTO rank_snapshots (guild_id, rank_key, member_count, holders_count, snapshot_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(GUILD, 'legend', 6, 6, agoMinutes(5));
+
+    const rows = await db.prepare(`SELECT * FROM ${web}.rank_counts`).all();
+    const legend = rows.find((r) => r.rank_key === 'legend');
+    assert.equal(legend?.member_count, 6, 'no member-table gating: the members view is empty of humans here');
+    assert.equal(legend?.holders_count, 6);
+    const ids = (await db.prepare(`SELECT member_id FROM ${web}.members`).all()).map((r) => r.member_id);
+    assert.deepEqual(ids, [], 'only a bot and an excluded account exist, so no human row');
+  });
+
+  test('members keeps a member with no join date, tenure null', async () => {
+    // TOG-8307: joined_at is nullable (predates our data) and tenure_days must
+    // be null with it - never 0, never a crash. A drift that coalesces the
+    // date publishes a tenure we never measured.
+    await db
+      .prepare(`INSERT INTO members (guild_id, member_id, is_bot) VALUES (?, ?, ?)`)
+      .run(GUILD, '111', 0);
+
+    const row = await db.prepare(`SELECT * FROM ${web}.members`).get();
+    assert.equal(row?.member_id, '111');
+    assert.equal(row?.joined_at, null);
+    assert.equal(row?.tenure_days, null, 'no join date means no tenure, not zero tenure');
+    assert.equal(row?.is_current_member, true);
+  });
+
+  test('member_milestones leaves detail null except on a rank change', async () => {
+    // TOG-8307: detail carries the new rank_key and nothing else. A drift that
+    // fills detail on joined/left leaks internal metadata onto a public page.
+    const joinedAt = agoMinutes(600);
+    await db
+      .prepare(`INSERT INTO members (guild_id, member_id, joined_at, is_bot) VALUES (?, ?, ?, ?)`)
+      .run(GUILD, '111', joinedAt, 0);
+    const insert = db.prepare(
+      `INSERT INTO events (event_type, member_id, guild_id, occurred_at, source, metadata, idempotency_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    );
+    await insert.run('member_join', '111', GUILD, joinedAt, 'invite:aB3xY9', '{"rank_key":"member"}', 'd1');
+    await insert.run('member_leave', '111', GUILD, agoMinutes(100), 'unknown', '{"rank_key":"member"}', 'd2');
+
+    const rows = await db
+      .prepare(`SELECT * FROM ${web}.member_milestones ORDER BY occurred_at`)
+      .all();
+    assert.deepEqual(rows.map((r) => r.milestone), ['joined', 'left']);
+    for (const r of rows) {
+      assert.equal(r.detail, null, `${r.milestone} must not carry a detail`);
+    }
+    assert.equal(rows[0].occurred_at, joinedAt, 'the Discord timestamp echoes through');
+  });
+
+  test('next_event is the first upcoming row, with channel and description', async () => {
+    // TOG-8307: next_event is literally upcoming_events LIMIT 1 (SELECT ue.*),
+    // past the 90-day window nothing appears, and the website renders channel
+    // + description from these columns - so they must round-trip, not just
+    // exist. A drift that defines next_event separately can silently diverge.
+    const insert = db.prepare(
+      `INSERT INTO scheduled_events (guild_id, event_id, name, starts_at, channel_id, description, status, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    await insert.run(GUILD, 'e1', 'Sunday Squad', inMinutes(60), 'chan1', 'Bring dice', 'scheduled', agoMinutes(1));
+    await insert.run(GUILD, 'e2', 'Later', inMinutes(600), null, null, 'scheduled', agoMinutes(1));
+    await insert.run(GUILD, 'e3', 'Far', inMinutes(89 * 24 * 60), null, null, 'scheduled', agoMinutes(1));
+    await insert.run(GUILD, 'e4', 'Too far', inMinutes(91 * 24 * 60), null, null, 'scheduled', agoMinutes(1));
+    await insert.run(GUILD, 'e5', 'Called off', inMinutes(30), null, null, 'cancelled', agoMinutes(1));
+    await insert.run(GUILD, 'e6', 'Yesterday', agoMinutes(600), null, null, 'completed', agoMinutes(1));
+
+    const upcoming = await db.prepare(`SELECT * FROM ${web}.upcoming_events`).all();
+    assert.deepEqual(
+      upcoming.map((r) => r.event_id),
+      ['e1', 'e2', 'e3'],
+      'the 91st day, the cancelled and the completed stay out',
+    );
+    const nextRows = await db.prepare(`SELECT * FROM ${web}.next_event`).all();
+    assert.equal(nextRows.length, 1, 'next_event yields exactly one row; dropping LIMIT 1 must red here');
+    assert.deepEqual(
+      nextRows[0],
+      upcoming[0],
+      'next_event is the first upcoming row, whole row, not just the id',
+    );
+    assert.equal(nextRows[0]?.channel_id, 'chan1');
+    assert.equal(nextRows[0]?.description, 'Bring dice');
+  });
+
+  test('funnel_daily counts every column on its own day, and no row for an empty day', async () => {
+    // TOG-8307: every count column is its own event type, so the per-column
+    // totals differ on purpose - counting one type as another (messages as
+    // voice sessions, joins as leaves) changes two asserted numbers, not zero.
+    // A drift that drops a column or emits zero rows must red here.
+    for (const id of ['111', '222', '333', '444']) {
+      await db
+        .prepare(`INSERT INTO members (guild_id, member_id, joined_at, is_bot) VALUES (?, ?, ?, ?)`)
+        .run(GUILD, id, '2026-08-01T10:00:00.000Z', 0);
+    }
+    const insert = db.prepare(
+      `INSERT INTO events (event_type, member_id, guild_id, occurred_at, source, idempotency_key)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+    await insert.run('member_join', '111', GUILD, '2026-08-01T10:00:00.000Z', 'invite:aB3xY9', 'c1');
+    await insert.run('member_join', '222', GUILD, '2026-08-01T11:00:00.000Z', 'invite:aB3xY9', 'c2');
+    await insert.run('member_join', '333', GUILD, '2026-08-01T11:30:00.000Z', 'vanity', 'c3');
+    await insert.run('member_leave', '222', GUILD, '2026-08-01T12:00:00.000Z', 'unknown', 'c4');
+    await insert.run('first_message', '111', GUILD, '2026-08-01T13:00:00.000Z', 'channel:1', 'c5');
+    await insert.run('first_voice_session', '111', GUILD, '2026-08-01T14:00:00.000Z', 'channel:2', 'c6');
+    await insert.run('first_voice_session', '333', GUILD, '2026-08-01T15:00:00.000Z', 'channel:2', 'c7');
+    await insert.run('member_join', '444', GUILD, '2026-08-03T10:00:00.000Z', 'vanity', 'c8');
+    await insert.run('first_message', '444', GUILD, '2026-08-03T11:00:00.000Z', 'channel:1', 'c9');
+    await insert.run('first_message', '333', GUILD, '2026-08-03T12:00:00.000Z', 'channel:1', 'c10');
+    await insert.run('first_voice_session', '444', GUILD, '2026-08-03T13:00:00.000Z', 'channel:2', 'c11');
+
+    const rows = await db.prepare(`SELECT * FROM ${web}.funnel_daily ORDER BY day`).all();
+    assert.deepEqual(rows.map((r) => r.day), ['2026-08-01', '2026-08-03'], 'a day with no activity produces no row');
+    assert.deepEqual(
+      [rows[0].joins, rows[0].leaves, rows[0].first_messages, rows[0].first_voice_sessions, rows[0].net_change].map(Number),
+      [3, 1, 1, 2, 2],
+    );
+    assert.deepEqual(
+      [rows[1].joins, rows[1].leaves, rows[1].first_messages, rows[1].first_voice_sessions, rows[1].net_change].map(Number),
+      [1, 0, 2, 1, 1],
+    );
+  });
+
+  test('funnel_by_source counts joins only, and every source on file appears', async () => {
+    // TOG-8307: invite_click and non-join events share the events table. A
+    // drift that counts clicks as joins - or that drops a source the tracker
+    // actually wrote - rewrites the dashboard. The expected set is derived
+    // from the events table itself, so an unlisted source cannot slip through.
+    for (const id of ['111', '222', '333']) {
+      await db
+        .prepare(`INSERT INTO members (guild_id, member_id, joined_at, is_bot) VALUES (?, ?, ?, ?)`)
+        .run(GUILD, id, '2026-08-01T10:00:00.000Z', 0);
+    }
+    const insert = db.prepare(
+      `INSERT INTO events (event_type, member_id, guild_id, occurred_at, source, idempotency_key)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+    await insert.run('invite_click', null, GUILD, '2026-08-01T09:00:00.000Z', 'invite:aB3xY9', 'i1');
+    await insert.run('member_join', '111', GUILD, '2026-08-01T10:00:00.000Z', 'unknown', 'i2');
+    await insert.run('member_join', '222', GUILD, '2026-08-01T11:00:00.000Z', 'vanity', 'i3');
+    await insert.run('member_join', '333', GUILD, '2026-08-01T12:00:00.000Z', 'ambiguous:x+y', 'i4');
+    await insert.run('first_message', '111', GUILD, '2026-08-01T13:00:00.000Z', 'channel:1', 'i5');
+
+    const rows = await db.prepare(`SELECT * FROM ${web}.funnel_by_source`).all();
+    const onFile = (
+      await db
+        .prepare(`SELECT DISTINCT source FROM events WHERE event_type = 'member_join'`)
+        .all<{ source: string }>()
+    ).map((r) => r.source).sort();
+    assert.deepEqual(rows.map((r) => r.source).sort(), onFile, 'every join source appears, verbatim');
+    assert.equal(rows.reduce((n, r) => n + Number(r.joins), 0), 3, 'clicks and messages are not joins');
+    const bySource = new Map(rows.map((r) => [r.source as string, Number(r.joins)]));
+    assert.deepEqual(
+      [bySource.get('unknown'), bySource.get('vanity'), bySource.get('ambiguous:x+y')],
+      [1, 1, 1],
+    );
+  });
+
   // -------------------------------------------------------------------------
   // The role. "and nothing else", attempted rather than asserted.
   // -------------------------------------------------------------------------
@@ -547,6 +796,12 @@ describe('web_v1 contract', () => {
           botSchema: t.schema!,
           webSchema: web,
         });
+        const pending = results.find((r) => r.name === `cannot read ${t.schema}.capture_pending_joins`);
+        assert.ok(pending, 'expected a named denial check for pending capture observations');
+        assert.equal(pending.ok, true);
+        const retained = results.find((r) => r.name === `cannot read ${t.schema}.capture_retained_growth`);
+        assert.ok(retained, 'expected a named denial check for retained capture growth');
+        assert.equal(retained.ok, true);
         const failures = results.filter((r) => !r.ok);
         assert.deepEqual(
           failures.map((f) => `${f.name}: ${f.detail}`),

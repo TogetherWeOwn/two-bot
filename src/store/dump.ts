@@ -70,6 +70,8 @@ export const DUMP_TABLES = [
   'events',
   'members',
   'invite_snapshots',
+  'capture_pending_joins',
+  'capture_retained_growth',
   'operational_audit_log',
   'moderation_warnings',
   'moderation_scheduled_unbans',
@@ -176,6 +178,15 @@ function assertDumpTable(name: unknown, where: string): asserts name is DumpTabl
   }
 }
 
+/**
+ * A JSON object with string keys - the only record shape the dump format
+ * allows. Rules out null, arrays and primitives in one check, so a crafted
+ * line like `42` or `"str"` cannot slide past the kind dispatch below.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 export const DUMP_VERSION = 4;
 
 export interface DumpTableInfo {
@@ -189,6 +200,13 @@ export interface DumpManifest {
   version: number;
   createdAt: string;
   tables: DumpTableInfo[];
+  /**
+   * Owned tables absent from the file but tolerated by the reader
+   * (pre-0040/pre-0043 v4 backups). Present only on manifests read from a
+   * file; never written by `dump()`. Lets a caller distinguish an old-but-
+   * whole backup from a truncated one.
+   */
+  toleratedMissingTables?: string[];
   /**
    * High-water mark per BIGSERIAL table, so a restore can put each id
    * sequence back where it belongs. `eventsSequence` is the v3-era field,
@@ -228,6 +246,8 @@ function orderFor(table: DumpTable, columns: string[]): string {
   if (table === 'events') return 'id';
   if (table === 'members') return 'guild_id, member_id';
   if (table === 'invite_snapshots') return 'guild_id, code';
+  if (table === 'capture_pending_joins') return 'guild_id, member_id, joined_at';
+  if (table === 'capture_retained_growth') return 'guild_id, code';
   if (table === 'operational_audit_log') return 'entry_id';
   if (table === 'moderation_warnings') return 'created_at, id';
   if (table === 'moderation_scheduled_unbans') return 'execute_at, request_id';
@@ -334,6 +354,19 @@ export async function dump(db: Db, outPath: string): Promise<DumpManifest> {
           .get<{ n: number }>();
         sequences[name] = Number(seq?.n ?? 0);
       }
+      // The reader refuses marks that are not non-negative safe integers
+      // (validateManifest), so publishing one would hand pg-backup an archive
+      // nothing can read back - and pg-backup rotates good recovery history
+      // for a successful dump. Refuse here, before the manifest line is
+      // written and long before the atomic rename publishes anything: the
+      // existing catch removes the temp file and the destination is untouched.
+      for (const [name, mark] of Object.entries(sequences)) {
+        if (!Number.isSafeInteger(mark) || mark < 0) {
+          throw new Error(
+            `sequence ${name} has a high-water mark the dump format cannot represent: ${String(mark)}`,
+          );
+        }
+      }
       const applied = await tx
         .prepare(`SELECT id FROM schema_migrations ORDER BY id`)
         .all<{ id: string }>();
@@ -426,7 +459,11 @@ export async function inspect(inPath: string): Promise<DumpContents> {
 
   for await (const line of rl) {
     if (!line.trim()) continue;
-    const obj = JSON.parse(line);
+    const obj: unknown = JSON.parse(line);
+    // A backup file is bytes off a disk, not a trusted input. Every line must
+    // be an object with a known kind before anything else is believed about
+    // it - a bare `42`, `"str"` or `null` line must not reach the dispatch.
+    if (!isRecord(obj)) throw new Error('dump line is not an object - the file is not a two-bot dump');
     if (sawEnd) throw new Error('dump contains data after its end marker');
     if (obj.kind === 'manifest') {
       if (manifest) throw new Error('dump contains more than one manifest');
@@ -440,12 +477,27 @@ export async function inspect(inPath: string): Promise<DumpContents> {
       if (!manifest.tables.some((table) => table.name === obj.table)) {
         throw new Error(`row table ${obj.table} is not declared in the manifest`);
       }
+      // The row payload is interpolated into INSERTs on restore. It must be
+      // an object; a primitive here would sail through the count checks and
+      // detonate later, past the point where restore has committed.
+      if (!isRecord(obj.data)) {
+        throw new Error(`row in ${obj.table} has a data payload that is not an object`);
+      }
       let buf = buffers.get(obj.table);
       if (!buf) buffers.set(obj.table, (buf = []));
-      buf.push(obj.data as Record<string, unknown>);
+      buf.push(obj.data);
     } else if (obj.kind === 'end') {
+      // Coercion hid shape errors: end.rows of '1' read back as 1 and a
+      // missing count read as 0, both passing a file that is not well-formed.
+      if (!Number.isSafeInteger(obj.rows) || (obj.rows as number) < 0) {
+        throw new Error(`dump end marker has an invalid row count: ${JSON.stringify(obj.rows)}`);
+      }
       sawEnd = true;
-      declaredRows = Number(obj.rows ?? 0);
+      declaredRows = obj.rows as number;
+    } else {
+      // Unknown kinds used to fall through silently, so a file with a
+      // misspelled or foreign record type verified as if it were complete.
+      throw new Error(`dump contains an unknown record kind: ${JSON.stringify(obj.kind)}`);
     }
   }
 
@@ -469,11 +521,56 @@ export async function inspect(inPath: string): Promise<DumpContents> {
   return { manifest, buffers, rows: readRows };
 }
 
+/**
+ * Tables that may be absent from an otherwise complete manifest because they
+ * were added after the backup was written. A pre-0040 v4 backup has no
+ * `capture_pending_joins` entry and a pre-0043 v4 backup has no
+ * `capture_retained_growth` entry; the format version did not change, so
+ * rejection would invalidate every backup the previous v4 writer produced.
+ * `restore()` starts those tables empty, and `inspect()` reports them, so a
+ * caller can tell an old-but-whole backup from a truncated one.
+ */
+export const BACKWARD_COMPATIBLE_MISSING_TABLES: ReadonlySet<DumpTable> = new Set<DumpTable>([
+  'capture_pending_joins',
+  'capture_retained_growth',
+]);
+
+/**
+ * Tables absent from the manifest that the reader tolerates. Empty for a
+ * current backup; the pre-0040/pre-0043 table names for a legacy v4 backup.
+ * `restore()` uses this to decide which tables to start empty.
+ */
+export function toleratedMissingTables(manifest: DumpManifest): string[] {
+  const names = new Set(manifest.tables.map((t) => t.name));
+  return [...BACKWARD_COMPATIBLE_MISSING_TABLES].filter((name) => !names.has(name));
+}
+
 function validateManifest(obj: Record<string, unknown>): DumpManifest {
   if (!Array.isArray(obj.tables)) throw new Error('manifest has no table list');
+  // Everything else the writer emits is read back somewhere: createdAt is
+  // reported, eventsSequence/sequences position the id sequences, and
+  // schemaMigrations is .join'ed by both pg-restore verdict paths - where a
+  // missing field crashes after a force restore has already committed. Refuse
+  // the misshapen manifest here, before any transaction opens.
+  if (typeof obj.createdAt !== 'string') {
+    throw new Error('manifest has no createdAt timestamp');
+  }
+  if (!Number.isSafeInteger(obj.eventsSequence) || (obj.eventsSequence as number) < 0) {
+    throw new Error('manifest has an invalid eventsSequence');
+  }
+  if (!isRecord(obj.sequences)) throw new Error('manifest has invalid sequences');
+  for (const [name, mark] of Object.entries(obj.sequences)) {
+    assertDumpTable(name, 'manifest sequence');
+    if (!Number.isSafeInteger(mark) || (mark as number) < 0) {
+      throw new Error(`manifest sequence ${name} has an invalid high-water mark`);
+    }
+  }
+  if (!Array.isArray(obj.schemaMigrations) || obj.schemaMigrations.some((m) => typeof m !== 'string')) {
+    throw new Error('manifest has an invalid schemaMigrations list');
+  }
   const names = new Set<DumpTable>();
   for (const table of obj.tables) {
-    if (!table || typeof table !== 'object') throw new Error('manifest table is not an object');
+    if (!isRecord(table)) throw new Error('manifest table is not an object');
     const row = table as Record<string, unknown>;
     assertDumpTable(row.name, 'manifest table');
     if (names.has(row.name)) throw new Error(`manifest table ${row.name} is duplicated`);
@@ -489,7 +586,12 @@ function validateManifest(obj: Record<string, unknown>): DumpManifest {
     }
   }
   const missing = DUMP_TABLES.filter((name) => !names.has(name));
-  if (missing.length > 0) throw new Error(`manifest is missing tables: ${missing.join(', ')}`);
+  const tolerated = missing.filter((name) => BACKWARD_COMPATIBLE_MISSING_TABLES.has(name));
+  const refused = missing.filter((name) => !BACKWARD_COMPATIBLE_MISSING_TABLES.has(name));
+  if (refused.length > 0) throw new Error(`manifest is missing tables: ${refused.join(', ')}`);
+  if (tolerated.length > 0) {
+    (obj as Record<string, unknown>).toleratedMissingTables = tolerated;
+  }
   return obj as unknown as DumpManifest;
 }
 
@@ -511,7 +613,10 @@ export async function restore(db: Db, inPath: string): Promise<RestoreReport> {
 
   await db.transaction(async (tx) => {
     // RESTART IDENTITY so the sequence does not carry over from whatever was
-    // in the target before; it is set explicitly below.
+    // in the target before; it is set explicitly below. Every owned table is
+    // truncated — including tolerated-missing ones with no rows to insert —
+    // so a restore never leaves target-time rows behind (the TOG-9074 mixing
+    // rule), and a legacy backup starts its new tables empty.
     await tx.exec(`TRUNCATE ${DUMP_TABLES.join(', ')} RESTART IDENTITY`);
 
     for (const t of manifest.tables) {

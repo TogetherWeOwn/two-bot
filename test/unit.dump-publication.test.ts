@@ -212,6 +212,52 @@ describe('dump publication (offline)', () => {
     } finally { rmSync(f.dir, { recursive: true, force: true }); }
   });
 
+  test('a sequence mark the reader would refuse is never published', async () => {
+    // A legal BIGSERIAL MAX(id) like 2**53 is exactly representable but not a
+    // safe integer, so inspect() would reject the archive after pg-backup had
+    // already rotated good recovery history for it. dump() must refuse first,
+    // with the prior archive byte-identical and no final or temp output left.
+    const f = fixture();
+    try {
+      await dump(snapshot(), f.prior);
+      const priorBytes = readFileSync(f.prior);
+      const priorMtime = statSync(f.prior).mtimeMs;
+      const db = snapshot();
+      const basePrepare = db.prepare.bind(db);
+      db.prepare = (sql: string) => {
+        const stmt = basePrepare(sql);
+        if (sql === 'SELECT COALESCE(MAX(id), 0) AS n FROM events') {
+          return { ...stmt, get: async <T>(): Promise<T | undefined> => ({ n: 2 ** 53 }) as T };
+        }
+        return stmt;
+      };
+      await assert.rejects(dump(db, f.next), /cannot represent/);
+      assert.deepEqual(readdirSync(f.dir), ['two-funnel-20000101T000000Z.ndjson.gz']);
+      assert.deepEqual(readFileSync(f.prior), priorBytes, 'prior archive bytes must not change');
+      assert.equal(statSync(f.prior).mtimeMs, priorMtime, 'prior archive must not become newest-looking');
+      assert.equal(newest(f.dir), f.prior);
+      assert.equal((await inspect(f.prior)).rows, events.length);
+    } finally { rmSync(f.dir, { recursive: true, force: true }); }
+  });
+
+  test('a safe-integer sequence mark still publishes a readable dump', async () => {
+    const f = fixture();
+    try {
+      const db = snapshot();
+      const basePrepare = db.prepare.bind(db);
+      db.prepare = (sql: string) => {
+        const stmt = basePrepare(sql);
+        if (sql === 'SELECT COALESCE(MAX(id), 0) AS n FROM events') {
+          return { ...stmt, get: async <T>(): Promise<T | undefined> => ({ n: Number.MAX_SAFE_INTEGER }) as T };
+        }
+        return stmt;
+      };
+      const manifest = await dump(db, f.next);
+      assert.equal(manifest.eventsSequence, Number.MAX_SAFE_INTEGER);
+      assert.equal((await inspect(f.next)).rows, events.length);
+    } finally { rmSync(f.dir, { recursive: true, force: true }); }
+  });
+
   test('output-open failure rejects cleanly even while a database read is pending', async () => {
     const f = fixture();
     try {

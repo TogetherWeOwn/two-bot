@@ -50,6 +50,10 @@ const TABLES = [
   'events',
   'members',
   'invite_snapshots',
+  'capture_pending_joins',
+  // 0043 — retained invite reads awaiting host-less capture attribution.
+  // Same treatment as pending: test data, not seed rows.
+  'capture_retained_growth',
   'guild_counters',
   'rank_snapshots',
   'member_ranks',

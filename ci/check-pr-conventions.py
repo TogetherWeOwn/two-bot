@@ -10,7 +10,10 @@ jobs stay in lockstep:
   BODY    PR body (pull_request / workflow_dispatch only)
   AUTHOR  PR author login (pull_request / workflow_dispatch only)
   COMMITS JSON list of {id, message} (push only)
-  REQUIRE_CARD_REF "true" to require a Refs: TOG-1234 card reference.
+  REQUIRE_CARD_REF "true" to require a Refs: TOG-1234 card reference
+    (private repos only). This repo is public, so the default is "false":
+    no card reference is required, and an internal tracker ID in the
+    title, body, commit or branch name is a warning.
 """
 
 import json
@@ -22,7 +25,7 @@ TYPES = "feat|fix|perf|refactor|test|docs|build|ci|chore|revert|style|security"
 HEADER = re.compile(rf"^({TYPES})(\([A-Za-z0-9._/,-]+\))?!?: \S.*$")
 HELP = ("Expected a Conventional Commits header, e.g. 'fix(auth): refuse expired sudo "
         "sessions' or 'feat(events): shareable event page'. Allowed types: "
-        + TYPES.replace("|", ", ") + ". Put the card ID in the body as 'Refs: TOG-1234'.")
+        + TYPES.replace("|", ", ") + ".")
 
 
 def header_errors(text):
@@ -55,12 +58,18 @@ def check_pr(title, body, author, require_card_ref):
     if require_card_ref and not re.search(r"\bTOG-\d+\b", body):
         failed = True
         print("::error title=Card reference::Add 'Refs: TOG-1234' to the PR body.")
+    elif not require_card_ref:
+        hit = re.search(r"\bTOG-\d+\b", body)
+        if hit:
+            print(f"::warning title=Internal reference::This repo is public: remove the "
+                  f"internal tracker ID {hit.group(0)} from the PR body and link only "
+                  f"public GitHub issues.")
     return failed
 
 
 def main():
     event = os.environ.get("EVENT", "")
-    require_card_ref = os.environ.get("REQUIRE_CARD_REF", "true") == "true"
+    require_card_ref = os.environ.get("REQUIRE_CARD_REF", "false") == "true"
     if event == "push":
         failed = False
         for c in json.loads(os.environ.get("COMMITS") or "[]") or []:
@@ -73,6 +82,12 @@ def main():
                 print(f"::error title=Commit on main::{c.get('id', '')[:10]} '{subject}': "
                       f"{'; '.join(errs)}. Merge PRs with squash and the PR title as the "
                       "commit title.")
+            if not require_card_ref:
+                hit = re.search(r"\bTOG-\d+\b", (c.get("message") or ""))
+                if hit:
+                    print(f"::warning title=Internal reference::Commit {c.get('id', '')[:10]} holds "
+                          f"internal tracker ID {hit.group(0)}. Public history carries no "
+                          f"internal references.")
     else:
         title = os.environ.get("TITLE", "").strip()
         body = os.environ.get("BODY", "") or ""

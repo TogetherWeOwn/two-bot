@@ -109,10 +109,10 @@ export interface UnknownReportOptions {
    */
   downtimeWindows?: readonly DowntimeWindow[];
   /**
-   * Earliest invite-snapshot timestamp: attribution starts at the first
-   * capture run, so an `unknown` older than this is pre-tracking, not a
-   * failure. Null (the default) disables only this leg - `backfill:*`
-   * sources still classify as pre-tracking.
+   * Durable first-capture evidence, if available: an `unknown` older than
+   * this is pre-tracking, not a failure. Mutable invite-snapshot refresh
+   * timestamps are not such evidence. Null (the default) disables only this
+   * leg - `backfill:*` sources still classify as pre-tracking.
    */
   firstCaptureAt?: string | null;
 }

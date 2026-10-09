@@ -177,6 +177,7 @@ test('role rewards replace atomically and rank text is user readable', async () 
 
   const text = rankText(await service.profile(GUILD, A), 'Player One');
   assert.match(text, /Player One/);
-  assert.match(text, /Rank \*\*#1\*\*/);
+  assert.match(text, /Rank \*\*Unranked\*\* \(no XP recorded\)/);
+  assert.doesNotMatch(text, /Rank \*\*#/);
   assert.match(text, /to level 1/);
 });
