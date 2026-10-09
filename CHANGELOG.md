@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.2.0](https://github.com/TogetherWeOwn/two-bot/compare/v0.1.0...v0.2.0) (2026-10-09)
+## [0.2.0](https://github.com/TogetherWeOwn/two-bot/releases/tag/v0.2.0) (2026-10-09)
 
 
 ### Changed
